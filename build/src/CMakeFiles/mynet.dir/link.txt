@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmynet.a CMakeFiles/mynet.dir/peer.cpp.o
+/usr/bin/ranlib libmynet.a

@@ -1,0 +1,9 @@
+/home/aaa/code/mynet/build/CMakeFiles/edit_cache.dir
+/home/aaa/code/mynet/build/CMakeFiles/rebuild_cache.dir
+/home/aaa/code/mynet/build/src/CMakeFiles/mynet.dir
+/home/aaa/code/mynet/build/src/CMakeFiles/edit_cache.dir
+/home/aaa/code/mynet/build/src/CMakeFiles/rebuild_cache.dir
+/home/aaa/code/mynet/build/examples/CMakeFiles/ser.dir
+/home/aaa/code/mynet/build/examples/CMakeFiles/cli.dir
+/home/aaa/code/mynet/build/examples/CMakeFiles/edit_cache.dir
+/home/aaa/code/mynet/build/examples/CMakeFiles/rebuild_cache.dir
