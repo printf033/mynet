@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/mynet.dir/peer.cpp.o"
-  "CMakeFiles/mynet.dir/peer.cpp.o.d"
+  "CMakeFiles/mynet.dir/inc.cpp.o"
+  "CMakeFiles/mynet.dir/inc.cpp.o.d"
   "libmynet.a"
   "libmynet.pdb"
 )

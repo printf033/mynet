@@ -1,5 +1,5 @@
-#ifndef MYNET_INC_PEER_HPP
-#define MYNET_INC_PEER_HPP
+#ifndef MYNET_SRC_PEER_HPP
+#define MYNET_SRC_PEER_HPP
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -39,16 +39,32 @@ public:
         my_info_.fd = fd;
         my_info_.sockaddr.sin_family = AF_INET;
         if (1 != ::inet_pton(AF_INET, ip.c_str(), &my_info_.sockaddr.sin_addr))
+        {
+            ::close(my_info_.fd);
+            my_info_.fd = -1;
             return -2;
+        }
         my_info_.ip = ip;
         if (port < 0 || port > 65535)
+        {
+            ::close(my_info_.fd);
+            my_info_.fd = -1;
             return -3;
+        }
         my_info_.sockaddr.sin_port = ::htons(port);
         my_info_.port = port;
         if (-1 == ::bind(fd, (const sockaddr *)&my_info_.sockaddr, sizeof(sockaddr_in)))
+        {
+            ::close(my_info_.fd);
+            my_info_.fd = -1;
             return -4;
+        }
         if (-1 == ::listen(fd, wait_queue_size))
+        {
+            ::close(my_info_.fd);
+            my_info_.fd = -1;
             return -5;
+        }
         return 0;
     }
     // n cli's socket descriptor
@@ -108,7 +124,7 @@ public:
         return 0;
     }
     // 0 success
-    // -1 recv() len error
+    // -1 recv() len error & closed the connection
     // n recv() data error & the number read
     ssize_t recv(int cli_fd, std::string &&data, size_t breakpoint = 0) // blocking recv
     {
@@ -171,7 +187,8 @@ public:
     // -5 setsockopt() error
     int connect(const std::string &ip, int port, int recv_overtime_sec = 60, int recv_overtime_usec = 0)
     {
-        ::close(ser_info_.fd);
+        if (ser_info_.fd != -1)
+            ::close(ser_info_.fd);
         ser_info_.fd = -1;
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (-1 == fd)
@@ -179,20 +196,33 @@ public:
         ser_info_.fd = fd;
         ser_info_.sockaddr.sin_family = AF_INET;
         if (1 != ::inet_pton(AF_INET, ip.c_str(), &ser_info_.sockaddr.sin_addr))
+        {
+            ::close(ser_info_.fd);
+            ser_info_.fd = -1;
             return -2;
+        }
         ser_info_.ip = ip;
         if (port < 0 || port > 65535)
+        {
+            ::close(ser_info_.fd);
+            ser_info_.fd = -1;
             return -3;
+        }
         ser_info_.sockaddr.sin_port = ::htons(port);
         ser_info_.port = port;
         if (-1 == ::connect(ser_info_.fd, (const sockaddr *)&ser_info_.sockaddr, sizeof(sockaddr_in)))
+        {
+            ::close(ser_info_.fd);
+            ser_info_.fd = -1;
             return -4;
+        }
         timeval tv;
         tv.tv_sec = recv_overtime_sec;
         tv.tv_usec = recv_overtime_usec;
         if (-1 == ::setsockopt(ser_info_.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)))
         {
             ::close(ser_info_.fd);
+            ser_info_.fd = -1;
             return -5;
         }
         return 0;
@@ -234,7 +264,7 @@ public:
         return 0;
     }
     // 0 success
-    // -1 recv() len error
+    // -1 recv() len error & closed the connection
     // n recv() data error & the number read
     ssize_t recv(std::string &&data, size_t breakpoint = 0) // blocking recv
     {
@@ -304,14 +334,26 @@ public:
         my_info_.fd = fd;
         my_info_.sockaddr.sin_family = AF_INET;
         if (1 != ::inet_pton(AF_INET, ip.c_str(), &my_info_.sockaddr.sin_addr))
+        {
+            ::close(my_info_.fd);
+            my_info_.fd = -1;
             return -2;
+        }
         my_info_.ip = ip;
         if (port < 0 || port > 65535)
+        {
+            ::close(my_info_.fd);
+            my_info_.fd = -1;
             return -3;
+        }
         my_info_.sockaddr.sin_port = ::htons(port);
         my_info_.port = port;
         if (-1 == ::bind(fd, (const sockaddr *)&my_info_.sockaddr, sizeof(sockaddr_in)))
+        {
+            ::close(my_info_.fd);
+            my_info_.fd = -1;
             return -4;
+        }
         int broadcastEnable = 1;
         if (-1 == ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)))
             return -5;

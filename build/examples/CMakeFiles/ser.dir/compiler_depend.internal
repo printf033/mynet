@@ -253,6 +253,8 @@ examples/ser
  /lib/x86_64-linux-gnu/libm.so
  /lib/x86_64-linux-gnu/libm.so.6
  /lib/x86_64-linux-gnu/libmvec.so.1
+ /lib/x86_64-linux-gnu/libz.so.1
+ /lib/x86_64-linux-gnu/libzstd.so.1
  /lib64/ld-linux-x86-64.so.2
  /usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o
  /usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o
@@ -260,5 +262,7 @@ examples/ser
  /usr/lib/gcc/x86_64-linux-gnu/14/libgcc_s.so
  /usr/lib/gcc/x86_64-linux-gnu/14/libstdc++.so
  /usr/lib/x86_64-linux-gnu/libc_nonshared.a
+ /usr/lib/x86_64-linux-gnu/libcrypto.so
+ /usr/lib/x86_64-linux-gnu/libssl.so
  /home/aaa/code/mynet/build/examples/CMakeFiles/ser.dir/ser.cpp.o
 

@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/aaa/code/mynet/src/peer.cpp" "src/CMakeFiles/mynet.dir/peer.cpp.o" "gcc" "src/CMakeFiles/mynet.dir/peer.cpp.o.d"
+  "/home/aaa/code/mynet/src/inc.cpp" "src/CMakeFiles/mynet.dir/inc.cpp.o" "gcc" "src/CMakeFiles/mynet.dir/inc.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

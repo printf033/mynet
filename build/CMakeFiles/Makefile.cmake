@@ -23,6 +23,10 @@ set(CMAKE_MAKEFILE_DEPENDS
   "/usr/share/cmake-3.31/Modules/Compiler/Clang-CXX.cmake"
   "/usr/share/cmake-3.31/Modules/Compiler/Clang.cmake"
   "/usr/share/cmake-3.31/Modules/Compiler/GNU.cmake"
+  "/usr/share/cmake-3.31/Modules/FindOpenSSL.cmake"
+  "/usr/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake"
+  "/usr/share/cmake-3.31/Modules/FindPackageMessage.cmake"
+  "/usr/share/cmake-3.31/Modules/FindPkgConfig.cmake"
   "/usr/share/cmake-3.31/Modules/GNUInstallDirs.cmake"
   "/usr/share/cmake-3.31/Modules/Internal/CMakeCXXLinkerInformation.cmake"
   "/usr/share/cmake-3.31/Modules/Internal/CMakeCommonLinkerInformation.cmake"
@@ -57,4 +61,6 @@ set(CMAKE_DEPEND_INFO_FILES
   "src/CMakeFiles/mynet.dir/DependInfo.cmake"
   "examples/CMakeFiles/ser.dir/DependInfo.cmake"
   "examples/CMakeFiles/cli.dir/DependInfo.cmake"
+  "examples/CMakeFiles/ser_s.dir/DependInfo.cmake"
+  "examples/CMakeFiles/cli_s.dir/DependInfo.cmake"
   )

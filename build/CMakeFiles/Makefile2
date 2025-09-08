@@ -88,11 +88,15 @@ clean: examples/clean
 # Recursive "all" directory target.
 examples/all: examples/CMakeFiles/ser.dir/all
 examples/all: examples/CMakeFiles/cli.dir/all
+examples/all: examples/CMakeFiles/ser_s.dir/all
+examples/all: examples/CMakeFiles/cli_s.dir/all
 .PHONY : examples/all
 
 # Recursive "codegen" directory target.
 examples/codegen: examples/CMakeFiles/ser.dir/codegen
 examples/codegen: examples/CMakeFiles/cli.dir/codegen
+examples/codegen: examples/CMakeFiles/ser_s.dir/codegen
+examples/codegen: examples/CMakeFiles/cli_s.dir/codegen
 .PHONY : examples/codegen
 
 # Recursive "preinstall" directory target.
@@ -102,6 +106,8 @@ examples/preinstall:
 # Recursive "clean" directory target.
 examples/clean: examples/CMakeFiles/ser.dir/clean
 examples/clean: examples/CMakeFiles/cli.dir/clean
+examples/clean: examples/CMakeFiles/ser_s.dir/clean
+examples/clean: examples/CMakeFiles/cli_s.dir/clean
 .PHONY : examples/clean
 
 #=============================================================================
@@ -130,7 +136,7 @@ src/clean: src/CMakeFiles/mynet.dir/clean
 src/CMakeFiles/mynet.dir/all:
 	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/depend
 	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=3,4 "Built target mynet"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Built target mynet"
 .PHONY : src/CMakeFiles/mynet.dir/all
 
 # Build rule for subdir invocation for target.
@@ -147,7 +153,7 @@ mynet: src/CMakeFiles/mynet.dir/rule
 # codegen rule for target.
 src/CMakeFiles/mynet.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=3,4 "Finished codegen for target mynet"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Finished codegen for target mynet"
 .PHONY : src/CMakeFiles/mynet.dir/codegen
 
 # clean rule for target.
@@ -162,7 +168,7 @@ src/CMakeFiles/mynet.dir/clean:
 examples/CMakeFiles/ser.dir/all: src/CMakeFiles/mynet.dir/all
 	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser.dir/build.make examples/CMakeFiles/ser.dir/depend
 	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser.dir/build.make examples/CMakeFiles/ser.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Built target ser"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=7,8 "Built target ser"
 .PHONY : examples/CMakeFiles/ser.dir/all
 
 # Build rule for subdir invocation for target.
@@ -179,7 +185,7 @@ ser: examples/CMakeFiles/ser.dir/rule
 # codegen rule for target.
 examples/CMakeFiles/ser.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser.dir/build.make examples/CMakeFiles/ser.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Finished codegen for target ser"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=7,8 "Finished codegen for target ser"
 .PHONY : examples/CMakeFiles/ser.dir/codegen
 
 # clean rule for target.
@@ -218,6 +224,70 @@ examples/CMakeFiles/cli.dir/codegen:
 examples/CMakeFiles/cli.dir/clean:
 	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/cli.dir/build.make examples/CMakeFiles/cli.dir/clean
 .PHONY : examples/CMakeFiles/cli.dir/clean
+
+#=============================================================================
+# Target rules for target examples/CMakeFiles/ser_s.dir
+
+# All Build rule for target.
+examples/CMakeFiles/ser_s.dir/all: src/CMakeFiles/mynet.dir/all
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser_s.dir/build.make examples/CMakeFiles/ser_s.dir/depend
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser_s.dir/build.make examples/CMakeFiles/ser_s.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=9,10 "Built target ser_s"
+.PHONY : examples/CMakeFiles/ser_s.dir/all
+
+# Build rule for subdir invocation for target.
+examples/CMakeFiles/ser_s.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 4
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 examples/CMakeFiles/ser_s.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
+.PHONY : examples/CMakeFiles/ser_s.dir/rule
+
+# Convenience name for target.
+ser_s: examples/CMakeFiles/ser_s.dir/rule
+.PHONY : ser_s
+
+# codegen rule for target.
+examples/CMakeFiles/ser_s.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser_s.dir/build.make examples/CMakeFiles/ser_s.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=9,10 "Finished codegen for target ser_s"
+.PHONY : examples/CMakeFiles/ser_s.dir/codegen
+
+# clean rule for target.
+examples/CMakeFiles/ser_s.dir/clean:
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser_s.dir/build.make examples/CMakeFiles/ser_s.dir/clean
+.PHONY : examples/CMakeFiles/ser_s.dir/clean
+
+#=============================================================================
+# Target rules for target examples/CMakeFiles/cli_s.dir
+
+# All Build rule for target.
+examples/CMakeFiles/cli_s.dir/all: src/CMakeFiles/mynet.dir/all
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/cli_s.dir/build.make examples/CMakeFiles/cli_s.dir/depend
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/cli_s.dir/build.make examples/CMakeFiles/cli_s.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=3,4 "Built target cli_s"
+.PHONY : examples/CMakeFiles/cli_s.dir/all
+
+# Build rule for subdir invocation for target.
+examples/CMakeFiles/cli_s.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 4
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 examples/CMakeFiles/cli_s.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
+.PHONY : examples/CMakeFiles/cli_s.dir/rule
+
+# Convenience name for target.
+cli_s: examples/CMakeFiles/cli_s.dir/rule
+.PHONY : cli_s
+
+# codegen rule for target.
+examples/CMakeFiles/cli_s.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/cli_s.dir/build.make examples/CMakeFiles/cli_s.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=3,4 "Finished codegen for target cli_s"
+.PHONY : examples/CMakeFiles/cli_s.dir/codegen
+
+# clean rule for target.
+examples/CMakeFiles/cli_s.dir/clean:
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/cli_s.dir/build.make examples/CMakeFiles/cli_s.dir/clean
+.PHONY : examples/CMakeFiles/cli_s.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.

@@ -130,29 +130,29 @@ mynet/fast:
 	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/build
 .PHONY : mynet/fast
 
-peer.o: peer.cpp.o
-.PHONY : peer.o
+inc.o: inc.cpp.o
+.PHONY : inc.o
 
 # target to build an object file
-peer.cpp.o:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/peer.cpp.o
-.PHONY : peer.cpp.o
+inc.cpp.o:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/inc.cpp.o
+.PHONY : inc.cpp.o
 
-peer.i: peer.cpp.i
-.PHONY : peer.i
+inc.i: inc.cpp.i
+.PHONY : inc.i
 
 # target to preprocess a source file
-peer.cpp.i:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/peer.cpp.i
-.PHONY : peer.cpp.i
+inc.cpp.i:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/inc.cpp.i
+.PHONY : inc.cpp.i
 
-peer.s: peer.cpp.s
-.PHONY : peer.s
+inc.s: inc.cpp.s
+.PHONY : inc.s
 
 # target to generate assembly for a file
-peer.cpp.s:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/peer.cpp.s
-.PHONY : peer.cpp.s
+inc.cpp.s:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/inc.cpp.s
+.PHONY : inc.cpp.s
 
 # Help Target
 help:
@@ -163,9 +163,9 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... mynet"
-	@echo "... peer.o"
-	@echo "... peer.i"
-	@echo "... peer.s"
+	@echo "... inc.o"
+	@echo "... inc.i"
+	@echo "... inc.s"
 .PHONY : help
 
 

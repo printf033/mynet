@@ -72,28 +72,28 @@ include src/CMakeFiles/mynet.dir/flags.make
 src/CMakeFiles/mynet.dir/codegen:
 .PHONY : src/CMakeFiles/mynet.dir/codegen
 
-src/CMakeFiles/mynet.dir/peer.cpp.o: src/CMakeFiles/mynet.dir/flags.make
-src/CMakeFiles/mynet.dir/peer.cpp.o: /home/aaa/code/mynet/src/peer.cpp
-src/CMakeFiles/mynet.dir/peer.cpp.o: src/CMakeFiles/mynet.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object src/CMakeFiles/mynet.dir/peer.cpp.o"
-	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/mynet.dir/peer.cpp.o -MF CMakeFiles/mynet.dir/peer.cpp.o.d -o CMakeFiles/mynet.dir/peer.cpp.o -c /home/aaa/code/mynet/src/peer.cpp
+src/CMakeFiles/mynet.dir/inc.cpp.o: src/CMakeFiles/mynet.dir/flags.make
+src/CMakeFiles/mynet.dir/inc.cpp.o: /home/aaa/code/mynet/src/inc.cpp
+src/CMakeFiles/mynet.dir/inc.cpp.o: src/CMakeFiles/mynet.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object src/CMakeFiles/mynet.dir/inc.cpp.o"
+	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/mynet.dir/inc.cpp.o -MF CMakeFiles/mynet.dir/inc.cpp.o.d -o CMakeFiles/mynet.dir/inc.cpp.o -c /home/aaa/code/mynet/src/inc.cpp
 
-src/CMakeFiles/mynet.dir/peer.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/mynet.dir/peer.cpp.i"
-	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/src/peer.cpp > CMakeFiles/mynet.dir/peer.cpp.i
+src/CMakeFiles/mynet.dir/inc.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/mynet.dir/inc.cpp.i"
+	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/src/inc.cpp > CMakeFiles/mynet.dir/inc.cpp.i
 
-src/CMakeFiles/mynet.dir/peer.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/mynet.dir/peer.cpp.s"
-	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/src/peer.cpp -o CMakeFiles/mynet.dir/peer.cpp.s
+src/CMakeFiles/mynet.dir/inc.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/mynet.dir/inc.cpp.s"
+	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/src/inc.cpp -o CMakeFiles/mynet.dir/inc.cpp.s
 
 # Object files for target mynet
 mynet_OBJECTS = \
-"CMakeFiles/mynet.dir/peer.cpp.o"
+"CMakeFiles/mynet.dir/inc.cpp.o"
 
 # External object files for target mynet
 mynet_EXTERNAL_OBJECTS =
 
-src/libmynet.a: src/CMakeFiles/mynet.dir/peer.cpp.o
+src/libmynet.a: src/CMakeFiles/mynet.dir/inc.cpp.o
 src/libmynet.a: src/CMakeFiles/mynet.dir/build.make
 src/libmynet.a: src/CMakeFiles/mynet.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX static library libmynet.a"

@@ -4,6 +4,8 @@ ser: \
   /usr/lib/gcc/x86_64-linux-gnu/14/crtbeginS.o \
   CMakeFiles/ser.dir/ser.cpp.o \
   ../src/libmynet.a \
+  /usr/lib/x86_64-linux-gnu/libssl.so \
+  /usr/lib/x86_64-linux-gnu/libcrypto.so \
   /usr/lib/gcc/x86_64-linux-gnu/14/libstdc++.so \
   /lib/x86_64-linux-gnu/libm.so \
   /lib/x86_64-linux-gnu/libm.so \
@@ -30,6 +32,8 @@ ser: \
   /usr/lib/gcc/x86_64-linux-gnu/14/libgcc.a \
   /usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o \
   /lib/x86_64-linux-gnu/crtn.o \
+  /lib/x86_64-linux-gnu/libz.so.1 \
+  /lib/x86_64-linux-gnu/libzstd.so.1 \
   /lib64/ld-linux-x86-64.so.2
 
 /lib/x86_64-linux-gnu/Scrt1.o:
@@ -41,6 +45,10 @@ ser: \
 CMakeFiles/ser.dir/ser.cpp.o:
 
 ../src/libmynet.a:
+
+/usr/lib/x86_64-linux-gnu/libssl.so:
+
+/usr/lib/x86_64-linux-gnu/libcrypto.so:
 
 /usr/lib/gcc/x86_64-linux-gnu/14/libstdc++.so:
 
@@ -93,5 +101,9 @@ CMakeFiles/ser.dir/ser.cpp.o:
 /usr/lib/gcc/x86_64-linux-gnu/14/crtendS.o:
 
 /lib/x86_64-linux-gnu/crtn.o:
+
+/lib/x86_64-linux-gnu/libz.so.1:
+
+/lib/x86_64-linux-gnu/libzstd.so.1:
 
 /lib64/ld-linux-x86-64.so.2:

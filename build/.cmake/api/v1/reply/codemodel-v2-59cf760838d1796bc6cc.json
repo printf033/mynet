@@ -31,7 +31,7 @@
 					"source" : "src",
 					"targetIndexes" : 
 					[
-						1
+						2
 					]
 				},
 				{
@@ -47,7 +47,9 @@
 					"targetIndexes" : 
 					[
 						0,
-						2
+						1,
+						3,
+						4
 					]
 				}
 			],
@@ -66,7 +68,9 @@
 					[
 						0,
 						1,
-						2
+						2,
+						3,
+						4
 					]
 				}
 			],
@@ -75,22 +79,36 @@
 				{
 					"directoryIndex" : 2,
 					"id" : "cli::@714eac15f71a94114fdf",
-					"jsonFile" : "target-cli-Debug-ea366d68d084dffe378c.json",
+					"jsonFile" : "target-cli-Debug-39382fe0e0af5576ec9a.json",
 					"name" : "cli",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "cli_s::@714eac15f71a94114fdf",
+					"jsonFile" : "target-cli_s-Debug-48e05fc3e2a254031f6d.json",
+					"name" : "cli_s",
 					"projectIndex" : 0
 				},
 				{
 					"directoryIndex" : 1,
 					"id" : "mynet::@145eef247bfb46b6828c",
-					"jsonFile" : "target-mynet-Debug-5ceffb0827ca48cd0cfc.json",
+					"jsonFile" : "target-mynet-Debug-10632e97545885faf58e.json",
 					"name" : "mynet",
 					"projectIndex" : 0
 				},
 				{
 					"directoryIndex" : 2,
 					"id" : "ser::@714eac15f71a94114fdf",
-					"jsonFile" : "target-ser-Debug-4541cc3d41cdb9bbd6c7.json",
+					"jsonFile" : "target-ser-Debug-78c188aa47fbf015c18a.json",
 					"name" : "ser",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "ser_s::@714eac15f71a94114fdf",
+					"jsonFile" : "target-ser_s-Debug-339f24858322ebb85fc6.json",
+					"name" : "ser_s",
 					"projectIndex" : 0
 				}
 			]

@@ -155,6 +155,32 @@ cli/fast:
 	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/cli.dir/build.make examples/CMakeFiles/cli.dir/build
 .PHONY : cli/fast
 
+#=============================================================================
+# Target rules for targets named ser_s
+
+# Build rule for target.
+ser_s: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 ser_s
+.PHONY : ser_s
+
+# fast build rule for target.
+ser_s/fast:
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/ser_s.dir/build.make examples/CMakeFiles/ser_s.dir/build
+.PHONY : ser_s/fast
+
+#=============================================================================
+# Target rules for targets named cli_s
+
+# Build rule for target.
+cli_s: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cli_s
+.PHONY : cli_s
+
+# fast build rule for target.
+cli_s/fast:
+	$(MAKE) $(MAKESILENT) -f examples/CMakeFiles/cli_s.dir/build.make examples/CMakeFiles/cli_s.dir/build
+.PHONY : cli_s/fast
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -164,8 +190,10 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... cli"
+	@echo "... cli_s"
 	@echo "... mynet"
 	@echo "... ser"
+	@echo "... ser_s"
 .PHONY : help
 
 
