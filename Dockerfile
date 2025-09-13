@@ -16,4 +16,4 @@ RUN cmake .. &&\
 
 WORKDIR /mynet/build/examples
 
-CMD ["./ser_s"]
+CMD ["./ser"]
