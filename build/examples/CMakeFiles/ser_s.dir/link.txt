@@ -1,1 +1,0 @@
-/usr/bin/clang++ -g -Xlinker --dependency-file=CMakeFiles/ser_s.dir/link.d CMakeFiles/ser_s.dir/ser_s.cpp.o -o ser_s  ../src/libmynet.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so

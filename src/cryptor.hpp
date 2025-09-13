@@ -26,10 +26,8 @@ public:
     Cryptor_tls_ser() = default;
     ~Cryptor_tls_ser()
     {
-        if (my_info_.fd != -1)
-            ::close(my_info_.fd);
-        if (ctx_ != nullptr)
-            SSL_CTX_free(ctx_);
+        ::close(my_info_.fd);
+        SSL_CTX_free(ctx_);
     }
     Cryptor_tls_ser(const Cryptor_tls_ser &) = delete;
     Cryptor_tls_ser &operator=(const Cryptor_tls_ser &) = delete;
@@ -156,7 +154,7 @@ public:
     // 0 success
     // -1 SSL_write() error
     // n SSL_write() data error & the number sent
-    ssize_t send(SSL *ssl, const std::string &data, size_t breakpoint = 0) // blocking send
+    ssize_t send(SSL *&ssl, const std::string &data, size_t breakpoint = 0) // blocking send
     {
         if (data.empty())
             return 0;
@@ -174,6 +172,7 @@ public:
                 SSL_shutdown(ssl);
                 int fd = SSL_get_fd(ssl);
                 SSL_free(ssl);
+                ssl = nullptr;
                 ::close(fd);
                 return -1;
             }
@@ -190,6 +189,7 @@ public:
                 SSL_shutdown(ssl);
                 int fd = SSL_get_fd(ssl);
                 SSL_free(ssl);
+                ssl = nullptr;
                 ::close(fd);
                 return sum;
             }
@@ -200,7 +200,7 @@ public:
     // 0 success
     // -1 SSL_read() error & closed the connection
     // n SSL_read() data error & the number read
-    ssize_t recv(SSL *ssl, std::string &&data, size_t breakpoint = 0) // blocking recv
+    ssize_t recv(SSL *&ssl, std::string &&data, size_t breakpoint = 0) // blocking recv
     {
         if (nullptr == ssl)
             return -1;
@@ -216,6 +216,7 @@ public:
                 SSL_shutdown(ssl);
                 int fd = SSL_get_fd(ssl);
                 SSL_free(ssl);
+                ssl = nullptr;
                 ::close(fd);
                 return -1;
             }
@@ -234,6 +235,7 @@ public:
                 SSL_shutdown(ssl);
                 int fd = SSL_get_fd(ssl);
                 SSL_free(ssl);
+                ssl = nullptr;
                 ::close(fd);
                 return sum;
             }
@@ -269,15 +271,10 @@ public:
     }
     ~Cryptor_tls_cli()
     {
-        if (ssl_ != nullptr)
-        {
-            SSL_shutdown(ssl_);
-            SSL_free(ssl_);
-        }
-        if (ser_info_.fd != -1)
-            ::close(ser_info_.fd);
-        if (ctx_ != nullptr)
-            SSL_CTX_free(ctx_);
+        SSL_shutdown(ssl_);
+        SSL_free(ssl_);
+        ::close(ser_info_.fd);
+        SSL_CTX_free(ctx_);
     }
     Cryptor_tls_cli(const Cryptor_tls_cli &) = delete;
     Cryptor_tls_cli &operator=(const Cryptor_tls_cli &) = delete;

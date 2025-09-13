@@ -4,15 +4,15 @@
 int main()
 {
     Peer_tcp_ser ser;
-    ser.listen("0.0.0.0", 9999);
+    int n = ser.listen("0.0.0.0", 9999);
     int cli_fd = ser.accept(99999);
     while (true)
     {
         std::string data{};
         if (0 == ser.recv(cli_fd, std::move(data)))
+        {
             std::cout << data << std::endl;
-        else
-            std::cout << "no connection" << std::endl;
-        ser.send(cli_fd, data);
+            ser.send(cli_fd, data);
+        }
     }
 }
