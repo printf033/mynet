@@ -15,8 +15,7 @@ class Peer_tcp_ser
         std::string ip{};
         int port = -1;
         int fd = -1;
-    };
-    Info my_info_;
+    } my_info_;
 
 public:
     Peer_tcp_ser() = default;
@@ -94,7 +93,7 @@ public:
     {
         if (data.empty())
             return 0;
-        uint32_t len = data.size() + 1;
+        uint32_t len = data.size();
         size_t sum = 0;
         while (sum < 4)
         {
@@ -169,8 +168,7 @@ class Peer_tcp_cli // binding socket is not supported
         std::string ip{};
         int port = -1;
         int fd = -1;
-    };
-    Info ser_info_;
+    } ser_info_;
 
 public:
     Peer_tcp_cli() = default;
@@ -234,7 +232,7 @@ public:
     {
         if (data.empty())
             return 0;
-        uint32_t len = data.size() + 1;
+        uint32_t len = data.size();
         size_t sum = 0;
         while (sum < 4)
         {
@@ -309,8 +307,7 @@ class Peer_udp
         std::string ip{};
         int port = -1;
         int fd = -1;
-    };
-    Info my_info_;
+    } my_info_;
     socklen_t socklen_ = sizeof(sockaddr_in);
 
 public:
@@ -361,7 +358,7 @@ public:
     }
     void send(sockaddr_in &ur_sockaddr_in, const std::string &data)
     {
-        ::sendto(my_info_.fd, data.c_str(), data.size() + 1, 0, (const sockaddr *)&ur_sockaddr_in, socklen_);
+        ::sendto(my_info_.fd, data.c_str(), data.size(), 0, (const sockaddr *)&ur_sockaddr_in, socklen_);
     }
     void send(const std::string &ur_ip, int ur_port, const std::string &data)
     {

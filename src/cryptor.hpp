@@ -18,8 +18,7 @@ class Cryptor_tls_ser
         std::string ip{};
         int port = -1;
         int fd = -1;
-    };
-    Info my_info_;
+    } my_info_;
     SSL_CTX *ctx_ = nullptr;
 
 public:
@@ -160,7 +159,7 @@ public:
             return 0;
         if (nullptr == ssl)
             return -1;
-        uint32_t len = data.size() + 1;
+        uint32_t len = data.size();
         size_t sum = 0;
         while (sum < 4)
         {
@@ -253,8 +252,7 @@ class Cryptor_tls_cli // binding socket is not supported
         std::string ip{};
         int port = -1;
         int fd = -1;
-    };
-    Info ser_info_;
+    } ser_info_;
     SSL_CTX *ctx_ = nullptr;
     SSL *ssl_ = nullptr;
     std::string crt_ = "";
@@ -380,7 +378,7 @@ public:
             return 0;
         if (nullptr == ssl_)
             return -1;
-        uint32_t len = data.size() + 1;
+        uint32_t len = data.size();
         size_t sum = 0;
         while (sum < 4)
         {

@@ -4,7 +4,7 @@
 
 int main()
 {
-    struct hostent *he = gethostbyname("switchyard.proxy.rlwy.net");
+    struct hostent *he = gethostbyname("crossover.proxy.rlwy.net");
     if (he == nullptr)
     {
         std::cerr << "gethostbyname error\n";
@@ -23,7 +23,7 @@ int main()
     }
     /////////////////////////////////////////////////////////////////
     Peer_tcp_cli cli;
-    cli.connect(ip, 15548); // 127.0.0.1 9999
+    cli.connect(ip, 51029); // 127.0.0.1 9999
     while (true)
     {
         std::string data{};
