@@ -99,6 +99,7 @@ samples/ser_s: samples/CMakeFiles/ser_s.dir/compiler_depend.ts
 samples/ser_s: src/libmynet.a
 samples/ser_s: /usr/lib/x86_64-linux-gnu/libssl.so
 samples/ser_s: /usr/lib/x86_64-linux-gnu/libcrypto.so
+samples/ser_s: myque/src/libmyque.a
 samples/ser_s: samples/CMakeFiles/ser_s.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable ser_s"
 	cd /home/aaa/code/mynet/build/samples && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/ser_s.dir/link.txt --verbose=$(VERBOSE)

@@ -1,5 +1,5 @@
-#ifndef ATOMQUEUE_NONBLOCKING_HPP
-#define ATOMQUEUE_NONBLOCKING_HPP
+#ifndef MYQUE_SRC_ATOMQUEUE_NONBLOCKING_HPP
+#define MYQUE_SRC_ATOMQUEUE_NONBLOCKING_HPP
 
 #include <atomic>
 #include <cassert>
@@ -25,7 +25,7 @@ class AtomQueue_nonblocking
 
 public:
     // !!! capacity must be power of two !!!
-    explicit AtomQueue_nonblocking(size_t capacity)
+    explicit AtomQueue_nonblocking(size_t capacity = 1024)
         : capacity_(capacity), mask_(capacity - 1)
     {
         assert(capacity >= 2 && (capacity & (capacity - 1)) == 0 && "capacity must be power of two");

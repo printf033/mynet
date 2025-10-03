@@ -4,7 +4,7 @@
 
 int main()
 {
-    struct hostent *he = gethostbyname("crossover.proxy.rlwy.net");
+    struct hostent *he = gethostbyname("switchyard.proxy.rlwy.net");
     if (he == nullptr)
     {
         std::cerr << "gethostbyname error\n";
@@ -19,18 +19,18 @@ int main()
             std::cout << "IP " << i << ": " << ipstr << std::endl;
         else
             perror("inet_ntop");
-        i++;
+        ++i;
     }
     /////////////////////////////////////////////////////////////////
     Peer_tcp_cli cli;
-    cli.connect(ip, 51029); // 127.0.0.1 9999
+    cli.connect("127.0.0.1", 9999);
     while (true)
     {
         std::string data{};
-        std::getline(std::cin, data);
+        std::cin >> data;
         cli.send(data);
         std::string recv_data{};
-        if (0 == cli.recv(std::move(recv_data)))
+        if (cli.recv(recv_data) > 0)
             std::cout << recv_data << std::endl;
         else
             std::cout << "recv error" << std::endl;

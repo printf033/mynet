@@ -1,11 +1,12 @@
-#ifndef SYNCQUEUE_NONBLOCKING_HPP
-#define SYNCQUEUE_NONBLOCKING_HPP
+#ifndef MYQUE_SRC_SYNCQUEUE_NONBLOCKING_HPP
+#define MYQUE_SRC_SYNCQUEUE_NONBLOCKING_HPP
 
 #include <queue>
 #include <mutex>
 #include <shared_mutex>
 #include <atomic>
 #include <chrono>
+#include <thread>
 
 template <typename E>
 class SyncQueue_nonblocking
@@ -19,7 +20,7 @@ class SyncQueue_nonblocking
     inline bool isEmpty() const { return queue_.empty(); }
 
 public:
-    SyncQueue_nonblocking(size_t capacity = 10000)
+    SyncQueue_nonblocking(size_t capacity = 1024)
         : capacity_(capacity) {}
     ~SyncQueue_nonblocking()
     {

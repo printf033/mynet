@@ -1,5 +1,5 @@
-#ifndef SYNCQUEUE_HPP
-#define SYNCQUEUE_HPP
+#ifndef MYQUE_SRC_SYNCQUEUE_HPP
+#define MYQUE_SRC_SYNCQUEUE_HPP
 
 #include <queue>
 #include <shared_mutex>
@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
+#include <thread>
 
 template <typename E>
 class SyncQueue
@@ -17,19 +18,19 @@ class SyncQueue
     std::condition_variable_any cv_que_full_;
     std::atomic<bool> is_running_{true};
     size_t capacity_;
-    std::chrono::milliseconds maxtime_to_put_;
-    std::chrono::milliseconds maxtime_to_take_;
+    std::chrono::milliseconds maxtime_to_put_ms_;
+    std::chrono::milliseconds maxtime_to_take_ms_;
 
     inline bool isFull() const { return queue_.size() >= capacity_; }
     inline bool isEmpty() const { return queue_.empty(); }
 
 public:
-    SyncQueue(size_t capacity = 10000,
-              std::chrono::milliseconds maxtime_to_put = 10,
-              std::chrono::milliseconds maxtime_to_take = 100)
+    SyncQueue(size_t capacity = 1024,
+              int maxtime_to_put_ms = 10,
+              int maxtime_to_take_ms = 100)
         : capacity_(capacity),
-          maxtime_to_put_(maxtime_to_put),
-          maxtime_to_take_(maxtime_to_take) {}
+          maxtime_to_put_ms_(std::chrono::milliseconds(maxtime_to_put_ms)),
+          maxtime_to_take_ms_(std::chrono::milliseconds(maxtime_to_take_ms)) {}
     ~SyncQueue()
     {
         is_running_.store(false, std::memory_order_release);
@@ -54,7 +55,7 @@ public:
         bool is_running = true;
         while ((is_running = is_running_.load(std::memory_order_acquire)) && isFull())
             if (std::cv_status::timeout ==
-                cv_que_full_.wait_for(locker, maxtime_to_put_))
+                cv_que_full_.wait_for(locker, maxtime_to_put_ms_))
                 return -1;
         if (!is_running)
             return -2;
@@ -69,7 +70,7 @@ public:
         std::unique_lock<std::shared_mutex> locker(mtx_);
         while (isEmpty())
             if (std::cv_status::timeout ==
-                cv_que_empty_.wait_for(locker, maxtime_to_take_))
+                cv_que_empty_.wait_for(locker, maxtime_to_take_ms_))
                 return -1;
         element = std::move(queue_.front());
         queue_.pop();
@@ -83,7 +84,7 @@ public:
         std::unique_lock<std::shared_mutex> locker(mtx_);
         while (isEmpty())
             if (std::cv_status::timeout ==
-                cv_que_empty_.wait_for(locker, maxtime_to_take_))
+                cv_que_empty_.wait_for(locker, maxtime_to_take_ms_))
                 return -1;
         queue = std::move(queue_);
         cv_que_full_.notify_all();

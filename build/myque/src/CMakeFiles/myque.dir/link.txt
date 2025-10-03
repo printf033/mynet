@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmyque.a CMakeFiles/myque.dir/inc.cpp.o
+/usr/bin/ranlib libmyque.a

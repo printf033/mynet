@@ -117,19 +117,6 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named mynet
-
-# Build rule for target.
-mynet: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 mynet
-.PHONY : mynet
-
-# fast build rule for target.
-mynet/fast:
-	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/build
-.PHONY : mynet/fast
-
-#=============================================================================
 # Target rules for targets named ser
 
 # Build rule for target.
@@ -181,6 +168,32 @@ cli_s/fast:
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/build
 .PHONY : cli_s/fast
 
+#=============================================================================
+# Target rules for targets named mynet
+
+# Build rule for target.
+mynet: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 mynet
+.PHONY : mynet
+
+# fast build rule for target.
+mynet/fast:
+	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/build
+.PHONY : mynet/fast
+
+#=============================================================================
+# Target rules for targets named myque
+
+# Build rule for target.
+myque: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 myque
+.PHONY : myque
+
+# fast build rule for target.
+myque/fast:
+	$(MAKE) $(MAKESILENT) -f myque/src/CMakeFiles/myque.dir/build.make myque/src/CMakeFiles/myque.dir/build
+.PHONY : myque/fast
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -192,6 +205,7 @@ help:
 	@echo "... cli"
 	@echo "... cli_s"
 	@echo "... mynet"
+	@echo "... myque"
 	@echo "... ser"
 	@echo "... ser_s"
 .PHONY : help

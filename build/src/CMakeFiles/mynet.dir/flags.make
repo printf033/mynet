@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/clang++
 CXX_DEFINES = 
 
-CXX_INCLUDES = -I/home/aaa/code/mynet/src
+CXX_INCLUDES = -I/home/aaa/code/mynet/src -I/home/aaa/code/mynet/myque/src
 
 CXX_FLAGS = -g -std=c++20 -Wall -Wextra -Wpedantic
 

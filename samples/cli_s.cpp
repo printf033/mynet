@@ -3,33 +3,15 @@
 
 int main()
 {
-    struct hostent *he = gethostbyname("switchyard.proxy.rlwy.net");
-    if (he == nullptr)
-    {
-        std::cerr << "gethostbyname error\n";
-        return -1;
-    }
-    std::string ip = inet_ntoa(*(struct in_addr *)he->h_addr_list[0]);
-    char ipstr[INET_ADDRSTRLEN]; // IPv4 长度
-    int i = 0;
-    while (he->h_addr_list[i] != nullptr)
-    {
-        if (inet_ntop(AF_INET, he->h_addr_list[i], ipstr, sizeof(ipstr)) != nullptr)
-            std::cout << "IP " << i << ": " << ipstr << std::endl;
-        else
-            perror("inet_ntop");
-        i++;
-    }
-    /////////////////////////////////////////////////////////////////
     Cryptor_tls_cli cli;
-    int n = cli.connect(ip, 15548, "../../certs/myser.crt"); // 127.0.0.1 9999
+    int n = cli.connect("127.0.0.1", 9999, "../../certs/myser.crt");
     while (true)
     {
         std::string data{};
-        std::getline(std::cin, data);
+        std::cin >> data;
         cli.send(data);
         std::string recv_data{};
-        if (0 == cli.recv(std::move(recv_data)))
+        if (cli.recv(recv_data) > 0)
             std::cout << recv_data << std::endl;
         else
             std::cout << "recv error" << std::endl;

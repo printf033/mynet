@@ -14,6 +14,6 @@ WORKDIR /mynet/build
 RUN cmake .. &&\
     make -j$(nproc)
 
-WORKDIR /mynet/build/examples
+WORKDIR /mynet/build/samples
 
 CMD ["./ser"]

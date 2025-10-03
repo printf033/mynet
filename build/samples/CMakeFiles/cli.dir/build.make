@@ -99,6 +99,7 @@ samples/cli: samples/CMakeFiles/cli.dir/compiler_depend.ts
 samples/cli: src/libmynet.a
 samples/cli: /usr/lib/x86_64-linux-gnu/libssl.so
 samples/cli: /usr/lib/x86_64-linux-gnu/libcrypto.so
+samples/cli: myque/src/libmyque.a
 samples/cli: samples/CMakeFiles/cli.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable cli"
 	cd /home/aaa/code/mynet/build/samples && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/cli.dir/link.txt --verbose=$(VERBOSE)

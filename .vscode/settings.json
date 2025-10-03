@@ -70,6 +70,10 @@
         "variant": "cpp",
         "iostream": "cpp",
         "cinttypes": "cpp",
-        "cerrno": "cpp"
+        "cerrno": "cpp",
+        "cassert": "cpp",
+        "shared_mutex": "cpp",
+        "chrono": "cpp",
+        "iomanip": "cpp"
     }
 }

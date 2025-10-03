@@ -63,24 +63,47 @@ CMAKE_BINARY_DIR = /home/aaa/code/mynet/build
 # Directory level rules for the build root directory
 
 # The main recursive "all" target.
-all: src/all
 all: samples/all
+all: src/all
+all: myque/src/all
 .PHONY : all
 
 # The main recursive "codegen" target.
-codegen: src/codegen
 codegen: samples/codegen
+codegen: src/codegen
+codegen: myque/src/codegen
 .PHONY : codegen
 
 # The main recursive "preinstall" target.
-preinstall: src/preinstall
 preinstall: samples/preinstall
+preinstall: src/preinstall
+preinstall: myque/src/preinstall
 .PHONY : preinstall
 
 # The main recursive "clean" target.
-clean: src/clean
 clean: samples/clean
+clean: src/clean
+clean: myque/src/clean
 .PHONY : clean
+
+#=============================================================================
+# Directory level rules for directory myque/src
+
+# Recursive "all" directory target.
+myque/src/all: myque/src/CMakeFiles/myque.dir/all
+.PHONY : myque/src/all
+
+# Recursive "codegen" directory target.
+myque/src/codegen: myque/src/CMakeFiles/myque.dir/codegen
+.PHONY : myque/src/codegen
+
+# Recursive "preinstall" directory target.
+myque/src/preinstall:
+.PHONY : myque/src/preinstall
+
+# Recursive "clean" directory target.
+myque/src/clean: myque/src/CMakeFiles/myque.dir/clean
+.PHONY : myque/src/clean
 
 #=============================================================================
 # Directory level rules for directory samples
@@ -130,50 +153,19 @@ src/clean: src/CMakeFiles/mynet.dir/clean
 .PHONY : src/clean
 
 #=============================================================================
-# Target rules for target src/CMakeFiles/mynet.dir
-
-# All Build rule for target.
-src/CMakeFiles/mynet.dir/all:
-	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/depend
-	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Built target mynet"
-.PHONY : src/CMakeFiles/mynet.dir/all
-
-# Build rule for subdir invocation for target.
-src/CMakeFiles/mynet.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 2
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 src/CMakeFiles/mynet.dir/all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
-.PHONY : src/CMakeFiles/mynet.dir/rule
-
-# Convenience name for target.
-mynet: src/CMakeFiles/mynet.dir/rule
-.PHONY : mynet
-
-# codegen rule for target.
-src/CMakeFiles/mynet.dir/codegen:
-	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Finished codegen for target mynet"
-.PHONY : src/CMakeFiles/mynet.dir/codegen
-
-# clean rule for target.
-src/CMakeFiles/mynet.dir/clean:
-	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/clean
-.PHONY : src/CMakeFiles/mynet.dir/clean
-
-#=============================================================================
 # Target rules for target samples/CMakeFiles/ser.dir
 
 # All Build rule for target.
 samples/CMakeFiles/ser.dir/all: src/CMakeFiles/mynet.dir/all
+samples/CMakeFiles/ser.dir/all: myque/src/CMakeFiles/myque.dir/all
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser.dir/build.make samples/CMakeFiles/ser.dir/depend
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser.dir/build.make samples/CMakeFiles/ser.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=7,8 "Built target ser"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=9,10 "Built target ser"
 .PHONY : samples/CMakeFiles/ser.dir/all
 
 # Build rule for subdir invocation for target.
 samples/CMakeFiles/ser.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 4
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 6
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/ser.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
 .PHONY : samples/CMakeFiles/ser.dir/rule
@@ -185,7 +177,7 @@ ser: samples/CMakeFiles/ser.dir/rule
 # codegen rule for target.
 samples/CMakeFiles/ser.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser.dir/build.make samples/CMakeFiles/ser.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=7,8 "Finished codegen for target ser"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=9,10 "Finished codegen for target ser"
 .PHONY : samples/CMakeFiles/ser.dir/codegen
 
 # clean rule for target.
@@ -198,6 +190,7 @@ samples/CMakeFiles/ser.dir/clean:
 
 # All Build rule for target.
 samples/CMakeFiles/cli.dir/all: src/CMakeFiles/mynet.dir/all
+samples/CMakeFiles/cli.dir/all: myque/src/CMakeFiles/myque.dir/all
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli.dir/build.make samples/CMakeFiles/cli.dir/depend
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli.dir/build.make samples/CMakeFiles/cli.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=1,2 "Built target cli"
@@ -205,7 +198,7 @@ samples/CMakeFiles/cli.dir/all: src/CMakeFiles/mynet.dir/all
 
 # Build rule for subdir invocation for target.
 samples/CMakeFiles/cli.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 4
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 6
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/cli.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
 .PHONY : samples/CMakeFiles/cli.dir/rule
@@ -230,14 +223,15 @@ samples/CMakeFiles/cli.dir/clean:
 
 # All Build rule for target.
 samples/CMakeFiles/ser_s.dir/all: src/CMakeFiles/mynet.dir/all
+samples/CMakeFiles/ser_s.dir/all: myque/src/CMakeFiles/myque.dir/all
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/depend
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=9,10 "Built target ser_s"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=11,12 "Built target ser_s"
 .PHONY : samples/CMakeFiles/ser_s.dir/all
 
 # Build rule for subdir invocation for target.
 samples/CMakeFiles/ser_s.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 4
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 6
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/ser_s.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
 .PHONY : samples/CMakeFiles/ser_s.dir/rule
@@ -249,7 +243,7 @@ ser_s: samples/CMakeFiles/ser_s.dir/rule
 # codegen rule for target.
 samples/CMakeFiles/ser_s.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=9,10 "Finished codegen for target ser_s"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=11,12 "Finished codegen for target ser_s"
 .PHONY : samples/CMakeFiles/ser_s.dir/codegen
 
 # clean rule for target.
@@ -262,6 +256,7 @@ samples/CMakeFiles/ser_s.dir/clean:
 
 # All Build rule for target.
 samples/CMakeFiles/cli_s.dir/all: src/CMakeFiles/mynet.dir/all
+samples/CMakeFiles/cli_s.dir/all: myque/src/CMakeFiles/myque.dir/all
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/depend
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=3,4 "Built target cli_s"
@@ -269,7 +264,7 @@ samples/CMakeFiles/cli_s.dir/all: src/CMakeFiles/mynet.dir/all
 
 # Build rule for subdir invocation for target.
 samples/CMakeFiles/cli_s.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 4
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 6
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/cli_s.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
 .PHONY : samples/CMakeFiles/cli_s.dir/rule
@@ -288,6 +283,70 @@ samples/CMakeFiles/cli_s.dir/codegen:
 samples/CMakeFiles/cli_s.dir/clean:
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/clean
 .PHONY : samples/CMakeFiles/cli_s.dir/clean
+
+#=============================================================================
+# Target rules for target src/CMakeFiles/mynet.dir
+
+# All Build rule for target.
+src/CMakeFiles/mynet.dir/all: myque/src/CMakeFiles/myque.dir/all
+	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/depend
+	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Built target mynet"
+.PHONY : src/CMakeFiles/mynet.dir/all
+
+# Build rule for subdir invocation for target.
+src/CMakeFiles/mynet.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 4
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 src/CMakeFiles/mynet.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
+.PHONY : src/CMakeFiles/mynet.dir/rule
+
+# Convenience name for target.
+mynet: src/CMakeFiles/mynet.dir/rule
+.PHONY : mynet
+
+# codegen rule for target.
+src/CMakeFiles/mynet.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=5,6 "Finished codegen for target mynet"
+.PHONY : src/CMakeFiles/mynet.dir/codegen
+
+# clean rule for target.
+src/CMakeFiles/mynet.dir/clean:
+	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/mynet.dir/build.make src/CMakeFiles/mynet.dir/clean
+.PHONY : src/CMakeFiles/mynet.dir/clean
+
+#=============================================================================
+# Target rules for target myque/src/CMakeFiles/myque.dir
+
+# All Build rule for target.
+myque/src/CMakeFiles/myque.dir/all:
+	$(MAKE) $(MAKESILENT) -f myque/src/CMakeFiles/myque.dir/build.make myque/src/CMakeFiles/myque.dir/depend
+	$(MAKE) $(MAKESILENT) -f myque/src/CMakeFiles/myque.dir/build.make myque/src/CMakeFiles/myque.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=7,8 "Built target myque"
+.PHONY : myque/src/CMakeFiles/myque.dir/all
+
+# Build rule for subdir invocation for target.
+myque/src/CMakeFiles/myque.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 myque/src/CMakeFiles/myque.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
+.PHONY : myque/src/CMakeFiles/myque.dir/rule
+
+# Convenience name for target.
+myque: myque/src/CMakeFiles/myque.dir/rule
+.PHONY : myque
+
+# codegen rule for target.
+myque/src/CMakeFiles/myque.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f myque/src/CMakeFiles/myque.dir/build.make myque/src/CMakeFiles/myque.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=7,8 "Finished codegen for target myque"
+.PHONY : myque/src/CMakeFiles/myque.dir/codegen
+
+# clean rule for target.
+myque/src/CMakeFiles/myque.dir/clean:
+	$(MAKE) $(MAKESILENT) -f myque/src/CMakeFiles/myque.dir/build.make myque/src/CMakeFiles/myque.dir/clean
+.PHONY : myque/src/CMakeFiles/myque.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.

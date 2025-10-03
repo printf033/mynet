@@ -86,18 +86,19 @@ public:
         }
         return cli_info.fd;
     }
-    // 0 success
-    // -1 send() len error
-    // n send() data error & the number sent
-    ssize_t send(int cli_fd, const std::string &data, size_t breakpoint = 0) // blocking send
+    // if length == -1, send with data size()
+    // n the number sent
+    // -1 send() total error & closed the connection
+    // -2 send() data error
+    ssize_t send(int cli_fd, const std::string &data, size_t breakpoint = 0, ssize_t length = -1) // blocking send
     {
         if (data.empty())
             return 0;
-        uint32_t len = data.size();
+        uint32_t total = length == -1 ? data.size() : breakpoint + length;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = ::send(cli_fd, reinterpret_cast<char *>(&len) + sum, 4 - sum, 0);
+            ssize_t n = ::send(cli_fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -108,56 +109,58 @@ public:
             sum += static_cast<size_t>(n);
         }
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = ::send(cli_fd, data.c_str() + sum, len - sum, 0);
+            ssize_t n = ::send(cli_fd, data.c_str() + sum, total - sum, 0);
             if (n < 0)
             {
                 if (errno == EINTR)
                     continue;
                 ::close(cli_fd);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
-    // 0 success
-    // -1 recv() len error & closed the connection
-    // n recv() data error & the number read
-    ssize_t recv(int cli_fd, std::string &&data, size_t breakpoint = 0) // blocking recv
+    // n the number read
+    // 0 closed the connection
+    // -1 recv() total error
+    // -2 recv() data error
+    ssize_t recv(int cli_fd, std::string &data, size_t breakpoint = 0) // blocking recv
     {
-        uint32_t len = 0;
+        uint32_t total = 0;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = ::recv(cli_fd, reinterpret_cast<char *>(&len) + sum, 4 - sum, 0);
+            ssize_t n = ::recv(cli_fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
                     continue;
                 ::close(cli_fd);
-                return -1;
+                return 0 == n ? 0 : -1;
             }
             sum += static_cast<size_t>(n);
         }
-        if (0 == breakpoint)
-            data.resize(len);
+        if (data.size() < total)
+            data.resize(total);
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = ::recv(cli_fd, data.data() + sum, len - sum, 0);
+            ssize_t n = ::recv(cli_fd, data.data() + sum, total - sum, 0);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
                     continue;
                 ::close(cli_fd);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
+    inline int getFd() const { return my_info_.fd; }
 };
 
 class Peer_tcp_cli // binding socket is not supported
@@ -225,18 +228,19 @@ public:
         }
         return 0;
     }
-    // 0 success
-    // -1 send() len error
-    // n send() data error & the number sent
-    ssize_t send(const std::string &data, size_t breakpoint = 0) // blocking send
+    // if length == -1, send with data size()
+    // n the number sent
+    // -1 send() total error & closed the connection
+    // -2 send() data error
+    ssize_t send(const std::string &data, size_t breakpoint = 0, ssize_t length = -1) // blocking send
     {
         if (data.empty())
             return 0;
-        uint32_t len = data.size();
+        uint32_t total = length == -1 ? data.size() : breakpoint + length;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = ::send(ser_info_.fd, reinterpret_cast<char *>(&len) + sum, 4 - sum, 0);
+            ssize_t n = ::send(ser_info_.fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -247,55 +251,56 @@ public:
             sum += static_cast<size_t>(n);
         }
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = ::send(ser_info_.fd, data.c_str() + sum, len - sum, 0);
+            ssize_t n = ::send(ser_info_.fd, data.c_str() + sum, total - sum, 0);
             if (n < 0)
             {
                 if (errno == EINTR)
                     continue;
                 connect(ser_info_.ip, ser_info_.port);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
-    // 0 success
-    // -1 recv() len error & closed the connection
-    // n recv() data error & the number read
-    ssize_t recv(std::string &&data, size_t breakpoint = 0) // blocking recv
+    // n the number read
+    // 0 closed the connection
+    // -1 recv() total error
+    // -2 recv() data error
+    ssize_t recv(std::string &data, size_t breakpoint = 0) // blocking recv
     {
-        uint32_t len = 0;
+        uint32_t total = 0;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = ::recv(ser_info_.fd, reinterpret_cast<char *>(&len) + sum, 4 - sum, 0);
+            ssize_t n = ::recv(ser_info_.fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
                     continue;
                 connect(ser_info_.ip, ser_info_.port);
-                return -1;
+                return 0 == n ? 0 : -1;
             }
             sum += static_cast<size_t>(n);
         }
-        if (0 == breakpoint)
-            data.resize(len);
+        if (data.size() < total)
+            data.resize(total);
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = ::recv(ser_info_.fd, data.data() + sum, len - sum, 0);
+            ssize_t n = ::recv(ser_info_.fd, data.data() + sum, total - sum, 0);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
                     continue;
                 connect(ser_info_.ip, ser_info_.port);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
 };
 

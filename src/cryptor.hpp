@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <signal.h>
 #include <string>
 #include <iostream>
 #include <openssl/ssl.h>
@@ -45,6 +46,7 @@ public:
     // -9 SSL_CTX_check_private_key() error
     int listen(const std::string &ip, int port, const std::string &crt, const std::string &key, int wait_queue_size = 5)
     {
+        signal(SIGPIPE, SIG_IGN);
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (-1 == fd)
             return -1;
@@ -150,20 +152,21 @@ public:
         }
         return cli_info.fd;
     }
-    // 0 success
-    // -1 SSL_write() error
-    // n SSL_write() data error & the number sent
-    ssize_t send(SSL *&ssl, const std::string &data, size_t breakpoint = 0) // blocking send
+    // if length == -1, send with data size()
+    // n the number sent
+    // -1 SSL_write() total error & closed the connection
+    // -2 SSL_write() data error
+    ssize_t send(SSL *&ssl, const std::string &data, size_t breakpoint = 0, ssize_t length = -1) // blocking send
     {
         if (data.empty())
             return 0;
         if (nullptr == ssl)
             return -1;
-        uint32_t len = data.size();
+        uint32_t total = length == -1 ? data.size() : breakpoint + length;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = SSL_write(ssl, reinterpret_cast<char *>(&len) + sum, 4 - sum);
+            ssize_t n = SSL_write(ssl, reinterpret_cast<char *>(&total) + sum, 4 - sum);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -178,9 +181,9 @@ public:
             sum += static_cast<size_t>(n);
         }
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = SSL_write(ssl, data.c_str() + sum, len - sum);
+            ssize_t n = SSL_write(ssl, data.c_str() + sum, total - sum);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -190,24 +193,25 @@ public:
                 SSL_free(ssl);
                 ssl = nullptr;
                 ::close(fd);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
-    // 0 success
-    // -1 SSL_read() error & closed the connection
-    // n SSL_read() data error & the number read
-    ssize_t recv(SSL *&ssl, std::string &&data, size_t breakpoint = 0) // blocking recv
+    // n the number read
+    // 0 closed the connection
+    // -1 SSL_read() total error
+    // -2 SSL_read() data error
+    ssize_t recv(SSL *&ssl, std::string &data, size_t breakpoint = 0) // blocking recv
     {
         if (nullptr == ssl)
             return -1;
-        uint32_t len = 0;
+        uint32_t total = 0;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = SSL_read(ssl, reinterpret_cast<char *>(&len) + sum, 4 - sum);
+            ssize_t n = SSL_read(ssl, reinterpret_cast<char *>(&total) + sum, 4 - sum);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
@@ -217,16 +221,16 @@ public:
                 SSL_free(ssl);
                 ssl = nullptr;
                 ::close(fd);
-                return -1;
+                return 0 == n ? 0 : -1;
             }
             sum += static_cast<size_t>(n);
         }
-        if (0 == breakpoint)
-            data.resize(len);
+        if (data.size() < total)
+            data.resize(total);
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = SSL_read(ssl, data.data() + sum, len - sum);
+            ssize_t n = SSL_read(ssl, data.data() + sum, total - sum);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
@@ -236,12 +240,13 @@ public:
                 SSL_free(ssl);
                 ssl = nullptr;
                 ::close(fd);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
+    inline int getFd() const { return my_info_.fd; }
 };
 
 class Cryptor_tls_cli // binding socket is not supported
@@ -260,6 +265,7 @@ class Cryptor_tls_cli // binding socket is not supported
 public:
     Cryptor_tls_cli()
     {
+        signal(SIGPIPE, SIG_IGN);
         ctx_ = SSL_CTX_new(TLS_client_method());
         if (nullptr == ctx_)
             std::cerr << "SSL_CTX_new() error\n";
@@ -369,20 +375,21 @@ public:
         }
         return 0;
     }
-    // 0 success
-    // -1 SSL_write() len error
-    // n SSL_write() data error & the number sent
-    ssize_t send(const std::string &data, size_t breakpoint = 0) // blocking send
+    // if length == -1, send with data size()
+    // n the number sent
+    // -1 SSL_write() total error & closed the connection
+    // -2 SSL_write() data error
+    ssize_t send(const std::string &data, size_t breakpoint = 0, ssize_t length = -1) // blocking send
     {
         if (data.empty())
             return 0;
         if (nullptr == ssl_)
             return -1;
-        uint32_t len = data.size();
+        uint32_t total = length == -1 ? data.size() : breakpoint + length;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = SSL_write(ssl_, reinterpret_cast<char *>(&len) + sum, 4 - sum);
+            ssize_t n = SSL_write(ssl_, reinterpret_cast<char *>(&total) + sum, 4 - sum);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -393,57 +400,58 @@ public:
             sum += static_cast<size_t>(n);
         }
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = SSL_write(ssl_, data.c_str() + sum, len - sum);
+            ssize_t n = SSL_write(ssl_, data.c_str() + sum, total - sum);
             if (n < 0)
             {
                 if (errno == EINTR)
                     continue;
                 connect(ser_info_.ip, ser_info_.port, crt_);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
-    // 0 success
-    // -1 SSL_read() error & closed the connection
-    // n SSL_read() data error & the number read
-    ssize_t recv(std::string &&data, size_t breakpoint = 0) // blocking recv
+    // n the number read
+    // 0 closed the connection
+    // -1 SSL_read() total error
+    // -2 SSL_read() data error
+    ssize_t recv(std::string &data, size_t breakpoint = 0) // blocking recv
     {
         if (nullptr == ssl_)
             return -1;
-        uint32_t len = 0;
+        uint32_t total = 0;
         size_t sum = 0;
         while (sum < 4)
         {
-            ssize_t n = SSL_read(ssl_, reinterpret_cast<char *>(&len) + sum, 4 - sum);
+            ssize_t n = SSL_read(ssl_, reinterpret_cast<char *>(&total) + sum, 4 - sum);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
                     continue;
                 connect(ser_info_.ip, ser_info_.port, crt_);
-                return -1;
+                return 0 == n ? 0 : -1;
             }
             sum += static_cast<size_t>(n);
         }
-        if (0 == breakpoint)
-            data.resize(len);
+        if (data.size() < total)
+            data.resize(total);
         sum = breakpoint;
-        while (sum < len)
+        while (sum < total)
         {
-            ssize_t n = SSL_read(ssl_, data.data() + sum, len - sum);
+            ssize_t n = SSL_read(ssl_, data.data() + sum, total - sum);
             if (n <= 0)
             {
                 if (n < 0 && errno == EINTR)
                     continue;
                 connect(ser_info_.ip, ser_info_.port, crt_);
-                return sum;
+                return -2;
             }
             sum += static_cast<size_t>(n);
         }
-        return 0;
+        return sum;
     }
 };
 

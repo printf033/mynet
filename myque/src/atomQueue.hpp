@@ -1,5 +1,5 @@
-#ifndef ATOMQUEUE_HPP
-#define ATOMQUEUE_HPP
+#ifndef MYQUE_SRC_ATOMQUEUE_HPP
+#define MYQUE_SRC_ATOMQUEUE_HPP
 
 #include <atomic>
 #include <cassert>
@@ -23,8 +23,8 @@ class AtomQueue
     const size_t mask_;
     std::atomic<size_t> head_ = 0;
     std::atomic<size_t> tail_ = 0;
-    int maxtime_to_put_;
-    int maxtime_to_take_;
+    int maxtimes_to_put_;
+    int maxtimes_to_take_;
 
     // 0 success
     // -1 queue is full or not ready
@@ -84,13 +84,13 @@ class AtomQueue
 
 public:
     // !!! capacity must be power of two !!!
-    explicit AtomQueue(size_t capacity,
-                       int maxtime_to_put = 10,
-                       int maxtime_to_take = 100)
+    explicit AtomQueue(size_t capacity = 1024,
+                       int maxtimes_to_put = 10,
+                       int maxtimes_to_take = 100)
         : capacity_(capacity),
           mask_(capacity - 1),
-          maxtime_to_put_(maxtime_to_put),
-          maxtime_to_take_(maxtime_to_take)
+          maxtimes_to_put_(maxtimes_to_put),
+          maxtimes_to_take_(maxtimes_to_take)
     {
         assert(capacity >= 2 && (capacity & (capacity - 1)) == 0 && "capacity must be power of two");
         queue_ = reinterpret_cast<Slot *>(operator new[](sizeof(Slot) * capacity_));
@@ -128,7 +128,7 @@ public:
         int n = put_(tmp);
         if (0 == n)
             return 0;
-        int times = maxtime_to_put_;
+        int times = maxtimes_to_put_;
         while (times-- > 0 && n == -1)
         {
             n = put_(tmp);
@@ -143,7 +143,7 @@ public:
         int n = take_(element);
         if (0 == n)
             return 0;
-        int times = maxtime_to_take_;
+        int times = maxtimes_to_take_;
         while (times-- > 0 && n == -1)
         {
             n = take_(element);

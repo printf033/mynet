@@ -10,6 +10,7 @@ set(CMAKE_MAKEFILE_DEPENDS
   "/home/aaa/code/mynet/CMakeLists.txt"
   "CMakeFiles/3.31.6/CMakeCXXCompiler.cmake"
   "CMakeFiles/3.31.6/CMakeSystem.cmake"
+  "/home/aaa/code/mynet/myque/src/CMakeLists.txt"
   "/home/aaa/code/mynet/samples/CMakeLists.txt"
   "/home/aaa/code/mynet/src/CMakeLists.txt"
   "/usr/share/cmake-3.31/Modules/CMakeCXXInformation.cmake"
@@ -52,15 +53,17 @@ set(CMAKE_MAKEFILE_OUTPUTS
 # Byproducts of CMake generate step:
 set(CMAKE_MAKEFILE_PRODUCTS
   "CMakeFiles/CMakeDirectoryInformation.cmake"
-  "src/CMakeFiles/CMakeDirectoryInformation.cmake"
   "samples/CMakeFiles/CMakeDirectoryInformation.cmake"
+  "src/CMakeFiles/CMakeDirectoryInformation.cmake"
+  "myque/src/CMakeFiles/CMakeDirectoryInformation.cmake"
   )
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
-  "src/CMakeFiles/mynet.dir/DependInfo.cmake"
   "samples/CMakeFiles/ser.dir/DependInfo.cmake"
   "samples/CMakeFiles/cli.dir/DependInfo.cmake"
   "samples/CMakeFiles/ser_s.dir/DependInfo.cmake"
   "samples/CMakeFiles/cli_s.dir/DependInfo.cmake"
+  "src/CMakeFiles/mynet.dir/DependInfo.cmake"
+  "myque/src/CMakeFiles/myque.dir/DependInfo.cmake"
   )
