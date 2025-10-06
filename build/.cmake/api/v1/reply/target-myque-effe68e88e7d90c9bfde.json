@@ -3,7 +3,7 @@
 	"artifacts" : 
 	[
 		{
-			"path" : "src/libmynet.a"
+			"path" : "myque/src/libmyque.a"
 		}
 	],
 	"backtrace" : 1,
@@ -12,13 +12,12 @@
 		"commands" : 
 		[
 			"add_library",
-			"target_link_libraries",
 			"target_compile_options",
 			"target_include_directories"
 		],
 		"files" : 
 		[
-			"src/CMakeLists.txt"
+			"myque/src/CMakeLists.txt"
 		],
 		"nodes" : 
 		[
@@ -34,25 +33,13 @@
 			{
 				"command" : 1,
 				"file" : 0,
-				"line" : 10,
+				"line" : 5,
 				"parent" : 0
 			},
 			{
 				"command" : 2,
 				"file" : 0,
-				"line" : 12,
-				"parent" : 0
-			},
-			{
-				"command" : 3,
-				"file" : 0,
 				"line" : 3,
-				"parent" : 0
-			},
-			{
-				"command" : 3,
-				"file" : 0,
-				"line" : 8,
 				"parent" : 0
 			}
 		]
@@ -63,29 +50,25 @@
 			"compileCommandFragments" : 
 			[
 				{
-					"fragment" : "-g -std=c++20"
+					"fragment" : "-std=c++20"
 				},
 				{
-					"backtrace" : 3,
+					"backtrace" : 2,
 					"fragment" : "-Wall"
 				},
 				{
-					"backtrace" : 3,
+					"backtrace" : 2,
 					"fragment" : "-Wextra"
 				},
 				{
-					"backtrace" : 3,
+					"backtrace" : 2,
 					"fragment" : "-Wpedantic"
 				}
 			],
 			"includes" : 
 			[
 				{
-					"backtrace" : 4,
-					"path" : "/home/aaa/code/mynet/src"
-				},
-				{
-					"backtrace" : 5,
+					"backtrace" : 3,
 					"path" : "/home/aaa/code/mynet/myque/src"
 				}
 			],
@@ -104,20 +87,13 @@
 			]
 		}
 	],
-	"dependencies" : 
-	[
-		{
-			"backtrace" : 2,
-			"id" : "myque::@7d45aeee7c3ee063ea5a"
-		}
-	],
-	"id" : "mynet::@145eef247bfb46b6828c",
-	"name" : "mynet",
-	"nameOnDisk" : "libmynet.a",
+	"id" : "myque::@7d45aeee7c3ee063ea5a",
+	"name" : "myque",
+	"nameOnDisk" : "libmyque.a",
 	"paths" : 
 	{
-		"build" : "src",
-		"source" : "src"
+		"build" : "myque/src",
+		"source" : "myque/src"
 	},
 	"sourceGroups" : 
 	[
@@ -134,7 +110,7 @@
 		{
 			"backtrace" : 1,
 			"compileGroupIndex" : 0,
-			"path" : "src/inc.cpp",
+			"path" : "myque/src/inc.cpp",
 			"sourceGroupIndex" : 0
 		}
 	],

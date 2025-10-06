@@ -169,6 +169,19 @@ cli_s/fast:
 .PHONY : cli_s/fast
 
 #=============================================================================
+# Target rules for targets named viewer_s
+
+# Build rule for target.
+viewer_s: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 viewer_s
+.PHONY : viewer_s
+
+# fast build rule for target.
+viewer_s/fast:
+	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/build
+.PHONY : viewer_s/fast
+
+#=============================================================================
 # Target rules for targets named mynet
 
 # Build rule for target.
@@ -208,6 +221,7 @@ help:
 	@echo "... myque"
 	@echo "... ser"
 	@echo "... ser_s"
+	@echo "... viewer_s"
 .PHONY : help
 
 

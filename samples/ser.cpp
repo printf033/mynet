@@ -1,5 +1,4 @@
 #include "reactor.hpp"
-#include <iostream>
 
 int main()
 {

@@ -76,15 +76,15 @@ samples/CMakeFiles/ser.dir/ser.cpp.o: samples/CMakeFiles/ser.dir/flags.make
 samples/CMakeFiles/ser.dir/ser.cpp.o: /home/aaa/code/mynet/samples/ser.cpp
 samples/CMakeFiles/ser.dir/ser.cpp.o: samples/CMakeFiles/ser.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object samples/CMakeFiles/ser.dir/ser.cpp.o"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT samples/CMakeFiles/ser.dir/ser.cpp.o -MF CMakeFiles/ser.dir/ser.cpp.o.d -o CMakeFiles/ser.dir/ser.cpp.o -c /home/aaa/code/mynet/samples/ser.cpp
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT samples/CMakeFiles/ser.dir/ser.cpp.o -MF CMakeFiles/ser.dir/ser.cpp.o.d -o CMakeFiles/ser.dir/ser.cpp.o -c /home/aaa/code/mynet/samples/ser.cpp
 
 samples/CMakeFiles/ser.dir/ser.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/ser.dir/ser.cpp.i"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/samples/ser.cpp > CMakeFiles/ser.dir/ser.cpp.i
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/samples/ser.cpp > CMakeFiles/ser.dir/ser.cpp.i
 
 samples/CMakeFiles/ser.dir/ser.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/ser.dir/ser.cpp.s"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/samples/ser.cpp -o CMakeFiles/ser.dir/ser.cpp.s
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/samples/ser.cpp -o CMakeFiles/ser.dir/ser.cpp.s
 
 # Object files for target ser
 ser_OBJECTS = \

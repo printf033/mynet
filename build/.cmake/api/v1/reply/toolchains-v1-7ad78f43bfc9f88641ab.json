@@ -5,7 +5,7 @@
 		{
 			"compiler" : 
 			{
-				"id" : "Clang",
+				"id" : "GNU",
 				"implicit" : 
 				{
 					"includeDirectories" : 
@@ -13,7 +13,7 @@
 						"/usr/include/c++/14",
 						"/usr/include/x86_64-linux-gnu/c++/14",
 						"/usr/include/c++/14/backward",
-						"/usr/lib/llvm-20/lib/clang/20/include",
+						"/usr/lib/gcc/x86_64-linux-gnu/14/include",
 						"/usr/local/include",
 						"/usr/include/x86_64-linux-gnu",
 						"/usr/include"
@@ -21,12 +21,10 @@
 					"linkDirectories" : 
 					[
 						"/usr/lib/gcc/x86_64-linux-gnu/14",
-						"/usr/lib64",
-						"/lib/x86_64-linux-gnu",
-						"/lib64",
 						"/usr/lib/x86_64-linux-gnu",
-						"/lib",
-						"/usr/lib"
+						"/usr/lib",
+						"/lib/x86_64-linux-gnu",
+						"/lib"
 					],
 					"linkFrameworkDirectories" : [],
 					"linkLibraries" : 
@@ -40,8 +38,8 @@
 						"gcc"
 					]
 				},
-				"path" : "/usr/bin/clang++",
-				"version" : "20.1.2"
+				"path" : "/usr/bin/c++",
+				"version" : "14.2.0"
 			},
 			"language" : "CXX",
 			"sourceFileExtensions" : 

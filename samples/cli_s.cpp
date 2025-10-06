@@ -1,10 +1,10 @@
 #include "cryptor.hpp"
-#include <netdb.h>
+#include <iostream>
 
 int main()
 {
     Cryptor_tls_cli cli;
-    int n = cli.connect("127.0.0.1", 9999, "../../certs/myser.crt");
+    cli.connect("127.0.0.1", 9998, "../../certs/myser.crt");
     while (true)
     {
         std::string data{};
@@ -14,6 +14,6 @@ int main()
         if (cli.recv(recv_data) > 0)
             std::cout << recv_data << std::endl;
         else
-            std::cout << "recv error" << std::endl;
+            std::cout << "the other side left..." << std::endl;
     }
 }

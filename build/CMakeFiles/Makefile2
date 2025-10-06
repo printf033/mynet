@@ -113,6 +113,7 @@ samples/all: samples/CMakeFiles/ser.dir/all
 samples/all: samples/CMakeFiles/cli.dir/all
 samples/all: samples/CMakeFiles/ser_s.dir/all
 samples/all: samples/CMakeFiles/cli_s.dir/all
+samples/all: samples/CMakeFiles/viewer_s.dir/all
 .PHONY : samples/all
 
 # Recursive "codegen" directory target.
@@ -120,6 +121,7 @@ samples/codegen: samples/CMakeFiles/ser.dir/codegen
 samples/codegen: samples/CMakeFiles/cli.dir/codegen
 samples/codegen: samples/CMakeFiles/ser_s.dir/codegen
 samples/codegen: samples/CMakeFiles/cli_s.dir/codegen
+samples/codegen: samples/CMakeFiles/viewer_s.dir/codegen
 .PHONY : samples/codegen
 
 # Recursive "preinstall" directory target.
@@ -131,6 +133,7 @@ samples/clean: samples/CMakeFiles/ser.dir/clean
 samples/clean: samples/CMakeFiles/cli.dir/clean
 samples/clean: samples/CMakeFiles/ser_s.dir/clean
 samples/clean: samples/CMakeFiles/cli_s.dir/clean
+samples/clean: samples/CMakeFiles/viewer_s.dir/clean
 .PHONY : samples/clean
 
 #=============================================================================
@@ -283,6 +286,39 @@ samples/CMakeFiles/cli_s.dir/codegen:
 samples/CMakeFiles/cli_s.dir/clean:
 	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/clean
 .PHONY : samples/CMakeFiles/cli_s.dir/clean
+
+#=============================================================================
+# Target rules for target samples/CMakeFiles/viewer_s.dir
+
+# All Build rule for target.
+samples/CMakeFiles/viewer_s.dir/all: src/CMakeFiles/mynet.dir/all
+samples/CMakeFiles/viewer_s.dir/all: myque/src/CMakeFiles/myque.dir/all
+	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/depend
+	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=13,14 "Built target viewer_s"
+.PHONY : samples/CMakeFiles/viewer_s.dir/all
+
+# Build rule for subdir invocation for target.
+samples/CMakeFiles/viewer_s.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 6
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/viewer_s.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/aaa/code/mynet/build/CMakeFiles 0
+.PHONY : samples/CMakeFiles/viewer_s.dir/rule
+
+# Convenience name for target.
+viewer_s: samples/CMakeFiles/viewer_s.dir/rule
+.PHONY : viewer_s
+
+# codegen rule for target.
+samples/CMakeFiles/viewer_s.dir/codegen:
+	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/codegen
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=13,14 "Finished codegen for target viewer_s"
+.PHONY : samples/CMakeFiles/viewer_s.dir/codegen
+
+# clean rule for target.
+samples/CMakeFiles/viewer_s.dir/clean:
+	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/clean
+.PHONY : samples/CMakeFiles/viewer_s.dir/clean
 
 #=============================================================================
 # Target rules for target src/CMakeFiles/mynet.dir

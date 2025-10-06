@@ -7,7 +7,6 @@
 #include <unistd.h>
 #include <signal.h>
 #include <string>
-#include <iostream>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -268,10 +267,10 @@ public:
         signal(SIGPIPE, SIG_IGN);
         ctx_ = SSL_CTX_new(TLS_client_method());
         if (nullptr == ctx_)
-            std::cerr << "SSL_CTX_new() error\n";
+            printf("SSL_CTX_new() error\n");
         SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
         if (SSL_CTX_set_default_verify_paths(ctx_) <= 0)
-            std::cerr << "SSL_CTX_set_default_verify_paths() error\n";
+            printf("SSL_CTX_set_default_verify_paths() error\n");
     }
     ~Cryptor_tls_cli()
     {

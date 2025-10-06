@@ -4,6 +4,7 @@
 /home/aaa/code/mynet/build/samples/CMakeFiles/cli.dir
 /home/aaa/code/mynet/build/samples/CMakeFiles/ser_s.dir
 /home/aaa/code/mynet/build/samples/CMakeFiles/cli_s.dir
+/home/aaa/code/mynet/build/samples/CMakeFiles/viewer_s.dir
 /home/aaa/code/mynet/build/samples/CMakeFiles/edit_cache.dir
 /home/aaa/code/mynet/build/samples/CMakeFiles/rebuild_cache.dir
 /home/aaa/code/mynet/build/src/CMakeFiles/mynet.dir

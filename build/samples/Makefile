@@ -172,6 +172,20 @@ cli_s/fast:
 	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/build
 .PHONY : cli_s/fast
 
+# Convenience name for target.
+samples/CMakeFiles/viewer_s.dir/rule:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/viewer_s.dir/rule
+.PHONY : samples/CMakeFiles/viewer_s.dir/rule
+
+# Convenience name for target.
+viewer_s: samples/CMakeFiles/viewer_s.dir/rule
+.PHONY : viewer_s
+
+# fast build rule for target.
+viewer_s/fast:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/build
+.PHONY : viewer_s/fast
+
 cli.o: cli.cpp.o
 .PHONY : cli.o
 
@@ -268,6 +282,30 @@ ser_s.cpp.s:
 	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/ser_s.cpp.s
 .PHONY : ser_s.cpp.s
 
+viewer_s.o: viewer_s.cpp.o
+.PHONY : viewer_s.o
+
+# target to build an object file
+viewer_s.cpp.o:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/viewer_s.cpp.o
+.PHONY : viewer_s.cpp.o
+
+viewer_s.i: viewer_s.cpp.i
+.PHONY : viewer_s.i
+
+# target to preprocess a source file
+viewer_s.cpp.i:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/viewer_s.cpp.i
+.PHONY : viewer_s.cpp.i
+
+viewer_s.s: viewer_s.cpp.s
+.PHONY : viewer_s.s
+
+# target to generate assembly for a file
+viewer_s.cpp.s:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/viewer_s.cpp.s
+.PHONY : viewer_s.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -280,6 +318,7 @@ help:
 	@echo "... cli_s"
 	@echo "... ser"
 	@echo "... ser_s"
+	@echo "... viewer_s"
 	@echo "... cli.o"
 	@echo "... cli.i"
 	@echo "... cli.s"
@@ -292,6 +331,9 @@ help:
 	@echo "... ser_s.o"
 	@echo "... ser_s.i"
 	@echo "... ser_s.s"
+	@echo "... viewer_s.o"
+	@echo "... viewer_s.i"
+	@echo "... viewer_s.s"
 .PHONY : help
 
 

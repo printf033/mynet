@@ -10,3 +10,6 @@ add_executable(cli_s cli_s.cpp)
 target_link_libraries(ser_s PRIVATE mynet)
 target_link_libraries(cli_s PRIVATE mynet)
 
+add_executable(viewer_s viewer_s.cpp)
+
+target_link_libraries(viewer_s PRIVATE mynet)
