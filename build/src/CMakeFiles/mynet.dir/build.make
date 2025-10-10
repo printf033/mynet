@@ -76,15 +76,15 @@ src/CMakeFiles/mynet.dir/inc.cpp.o: src/CMakeFiles/mynet.dir/flags.make
 src/CMakeFiles/mynet.dir/inc.cpp.o: /home/aaa/code/mynet/src/inc.cpp
 src/CMakeFiles/mynet.dir/inc.cpp.o: src/CMakeFiles/mynet.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object src/CMakeFiles/mynet.dir/inc.cpp.o"
-	cd /home/aaa/code/mynet/build/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/mynet.dir/inc.cpp.o -MF CMakeFiles/mynet.dir/inc.cpp.o.d -o CMakeFiles/mynet.dir/inc.cpp.o -c /home/aaa/code/mynet/src/inc.cpp
+	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/mynet.dir/inc.cpp.o -MF CMakeFiles/mynet.dir/inc.cpp.o.d -o CMakeFiles/mynet.dir/inc.cpp.o -c /home/aaa/code/mynet/src/inc.cpp
 
 src/CMakeFiles/mynet.dir/inc.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/mynet.dir/inc.cpp.i"
-	cd /home/aaa/code/mynet/build/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/src/inc.cpp > CMakeFiles/mynet.dir/inc.cpp.i
+	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/src/inc.cpp > CMakeFiles/mynet.dir/inc.cpp.i
 
 src/CMakeFiles/mynet.dir/inc.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/mynet.dir/inc.cpp.s"
-	cd /home/aaa/code/mynet/build/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/src/inc.cpp -o CMakeFiles/mynet.dir/inc.cpp.s
+	cd /home/aaa/code/mynet/build/src && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/src/inc.cpp -o CMakeFiles/mynet.dir/inc.cpp.s
 
 # Object files for target mynet
 mynet_OBJECTS = \

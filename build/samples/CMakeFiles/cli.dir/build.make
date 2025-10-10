@@ -76,15 +76,15 @@ samples/CMakeFiles/cli.dir/cli.cpp.o: samples/CMakeFiles/cli.dir/flags.make
 samples/CMakeFiles/cli.dir/cli.cpp.o: /home/aaa/code/mynet/samples/cli.cpp
 samples/CMakeFiles/cli.dir/cli.cpp.o: samples/CMakeFiles/cli.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object samples/CMakeFiles/cli.dir/cli.cpp.o"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT samples/CMakeFiles/cli.dir/cli.cpp.o -MF CMakeFiles/cli.dir/cli.cpp.o.d -o CMakeFiles/cli.dir/cli.cpp.o -c /home/aaa/code/mynet/samples/cli.cpp
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT samples/CMakeFiles/cli.dir/cli.cpp.o -MF CMakeFiles/cli.dir/cli.cpp.o.d -o CMakeFiles/cli.dir/cli.cpp.o -c /home/aaa/code/mynet/samples/cli.cpp
 
 samples/CMakeFiles/cli.dir/cli.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/cli.dir/cli.cpp.i"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/samples/cli.cpp > CMakeFiles/cli.dir/cli.cpp.i
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/samples/cli.cpp > CMakeFiles/cli.dir/cli.cpp.i
 
 samples/CMakeFiles/cli.dir/cli.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/cli.dir/cli.cpp.s"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/samples/cli.cpp -o CMakeFiles/cli.dir/cli.cpp.s
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/samples/cli.cpp -o CMakeFiles/cli.dir/cli.cpp.s
 
 # Object files for target cli
 cli_OBJECTS = \

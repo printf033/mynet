@@ -76,15 +76,15 @@ samples/CMakeFiles/s_ser.dir/s_ser.cpp.o: samples/CMakeFiles/s_ser.dir/flags.mak
 samples/CMakeFiles/s_ser.dir/s_ser.cpp.o: /home/aaa/code/mynet/samples/s_ser.cpp
 samples/CMakeFiles/s_ser.dir/s_ser.cpp.o: samples/CMakeFiles/s_ser.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/aaa/code/mynet/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object samples/CMakeFiles/s_ser.dir/s_ser.cpp.o"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT samples/CMakeFiles/s_ser.dir/s_ser.cpp.o -MF CMakeFiles/s_ser.dir/s_ser.cpp.o.d -o CMakeFiles/s_ser.dir/s_ser.cpp.o -c /home/aaa/code/mynet/samples/s_ser.cpp
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT samples/CMakeFiles/s_ser.dir/s_ser.cpp.o -MF CMakeFiles/s_ser.dir/s_ser.cpp.o.d -o CMakeFiles/s_ser.dir/s_ser.cpp.o -c /home/aaa/code/mynet/samples/s_ser.cpp
 
 samples/CMakeFiles/s_ser.dir/s_ser.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/s_ser.dir/s_ser.cpp.i"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/samples/s_ser.cpp > CMakeFiles/s_ser.dir/s_ser.cpp.i
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/aaa/code/mynet/samples/s_ser.cpp > CMakeFiles/s_ser.dir/s_ser.cpp.i
 
 samples/CMakeFiles/s_ser.dir/s_ser.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/s_ser.dir/s_ser.cpp.s"
-	cd /home/aaa/code/mynet/build/samples && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/samples/s_ser.cpp -o CMakeFiles/s_ser.dir/s_ser.cpp.s
+	cd /home/aaa/code/mynet/build/samples && /usr/bin/clang++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/aaa/code/mynet/samples/s_ser.cpp -o CMakeFiles/s_ser.dir/s_ser.cpp.s
 
 # Object files for target s_ser
 s_ser_OBJECTS = \

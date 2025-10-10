@@ -1,1 +1,1 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/s_ser.dir/link.d CMakeFiles/s_ser.dir/s_ser.cpp.o -o s_ser  ../src/libmynet.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so ../myque/src/libmyque.a
+/usr/bin/clang++ -Xlinker --dependency-file=CMakeFiles/s_ser.dir/link.d CMakeFiles/s_ser.dir/s_ser.cpp.o -o s_ser  ../src/libmynet.a /usr/lib/x86_64-linux-gnu/libssl.so /usr/lib/x86_64-linux-gnu/libcrypto.so ../myque/src/libmyque.a
