@@ -1,5 +1,6 @@
-src/CMakeFiles/mynet.dir/inc.cpp.o: /home/aaa/code/mynet/src/inc.cpp \
- /usr/include/stdc-predef.h /home/aaa/code/mynet/src/peer.hpp \
+samples/CMakeFiles/s_ser.dir/s_ser.cpp.o: \
+ /home/aaa/code/mynet/samples/s_ser.cpp /usr/include/stdc-predef.h \
+ /home/aaa/code/mynet/src/reactor.hpp /home/aaa/code/mynet/src/peer.hpp \
  /usr/include/arpa/inet.h /usr/include/features.h \
  /usr/include/features-time64.h \
  /usr/include/x86_64-linux-gnu/bits/wordsize.h \
@@ -230,7 +231,6 @@ src/CMakeFiles/mynet.dir/inc.cpp.o: /home/aaa/code/mynet/src/inc.cpp \
  /usr/include/openssl/ssl3.h /usr/include/openssl/tls1.h \
  /usr/include/openssl/dtls1.h /usr/include/openssl/srtp.h \
  /usr/include/openssl/quic.h /usr/include/openssl/err.h \
- /home/aaa/code/mynet/src/reactor.hpp \
  /home/aaa/code/mynet/myque/src/syncQueue_nonblocking.hpp \
  /usr/include/c++/14/queue /usr/include/c++/14/deque \
  /usr/include/c++/14/bits/stl_uninitialized.h \

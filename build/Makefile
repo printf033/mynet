@@ -143,43 +143,30 @@ cli/fast:
 .PHONY : cli/fast
 
 #=============================================================================
-# Target rules for targets named ser_s
+# Target rules for targets named s_ser
 
 # Build rule for target.
-ser_s: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 ser_s
-.PHONY : ser_s
+s_ser: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 s_ser
+.PHONY : s_ser
 
 # fast build rule for target.
-ser_s/fast:
-	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/build
-.PHONY : ser_s/fast
+s_ser/fast:
+	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_ser.dir/build.make samples/CMakeFiles/s_ser.dir/build
+.PHONY : s_ser/fast
 
 #=============================================================================
-# Target rules for targets named cli_s
+# Target rules for targets named s_cli
 
 # Build rule for target.
-cli_s: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cli_s
-.PHONY : cli_s
+s_cli: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 s_cli
+.PHONY : s_cli
 
 # fast build rule for target.
-cli_s/fast:
-	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/build
-.PHONY : cli_s/fast
-
-#=============================================================================
-# Target rules for targets named viewer_s
-
-# Build rule for target.
-viewer_s: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 viewer_s
-.PHONY : viewer_s
-
-# fast build rule for target.
-viewer_s/fast:
-	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/build
-.PHONY : viewer_s/fast
+s_cli/fast:
+	$(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_cli.dir/build.make samples/CMakeFiles/s_cli.dir/build
+.PHONY : s_cli/fast
 
 #=============================================================================
 # Target rules for targets named mynet
@@ -216,12 +203,11 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... cli"
-	@echo "... cli_s"
 	@echo "... mynet"
 	@echo "... myque"
+	@echo "... s_cli"
+	@echo "... s_ser"
 	@echo "... ser"
-	@echo "... ser_s"
-	@echo "... viewer_s"
 .PHONY : help
 
 

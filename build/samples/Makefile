@@ -145,46 +145,32 @@ cli/fast:
 .PHONY : cli/fast
 
 # Convenience name for target.
-samples/CMakeFiles/ser_s.dir/rule:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/ser_s.dir/rule
-.PHONY : samples/CMakeFiles/ser_s.dir/rule
+samples/CMakeFiles/s_ser.dir/rule:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/s_ser.dir/rule
+.PHONY : samples/CMakeFiles/s_ser.dir/rule
 
 # Convenience name for target.
-ser_s: samples/CMakeFiles/ser_s.dir/rule
-.PHONY : ser_s
+s_ser: samples/CMakeFiles/s_ser.dir/rule
+.PHONY : s_ser
 
 # fast build rule for target.
-ser_s/fast:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/build
-.PHONY : ser_s/fast
+s_ser/fast:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_ser.dir/build.make samples/CMakeFiles/s_ser.dir/build
+.PHONY : s_ser/fast
 
 # Convenience name for target.
-samples/CMakeFiles/cli_s.dir/rule:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/cli_s.dir/rule
-.PHONY : samples/CMakeFiles/cli_s.dir/rule
+samples/CMakeFiles/s_cli.dir/rule:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/s_cli.dir/rule
+.PHONY : samples/CMakeFiles/s_cli.dir/rule
 
 # Convenience name for target.
-cli_s: samples/CMakeFiles/cli_s.dir/rule
-.PHONY : cli_s
+s_cli: samples/CMakeFiles/s_cli.dir/rule
+.PHONY : s_cli
 
 # fast build rule for target.
-cli_s/fast:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/build
-.PHONY : cli_s/fast
-
-# Convenience name for target.
-samples/CMakeFiles/viewer_s.dir/rule:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 samples/CMakeFiles/viewer_s.dir/rule
-.PHONY : samples/CMakeFiles/viewer_s.dir/rule
-
-# Convenience name for target.
-viewer_s: samples/CMakeFiles/viewer_s.dir/rule
-.PHONY : viewer_s
-
-# fast build rule for target.
-viewer_s/fast:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/build
-.PHONY : viewer_s/fast
+s_cli/fast:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_cli.dir/build.make samples/CMakeFiles/s_cli.dir/build
+.PHONY : s_cli/fast
 
 cli.o: cli.cpp.o
 .PHONY : cli.o
@@ -210,29 +196,53 @@ cli.cpp.s:
 	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli.dir/build.make samples/CMakeFiles/cli.dir/cli.cpp.s
 .PHONY : cli.cpp.s
 
-cli_s.o: cli_s.cpp.o
-.PHONY : cli_s.o
+s_cli.o: s_cli.cpp.o
+.PHONY : s_cli.o
 
 # target to build an object file
-cli_s.cpp.o:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/cli_s.cpp.o
-.PHONY : cli_s.cpp.o
+s_cli.cpp.o:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_cli.dir/build.make samples/CMakeFiles/s_cli.dir/s_cli.cpp.o
+.PHONY : s_cli.cpp.o
 
-cli_s.i: cli_s.cpp.i
-.PHONY : cli_s.i
+s_cli.i: s_cli.cpp.i
+.PHONY : s_cli.i
 
 # target to preprocess a source file
-cli_s.cpp.i:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/cli_s.cpp.i
-.PHONY : cli_s.cpp.i
+s_cli.cpp.i:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_cli.dir/build.make samples/CMakeFiles/s_cli.dir/s_cli.cpp.i
+.PHONY : s_cli.cpp.i
 
-cli_s.s: cli_s.cpp.s
-.PHONY : cli_s.s
+s_cli.s: s_cli.cpp.s
+.PHONY : s_cli.s
 
 # target to generate assembly for a file
-cli_s.cpp.s:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/cli_s.dir/build.make samples/CMakeFiles/cli_s.dir/cli_s.cpp.s
-.PHONY : cli_s.cpp.s
+s_cli.cpp.s:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_cli.dir/build.make samples/CMakeFiles/s_cli.dir/s_cli.cpp.s
+.PHONY : s_cli.cpp.s
+
+s_ser.o: s_ser.cpp.o
+.PHONY : s_ser.o
+
+# target to build an object file
+s_ser.cpp.o:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_ser.dir/build.make samples/CMakeFiles/s_ser.dir/s_ser.cpp.o
+.PHONY : s_ser.cpp.o
+
+s_ser.i: s_ser.cpp.i
+.PHONY : s_ser.i
+
+# target to preprocess a source file
+s_ser.cpp.i:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_ser.dir/build.make samples/CMakeFiles/s_ser.dir/s_ser.cpp.i
+.PHONY : s_ser.cpp.i
+
+s_ser.s: s_ser.cpp.s
+.PHONY : s_ser.s
+
+# target to generate assembly for a file
+s_ser.cpp.s:
+	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/s_ser.dir/build.make samples/CMakeFiles/s_ser.dir/s_ser.cpp.s
+.PHONY : s_ser.cpp.s
 
 ser.o: ser.cpp.o
 .PHONY : ser.o
@@ -258,54 +268,6 @@ ser.cpp.s:
 	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser.dir/build.make samples/CMakeFiles/ser.dir/ser.cpp.s
 .PHONY : ser.cpp.s
 
-ser_s.o: ser_s.cpp.o
-.PHONY : ser_s.o
-
-# target to build an object file
-ser_s.cpp.o:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/ser_s.cpp.o
-.PHONY : ser_s.cpp.o
-
-ser_s.i: ser_s.cpp.i
-.PHONY : ser_s.i
-
-# target to preprocess a source file
-ser_s.cpp.i:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/ser_s.cpp.i
-.PHONY : ser_s.cpp.i
-
-ser_s.s: ser_s.cpp.s
-.PHONY : ser_s.s
-
-# target to generate assembly for a file
-ser_s.cpp.s:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/ser_s.dir/build.make samples/CMakeFiles/ser_s.dir/ser_s.cpp.s
-.PHONY : ser_s.cpp.s
-
-viewer_s.o: viewer_s.cpp.o
-.PHONY : viewer_s.o
-
-# target to build an object file
-viewer_s.cpp.o:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/viewer_s.cpp.o
-.PHONY : viewer_s.cpp.o
-
-viewer_s.i: viewer_s.cpp.i
-.PHONY : viewer_s.i
-
-# target to preprocess a source file
-viewer_s.cpp.i:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/viewer_s.cpp.i
-.PHONY : viewer_s.cpp.i
-
-viewer_s.s: viewer_s.cpp.s
-.PHONY : viewer_s.s
-
-# target to generate assembly for a file
-viewer_s.cpp.s:
-	cd /home/aaa/code/mynet/build && $(MAKE) $(MAKESILENT) -f samples/CMakeFiles/viewer_s.dir/build.make samples/CMakeFiles/viewer_s.dir/viewer_s.cpp.s
-.PHONY : viewer_s.cpp.s
-
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -315,25 +277,21 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... cli"
-	@echo "... cli_s"
+	@echo "... s_cli"
+	@echo "... s_ser"
 	@echo "... ser"
-	@echo "... ser_s"
-	@echo "... viewer_s"
 	@echo "... cli.o"
 	@echo "... cli.i"
 	@echo "... cli.s"
-	@echo "... cli_s.o"
-	@echo "... cli_s.i"
-	@echo "... cli_s.s"
+	@echo "... s_cli.o"
+	@echo "... s_cli.i"
+	@echo "... s_cli.s"
+	@echo "... s_ser.o"
+	@echo "... s_ser.i"
+	@echo "... s_ser.s"
 	@echo "... ser.o"
 	@echo "... ser.i"
 	@echo "... ser.s"
-	@echo "... ser_s.o"
-	@echo "... ser_s.i"
-	@echo "... ser_s.s"
-	@echo "... viewer_s.o"
-	@echo "... viewer_s.i"
-	@echo "... viewer_s.s"
 .PHONY : help
 
 

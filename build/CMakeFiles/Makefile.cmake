@@ -123,9 +123,8 @@ set(CMAKE_MAKEFILE_PRODUCTS
 set(CMAKE_DEPEND_INFO_FILES
   "samples/CMakeFiles/ser.dir/DependInfo.cmake"
   "samples/CMakeFiles/cli.dir/DependInfo.cmake"
-  "samples/CMakeFiles/ser_s.dir/DependInfo.cmake"
-  "samples/CMakeFiles/cli_s.dir/DependInfo.cmake"
-  "samples/CMakeFiles/viewer_s.dir/DependInfo.cmake"
+  "samples/CMakeFiles/s_ser.dir/DependInfo.cmake"
+  "samples/CMakeFiles/s_cli.dir/DependInfo.cmake"
   "src/CMakeFiles/mynet.dir/DependInfo.cmake"
   "myque/src/CMakeFiles/myque.dir/DependInfo.cmake"
   )
