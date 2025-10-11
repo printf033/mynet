@@ -6,10 +6,6 @@
 enum class CLI : int
 {
     CHECK_UNIVERSAL = 0,
-    CHECK_ATTRIBUTE,
-    CHECK_SERVEPLACE,
-    CHECK_IMPROVEMENT,
-    CHECK_INFORMATION,
     type_amount
 };
 // ack（服务器端回复类型）

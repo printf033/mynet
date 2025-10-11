@@ -3,7 +3,7 @@
 
 int main()
 {
-    Peer_tcp_cli cli;
+    Peer_tcp_based_cli cli;
     cli.connect("127.0.0.1", 9999);
     while (true)
     {

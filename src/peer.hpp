@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <string>
 
-class Peer_tcp_ser
+class Peer_tcp_based_ser
 {
     struct Info
     {
@@ -18,12 +18,12 @@ class Peer_tcp_ser
     } my_info_;
 
 public:
-    Peer_tcp_ser() = default;
-    ~Peer_tcp_ser() { ::close(my_info_.fd); }
-    Peer_tcp_ser(const Peer_tcp_ser &) = delete;
-    Peer_tcp_ser &operator=(const Peer_tcp_ser &) = delete;
-    Peer_tcp_ser(Peer_tcp_ser &&) = delete;
-    Peer_tcp_ser &operator=(Peer_tcp_ser &&) = delete;
+    Peer_tcp_based_ser() = default;
+    ~Peer_tcp_based_ser() { ::close(my_info_.fd); }
+    Peer_tcp_based_ser(const Peer_tcp_based_ser &) = delete;
+    Peer_tcp_based_ser &operator=(const Peer_tcp_based_ser &) = delete;
+    Peer_tcp_based_ser(Peer_tcp_based_ser &&) = delete;
+    Peer_tcp_based_ser &operator=(Peer_tcp_based_ser &&) = delete;
     // 0 success
     // -1 socket() error
     // -2 inet_pton() error
@@ -94,7 +94,7 @@ public:
     {
         if (data.empty())
             return 0;
-        uint32_t total = length == -1 ? data.size() : breakpoint + length;
+        uint32_t total = length == -1 ? data.size() : std::min(breakpoint + length, data.size());
         size_t sum = 0;
         while (sum < 4)
         {
@@ -163,7 +163,7 @@ public:
     inline int getFd() const { return my_info_.fd; }
 };
 
-class Peer_tcp_cli // binding socket is not supported
+class Peer_tcp_based_cli // binding socket is not supported
 {
     struct Info
     {
@@ -174,12 +174,12 @@ class Peer_tcp_cli // binding socket is not supported
     } ser_info_;
 
 public:
-    Peer_tcp_cli() = default;
-    ~Peer_tcp_cli() { ::close(ser_info_.fd); }
-    Peer_tcp_cli(const Peer_tcp_cli &) = delete;
-    Peer_tcp_cli &operator=(const Peer_tcp_cli &) = delete;
-    Peer_tcp_cli(Peer_tcp_cli &&) = delete;
-    Peer_tcp_cli &operator=(Peer_tcp_cli &&) = delete;
+    Peer_tcp_based_cli() = default;
+    ~Peer_tcp_based_cli() { ::close(ser_info_.fd); }
+    Peer_tcp_based_cli(const Peer_tcp_based_cli &) = delete;
+    Peer_tcp_based_cli &operator=(const Peer_tcp_based_cli &) = delete;
+    Peer_tcp_based_cli(Peer_tcp_based_cli &&) = delete;
+    Peer_tcp_based_cli &operator=(Peer_tcp_based_cli &&) = delete;
     // 0 success
     // -1 socket() error
     // -2 inet_pton() error
@@ -236,7 +236,7 @@ public:
     {
         if (data.empty())
             return 0;
-        uint32_t total = length == -1 ? data.size() : breakpoint + length;
+        uint32_t total = length == -1 ? data.size() : std::min(breakpoint + length, data.size());
         size_t sum = 0;
         while (sum < 4)
         {
@@ -318,10 +318,10 @@ class Peer_udp
 public:
     Peer_udp() = default;
     ~Peer_udp() { ::close(my_info_.fd); }
-    Peer_udp(const Peer_tcp_cli &) = delete;
-    Peer_udp &operator=(const Peer_tcp_cli &) = delete;
-    Peer_udp(Peer_tcp_cli &&) = delete;
-    Peer_udp &operator=(Peer_tcp_cli &&) = delete;
+    Peer_udp(const Peer_udp &) = delete;
+    Peer_udp &operator=(const Peer_udp &) = delete;
+    Peer_udp(Peer_udp &&) = delete;
+    Peer_udp &operator=(Peer_udp &&) = delete;
     // 0 success
     // -1 socket() error
     // -2 inet_pton() error

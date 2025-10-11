@@ -1,5 +1,5 @@
-#ifndef MYNET_SRC_CRYPTOR_HPP
-#define MYNET_SRC_CRYPTOR_HPP
+#ifndef MYNET_SRC_PEER_S_HPP
+#define MYNET_SRC_PEER_S_HPP
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -10,7 +10,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-class Cryptor_tls_ser
+class Peer_s_tls_based_ser
 {
     struct Info
     {
@@ -22,16 +22,16 @@ class Cryptor_tls_ser
     SSL_CTX *ctx_ = nullptr;
 
 public:
-    Cryptor_tls_ser() = default;
-    ~Cryptor_tls_ser()
+    Peer_s_tls_based_ser() = default;
+    ~Peer_s_tls_based_ser()
     {
         ::close(my_info_.fd);
         SSL_CTX_free(ctx_);
     }
-    Cryptor_tls_ser(const Cryptor_tls_ser &) = delete;
-    Cryptor_tls_ser &operator=(const Cryptor_tls_ser &) = delete;
-    Cryptor_tls_ser(Cryptor_tls_ser &&) = delete;
-    Cryptor_tls_ser &operator=(Cryptor_tls_ser &&) = delete;
+    Peer_s_tls_based_ser(const Peer_s_tls_based_ser &) = delete;
+    Peer_s_tls_based_ser &operator=(const Peer_s_tls_based_ser &) = delete;
+    Peer_s_tls_based_ser(Peer_s_tls_based_ser &&) = delete;
+    Peer_s_tls_based_ser &operator=(Peer_s_tls_based_ser &&) = delete;
     // !!! single crt & pem format !!!
     // 0 success
     // -1 socket() error
@@ -161,7 +161,7 @@ public:
             return 0;
         if (nullptr == ssl)
             return -1;
-        uint32_t total = length == -1 ? data.size() : breakpoint + length;
+        uint32_t total = length == -1 ? data.size() : std::min(breakpoint + length, data.size());
         size_t sum = 0;
         while (sum < 4)
         {
@@ -248,7 +248,7 @@ public:
     inline int getFd() const { return my_info_.fd; }
 };
 
-class Cryptor_tls_cli // binding socket is not supported
+class Peer_s_tls_based_cli // binding socket is not supported
 {
     struct Info
     {
@@ -262,7 +262,7 @@ class Cryptor_tls_cli // binding socket is not supported
     std::string crt_ = "";
 
 public:
-    Cryptor_tls_cli()
+    Peer_s_tls_based_cli()
     {
         signal(SIGPIPE, SIG_IGN);
         ctx_ = SSL_CTX_new(TLS_client_method());
@@ -272,17 +272,17 @@ public:
         if (SSL_CTX_set_default_verify_paths(ctx_) <= 0)
             printf("SSL_CTX_set_default_verify_paths() error\n");
     }
-    ~Cryptor_tls_cli()
+    ~Peer_s_tls_based_cli()
     {
         SSL_shutdown(ssl_);
         SSL_free(ssl_);
         ::close(ser_info_.fd);
         SSL_CTX_free(ctx_);
     }
-    Cryptor_tls_cli(const Cryptor_tls_cli &) = delete;
-    Cryptor_tls_cli &operator=(const Cryptor_tls_cli &) = delete;
-    Cryptor_tls_cli(Cryptor_tls_cli &&) = delete;
-    Cryptor_tls_cli &operator=(Cryptor_tls_cli &&) = delete;
+    Peer_s_tls_based_cli(const Peer_s_tls_based_cli &) = delete;
+    Peer_s_tls_based_cli &operator=(const Peer_s_tls_based_cli &) = delete;
+    Peer_s_tls_based_cli(Peer_s_tls_based_cli &&) = delete;
+    Peer_s_tls_based_cli &operator=(Peer_s_tls_based_cli &&) = delete;
     // 0 success
     // -1 socket() error
     // -2 inet_pton() error
@@ -384,7 +384,7 @@ public:
             return 0;
         if (nullptr == ssl_)
             return -1;
-        uint32_t total = length == -1 ? data.size() : breakpoint + length;
+        uint32_t total = length == -1 ? data.size() : std::min(breakpoint + length, data.size());
         size_t sum = 0;
         while (sum < 4)
         {

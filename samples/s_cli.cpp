@@ -1,9 +1,9 @@
-#include "cryptor.hpp"
+#include "peer_s.hpp"
 #include <iostream>
 
 int main()
 {
-    Cryptor_tls_cli cli;
+    Peer_s_tls_based_cli cli;
     cli.connect("127.0.0.1", 9998, "../../certs/myser.crt");
     while (true)
     {
