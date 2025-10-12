@@ -1,3 +1,3 @@
 #include "peer.hpp"
-#include "peer_s.hpp"
+#include "peerS.hpp"
 #include "reactor.hpp"

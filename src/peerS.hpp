@@ -10,7 +10,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-class Peer_s_tls_based_ser
+class PeerS_tls_based_ser
 {
     struct Info
     {
@@ -22,16 +22,16 @@ class Peer_s_tls_based_ser
     SSL_CTX *ctx_ = nullptr;
 
 public:
-    Peer_s_tls_based_ser() = default;
-    ~Peer_s_tls_based_ser()
+    PeerS_tls_based_ser() = default;
+    ~PeerS_tls_based_ser()
     {
         ::close(my_info_.fd);
         SSL_CTX_free(ctx_);
     }
-    Peer_s_tls_based_ser(const Peer_s_tls_based_ser &) = delete;
-    Peer_s_tls_based_ser &operator=(const Peer_s_tls_based_ser &) = delete;
-    Peer_s_tls_based_ser(Peer_s_tls_based_ser &&) = delete;
-    Peer_s_tls_based_ser &operator=(Peer_s_tls_based_ser &&) = delete;
+    PeerS_tls_based_ser(const PeerS_tls_based_ser &) = delete;
+    PeerS_tls_based_ser &operator=(const PeerS_tls_based_ser &) = delete;
+    PeerS_tls_based_ser(PeerS_tls_based_ser &&) = delete;
+    PeerS_tls_based_ser &operator=(PeerS_tls_based_ser &&) = delete;
     // !!! single crt & pem format !!!
     // 0 success
     // -1 socket() error
@@ -248,7 +248,7 @@ public:
     inline int getFd() const { return my_info_.fd; }
 };
 
-class Peer_s_tls_based_cli // binding socket is not supported
+class PeerS_tls_based_cli // binding socket is not supported
 {
     struct Info
     {
@@ -262,7 +262,7 @@ class Peer_s_tls_based_cli // binding socket is not supported
     std::string crt_ = "";
 
 public:
-    Peer_s_tls_based_cli()
+    PeerS_tls_based_cli()
     {
         signal(SIGPIPE, SIG_IGN);
         ctx_ = SSL_CTX_new(TLS_client_method());
@@ -272,17 +272,17 @@ public:
         if (SSL_CTX_set_default_verify_paths(ctx_) <= 0)
             printf("SSL_CTX_set_default_verify_paths() error\n");
     }
-    ~Peer_s_tls_based_cli()
+    ~PeerS_tls_based_cli()
     {
         SSL_shutdown(ssl_);
         SSL_free(ssl_);
         ::close(ser_info_.fd);
         SSL_CTX_free(ctx_);
     }
-    Peer_s_tls_based_cli(const Peer_s_tls_based_cli &) = delete;
-    Peer_s_tls_based_cli &operator=(const Peer_s_tls_based_cli &) = delete;
-    Peer_s_tls_based_cli(Peer_s_tls_based_cli &&) = delete;
-    Peer_s_tls_based_cli &operator=(Peer_s_tls_based_cli &&) = delete;
+    PeerS_tls_based_cli(const PeerS_tls_based_cli &) = delete;
+    PeerS_tls_based_cli &operator=(const PeerS_tls_based_cli &) = delete;
+    PeerS_tls_based_cli(PeerS_tls_based_cli &&) = delete;
+    PeerS_tls_based_cli &operator=(PeerS_tls_based_cli &&) = delete;
     // 0 success
     // -1 socket() error
     // -2 inet_pton() error

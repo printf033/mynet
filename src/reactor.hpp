@@ -2,7 +2,7 @@
 #define MYNET_SRC_REACTOR_HPP
 
 #include "peer.hpp"
-#include "peer_s.hpp"
+#include "peerS.hpp"
 #include "syncQueue_nonblocking.hpp"
 #include "atomQueue_nonblocking.hpp"
 #include "handler.hpp"
@@ -16,7 +16,7 @@
 template <typename Peer_ser>
 concept is_tcp_ser = std::is_same_v<Peer_ser, Peer_tcp_based_ser>;
 template <typename Peer_ser>
-concept is_tls_ser = std::is_same_v<Peer_ser, Peer_s_tls_based_ser>;
+concept is_tls_ser = std::is_same_v<Peer_ser, PeerS_tls_based_ser>;
 template <typename Peer_ser, template <typename> typename TaskQueue_nonblocking>
 class Reactor_linux : public Peer_ser
 {
@@ -24,7 +24,7 @@ class Reactor_linux : public Peer_ser
     epoll_event acceptor_;
     std::vector<std::jthread> subReactorVec_;
     std::stop_source stop_source_;
-    using TaskType = std::conditional_t<std::is_same_v<Peer_ser, Peer_s_tls_based_ser>, SSL *, int>;
+    using TaskType = std::conditional_t<std::is_same_v<Peer_ser, PeerS_tls_based_ser>, SSL *, int>;
     TaskQueue_nonblocking<TaskType> clientQue_;
 
 public:
