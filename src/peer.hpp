@@ -1,401 +1,1172 @@
-#ifndef MYNET_SRC_PEER_HPP
-#define MYNET_SRC_PEER_HPP
+#pragma once
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <string>
+#include <cstring>
+#include <unordered_map>
+#include "handler.hpp"
 
-class Peer_tcp_based_ser
+class Peer_tcp
 {
+protected:
     struct Info
     {
         sockaddr_in sockaddr{};
-        std::string ip{};
+        const char *ip = nullptr;
         int port = -1;
         int fd = -1;
-    } my_info_;
+    } serInfo_, cliInfo_;
 
 public:
-    Peer_tcp_based_ser() = default;
-    ~Peer_tcp_based_ser() { ::close(my_info_.fd); }
-    Peer_tcp_based_ser(const Peer_tcp_based_ser &) = delete;
-    Peer_tcp_based_ser &operator=(const Peer_tcp_based_ser &) = delete;
-    Peer_tcp_based_ser(Peer_tcp_based_ser &&) = delete;
-    Peer_tcp_based_ser &operator=(Peer_tcp_based_ser &&) = delete;
-    // 0 success
-    // -1 socket() error
-    // -2 inet_pton() error
-    // -3 port error
-    // -4 bind() error
-    // -5 listen() error
-    int listen(const std::string &ip, int port, int wait_queue_size = 5)
+    Peer_tcp() noexcept = default;
+    ~Peer_tcp() noexcept
     {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (-1 == fd)
+        ::close(serInfo_.fd);
+        ::close(cliInfo_.fd);
+    }
+    Peer_tcp(const Peer_tcp &) = delete;
+    Peer_tcp &operator=(const Peer_tcp &) = delete;
+    Peer_tcp(Peer_tcp &&) noexcept = delete;
+    Peer_tcp &operator=(Peer_tcp &&) noexcept = delete;
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 bind() error
+    // -7 listen() error
+    int listen(const char *ip, int port, int backlog = 511)
+    {
+        if (ip == nullptr)
             return -1;
-        my_info_.fd = fd;
-        my_info_.sockaddr.sin_family = AF_INET;
-        if (1 != ::inet_pton(AF_INET, ip.c_str(), &my_info_.sockaddr.sin_addr))
+        serInfo_.sockaddr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &serInfo_.sockaddr.sin_addr) <= 0)
         {
-            ::close(my_info_.fd);
-            my_info_.fd = -1;
-            return -2;
+            serInfo_ = {};
+            return -1;
         }
-        my_info_.ip = ip;
+        serInfo_.ip = ip;
         if (port < 0 || port > 65535)
         {
-            ::close(my_info_.fd);
-            my_info_.fd = -1;
+            serInfo_ = {};
+            return -2;
+        }
+        serInfo_.sockaddr.sin_port = ::htons(port);
+        serInfo_.port = port;
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0)
+        {
+            serInfo_ = {};
             return -3;
         }
-        my_info_.sockaddr.sin_port = ::htons(port);
-        my_info_.port = port;
-        if (-1 == ::bind(fd, (const sockaddr *)&my_info_.sockaddr, sizeof(sockaddr_in)))
+        serInfo_.fd = fd;
+        int flags;
+        if ((flags = ::fcntl(serInfo_.fd, F_GETFL, 0)) < 0)
         {
-            ::close(my_info_.fd);
-            my_info_.fd = -1;
+            ::close(serInfo_.fd);
+            serInfo_ = {};
             return -4;
         }
-        if (-1 == ::listen(fd, wait_queue_size))
+        if (::fcntl(serInfo_.fd, F_SETFL, flags | O_NONBLOCK) < 0)
         {
-            ::close(my_info_.fd);
-            my_info_.fd = -1;
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -4;
+        }
+        int opt = 1;
+        if (::setsockopt(serInfo_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
             return -5;
+        }
+        if (::setsockopt(serInfo_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -5;
+        }
+        if (::bind(fd, (const sockaddr *)&serInfo_.sockaddr, sizeof(sockaddr_in)) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -6;
+        }
+        if (::listen(fd, backlog) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -7;
         }
         return 0;
     }
-    // n cli's socket descriptor
+    // n cli socket descriptor
     // -1 accept() error
     // -2 setsockopt() error
-    int accept(int recv_overtime_sec = 3, int recv_overtime_usec = 0) // blocking accept
+    int accept(int recvTimeout_s = 3, int recvTimeout_us = 0)
     {
-        Info cli_info{};
+        Info accInfo{};
         socklen_t socklen = sizeof(sockaddr_in);
-        cli_info.fd = ::accept(my_info_.fd, (sockaddr *)&cli_info.sockaddr, &socklen);
-        if (-1 == cli_info.fd)
+        if ((accInfo.fd = ::accept4(serInfo_.fd, (sockaddr *)&accInfo.sockaddr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC)) < 0)
+        {
+            accInfo = {};
             return -1;
+        }
         timeval tv;
-        tv.tv_sec = recv_overtime_sec;
-        tv.tv_usec = recv_overtime_usec;
-        if (-1 == ::setsockopt(cli_info.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)))
+        tv.tv_sec = recvTimeout_s;
+        tv.tv_usec = recvTimeout_us;
+        if (::setsockopt(accInfo.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
         {
-            ::close(cli_info.fd);
+            ::close(accInfo.fd);
+            accInfo = {};
             return -2;
         }
-        return cli_info.fd;
+        return accInfo.fd;
     }
-    // if length == -1, send with data size()
-    // n the number sent
-    // -1 send() total error & closed the connection
-    // -2 send() data error
-    ssize_t send(int cli_fd, const std::string &data, size_t breakpoint = 0, ssize_t length = -1) // blocking send
-    {
-        if (data.empty())
-            return 0;
-        uint32_t total = length == -1 ? data.size() : std::min(breakpoint + length, data.size());
-        size_t sum = 0;
-        while (sum < 4)
-        {
-            ssize_t n = ::send(cli_fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
-            if (n < 0)
-            {
-                if (errno == EINTR)
-                    continue;
-                ::close(cli_fd);
-                return -1;
-            }
-            sum += static_cast<size_t>(n);
-        }
-        sum = breakpoint;
-        while (sum < total)
-        {
-            ssize_t n = ::send(cli_fd, data.c_str() + sum, total - sum, 0);
-            if (n < 0)
-            {
-                if (errno == EINTR)
-                    continue;
-                ::close(cli_fd);
-                return -2;
-            }
-            sum += static_cast<size_t>(n);
-        }
-        return sum;
-    }
-    // n the number read
-    // 0 closed the connection
-    // -1 recv() total error
-    // -2 recv() data error
-    ssize_t recv(int cli_fd, std::string &data, size_t breakpoint = 0) // blocking recv
-    {
-        uint32_t total = 0;
-        size_t sum = 0;
-        while (sum < 4)
-        {
-            ssize_t n = ::recv(cli_fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
-            if (n <= 0)
-            {
-                if (n < 0 && errno == EINTR)
-                    continue;
-                ::close(cli_fd);
-                return 0 == n ? 0 : -1;
-            }
-            sum += static_cast<size_t>(n);
-        }
-        if (data.size() < total)
-            data.resize(total);
-        sum = breakpoint;
-        while (sum < total)
-        {
-            ssize_t n = ::recv(cli_fd, data.data() + sum, total - sum, 0);
-            if (n <= 0)
-            {
-                if (n < 0 && errno == EINTR)
-                    continue;
-                ::close(cli_fd);
-                return -2;
-            }
-            sum += static_cast<size_t>(n);
-        }
-        return sum;
-    }
-    inline int getFd() const { return my_info_.fd; }
-};
-
-class Peer_tcp_based_cli // binding socket is not supported
-{
-    struct Info
-    {
-        sockaddr_in sockaddr{};
-        std::string ip{};
-        int port = -1;
-        int fd = -1;
-    } ser_info_;
-
-public:
-    Peer_tcp_based_cli() = default;
-    ~Peer_tcp_based_cli() { ::close(ser_info_.fd); }
-    Peer_tcp_based_cli(const Peer_tcp_based_cli &) = delete;
-    Peer_tcp_based_cli &operator=(const Peer_tcp_based_cli &) = delete;
-    Peer_tcp_based_cli(Peer_tcp_based_cli &&) = delete;
-    Peer_tcp_based_cli &operator=(Peer_tcp_based_cli &&) = delete;
+    // user space blocking
     // 0 success
-    // -1 socket() error
-    // -2 inet_pton() error
-    // -3 port error
-    // -4 connect() error
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
     // -5 setsockopt() error
-    int connect(const std::string &ip, int port, int recv_overtime_sec = 60, int recv_overtime_usec = 0)
+    // -6 connect() error
+    int connect(const char *ip, int port, int recvTimeout_s = 60, int recvTimeout_us = 0)
     {
-        if (ser_info_.fd != -1)
-            ::close(ser_info_.fd);
-        ser_info_.fd = -1;
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (-1 == fd)
-            return -1;
-        ser_info_.fd = fd;
-        ser_info_.sockaddr.sin_family = AF_INET;
-        if (1 != ::inet_pton(AF_INET, ip.c_str(), &ser_info_.sockaddr.sin_addr))
+        if (cliInfo_.fd != -1)
         {
-            ::close(ser_info_.fd);
-            ser_info_.fd = -1;
-            return -2;
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
         }
-        ser_info_.ip = ip;
+        if (ip == nullptr)
+            return -1;
+        cliInfo_.sockaddr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &cliInfo_.sockaddr.sin_addr) <= 0)
+        {
+            cliInfo_ = {};
+            return -1;
+        }
+        cliInfo_.ip = ip;
         if (port < 0 || port > 65535)
         {
-            ::close(ser_info_.fd);
-            ser_info_.fd = -1;
+            cliInfo_ = {};
+            return -2;
+        }
+        cliInfo_.sockaddr.sin_port = ::htons(port);
+        cliInfo_.port = port;
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0)
+        {
+            cliInfo_ = {};
             return -3;
         }
-        ser_info_.sockaddr.sin_port = ::htons(port);
-        ser_info_.port = port;
-        if (-1 == ::connect(ser_info_.fd, (const sockaddr *)&ser_info_.sockaddr, sizeof(sockaddr_in)))
+        cliInfo_.fd = fd;
+        int flags;
+        if ((flags = ::fcntl(cliInfo_.fd, F_GETFL, 0)) < 0)
         {
-            ::close(ser_info_.fd);
-            ser_info_.fd = -1;
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
+            return -4;
+        }
+        if (::fcntl(cliInfo_.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
             return -4;
         }
         timeval tv;
-        tv.tv_sec = recv_overtime_sec;
-        tv.tv_usec = recv_overtime_usec;
-        if (-1 == ::setsockopt(ser_info_.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)))
+        tv.tv_sec = recvTimeout_s;
+        tv.tv_usec = recvTimeout_us;
+        if (::setsockopt(cliInfo_.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
         {
-            ::close(ser_info_.fd);
-            ser_info_.fd = -1;
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
             return -5;
+        }
+        while (::connect(cliInfo_.fd, (const sockaddr *)&cliInfo_.sockaddr, sizeof(sockaddr_in)) < 0)
+            if (errno != EINPROGRESS)
+            {
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -6;
+            }
+        return 0;
+    }
+    // n the bytes sent
+    // -1 data == nullptr || len == 0
+    // -2 send() error
+    ssize_t send(int fd, const char *data, size_t len)
+    {
+        if (data == nullptr || len == 0)
+            return -1;
+        size_t sum = 0;
+        while (sum < len)
+        {
+            ssize_t n = ::send(fd, data + sum, len - sum, MSG_NOSIGNAL);
+            if (n < 0)
+            {
+                if (errno == EAGAIN)
+                    break;
+                if (errno == EINTR)
+                    continue;
+                ::close(fd);
+                return -2;
+            }
+            sum += static_cast<size_t>(n);
+        }
+        return sum;
+    }
+    // n the bytes received
+    // 0 EAGAIN
+    // -1 buf == nullptr || len == 0
+    // -2 recv() error
+    ssize_t recv(int fd, char *buf, size_t len)
+    {
+        if (buf == nullptr || len == 0)
+            return -1;
+        size_t sum = 0;
+        while (sum < len)
+        {
+            ssize_t n = ::recv(fd, buf + sum, len - sum, 0);
+            if (n <= 0)
+            {
+                if (errno == EAGAIN)
+                    break;
+                if (errno == EINTR)
+                    continue;
+                ::close(fd);
+                return -2;
+            }
+            sum += static_cast<size_t>(n);
+        }
+        return sum;
+    }
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 bind() error
+    // -7 listen() error
+    int run_ser(const char *ip, int port, int backlog = 511,
+                int recvTimeout_s = 3, int recvTimeout_us = 0)
+    {
+        int n = listen(ip, port, backlog);
+        if (n < 0)
+            return n;
+        std::unordered_map<int, Handler> accMap;
+        while (true)
+        {
+            int fd = accept(recvTimeout_s, recvTimeout_us);
+            if (fd > 0)
+                accMap.emplace(fd, Handler());
+            for (auto it = accMap.begin(); it != accMap.end();)
+            {
+                int fd = it->first;
+                Handler &handler = it->second;
+                bool isClose = false;
+                {
+                    char buf[4096]{0};
+                    ssize_t rn = recv(fd, buf, sizeof(buf));
+                    if (rn > 0)
+                    {
+                        handler.appendRecvStream(buf, rn);
+                        handler.process_reflect();
+                        if (handler.isResponse())
+                        {
+                            ssize_t sn = send(fd, handler.responseBegin(), handler.responseLength());
+                            if (sn >= 0)
+                                handler.stillSending(sn);
+                            else
+                                isClose = true;
+                        }
+                    }
+                    else
+                    {
+                        if (rn != 0)
+                            isClose = true;
+                    }
+                }
+                if (!isClose && handler.stillSending(0))
+                {
+                    ssize_t sn = send(fd, handler.responseBegin(), handler.responseLength());
+                    if (sn >= 0)
+                        handler.stillSending(sn);
+                    else
+                        isClose = true;
+                }
+                if (isClose)
+                    it = accMap.erase(it);
+                else
+                    ++it;
+            }
         }
         return 0;
     }
-    // if length == -1, send with data size()
-    // n the number sent
-    // -1 send() total error & closed the connection
-    // -2 send() data error
-    ssize_t send(const std::string &data, size_t breakpoint = 0, ssize_t length = -1) // blocking send
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 connect() error
+    int run_cli(const char *ip, int port,
+                int recvTimeout_s = 60, int recvTimeout_us = 0)
     {
-        if (data.empty())
-            return 0;
-        uint32_t total = length == -1 ? data.size() : std::min(breakpoint + length, data.size());
-        size_t sum = 0;
-        while (sum < 4)
+        int n = connect(ip, port, recvTimeout_s, recvTimeout_us);
+        if (n < 0)
+            return n;
+        int fd = cliInfo_.fd;
+        Handler handler;
+        while (true)
         {
-            ssize_t n = ::send(ser_info_.fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
-            if (n < 0)
+            handler.process_stdin();
+            if (handler.isResponse())
             {
-                if (errno == EINTR)
-                    continue;
-                connect(ser_info_.ip, ser_info_.port);
-                return -1;
+                ssize_t sn = 0;
+                do
+                {
+                    sn = send(fd, handler.responseBegin(), handler.responseLength());
+                    if (sn < 0)
+                    {
+                        n = connect(ip, port, recvTimeout_s, recvTimeout_us);
+                        if (n < 0)
+                            return n;
+                    }
+                } while (handler.stillSending(sn));
             }
-            sum += static_cast<size_t>(n);
-        }
-        sum = breakpoint;
-        while (sum < total)
-        {
-            ssize_t n = ::send(ser_info_.fd, data.c_str() + sum, total - sum, 0);
-            if (n < 0)
+            char buf[4096]{0};
+            ssize_t rn = 0;
+            do
             {
-                if (errno == EINTR)
+                rn = recv(fd, buf, sizeof(buf));
+                if (rn < 0)
+                {
+                    n = connect(ip, port, recvTimeout_s, recvTimeout_us);
+                    if (n < 0)
+                        return n;
                     continue;
-                connect(ser_info_.ip, ser_info_.port);
-                return -2;
-            }
-            sum += static_cast<size_t>(n);
+                }
+                if (rn > 0)
+                {
+                    handler.appendRecvStream(buf, rn);
+                    handler.process_stdout();
+                }
+            } while (rn <= 0);
         }
-        return sum;
-    }
-    // n the number read
-    // 0 closed the connection
-    // -1 recv() total error
-    // -2 recv() data error
-    ssize_t recv(std::string &data, size_t breakpoint = 0) // blocking recv
-    {
-        uint32_t total = 0;
-        size_t sum = 0;
-        while (sum < 4)
-        {
-            ssize_t n = ::recv(ser_info_.fd, reinterpret_cast<char *>(&total) + sum, 4 - sum, 0);
-            if (n <= 0)
-            {
-                if (n < 0 && errno == EINTR)
-                    continue;
-                connect(ser_info_.ip, ser_info_.port);
-                return 0 == n ? 0 : -1;
-            }
-            sum += static_cast<size_t>(n);
-        }
-        if (data.size() < total)
-            data.resize(total);
-        sum = breakpoint;
-        while (sum < total)
-        {
-            ssize_t n = ::recv(ser_info_.fd, data.data() + sum, total - sum, 0);
-            if (n <= 0)
-            {
-                if (n < 0 && errno == EINTR)
-                    continue;
-                connect(ser_info_.ip, ser_info_.port);
-                return -2;
-            }
-            sum += static_cast<size_t>(n);
-        }
-        return sum;
+        return 0;
     }
 };
 
 class Peer_udp
 {
+protected:
     struct Info
     {
         sockaddr_in sockaddr{};
-        std::string ip{};
+        const char *ip = nullptr;
         int port = -1;
         int fd = -1;
-    } my_info_;
-    socklen_t socklen_ = sizeof(sockaddr_in);
+    } myInfo_;
 
 public:
-    Peer_udp() = default;
-    ~Peer_udp() { ::close(my_info_.fd); }
+    Peer_udp() noexcept = default;
+    ~Peer_udp() noexcept { ::close(myInfo_.fd); }
     Peer_udp(const Peer_udp &) = delete;
     Peer_udp &operator=(const Peer_udp &) = delete;
-    Peer_udp(Peer_udp &&) = delete;
-    Peer_udp &operator=(Peer_udp &&) = delete;
+    Peer_udp(Peer_udp &&) noexcept = delete;
+    Peer_udp &operator=(Peer_udp &&) noexcept = delete;
     // 0 success
-    // -1 socket() error
-    // -2 inet_pton() error
-    // -3 port error
-    // -4 bind() error
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
     // -5 setsockopt() error
-    int init(const std::string &ip, int port)
+    // -6 bind() error
+    int listen(const char *ip, int port)
     {
-        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-        if (-1 == fd)
+        if (ip == nullptr)
             return -1;
-        my_info_.fd = fd;
-        my_info_.sockaddr.sin_family = AF_INET;
-        if (1 != ::inet_pton(AF_INET, ip.c_str(), &my_info_.sockaddr.sin_addr))
+        myInfo_.sockaddr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &myInfo_.sockaddr.sin_addr) <= 0)
         {
-            ::close(my_info_.fd);
-            my_info_.fd = -1;
-            return -2;
+            myInfo_ = {};
+            return -1;
         }
-        my_info_.ip = ip;
+        myInfo_.ip = ip;
         if (port < 0 || port > 65535)
         {
-            ::close(my_info_.fd);
-            my_info_.fd = -1;
+            myInfo_ = {};
+            return -2;
+        }
+        myInfo_.sockaddr.sin_port = ::htons(port);
+        myInfo_.port = port;
+        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0)
+        {
+            myInfo_ = {};
             return -3;
         }
-        my_info_.sockaddr.sin_port = ::htons(port);
-        my_info_.port = port;
-        if (-1 == ::bind(fd, (const sockaddr *)&my_info_.sockaddr, sizeof(sockaddr_in)))
+        myInfo_.fd = fd;
+        int flags;
+        if ((flags = ::fcntl(myInfo_.fd, F_GETFL, 0)) < 0)
         {
-            ::close(my_info_.fd);
-            my_info_.fd = -1;
+            ::close(myInfo_.fd);
+            myInfo_ = {};
             return -4;
         }
-        int broadcastEnable = 1;
-        if (-1 == ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)))
+        if (::fcntl(myInfo_.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -4;
+        }
+        int opt = 1;
+        if (::setsockopt(myInfo_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
             return -5;
+        }
+        if (::setsockopt(myInfo_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -5;
+        }
+        if (::setsockopt(myInfo_.fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -5;
+        }
+        if (::bind(fd, (const sockaddr *)&myInfo_.sockaddr, sizeof(sockaddr_in)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -6;
+        }
         return 0;
     }
-    void send(sockaddr_in &ur_sockaddr_in, const std::string &data)
+    // n the bytes received
+    // 0 EAGAIN
+    // -1 buf == nullptr || len == 0
+    // -2 recvfrom() error
+    ssize_t recv(sockaddr_in &ur_sockaddr, char *buf, size_t len)
     {
-        ::sendto(my_info_.fd, data.c_str(), data.size(), 0, (const sockaddr *)&ur_sockaddr_in, socklen_);
+        if (buf == nullptr || len == 0)
+            return -1;
+        socklen_t socklen = sizeof(sockaddr_in);
+        size_t sum = 0;
+        while (sum < len)
+        {
+            ssize_t n = ::recvfrom(myInfo_.fd, buf, len, 0, (sockaddr *)&ur_sockaddr, &socklen);
+            if (n <= 0)
+            {
+                if (errno == EAGAIN)
+                    break;
+                if (errno == EINTR)
+                    continue;
+                return -2;
+            }
+            sum += static_cast<size_t>(n);
+        }
+        return sum;
     }
-    void send(const std::string &ur_ip, int ur_port, const std::string &data)
+    // n the bytes sent
+    // -1 data == nullptr || len == 0
+    // -2 sendto() error
+    ssize_t send(sockaddr_in &ur_sockaddr, const char *data, size_t len)
     {
-        sockaddr_in ur_sockaddr_in{};
-        ur_sockaddr_in.sin_family = AF_INET;
-        if (1 != ::inet_pton(AF_INET, ur_ip.c_str(), &ur_sockaddr_in.sin_addr))
-            return;
-        if (ur_port < 0 || ur_port > 65535)
-            return;
-        ur_sockaddr_in.sin_port = ::htons(ur_port);
-        send(ur_sockaddr_in, data);
+        if (data == nullptr || len == 0)
+            return -1;
+        socklen_t socklen = sizeof(sockaddr_in);
+        size_t sum = 0;
+        while (sum < len)
+        {
+            ssize_t n = ::sendto(myInfo_.fd, data, len, 0, (const sockaddr *)&ur_sockaddr, socklen);
+            if (n < 0)
+            {
+                if (errno == EAGAIN)
+                    break;
+                if (errno == EINTR)
+                    continue;
+                return -2;
+            }
+            sum += static_cast<size_t>(n);
+        }
+        return sum;
     }
-#define MAX_RECV_SIZE 65536
-    std::string recv(sockaddr_in &ur_sockaddr_in) // blocking recv & max recv size 65536
+    // n the bytes sent
+    // -1 data == nullptr || len == 0
+    // -2 sendto() error
+    // -3 ip error
+    // -4 port error
+    ssize_t send(const char *ip, int port, const char *data, size_t len)
     {
-        char buf[MAX_RECV_SIZE]{};
-        if (::recvfrom(my_info_.fd, buf, MAX_RECV_SIZE, 0, (sockaddr *)&ur_sockaddr_in, &socklen_) <= 0)
-            return {};
-        return std::string(buf);
+        if (ip == nullptr)
+            return -3;
+        sockaddr_in ur_sockaddr{};
+        ur_sockaddr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &ur_sockaddr.sin_addr) <= 0)
+        {
+            ur_sockaddr = {};
+            return -3;
+        }
+        if (port < 0 || port > 65535)
+        {
+            ur_sockaddr = {};
+            return -4;
+        }
+        ur_sockaddr.sin_port = ::htons(port);
+        return send(ur_sockaddr, data, len);
     }
-    std::string recv(int ur_port, const std::string &ur_ip = "255.255.255.255") // blocking recv & max recv size 65536
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 bind() error
+    int run_ser(const char *ip, int port)
     {
-        sockaddr_in ur_sockaddr_in{};
-        ur_sockaddr_in.sin_family = AF_INET;
-        if (1 != ::inet_pton(AF_INET, ur_ip.c_str(), &ur_sockaddr_in.sin_addr))
-            return {};
-        if (ur_port < 0 || ur_port > 65535)
-            return {};
-        ur_sockaddr_in.sin_port = ::htons(ur_port);
-        return recv(ur_sockaddr_in);
+        int n = listen(ip, port);
+        if (n < 0)
+            return n;
+        Handler handler;
+        while (true)
+        {
+            char buf[4096]{0};
+            sockaddr_in ur_sockaddr{};
+            ssize_t rn = recv(ur_sockaddr, buf, sizeof(buf));
+            if (rn > 0)
+            {
+                handler.appendRecvStream(buf, rn);
+                handler.process_reflect();
+                if (handler.isResponse())
+                {
+                    ssize_t sn = 0;
+                    do
+                    {
+                        sn = send(ur_sockaddr, handler.responseBegin(), handler.responseLength());
+                        if (sn < 0)
+                            break;
+                    } while (handler.stillSending(sn));
+                }
+            }
+        }
+        return 0;
     }
-#undef MAX_RECV_SIZE
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    int run_cli(const char *ip, int port)
+    {
+        if (ip == nullptr)
+            return -1;
+        myInfo_.sockaddr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &myInfo_.sockaddr.sin_addr) <= 0)
+        {
+            myInfo_ = {};
+            return -1;
+        }
+        myInfo_.ip = ip;
+        if (port < 0 || port > 65535)
+        {
+            myInfo_ = {};
+            return -2;
+        }
+        myInfo_.sockaddr.sin_port = ::htons(port);
+        myInfo_.port = port;
+        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0)
+        {
+            myInfo_ = {};
+            return -3;
+        }
+        myInfo_.fd = fd;
+        int flags;
+        if ((flags = ::fcntl(myInfo_.fd, F_GETFL, 0)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -4;
+        }
+        if (::fcntl(myInfo_.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -4;
+        }
+        int opt = 1;
+        if (::setsockopt(myInfo_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -5;
+        }
+        if (::setsockopt(myInfo_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -5;
+        }
+        if (::setsockopt(myInfo_.fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0)
+        {
+            ::close(myInfo_.fd);
+            myInfo_ = {};
+            return -5;
+        }
+        Handler handler;
+        while (true)
+        {
+            handler.process_stdin();
+            if (handler.isResponse())
+            {
+                ssize_t sn = 0;
+                do
+                {
+                    sn = send(myInfo_.sockaddr, handler.responseBegin(), handler.responseLength());
+                    if (sn < 0)
+                        break;
+                } while (handler.stillSending(sn));
+            }
+            char buf[4096]{0};
+            ssize_t rn = 0;
+            do
+            {
+                rn = recv(myInfo_.sockaddr, buf, sizeof(buf));
+                if (rn > 0)
+                {
+                    handler.appendRecvStream(buf, rn);
+                    handler.process_stdout();
+                }
+            } while (rn <= 0);
+        }
+        return 0;
+    }
 };
 
-#endif
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <signal.h>
+
+class Peer_tls
+{
+protected:
+    struct Info
+    {
+        sockaddr_in sockaddr{};
+        const char *ip = nullptr;
+        int port = -1;
+        int fd = -1;
+        SSL_CTX *ctx = nullptr;
+        SSL *ssl = nullptr;
+    } serInfo_, cliInfo_;
+
+public:
+    Peer_tls() noexcept { signal(SIGPIPE, SIG_IGN); }
+    ~Peer_tls() noexcept
+    {
+        SSL_shutdown(serInfo_.ssl);
+        SSL_free(serInfo_.ssl);
+        ::close(serInfo_.fd);
+        SSL_CTX_free(serInfo_.ctx);
+        SSL_shutdown(cliInfo_.ssl);
+        SSL_free(cliInfo_.ssl);
+        ::close(cliInfo_.fd);
+        SSL_CTX_free(cliInfo_.ctx);
+    }
+    Peer_tls(const Peer_tls &) = delete;
+    Peer_tls &operator=(const Peer_tls &) = delete;
+    Peer_tls(Peer_tls &&) noexcept = delete;
+    Peer_tls &operator=(Peer_tls &&) noexcept = delete;
+    // single crt&pem format
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 bind() error
+    // -7 listen() error
+    // -8 SSL_CTX_new() error
+    // -9 SSL_CTX_use_certificate_file() error
+    // -10 SSL_CTX_use_PrivateKey_file() error
+    // -11 SSL_CTX_check_private_key() error
+    int listen(const char *ip, int port, const char *crt, const char *key, int backlog = 511)
+    {
+        if (ip == nullptr)
+            return -1;
+        serInfo_.sockaddr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &serInfo_.sockaddr.sin_addr) <= 0)
+        {
+            serInfo_ = {};
+            return -1;
+        }
+        serInfo_.ip = ip;
+        if (port < 0 || port > 65535)
+        {
+            serInfo_ = {};
+            return -2;
+        }
+        serInfo_.sockaddr.sin_port = ::htons(port);
+        serInfo_.port = port;
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0)
+        {
+            serInfo_ = {};
+            return -3;
+        }
+        serInfo_.fd = fd;
+        int flags;
+        if ((flags = ::fcntl(serInfo_.fd, F_GETFL, 0)) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -4;
+        }
+        if (::fcntl(serInfo_.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -4;
+        }
+        int opt = 1;
+        if (::setsockopt(serInfo_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -5;
+        }
+        if (::setsockopt(serInfo_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -5;
+        }
+        if (::bind(fd, (const sockaddr *)&serInfo_.sockaddr, sizeof(sockaddr_in)) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -6;
+        }
+        if (::listen(fd, backlog) < 0)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -7;
+        }
+        serInfo_.ctx = SSL_CTX_new(TLS_server_method());
+        if (serInfo_.ctx == nullptr)
+        {
+            ::close(serInfo_.fd);
+            serInfo_ = {};
+            return -8;
+        }
+        if (SSL_CTX_use_certificate_file(serInfo_.ctx, crt, SSL_FILETYPE_PEM) <= 0)
+        {
+            ::close(serInfo_.fd);
+            SSL_CTX_free(serInfo_.ctx);
+            serInfo_ = {};
+            return -9;
+        }
+        if (SSL_CTX_use_PrivateKey_file(serInfo_.ctx, key, SSL_FILETYPE_PEM) <= 0)
+        {
+            ::close(serInfo_.fd);
+            SSL_CTX_free(serInfo_.ctx);
+            serInfo_ = {};
+            return -10;
+        }
+        if (SSL_CTX_check_private_key(serInfo_.ctx) <= 0)
+        {
+            ::close(serInfo_.fd);
+            SSL_CTX_free(serInfo_.ctx);
+            serInfo_ = {};
+            return -11;
+        }
+        return 0;
+    }
+    // pointer cli ssl pointer
+    // nullptr accept() error
+    // nullptr setsockopt() error
+    // nullptr SSL_new() error
+    // nullptr SSL_set_fd() error
+    // nullptr SSL_accept() error
+    SSL *accept(int recvTimeout_s = 3, int recvTimeout_us = 0)
+    {
+        Info accInfo{};
+        socklen_t socklen = sizeof(sockaddr_in);
+        if ((accInfo.fd = ::accept4(serInfo_.fd, (sockaddr *)&accInfo.sockaddr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC)) < 0)
+        {
+            accInfo = {};
+            return nullptr;
+        }
+        timeval tv;
+        tv.tv_sec = recvTimeout_s;
+        tv.tv_usec = recvTimeout_us;
+        if (::setsockopt(accInfo.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        {
+            ::close(accInfo.fd);
+            accInfo = {};
+            return nullptr;
+        }
+        accInfo.ssl = SSL_new(serInfo_.ctx);
+        if (accInfo.ssl == nullptr)
+        {
+            ::close(accInfo.fd);
+            accInfo = {};
+            return nullptr;
+        }
+        if (SSL_set_fd(accInfo.ssl, accInfo.fd) <= 0)
+        {
+            SSL_free(accInfo.ssl);
+            ::close(accInfo.fd);
+            accInfo = {};
+            return nullptr;
+        }
+        int e;
+        while ((e = SSL_accept(accInfo.ssl)) <= 0)
+        {
+            e = SSL_get_error(accInfo.ssl, e);
+            if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE)
+            {
+                SSL_free(accInfo.ssl);
+                ::close(accInfo.fd);
+                accInfo = {};
+                return nullptr;
+            }
+        }
+        return accInfo.ssl;
+    }
+    // user space blocking
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 connect() error
+    // -7 SSL_CTX_new() error
+    // -8 SSL_CTX_set_default_verify_paths() error
+    // -9 SSL_new() error
+    // -10 SSL_set_fd() error
+    // -11 SSL_CTX_load_verify_locations() error
+    // -12 SSL_connect() error
+    int connect(const char *ip, int port, const char *crt = nullptr, int recvTimeout_s = 60, int recvTimeout_us = 0)
+    {
+        if (cliInfo_.fd != -1)
+        {
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
+        }
+        if (ip == nullptr)
+            return -1;
+        cliInfo_.sockaddr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &cliInfo_.sockaddr.sin_addr) <= 0)
+        {
+            cliInfo_ = {};
+            return -1;
+        }
+        cliInfo_.ip = ip;
+        if (port < 0 || port > 65535)
+        {
+            cliInfo_ = {};
+            return -2;
+        }
+        cliInfo_.sockaddr.sin_port = ::htons(port);
+        cliInfo_.port = port;
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0)
+        {
+            cliInfo_ = {};
+            return -3;
+        }
+        cliInfo_.fd = fd;
+        int flags;
+        if ((flags = ::fcntl(cliInfo_.fd, F_GETFL, 0)) < 0)
+        {
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
+            return -4;
+        }
+        if (::fcntl(cliInfo_.fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
+            return -4;
+        }
+        timeval tv;
+        tv.tv_sec = recvTimeout_s;
+        tv.tv_usec = recvTimeout_us;
+        if (::setsockopt(cliInfo_.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        {
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
+            return -5;
+        }
+        while (::connect(cliInfo_.fd, (const sockaddr *)&cliInfo_.sockaddr, sizeof(sockaddr_in)) < 0)
+            if (errno != EINPROGRESS)
+            {
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -6;
+            }
+        if (cliInfo_.ctx == nullptr)
+        {
+            cliInfo_.ctx = SSL_CTX_new(TLS_client_method());
+            if (cliInfo_.ctx == nullptr)
+            {
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -7;
+            }
+            if (SSL_CTX_set_default_verify_paths(cliInfo_.ctx) <= 0)
+            {
+                ::close(cliInfo_.fd);
+                SSL_CTX_free(cliInfo_.ctx);
+                cliInfo_ = {};
+                return -8;
+            }
+            if (crt == nullptr)
+                SSL_CTX_set_verify(cliInfo_.ctx, SSL_VERIFY_NONE, nullptr);
+            else
+                SSL_CTX_set_verify(cliInfo_.ctx, SSL_VERIFY_PEER, nullptr);
+        }
+        cliInfo_.ssl = SSL_new(cliInfo_.ctx);
+        if (cliInfo_.ssl == nullptr)
+        {
+            ::close(cliInfo_.fd);
+            cliInfo_.fd = {};
+            return -9;
+        }
+        if (SSL_set_fd(cliInfo_.ssl, cliInfo_.fd) <= 0)
+        {
+            SSL_free(cliInfo_.ssl);
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
+            return -10;
+        }
+        if (crt != nullptr && SSL_CTX_load_verify_locations(cliInfo_.ctx, crt, nullptr) <= 0)
+        {
+            SSL_free(cliInfo_.ssl);
+            ::close(cliInfo_.fd);
+            cliInfo_ = {};
+            return -11;
+        }
+        int e;
+        while ((e = SSL_connect(cliInfo_.ssl)) <= 0)
+        {
+            e = SSL_get_error(cliInfo_.ssl, e);
+            if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE)
+            {
+                SSL_free(cliInfo_.ssl);
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -12;
+            }
+        }
+        return 0;
+    }
+    // n the bytes sent
+    // -1 ssl == nullptr || data == nullptr || len == 0
+    // -2 SSL_write() error
+    ssize_t send(SSL *&ssl, const char *data, size_t len)
+    {
+        if (ssl == nullptr || data == nullptr || len == 0)
+            return -1;
+        size_t sum = 0;
+        while (sum < len)
+        {
+            ssize_t n = SSL_write(ssl, data + sum, len - sum);
+            if (n < 0)
+            {
+                n = SSL_get_error(ssl, n);
+                if (n == SSL_ERROR_WANT_READ ||
+                    n == SSL_ERROR_WANT_WRITE)
+                    break;
+                else
+                {
+                    int fd = SSL_get_fd(ssl);
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                    ::close(fd);
+                    ssl = nullptr;
+                    ERR_clear_error();
+                    return -2;
+                }
+            }
+            sum += static_cast<size_t>(n);
+        }
+        return sum;
+    }
+    // n the bytes received
+    // 0 EAGAIN
+    // -1 ssl == nullptr || buf == nullptr || len == 0
+    // -2 SSL_read() error
+    ssize_t recv(SSL *&ssl, char *buf, size_t len)
+    {
+        if (ssl == nullptr || buf == nullptr || len == 0)
+            return -1;
+        size_t sum = 0;
+        while (sum < len)
+        {
+            ssize_t n = ::SSL_read(ssl, buf + sum, len - sum);
+            if (n <= 0)
+            {
+                n = SSL_get_error(ssl, n);
+                if (n == SSL_ERROR_WANT_READ ||
+                    n == SSL_ERROR_WANT_WRITE)
+                    break;
+                else
+                {
+                    int fd = SSL_get_fd(ssl);
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                    ::close(fd);
+                    ssl = nullptr;
+                    ERR_clear_error();
+                    return -2;
+                }
+            }
+            sum += static_cast<size_t>(n);
+        }
+        return sum;
+    }
+    // single crt&pem format
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 bind() error
+    // -7 listen() error
+    // -8 SSL_CTX_new() error
+    // -9 SSL_CTX_use_certificate_file() error
+    // -10 SSL_CTX_use_PrivateKey_file() error
+    // -11 SSL_CTX_check_private_key() error
+    int run_ser(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
+                int recvTimeout_s = 3, int recvTimeout_us = 0)
+    {
+        int n = listen(ip, port, crt, key, backlog);
+        if (n < 0)
+            return n;
+        std::unordered_map<SSL *, Handler> accMap;
+        while (true)
+        {
+            SSL *ssl = accept(recvTimeout_s, recvTimeout_us);
+            if (ssl != nullptr)
+                accMap.emplace(ssl, Handler());
+            for (auto it = accMap.begin(); it != accMap.end();)
+            {
+                SSL *ssl = it->first;
+                Handler &handler = it->second;
+                bool isClose = false;
+                {
+                    char buf[4096]{0};
+                    ssize_t rn = recv(ssl, buf, sizeof(buf));
+                    if (rn > 0 && ssl != nullptr)
+                    {
+                        handler.appendRecvStream(buf, rn);
+                        handler.process_reflect();
+                        if (handler.isResponse())
+                        {
+                            ssize_t sn = send(ssl, handler.responseBegin(), handler.responseLength());
+                            if (ssl != nullptr)
+                                handler.stillSending(sn);
+                            else
+                                isClose = true;
+                        }
+                    }
+                    else
+                    {
+                        if (rn != 0)
+                            isClose = true;
+                    }
+                }
+                if (!isClose && handler.stillSending(0))
+                {
+                    ssize_t sn = send(ssl, handler.responseBegin(), handler.responseLength());
+                    if (ssl != nullptr)
+                        handler.stillSending(sn);
+                    else
+                        isClose = true;
+                }
+                if (isClose)
+                    it = accMap.erase(it);
+                else
+                    ++it;
+            }
+        }
+        return 0;
+    }
+    // 0 success
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 connect() error
+    // -7 SSL_CTX_new() error
+    // -8 SSL_CTX_set_default_verify_paths() error
+    // -9 SSL_new() error
+    // -10 SSL_set_fd() error
+    // -11 SSL_CTX_load_verify_locations() error
+    // -12 SSL_connect() error
+    int run_cli(const char *ip, int port, const char *crt = nullptr,
+                int recvTimeout_s = 60, int recvTimeout_us = 0)
+    {
+        int n = connect(ip, port, crt, recvTimeout_s, recvTimeout_us);
+        if (n < 0)
+            return n;
+        SSL *&ssl = cliInfo_.ssl;
+        Handler handler;
+        while (true)
+        {
+            handler.process_stdin();
+            if (handler.isResponse())
+            {
+                ssize_t sn = 0;
+                do
+                {
+                    sn = send(ssl, handler.responseBegin(), handler.responseLength());
+                    if (sn < 0)
+                    {
+                        n = connect(ip, port, crt, recvTimeout_s, recvTimeout_us);
+                        if (n < 0)
+                            return n;
+                    }
+                } while (handler.stillSending(sn));
+            }
+            char buf[4096]{0};
+            ssize_t rn = 0;
+            do
+            {
+                rn = recv(ssl, buf, sizeof(buf));
+                if (rn < 0)
+                {
+                    n = connect(ip, port, crt, recvTimeout_s, recvTimeout_us);
+                    if (n < 0)
+                        return n;
+                    continue;
+                }
+                if (rn > 0)
+                {
+                    handler.appendRecvStream(buf, rn);
+                    handler.process_stdout();
+                }
+            } while (rn <= 0);
+        }
+        return 0;
+    }
+};

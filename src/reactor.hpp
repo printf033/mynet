@@ -1,256 +1,490 @@
-#ifndef MYNET_SRC_REACTOR_HPP
-#define MYNET_SRC_REACTOR_HPP
+#pragma once
 
-#include "peer.hpp"
-#include "peerS.hpp"
-#include "syncQueue_nonblocking.hpp"
-#include "atomQueue_nonblocking.hpp"
-#include "handler.hpp"
-#include <sys/epoll.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <fcntl.h>
-#include <thread>
-#include <stop_token>
+#include <sys/epoll.h>
+#include <string>
 #include <vector>
-#include <type_traits>
+#include <cstdlib>
+#include <stop_token>
+#include "concepts.hpp"
 
-template <typename Peer_ser>
-concept is_tcp_ser = std::is_same_v<Peer_ser, Peer_tcp_based_ser>;
-template <typename Peer_ser>
-concept is_tls_ser = std::is_same_v<Peer_ser, PeerS_tls_based_ser>;
-template <typename Peer_ser, template <typename> typename TaskQueue_nonblocking>
-class Reactor_linux : public Peer_ser
+template <typename Peer>
+struct TEvent
 {
-    int mainreactor_fd_ = -1;
-    epoll_event acceptor_;
-    std::vector<std::jthread> subReactorVec_;
-    std::stop_source stop_source_;
-    using TaskType = std::conditional_t<std::is_same_v<Peer_ser, PeerS_tls_based_ser>, SSL *, int>;
-    TaskQueue_nonblocking<TaskType> clientQue_;
+    static_assert(is_tcp<Peer> || is_tls<Peer>,
+                  "Event<Peer>: Peer must satisfy is_tcp or is_tls");
+};
+template <is_tcp Peer>
+struct TEvent<Peer>
+{
+    int fd = -1;
+    uint32_t events = 0;
+    Handler handler{};
+    inline void reset() noexcept
+    {
+        fd = -1;
+        events = 0;
+        handler.reset();
+    }
+};
+template <is_tls Peer>
+struct TEvent<Peer>
+{
+    int fd = -1;
+    SSL *ssl = nullptr;
+    uint32_t events = 0;
+    Handler handler{};
+    inline void reset() noexcept
+    {
+        fd = -1;
+        events = 0;
+        handler.reset();
+    }
+};
+template <typename Peer>
+class Reactor : private Peer
+{
+    int epollFd_ = -1;
+    epoll_event *newEventBuf_ = nullptr;
+    using Event = TEvent<Peer>;
+    Event accEvent_{};
+    template <Resettable Obj>
+    class ObjPool
+    {
+        std::vector<Obj> pool_;
+        std::vector<Obj *> available_;
+
+    public:
+        ObjPool() noexcept = default;
+        ~ObjPool() noexcept = default;
+        ObjPool(const ObjPool &) = delete;
+        ObjPool &operator=(const ObjPool &) = delete;
+        ObjPool(ObjPool &&) noexcept = delete;
+        ObjPool &operator=(ObjPool &&) noexcept = delete;
+        inline void init(size_t capa)
+        {
+            pool_.resize(capa);
+            available_.reserve(capa);
+            for (auto &event : pool_)
+                available_.push_back(&event);
+        }
+        inline Obj *acquire()
+        {
+            if (available_.empty())
+                return nullptr;
+            Obj *obj = available_.back();
+            available_.pop_back();
+            return obj;
+        }
+        inline void release(Obj *obj)
+        {
+            if (obj != nullptr)
+            {
+                obj->reset();
+                available_.push_back(obj);
+            }
+        }
+        inline std::vector<Obj> &myPool() noexcept { return pool_; }
+    };
+    ObjPool<Event> eventPool_;
+    std::stop_source stopSource_;
 
 public:
-    Reactor_linux(size_t taskQueue_capacity = 1024)
-        : clientQue_(TaskQueue_nonblocking<TaskType>(taskQueue_capacity)) {}
-    ~Reactor_linux()
-    {
-        stop();
-        ::close(mainreactor_fd_);
-    }
-    Reactor_linux(const Reactor_linux &) = delete;
-    Reactor_linux &operator=(const Reactor_linux &) = delete;
-    Reactor_linux(Reactor_linux &&) = delete;
-    Reactor_linux &operator=(Reactor_linux &&) = delete;
-    // epoll_wait 0 millisecond timeout is high cost
+    Reactor() noexcept = default;
+    ~Reactor() noexcept { stop(); }
+    Reactor(const Reactor &) = delete;
+    Reactor &operator=(const Reactor &) = delete;
+    Reactor(Reactor &&) noexcept = delete;
+    Reactor &operator=(Reactor &&) noexcept = delete;
     // 0 success
-    // -1 socket() error
-    // -2 inet_pton() error
-    // -3 port error
-    // -4 bind() error
-    // -5 listen() error
-    // -6 fcntl() error
-    // -7 epoll_create1() error
-    // -8 epoll_ctl() error
-    int run(const std::string &ip, int port, int wait_queue_size = 5,
-            int sub_reactor_num = 4, int max_client_num = 100, int epoll_wait_time_ms = 10)
-        requires is_tcp_ser<Peer_ser>
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 bind() error
+    // -7 listen() error
+    // -8 epoll_create1() error
+    // -9 epoll_ctl() error
+    // -10 epoll_wait() error
+    int run(const char *ip, int port, int backlog = 511,
+            int recvTimeout_s = 3, int recvTimeout_us = 0,
+            unsigned int eventPoolSize = 1024, unsigned int maxBufEntrs = 1024)
+        requires is_tcp<Peer>
     {
-        auto n = Peer_ser::listen(ip, port, wait_queue_size);
-        if (0 != n)
+        int n = Peer::listen(ip, port, backlog);
+        if (n < 0)
             return n;
-        if (-1 == fcntl(Peer_ser::getFd(), F_SETFL, fcntl(Peer_ser::getFd(), F_GETFL, 0) | O_NONBLOCK))
-            return -6;
-        mainreactor_fd_ = epoll_create1(0);
-        if (-1 == mainreactor_fd_)
-            return -7;
-        acceptor_.events = EPOLLIN | EPOLLET;
-        acceptor_.data.fd = Peer_ser::getFd();
-        if (-1 == epoll_ctl(mainreactor_fd_, EPOLL_CTL_ADD, Peer_ser::getFd(), &acceptor_))
+        accEvent_.fd = Peer::serInfo_.fd;
+        epollFd_ = epoll_create1(0);
+        if (epollFd_ < 0)
+        {
+            ::close(Peer::serInfo_.fd);
+            Peer::serInfo_ = {};
             return -8;
-        subReactorVec_.reserve(sub_reactor_num);
-        for (int i = 0; i < sub_reactor_num; ++i)
-            subReactorVec_.emplace_back(
-                std::jthread([this, max_client_num, epoll_wait_time_ms](std::stop_token st)
-                             {
-                                 auto subReactor_fd = epoll_create1(0);
-                                 if (-1 == subReactor_fd)
-                                 {
-                                     perror("epoll_create1");
-                                     return;
-                                 }
-                                 int cli_fd = -1;
-                                 epoll_event accept_event = {};
-                                 accept_event.events = EPOLLIN | EPOLLET;
-                                 epoll_event *recv_events = new epoll_event[max_client_num]();
-                                 std::string data;
-                                 Handler handler;
-                                 while (!st.stop_requested())
-                                 {
-                                     if (0 == myClientQue().take(cli_fd))
-                                     {
-                                         accept_event.data.fd = cli_fd;
-                                         if (-1 == epoll_ctl(subReactor_fd, EPOLL_CTL_ADD, cli_fd, &accept_event))
-                                         {
-                                             perror("epoll_ctl");
-                                             ::close(cli_fd);
-                                         }
-                                     }
-                                     int n = epoll_wait(subReactor_fd, recv_events, max_client_num, epoll_wait_time_ms);
-                                     if (-1 == n)
-                                     {
-                                         perror("epoll_wait");
-                                         break;
-                                     }
-                                     for (int i = 0; i < n; ++i)
-                                     {
-                                         cli_fd = recv_events[i].data.fd;
-                                         auto n = Peer_ser::recv(cli_fd, data);
-                                         if (n <= 0)
-                                         {
-                                             epoll_ctl(subReactor_fd, EPOLL_CTL_DEL, cli_fd, nullptr);
-                                             printf("A client left, cli_fd: %d\n", cli_fd); //
-                                             continue;
-                                         }
-                                         n = Peer_ser::send(cli_fd, handler.process(data));
-                                         data.clear();
-                                         if (n < 0)
-                                         {
-                                             epoll_ctl(subReactor_fd, EPOLL_CTL_DEL, cli_fd, nullptr);
-                                             printf("send failed, cli_fd: %d\n", cli_fd); //
-                                             continue;
-                                         }
-                                     }
-                                 }
-                                 ::close(subReactor_fd);
-                                 delete[] recv_events;
-                                 printf("subReactor thread exit\n"); //
-                             },
-                             stop_source_.get_token()));
-        int cli_fd = -1;
-        epoll_event accept_event = {};
-        while (!stop_source_.stop_requested())
-            if (1 == epoll_wait(mainreactor_fd_, &accept_event, 1, epoll_wait_time_ms))
+        }
+        epoll_event acceptor;
+        acceptor.events = EPOLLIN;
+        acceptor.data.ptr = &accEvent_;
+        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, Peer::serInfo_.fd, &acceptor) < 0)
+        {
+            ::close(epollFd_);
+            ::close(Peer::serInfo_.fd);
+            Peer::serInfo_ = {};
+            return -9;
+        }
+        newEventBuf_ = new epoll_event[maxBufEntrs];
+        eventPool_.init(eventPoolSize);
+        while (!stopSource_.stop_requested())
+        {
+            n = epoll_wait(epollFd_, newEventBuf_, maxBufEntrs, -1);
+            if (n < 0)
             {
-                cli_fd = Peer_ser::accept();
-                if (cli_fd < 0)
+                if (errno == EINTR)
                     continue;
-                printf("A new client was accepted, cli_fd: %d\n", cli_fd); //
-                if (clientQue_.put(cli_fd) < 0)
-                    Peer_ser::send(cli_fd, "\0"); // error code
+                ::close(epollFd_);
+                ::close(Peer::serInfo_.fd);
+                Peer::serInfo_ = {};
+                return -10;
+            }
+            for (int i = 0; i < n; ++i)
+            {
+                Event *event = reinterpret_cast<Event *>(newEventBuf_[i].data.ptr);
+                int e = 0;
+                if (event->fd == Peer::serInfo_.fd)
+                {
+                    int fd = Peer::accept(recvTimeout_s, recvTimeout_us);
+                    if (fd < 0)
+                    {
+                        fprintf(stderr, "Peer::accept() Error: %d\n", fd); //
+                        continue;
+                    }
+                    Event *recvEvent = eventPool_.acquire();
+                    if (recvEvent == nullptr)
+                        continue;
+                    recvEvent->fd = fd;
+                    recvEvent->events |= (EPOLLIN | EPOLLET);
+                    epoll_event recver;
+                    recver.events = recvEvent->events;
+                    recver.data.ptr = recvEvent;
+                    if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, recvEvent->fd, &recver) < 0)
+                    {
+                        ::close(recvEvent->fd);
+                        eventPool_.release(recvEvent);
+                        goto error;
+                    }
+                }
+                else
+                {
+                    if (newEventBuf_[i].events & EPOLLIN)
+                    {
+                        int fd = event->fd;
+                        Handler &handler = event->handler;
+                        char buf[4096]{0};
+                        ssize_t rn = 0;
+                        do
+                        {
+                            rn = Peer::recv(fd, buf, sizeof(buf));
+                            if (rn >= 0)
+                            {
+                                if (rn == 0)
+                                    break;
+                                handler.appendRecvStream(buf, rn);
+                                handler.process_reflect();
+                                if (handler.isResponse())
+                                {
+                                    event->events |= (EPOLLOUT | EPOLLET);
+                                    epoll_event sender;
+                                    sender.events = event->events;
+                                    sender.data.ptr = event;
+                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
+                                    {
+                                        epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                        eventPool_.release(event);
+                                        goto error;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                eventPool_.release(event);
+                                if (rn != 0)
+                                    fprintf(stderr, "Peer::recv() Error: %ld\n", rn); //
+                                rn = 0;
+                            }
+                        } while (rn >= sizeof(buf));
+                    }
+                    else if (newEventBuf_[i].events & EPOLLOUT)
+                    {
+                        int fd = event->fd;
+                        Handler &handler = event->handler;
+                        ssize_t sn = 0;
+                        do
+                        {
+                            sn = Peer::send(fd, handler.responseBegin(), handler.responseLength());
+                            if (sn >= 0)
+                            {
+                                event->events &= ~EPOLLOUT;
+                                epoll_event sender;
+                                sender.events = event->events;
+                                sender.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
+                                {
+                                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                    eventPool_.release(event);
+                                    goto error;
+                                }
+                            }
+                            else
+                            {
+                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                eventPool_.release(event);
+                                fprintf(stderr, "Peer::send() Error: %ld\n", sn); //
+                            }
+                        } while (handler.stillSending(sn));
+                    }
+                    else if (newEventBuf_[i].events & EPOLLERR)
+                    {
+                    error:
+                        fprintf(stderr, "Event Error: %d\n", e); //
+                    }
+                }
+            }
+        }
+        if (Peer::serInfo_.fd != -1)
+        {
+            epoll_ctl(epollFd_, EPOLL_CTL_DEL, Peer::serInfo_.fd, nullptr);
+            ::close(Peer::serInfo_.fd);
+            Peer::serInfo_.fd = -1;
+        }
+        if (epollFd_ != -1)
+        {
+            ::close(epollFd_);
+            epollFd_ = -1;
+        }
+        if (newEventBuf_ != nullptr)
+        {
+            delete[] newEventBuf_;
+            newEventBuf_ = nullptr;
+        }
+        for (auto &event : eventPool_.myPool())
+            if (event.fd != -1)
+            {
+                ::close(event.fd);
+                event.fd = -1;
             }
         return 0;
     }
-    // epoll_wait 0 millisecond timeout is high cost
-    // !!! single crt & pem format !!!
+    // single crt&pem format
     // 0 success
-    // -1 socket() error
-    // -2 inet_pton() error
-    // -3 port error
-    // -4 bind() error
-    // -5 listen() error
-    // -6 SSL_CTX_new() error
-    // -7 SSL_CTX_use_certificate_file() error
-    // -8 SSL_CTX_use_PrivateKey_file() error
-    // -9 SSL_CTX_check_private_key() error
-    // -10 fcntl() error
-    // -11 epoll_create1() error
-    // -12 epoll_ctl() error
-    int run(const std::string &ip, int port, const std::string &crt, const std::string &key, int wait_queue_size = 5,
-            int sub_reactor_num = 4, int max_client_num = 100, int epoll_wait_time_ms = 10)
-        requires is_tls_ser<Peer_ser>
+    // -1 ip error
+    // -2 port error
+    // -3 socket() error
+    // -4 fcntl() error
+    // -5 setsockopt() error
+    // -6 bind() error
+    // -7 listen() error
+    // -8 SSL_CTX_new() error
+    // -9 SSL_CTX_use_certificate_file() error
+    // -10 SSL_CTX_use_PrivateKey_file() error
+    // -11 SSL_CTX_check_private_key() error
+    // -12 epoll_create1() error
+    // -13 epoll_ctl() error
+    // -14 epoll_wait() error
+    int run(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
+            int recvTimeout_s = 3, int recvTimeout_us = 0,
+            unsigned int eventPoolSize = 1024, unsigned int maxBufEntrs = 1024)
+        requires is_tls<Peer>
     {
-        auto n = Peer_ser::listen(ip, port, crt, key, wait_queue_size);
-        if (0 != n)
+        int n = Peer::listen(ip, port, crt, key, backlog);
+        if (n < 0)
             return n;
-        if (-1 == fcntl(Peer_ser::getFd(), F_SETFL, fcntl(Peer_ser::getFd(), F_GETFL, 0) | O_NONBLOCK))
-            return -10;
-        mainreactor_fd_ = epoll_create1(0);
-        if (-1 == mainreactor_fd_)
-            return -11;
-        acceptor_.events = EPOLLIN | EPOLLET;
-        acceptor_.data.fd = Peer_ser::getFd();
-        if (-1 == epoll_ctl(mainreactor_fd_, EPOLL_CTL_ADD, Peer_ser::getFd(), &acceptor_))
+        accEvent_.fd = Peer::serInfo_.fd;
+        epollFd_ = epoll_create1(0);
+        if (epollFd_ < 0)
+        {
+            ::close(Peer::serInfo_.fd);
+            SSL_CTX_free(Peer::serInfo_.ctx);
+            Peer::serInfo_ = {};
             return -12;
-        subReactorVec_.reserve(sub_reactor_num);
-        for (int i = 0; i < sub_reactor_num; ++i)
-            subReactorVec_.emplace_back(
-                std::jthread([this, max_client_num, epoll_wait_time_ms](std::stop_token st)
-                             {
-                                 auto subReactor_fd = epoll_create1(0);
-                                 if (-1 == subReactor_fd)
-                                 {
-                                     perror("epoll_create1");
-                                     return;
-                                 }
-                                 int cli_fd = -1;
-                                 SSL *cli_ssl = nullptr;
-                                 epoll_event accept_event = {};
-                                 accept_event.events = EPOLLIN | EPOLLET;
-                                 epoll_event *recv_events = new epoll_event[max_client_num]();
-                                 std::string data;
-                                 Handler handler;
-                                 while (!st.stop_requested())
-                                 {
-                                     if (0 == myClientQue().take(cli_ssl))
-                                     {
-                                         cli_fd = SSL_get_fd(cli_ssl);
-                                         accept_event.data.ptr = cli_ssl;
-                                         if (-1 == epoll_ctl(subReactor_fd, EPOLL_CTL_ADD, cli_fd, &accept_event))
-                                         {
-                                             perror("epoll_ctl");
-                                             SSL_shutdown(cli_ssl);
-                                             SSL_free(cli_ssl);
-                                             cli_ssl = nullptr;
-                                             ::close(cli_fd);
-                                         }
-                                     }
-                                     int n = epoll_wait(subReactor_fd, recv_events, max_client_num, epoll_wait_time_ms);
-                                     if (-1 == n)
-                                     {
-                                         perror("epoll_wait");
-                                         break;
-                                     }
-                                     for (int i = 0; i < n; ++i)
-                                     {
-                                         cli_ssl = reinterpret_cast<SSL *>(recv_events[i].data.ptr);
-                                         cli_fd = SSL_get_fd(cli_ssl);
-                                         auto n = Peer_ser::recv(cli_ssl, data);
-                                         if (n <= 0)
-                                         {
-                                             epoll_ctl(subReactor_fd, EPOLL_CTL_DEL, cli_fd, nullptr);
-                                             printf("A client left, cli_fd: %d\n", cli_fd); //
-                                             continue;
-                                         }
-                                         n = Peer_ser::send(cli_ssl, handler.process(data));
-                                         data.clear();
-                                         if (n < 0)
-                                         {
-                                             epoll_ctl(subReactor_fd, EPOLL_CTL_DEL, cli_fd, nullptr);
-                                             printf("send failed, cli_fd: %d\n", cli_fd); //
-                                             continue;
-                                         }
-                                     }
-                                 }
-                                 ::close(subReactor_fd);
-                                 delete[] recv_events;
-                                 printf("subReactor thread exit\n"); //
-                             },
-                             stop_source_.get_token()));
-        int cli_fd = -1;
-        SSL *cli_ssl = nullptr;
-        epoll_event accept_event = {};
-        while (!stop_source_.stop_requested())
-            if (1 == epoll_wait(mainreactor_fd_, &accept_event, 1, epoll_wait_time_ms))
+        }
+        epoll_event acceptor;
+        acceptor.events = EPOLLIN;
+        acceptor.data.ptr = &accEvent_;
+        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, Peer::serInfo_.fd, &acceptor) < 0)
+        {
+            ::close(epollFd_);
+            ::close(Peer::serInfo_.fd);
+            SSL_CTX_free(Peer::serInfo_.ctx);
+            Peer::serInfo_ = {};
+            return -13;
+        }
+        newEventBuf_ = new epoll_event[maxBufEntrs];
+        eventPool_.init(eventPoolSize);
+        while (!stopSource_.stop_requested())
+        {
+            n = epoll_wait(epollFd_, newEventBuf_, maxBufEntrs, -1);
+            if (n < 0)
             {
-                cli_fd = Peer_ser::accept(cli_ssl);
-                if (cli_fd < 0)
+                if (errno == EINTR)
                     continue;
-                printf("A new client was accepted, cli_fd: %d\n", cli_fd); //
-                if (clientQue_.put(cli_ssl) < 0)
-                    Peer_ser::send(cli_ssl, "\0"); // error code
+                ::close(epollFd_);
+                ::close(Peer::serInfo_.fd);
+                SSL_CTX_free(Peer::serInfo_.ctx);
+                Peer::serInfo_ = {};
+                return -14;
+            }
+            for (int i = 0; i < n; ++i)
+            {
+                Event *event = reinterpret_cast<Event *>(newEventBuf_[i].data.ptr);
+                int e = 0;
+                if (event->fd == Peer::serInfo_.fd)
+                {
+                    SSL *ssl = Peer::accept(recvTimeout_s, recvTimeout_us);
+                    if (ssl == nullptr)
+                    {
+                        fprintf(stderr, "Peer::accept() Error\n"); //
+                        continue;
+                    }
+                    int fd = SSL_get_fd(ssl);
+                    Event *recvEvent = eventPool_.acquire();
+                    if (recvEvent == nullptr)
+                        continue;
+                    recvEvent->ssl = ssl;
+                    recvEvent->fd = fd;
+                    recvEvent->events |= (EPOLLIN | EPOLLET);
+                    epoll_event recver;
+                    recver.events = recvEvent->events;
+                    recver.data.ptr = recvEvent;
+                    if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, fd, &recver) < 0)
+                    {
+                        SSL_shutdown(ssl);
+                        SSL_free(ssl);
+                        ::close(fd);
+                        eventPool_.release(recvEvent);
+                        goto error;
+                    }
+                }
+                else
+                {
+                    if (newEventBuf_[i].events & EPOLLIN)
+                    {
+                        SSL *&ssl = event->ssl;
+                        int fd = event->fd;
+                        Handler &handler = event->handler;
+                        char buf[4096]{0};
+                        ssize_t rn = 0;
+                        do
+                        {
+                            rn = Peer::recv(ssl, buf, sizeof(buf));
+                            if (rn >= 0)
+                            {
+                                if (rn == 0)
+                                    break;
+                                handler.appendRecvStream(buf, rn);
+                                handler.process_reflect();
+                                if (handler.isResponse())
+                                {
+                                    event->events |= (EPOLLOUT | EPOLLET);
+                                    epoll_event sender;
+                                    sender.events = event->events;
+                                    sender.data.ptr = event;
+                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
+                                    {
+                                        epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                        eventPool_.release(event);
+                                        goto error;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                eventPool_.release(event);
+                                if (rn != 0)
+                                    fprintf(stderr, "Peer::recv() Error: %ld\n", rn); //
+                                rn = 0;
+                            }
+                        } while (rn >= sizeof(buf));
+                    }
+                    else if (newEventBuf_[i].events & EPOLLOUT)
+                    {
+                        SSL *&ssl = event->ssl;
+                        int fd = event->fd;
+                        Handler &handler = event->handler;
+                        ssize_t sn = 0;
+                        do
+                        {
+                            sn = Peer::send(ssl, handler.responseBegin(), handler.responseLength());
+                            if (sn >= 0)
+                            {
+                                event->events &= ~EPOLLOUT;
+                                epoll_event sender;
+                                sender.events = event->events;
+                                sender.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
+                                {
+                                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                    eventPool_.release(event);
+                                    goto error;
+                                }
+                            }
+                            else
+                            {
+                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+                                eventPool_.release(event);
+                                fprintf(stderr, "Peer::send() Error: %ld\n", sn); //
+                            }
+                        } while (handler.stillSending(sn));
+                    }
+                    else if (newEventBuf_[i].events & EPOLLERR)
+                    {
+                    error:
+                        fprintf(stderr, "Event Error: %d\n", e); //
+                    }
+                }
+            }
+        }
+        if (Peer::cliInfo_.fd != -1)
+        {
+            epoll_ctl(epollFd_, EPOLL_CTL_DEL, Peer::cliInfo_.fd, nullptr);
+            SSL_shutdown(Peer::cliInfo_.ssl);
+            SSL_free(Peer::cliInfo_.ssl);
+            ::close(Peer::cliInfo_.fd);
+            SSL_CTX_free(Peer::cliInfo_.ctx);
+            Peer::cliInfo_ = {};
+        }
+        if (Peer::serInfo_.fd != -1)
+        {
+            epoll_ctl(epollFd_, EPOLL_CTL_DEL, Peer::serInfo_.fd, nullptr);
+            SSL_shutdown(Peer::serInfo_.ssl);
+            SSL_free(Peer::serInfo_.ssl);
+            ::close(Peer::serInfo_.fd);
+            SSL_CTX_free(Peer::serInfo_.ctx);
+            Peer::serInfo_ = {};
+        }
+        if (epollFd_ != -1)
+        {
+            ::close(epollFd_);
+            epollFd_ = -1;
+        }
+        if (newEventBuf_ != nullptr)
+        {
+            delete[] newEventBuf_;
+            newEventBuf_ = nullptr;
+        }
+        for (auto &event : eventPool_.myPool())
+            if (event.fd != -1)
+            {
+                ::close(event.fd);
+                event.fd = -1;
             }
         return 0;
     }
-    inline void stop() const { stop_source_.request_stop(); }
-    inline TaskQueue_nonblocking<TaskType> &myClientQue() { return clientQue_; }
+    inline void stop() const noexcept { stopSource_.request_stop(); }
 };
-
-#endif
