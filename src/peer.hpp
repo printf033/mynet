@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <string>
@@ -117,10 +118,10 @@ public:
             accInfo = {};
             return -1;
         }
-        timeval tv;
-        tv.tv_sec = recvTimeout_s;
-        tv.tv_usec = recvTimeout_us;
-        if (::setsockopt(accInfo.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        timeval timeout;
+        timeout.tv_sec = recvTimeout_s;
+        timeout.tv_usec = recvTimeout_us;
+        if (::setsockopt(accInfo.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
         {
             ::close(accInfo.fd);
             accInfo = {};
@@ -136,6 +137,7 @@ public:
     // -4 fcntl() error
     // -5 setsockopt() error
     // -6 connect() error
+    // -7 timeout
     int connect(const char *ip, int port, int recvTimeout_s = 60, int recvTimeout_us = 0)
     {
         if (cliInfo_.fd != -1)
@@ -179,22 +181,52 @@ public:
             cliInfo_ = {};
             return -4;
         }
-        timeval tv;
-        tv.tv_sec = recvTimeout_s;
-        tv.tv_usec = recvTimeout_us;
-        if (::setsockopt(cliInfo_.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        timeval timeout;
+        timeout.tv_sec = recvTimeout_s;
+        timeout.tv_usec = recvTimeout_us;
+        if (::setsockopt(cliInfo_.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
         {
             ::close(cliInfo_.fd);
             cliInfo_ = {};
             return -5;
         }
-        while (::connect(cliInfo_.fd, (const sockaddr *)&cliInfo_.sockaddr, sizeof(sockaddr_in)) < 0)
+        int n = ::connect(cliInfo_.fd, (const sockaddr *)&cliInfo_.sockaddr, sizeof(sockaddr_in));
+        if (n < 0)
+        {
             if (errno != EINPROGRESS)
             {
                 ::close(cliInfo_.fd);
                 cliInfo_ = {};
                 return -6;
             }
+            fd_set writeFds;
+            FD_ZERO(&writeFds);
+            FD_SET(cliInfo_.fd, &writeFds);
+            n = ::select(cliInfo_.fd + 1, nullptr, &writeFds, nullptr, &timeout);
+            if (n < 0)
+            {
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -6;
+            }
+            else if (n == 0)
+            {
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -7;
+            }
+            else
+            {
+                n = 0;
+                socklen_t len = sizeof(n);
+                if (::getsockopt(cliInfo_.fd, SOL_SOCKET, SO_ERROR, &n, &len) < 0 || n != 0)
+                {
+                    ::close(cliInfo_.fd);
+                    cliInfo_ = {};
+                    return -6;
+                }
+            }
+        }
         return 0;
     }
     // n the bytes sent
@@ -309,6 +341,7 @@ public:
         }
         return 0;
     }
+    // user space blocking
     // 0 success
     // -1 ip error
     // -2 port error
@@ -316,6 +349,7 @@ public:
     // -4 fcntl() error
     // -5 setsockopt() error
     // -6 connect() error
+    // -7 timeout
     int run_cli(const char *ip, int port,
                 int recvTimeout_s = 60, int recvTimeout_us = 0)
     {
@@ -811,10 +845,10 @@ public:
             accInfo = {};
             return nullptr;
         }
-        timeval tv;
-        tv.tv_sec = recvTimeout_s;
-        tv.tv_usec = recvTimeout_us;
-        if (::setsockopt(accInfo.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        timeval timeout;
+        timeout.tv_sec = recvTimeout_s;
+        timeout.tv_usec = recvTimeout_us;
+        if (::setsockopt(accInfo.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
         {
             ::close(accInfo.fd);
             accInfo = {};
@@ -856,12 +890,13 @@ public:
     // -4 fcntl() error
     // -5 setsockopt() error
     // -6 connect() error
-    // -7 SSL_CTX_new() error
-    // -8 SSL_CTX_set_default_verify_paths() error
-    // -9 SSL_new() error
-    // -10 SSL_set_fd() error
-    // -11 SSL_CTX_load_verify_locations() error
-    // -12 SSL_connect() error
+    // -7 timeout
+    // -8 SSL_CTX_new() error
+    // -9 SSL_CTX_set_default_verify_paths() error
+    // -10 SSL_new() error
+    // -11 SSL_set_fd() error
+    // -12 SSL_CTX_load_verify_locations() error
+    // -13 SSL_connect() error
     int connect(const char *ip, int port, const char *crt = nullptr, int recvTimeout_s = 60, int recvTimeout_us = 0)
     {
         if (cliInfo_.fd != -1)
@@ -905,22 +940,52 @@ public:
             cliInfo_ = {};
             return -4;
         }
-        timeval tv;
-        tv.tv_sec = recvTimeout_s;
-        tv.tv_usec = recvTimeout_us;
-        if (::setsockopt(cliInfo_.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        timeval timeout;
+        timeout.tv_sec = recvTimeout_s;
+        timeout.tv_usec = recvTimeout_us;
+        if (::setsockopt(cliInfo_.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0)
         {
             ::close(cliInfo_.fd);
             cliInfo_ = {};
             return -5;
         }
-        while (::connect(cliInfo_.fd, (const sockaddr *)&cliInfo_.sockaddr, sizeof(sockaddr_in)) < 0)
+        int n = ::connect(cliInfo_.fd, (const sockaddr *)&cliInfo_.sockaddr, sizeof(sockaddr_in));
+        if (n < 0)
+        {
             if (errno != EINPROGRESS)
             {
                 ::close(cliInfo_.fd);
                 cliInfo_ = {};
                 return -6;
             }
+            fd_set writeFds;
+            FD_ZERO(&writeFds);
+            FD_SET(cliInfo_.fd, &writeFds);
+            n = ::select(cliInfo_.fd + 1, nullptr, &writeFds, nullptr, &timeout);
+            if (n < 0)
+            {
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -6;
+            }
+            else if (n == 0)
+            {
+                ::close(cliInfo_.fd);
+                cliInfo_ = {};
+                return -7;
+            }
+            else
+            {
+                n = 0;
+                socklen_t len = sizeof(n);
+                if (::getsockopt(cliInfo_.fd, SOL_SOCKET, SO_ERROR, &n, &len) < 0 || n != 0)
+                {
+                    ::close(cliInfo_.fd);
+                    cliInfo_ = {};
+                    return -6;
+                }
+            }
+        }
         if (cliInfo_.ctx == nullptr)
         {
             cliInfo_.ctx = SSL_CTX_new(TLS_client_method());
@@ -928,14 +993,14 @@ public:
             {
                 ::close(cliInfo_.fd);
                 cliInfo_ = {};
-                return -7;
+                return -8;
             }
             if (SSL_CTX_set_default_verify_paths(cliInfo_.ctx) <= 0)
             {
                 ::close(cliInfo_.fd);
                 SSL_CTX_free(cliInfo_.ctx);
                 cliInfo_ = {};
-                return -8;
+                return -9;
             }
             if (crt == nullptr)
                 SSL_CTX_set_verify(cliInfo_.ctx, SSL_VERIFY_NONE, nullptr);
@@ -947,21 +1012,21 @@ public:
         {
             ::close(cliInfo_.fd);
             cliInfo_.fd = {};
-            return -9;
+            return -10;
         }
         if (SSL_set_fd(cliInfo_.ssl, cliInfo_.fd) <= 0)
         {
             SSL_free(cliInfo_.ssl);
             ::close(cliInfo_.fd);
             cliInfo_ = {};
-            return -10;
+            return -11;
         }
         if (crt != nullptr && SSL_CTX_load_verify_locations(cliInfo_.ctx, crt, nullptr) <= 0)
         {
             SSL_free(cliInfo_.ssl);
             ::close(cliInfo_.fd);
             cliInfo_ = {};
-            return -11;
+            return -12;
         }
         int e;
         while ((e = SSL_connect(cliInfo_.ssl)) <= 0)
@@ -972,8 +1037,15 @@ public:
                 SSL_free(cliInfo_.ssl);
                 ::close(cliInfo_.fd);
                 cliInfo_ = {};
-                return -12;
+                return -13;
             }
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(cliInfo_.fd, &fds);
+            if (e == SSL_ERROR_WANT_READ)
+                ::select(cliInfo_.fd + 1, &fds, nullptr, nullptr, &timeout);
+            else
+                ::select(cliInfo_.fd + 1, nullptr, &fds, nullptr, &timeout);
         }
         return 0;
     }
@@ -1110,6 +1182,7 @@ public:
         }
         return 0;
     }
+    // user space blocking
     // 0 success
     // -1 ip error
     // -2 port error
@@ -1117,12 +1190,13 @@ public:
     // -4 fcntl() error
     // -5 setsockopt() error
     // -6 connect() error
-    // -7 SSL_CTX_new() error
-    // -8 SSL_CTX_set_default_verify_paths() error
-    // -9 SSL_new() error
-    // -10 SSL_set_fd() error
-    // -11 SSL_CTX_load_verify_locations() error
-    // -12 SSL_connect() error
+    // -7 timeout
+    // -8 SSL_CTX_new() error
+    // -9 SSL_CTX_set_default_verify_paths() error
+    // -10 SSL_new() error
+    // -11 SSL_set_fd() error
+    // -12 SSL_CTX_load_verify_locations() error
+    // -13 SSL_connect() error
     int run_cli(const char *ip, int port, const char *crt = nullptr,
                 int recvTimeout_s = 60, int recvTimeout_us = 0)
     {

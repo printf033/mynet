@@ -3,6 +3,6 @@
 int main()
 {
     Peer_udp peer;
-    int n = peer.run_ser("127.0.0.1", 9999);
+    int n = peer.run_ser("0.0.0.0", 9999);
     return n;
 }
