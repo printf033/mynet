@@ -10,8 +10,9 @@
 #include <vector>
 #include <cstdlib>
 #include <stop_token>
-#include "concepts.hpp"
+#include "myconcepts.hpp"
 
+template <mustHandler Handler>
 class Proactor
 {
     struct Info
@@ -38,7 +39,7 @@ class Proactor
             handler = nullptr;
         }
     } accEvent_ = {.type = 0};
-    template <Resettable Obj>
+    template <mustResettable Obj>
     class ObjPool
     {
         std::vector<Obj> pool_;
@@ -259,9 +260,9 @@ public:
                     {
                         unsigned short bid = cqe->flags >> 16;
                         char *buf = (char *)bufBase_ + (bid * bufSize);
-                        handler->appendRecvStream(buf, n);
-                        handler->process_reflect();
-                        if (handler->isResponse())
+                        handler->appendRequest(buf, n);
+                        handler->process();
+                        if (handler->isResponsing())
                         {
                             e = addSend(fd, handler);
                             if (e < 0)
@@ -282,7 +283,7 @@ public:
                 {
                     int fd = event->fd;
                     Handler *handler = event->handler;
-                    if (handler->stillSending(n))
+                    if (handler->stillResponsing(n))
                     {
                         e = addSend(fd, handler);
                         if (e < 0)

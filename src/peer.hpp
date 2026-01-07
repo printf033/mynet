@@ -9,7 +9,7 @@
 #include <string>
 #include <cstring>
 #include <unordered_map>
-#include "handler.hpp"
+#include "myconcepts.hpp"
 
 class Peer_tcp
 {
@@ -286,6 +286,7 @@ public:
     // -5 setsockopt() error
     // -6 bind() error
     // -7 listen() error
+    template <mustHandler Handler>
     int run_ser(const char *ip, int port, int backlog = 511,
                 int recvTimeout_s = 3, int recvTimeout_us = 0)
     {
@@ -308,13 +309,13 @@ public:
                     ssize_t rn = recv(fd, buf, sizeof(buf));
                     if (rn > 0)
                     {
-                        handler.appendRecvStream(buf, rn);
-                        handler.process_reflect();
-                        if (handler.isResponse())
+                        handler.appendRequest(buf, rn);
+                        handler.process();
+                        if (handler.isResponsing())
                         {
                             ssize_t sn = send(fd, handler.responseBegin(), handler.responseLength());
                             if (sn >= 0)
-                                handler.stillSending(sn);
+                                handler.stillResponsing(sn);
                             else
                                 isClose = true;
                         }
@@ -325,11 +326,11 @@ public:
                             isClose = true;
                     }
                 }
-                if (!isClose && handler.stillSending(0))
+                if (!isClose && handler.stillResponsing(0))
                 {
                     ssize_t sn = send(fd, handler.responseBegin(), handler.responseLength());
                     if (sn >= 0)
-                        handler.stillSending(sn);
+                        handler.stillResponsing(sn);
                     else
                         isClose = true;
                 }
@@ -350,6 +351,7 @@ public:
     // -5 setsockopt() error
     // -6 connect() error
     // -7 timeout
+    template <mustHandler Handler>
     int run_cli(const char *ip, int port,
                 int recvTimeout_s = 60, int recvTimeout_us = 0)
     {
@@ -360,8 +362,8 @@ public:
         Handler handler;
         while (true)
         {
-            handler.process_stdin();
-            if (handler.isResponse())
+            handler.stdin2response();
+            if (handler.isResponsing())
             {
                 ssize_t sn = 0;
                 do
@@ -373,7 +375,7 @@ public:
                         if (n < 0)
                             return n;
                     }
-                } while (handler.stillSending(sn));
+                } while (handler.stillResponsing(sn));
             }
             char buf[4096]{0};
             ssize_t rn = 0;
@@ -389,8 +391,8 @@ public:
                 }
                 if (rn > 0)
                 {
-                    handler.appendRecvStream(buf, rn);
-                    handler.process_stdout();
+                    handler.appendRequest(buf, rn);
+                    handler.request2stdout();
                 }
             } while (rn <= 0);
         }
@@ -568,6 +570,7 @@ public:
     // -4 fcntl() error
     // -5 setsockopt() error
     // -6 bind() error
+    template <mustHandler Handler>
     int run_ser(const char *ip, int port)
     {
         int n = listen(ip, port);
@@ -581,9 +584,9 @@ public:
             ssize_t rn = recv(ur_sockaddr, buf, sizeof(buf));
             if (rn > 0)
             {
-                handler.appendRecvStream(buf, rn);
-                handler.process_reflect();
-                if (handler.isResponse())
+                handler.appendRequest(buf, rn);
+                handler.process();
+                if (handler.isResponsing())
                 {
                     ssize_t sn = 0;
                     do
@@ -591,7 +594,7 @@ public:
                         sn = send(ur_sockaddr, handler.responseBegin(), handler.responseLength());
                         if (sn < 0)
                             break;
-                    } while (handler.stillSending(sn));
+                    } while (handler.stillResponsing(sn));
                 }
             }
         }
@@ -603,6 +606,7 @@ public:
     // -3 socket() error
     // -4 fcntl() error
     // -5 setsockopt() error
+    template <mustHandler Handler>
     int run_cli(const char *ip, int port)
     {
         if (ip == nullptr)
@@ -663,8 +667,8 @@ public:
         Handler handler;
         while (true)
         {
-            handler.process_stdin();
-            if (handler.isResponse())
+            handler.stdin2response();
+            if (handler.isResponsing())
             {
                 ssize_t sn = 0;
                 do
@@ -672,7 +676,7 @@ public:
                     sn = send(myInfo_.sockaddr, handler.responseBegin(), handler.responseLength());
                     if (sn < 0)
                         break;
-                } while (handler.stillSending(sn));
+                } while (handler.stillResponsing(sn));
             }
             char buf[4096]{0};
             ssize_t rn = 0;
@@ -681,8 +685,8 @@ public:
                 rn = recv(myInfo_.sockaddr, buf, sizeof(buf));
                 if (rn > 0)
                 {
-                    handler.appendRecvStream(buf, rn);
-                    handler.process_stdout();
+                    handler.appendRequest(buf, rn);
+                    handler.request2stdout();
                 }
             } while (rn <= 0);
         }
@@ -1127,6 +1131,7 @@ public:
     // -9 SSL_CTX_use_certificate_file() error
     // -10 SSL_CTX_use_PrivateKey_file() error
     // -11 SSL_CTX_check_private_key() error
+    template <mustHandler Handler>
     int run_ser(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
                 int recvTimeout_s = 3, int recvTimeout_us = 0)
     {
@@ -1149,13 +1154,13 @@ public:
                     ssize_t rn = recv(ssl, buf, sizeof(buf));
                     if (rn > 0 && ssl != nullptr)
                     {
-                        handler.appendRecvStream(buf, rn);
-                        handler.process_reflect();
-                        if (handler.isResponse())
+                        handler.appendRequest(buf, rn);
+                        handler.process();
+                        if (handler.isResponsing())
                         {
                             ssize_t sn = send(ssl, handler.responseBegin(), handler.responseLength());
                             if (ssl != nullptr)
-                                handler.stillSending(sn);
+                                handler.stillResponsing(sn);
                             else
                                 isClose = true;
                         }
@@ -1166,11 +1171,11 @@ public:
                             isClose = true;
                     }
                 }
-                if (!isClose && handler.stillSending(0))
+                if (!isClose && handler.stillResponsing(0))
                 {
                     ssize_t sn = send(ssl, handler.responseBegin(), handler.responseLength());
                     if (ssl != nullptr)
-                        handler.stillSending(sn);
+                        handler.stillResponsing(sn);
                     else
                         isClose = true;
                 }
@@ -1197,6 +1202,7 @@ public:
     // -11 SSL_set_fd() error
     // -12 SSL_CTX_load_verify_locations() error
     // -13 SSL_connect() error
+    template <mustHandler Handler>
     int run_cli(const char *ip, int port, const char *crt = nullptr,
                 int recvTimeout_s = 60, int recvTimeout_us = 0)
     {
@@ -1207,8 +1213,8 @@ public:
         Handler handler;
         while (true)
         {
-            handler.process_stdin();
-            if (handler.isResponse())
+            handler.stdin2response();
+            if (handler.isResponsing())
             {
                 ssize_t sn = 0;
                 do
@@ -1220,7 +1226,7 @@ public:
                         if (n < 0)
                             return n;
                     }
-                } while (handler.stillSending(sn));
+                } while (handler.stillResponsing(sn));
             }
             char buf[4096]{0};
             ssize_t rn = 0;
@@ -1236,8 +1242,8 @@ public:
                 }
                 if (rn > 0)
                 {
-                    handler.appendRecvStream(buf, rn);
-                    handler.process_stdout();
+                    handler.appendRequest(buf, rn);
+                    handler.request2stdout();
                 }
             } while (rn <= 0);
         }

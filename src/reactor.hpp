@@ -10,16 +10,13 @@
 #include <vector>
 #include <cstdlib>
 #include <stop_token>
-#include "concepts.hpp"
+#include "myconcepts.hpp"
+#include "peer.hpp"
 
-template <typename Peer>
-struct TEvent
-{
-    static_assert(is_tcp<Peer> || is_tls<Peer>,
-                  "Event<Peer>: Peer must satisfy is_tcp or is_tls");
-};
-template <is_tcp Peer>
-struct TEvent<Peer>
+template <mustTrustedPeer Peer, mustHandler Handler>
+struct TEvent;
+template <mustPeerTcp Peer, mustHandler Handler>
+struct TEvent<Peer, Handler>
 {
     int fd = -1;
     uint32_t events = 0;
@@ -31,8 +28,8 @@ struct TEvent<Peer>
         handler.reset();
     }
 };
-template <is_tls Peer>
-struct TEvent<Peer>
+template <mustPeerTls Peer, mustHandler Handler>
+struct TEvent<Peer, Handler>
 {
     int fd = -1;
     SSL *ssl = nullptr;
@@ -45,14 +42,14 @@ struct TEvent<Peer>
         handler.reset();
     }
 };
-template <typename Peer>
+template <mustTrustedPeer Peer, mustHandler Handler>
 class Reactor : private Peer
 {
     int epollFd_ = -1;
     epoll_event *newEventBuf_ = nullptr;
-    using Event = TEvent<Peer>;
+    using Event = TEvent<Peer, Handler>;
     Event accEvent_{};
-    template <Resettable Obj>
+    template <mustResettable Obj>
     class ObjPool
     {
         std::vector<Obj> pool_;
@@ -114,7 +111,7 @@ public:
     int run(const char *ip, int port, int backlog = 511,
             int recvTimeout_s = 3, int recvTimeout_us = 0,
             unsigned int eventPoolSize = 1024, unsigned int maxBufEntrs = 1024)
-        requires is_tcp<Peer>
+        requires mustPeerTcp<Peer>
     {
         int n = Peer::listen(ip, port, backlog);
         if (n < 0)
@@ -193,9 +190,9 @@ public:
                             {
                                 if (rn == 0)
                                     break;
-                                handler.appendRecvStream(buf, rn);
-                                handler.process_reflect();
-                                if (handler.isResponse())
+                                handler.appendRequest(buf, rn);
+                                handler.process();
+                                if (handler.isResponsing())
                                 {
                                     event->events |= (EPOLLOUT | EPOLLET);
                                     epoll_event sender;
@@ -246,7 +243,7 @@ public:
                                 eventPool_.release(event);
                                 fprintf(stderr, "Peer::send() Error: %ld\n", sn); //
                             }
-                        } while (handler.stillSending(sn));
+                        } while (handler.stillResponsing(sn));
                     }
                     else if (newEventBuf_[i].events & EPOLLERR)
                     {
@@ -299,7 +296,7 @@ public:
     int run(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
             int recvTimeout_s = 3, int recvTimeout_us = 0,
             unsigned int eventPoolSize = 1024, unsigned int maxBufEntrs = 1024)
-        requires is_tls<Peer>
+        requires mustPeerTls<Peer>
     {
         int n = Peer::listen(ip, port, crt, key, backlog);
         if (n < 0)
@@ -386,9 +383,9 @@ public:
                             {
                                 if (rn == 0)
                                     break;
-                                handler.appendRecvStream(buf, rn);
-                                handler.process_reflect();
-                                if (handler.isResponse())
+                                handler.appendRequest(buf, rn);
+                                handler.process();
+                                if (handler.isResponsing())
                                 {
                                     event->events |= (EPOLLOUT | EPOLLET);
                                     epoll_event sender;
@@ -440,7 +437,7 @@ public:
                                 eventPool_.release(event);
                                 fprintf(stderr, "Peer::send() Error: %ld\n", sn); //
                             }
-                        } while (handler.stillSending(sn));
+                        } while (handler.stillResponsing(sn));
                     }
                     else if (newEventBuf_[i].events & EPOLLERR)
                     {
