@@ -1,98 +1,28 @@
 #pragma once
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <fcntl.h>
+#include "myconcepts.hpp"
+#include "event.hpp"
+#include "objectPool.hpp"
 #include <sys/epoll.h>
 #include <string>
-#include <vector>
-#include <cstdlib>
+#include <cstring>
 #include <stop_token>
-#include "myconcepts.hpp"
-#include "peer.hpp"
 
-template <mustTrustedPeer Peer, mustHandler Handler>
-struct TEvent;
-template <mustPeerTcp Peer, mustHandler Handler>
-struct TEvent<Peer, Handler>
+template <mustDerivedFromTransporter Transporter, mustDerivedFromHandler Handler>
+    requires mustResettable<Transporter> && mustResettable<Handler>
+class Reactor // remember to add timers!
 {
-    int fd = -1;
-    uint32_t events = 0;
-    Handler handler{};
-    inline void reset() noexcept
-    {
-        fd = -1;
-        events = 0;
-        handler.reset();
-    }
-};
-template <mustPeerTls Peer, mustHandler Handler>
-struct TEvent<Peer, Handler>
-{
-    int fd = -1;
-    SSL *ssl = nullptr;
-    uint32_t events = 0;
-    Handler handler{};
-    inline void reset() noexcept
-    {
-        fd = -1;
-        events = 0;
-        handler.reset();
-    }
-};
-template <mustTrustedPeer Peer, mustHandler Handler>
-class Reactor : private Peer
-{
+    [[no_unique_address]] ProtocolMember<Transporter> protocolMember_;
     int epollFd_ = -1;
     epoll_event *newEventBuf_ = nullptr;
-    using Event = TEvent<Peer, Handler>;
-    Event accEvent_{};
-    template <mustResettable Obj>
-    class ObjPool
-    {
-        std::vector<Obj> pool_;
-        std::vector<Obj *> available_;
-
-    public:
-        ObjPool() noexcept = default;
-        ~ObjPool() noexcept = default;
-        ObjPool(const ObjPool &) = delete;
-        ObjPool &operator=(const ObjPool &) = delete;
-        ObjPool(ObjPool &&) noexcept = delete;
-        ObjPool &operator=(ObjPool &&) noexcept = delete;
-        inline void init(size_t capa)
-        {
-            pool_.resize(capa);
-            available_.reserve(capa);
-            for (auto &event : pool_)
-                available_.push_back(&event);
-        }
-        inline Obj *acquire()
-        {
-            if (available_.empty())
-                return nullptr;
-            Obj *obj = available_.back();
-            available_.pop_back();
-            return obj;
-        }
-        inline void release(Obj *obj)
-        {
-            if (obj != nullptr)
-            {
-                obj->reset();
-                available_.push_back(obj);
-            }
-        }
-        inline std::vector<Obj> &myPool() noexcept { return pool_; }
-    };
-    ObjPool<Event> eventPool_;
+    Event<Transporter, Handler> accEvent_{};
+    ObjectPool<Event<Transporter, Handler>> eventPool_;
+    ObjectPool<Handler> handlerPool_;
     std::stop_source stopSource_;
 
 public:
     Reactor() noexcept = default;
-    ~Reactor() noexcept { stop(); }
+    ~Reactor() noexcept = default;
     Reactor(const Reactor &) = delete;
     Reactor &operator=(const Reactor &) = delete;
     Reactor(Reactor &&) noexcept = delete;
@@ -108,176 +38,179 @@ public:
     // -8 epoll_create1() error
     // -9 epoll_ctl() error
     // -10 epoll_wait() error
-    int run(const char *ip, int port, int backlog = 511,
-            int recvTimeout_s = 3, int recvTimeout_us = 0,
-            unsigned int eventPoolSize = 1024, unsigned int maxBufEntrs = 1024)
-        requires mustPeerTcp<Peer>
+    int run_tcp(const char *ip, int port, int backlog = 511,
+                size_t eventPoolSize = 1024, size_t handlerPoolSize = 256,
+                int maxBufEntrs = 1024, int bufSize = 4096)
+        requires mustTransporter<Transporter>
     {
-        int n = Peer::listen(ip, port, backlog);
-        if (n < 0)
-            return n;
-        accEvent_.fd = Peer::serInfo_.fd;
-        epollFd_ = epoll_create1(0);
-        if (epollFd_ < 0)
+        int err = accEvent_.transporter.listen_tcp(ip, port, backlog);
+        if (err < 0)
         {
-            ::close(Peer::serInfo_.fd);
-            Peer::serInfo_ = {};
+            reset();
+            return err;
+        }
+        if ((epollFd_ = epoll_create1(0)) < 0)
+        {
+            reset();
             return -8;
         }
+        eventPool_.init(eventPoolSize);
+        handlerPool_.init(handlerPoolSize);
+        newEventBuf_ = new epoll_event[maxBufEntrs];
+        accEvent_.type = 1;
         epoll_event acceptor;
         acceptor.events = EPOLLIN;
         acceptor.data.ptr = &accEvent_;
-        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, Peer::serInfo_.fd, &acceptor) < 0)
+        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, accEvent_.transporter.fd, &acceptor) < 0)
         {
-            ::close(epollFd_);
-            ::close(Peer::serInfo_.fd);
-            Peer::serInfo_ = {};
+            reset();
             return -9;
         }
-        newEventBuf_ = new epoll_event[maxBufEntrs];
-        eventPool_.init(eventPoolSize);
         while (!stopSource_.stop_requested())
         {
-            n = epoll_wait(epollFd_, newEventBuf_, maxBufEntrs, -1);
+            int n = epoll_wait(epollFd_, newEventBuf_, maxBufEntrs, -1);
             if (n < 0)
             {
                 if (errno == EINTR)
                     continue;
-                ::close(epollFd_);
-                ::close(Peer::serInfo_.fd);
-                Peer::serInfo_ = {};
+                reset();
                 return -10;
             }
             for (int i = 0; i < n; ++i)
             {
-                Event *event = reinterpret_cast<Event *>(newEventBuf_[i].data.ptr);
-                int e = 0;
-                if (event->fd == Peer::serInfo_.fd)
+                Event<Transporter, Handler> *event = reinterpret_cast<Event<Transporter, Handler> *>(newEventBuf_[i].data.ptr);
+                if (event == nullptr)
+                    goto error;
+                switch (event->type)
                 {
-                    int fd = Peer::accept(recvTimeout_s, recvTimeout_us);
-                    if (fd < 0)
-                    {
-                        fprintf(stderr, "Peer::accept() Error: %d\n", fd); //
-                        continue;
-                    }
-                    Event *recvEvent = eventPool_.acquire();
-                    if (recvEvent == nullptr)
-                        continue;
-                    recvEvent->fd = fd;
-                    recvEvent->events |= (EPOLLIN | EPOLLET);
-                    epoll_event recver;
-                    recver.events = recvEvent->events;
-                    recver.data.ptr = recvEvent;
-                    if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, recvEvent->fd, &recver) < 0)
-                    {
-                        ::close(recvEvent->fd);
-                        eventPool_.release(recvEvent);
-                        goto error;
-                    }
-                }
-                else
-                {
+                case 1:
                     if (newEventBuf_[i].events & EPOLLIN)
                     {
-                        int fd = event->fd;
-                        Handler &handler = event->handler;
-                        char buf[4096]{0};
-                        ssize_t rn = 0;
-                        do
+                        Event<Transporter, Handler> *cliEvent = eventPool_.acquire();
+                        if (cliEvent == nullptr)
+                            goto error;
+                        socklen_t socklen = sizeof(cliEvent->transporter.addr);
+                        cliEvent->transporter.fd = ::accept4(accEvent_.transporter.fd, (sockaddr *)&cliEvent->transporter.addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                        if (cliEvent->transporter.fd < 0)
                         {
-                            rn = Peer::recv(fd, buf, sizeof(buf));
-                            if (rn >= 0)
+                            switch (errno)
                             {
-                                if (rn == 0)
-                                    break;
-                                handler.appendRequest(buf, rn);
-                                handler.process();
-                                if (handler.isResponsing())
-                                {
-                                    event->events |= (EPOLLOUT | EPOLLET);
-                                    epoll_event sender;
-                                    sender.events = event->events;
-                                    sender.data.ptr = event;
-                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
-                                    {
-                                        epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                        eventPool_.release(event);
-                                        goto error;
-                                    }
-                                }
+                            default:
+                                goto error;
                             }
-                            else
-                            {
-                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                eventPool_.release(event);
-                                if (rn != 0)
-                                    fprintf(stderr, "Peer::recv() Error: %ld\n", rn); //
-                                rn = 0;
-                            }
-                        } while (rn >= sizeof(buf));
+                        }
+
+                        cliEvent->type = 2;
+                        cliEvent->handler = handlerPool_.acquire();
+                        if (cliEvent->handler == nullptr)
+                            goto error;
+                        epoll_event recver;
+                        recver.events = EPOLLIN | EPOLLET;
+                        recver.data.ptr = cliEvent;
+                        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &recver) < 0)
+                            goto error;
                     }
                     else if (newEventBuf_[i].events & EPOLLOUT)
                     {
-                        int fd = event->fd;
-                        Handler &handler = event->handler;
-                        ssize_t sn = 0;
-                        do
+                        goto error;
+                    }
+                    else
+                    {
+                        goto error;
+                    }
+                    break;
+                case 2:
+                    if (newEventBuf_[i].events & EPOLLIN)
+                    {
+                        if (event->handler == nullptr)
+                            goto error;
+                        std::vector<char> buf(bufSize, 0);
+                        while (true)
                         {
-                            sn = Peer::send(fd, handler.responseBegin(), handler.responseLength());
-                            if (sn >= 0)
+                            ssize_t rn = ::recv(event->transporter.fd, buf.data(), buf.size(), 0);
+                            if (rn < 0)
                             {
-                                event->events &= ~EPOLLOUT;
-                                epoll_event sender;
-                                sender.events = event->events;
-                                sender.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
+                                switch (errno)
                                 {
-                                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                    eventPool_.release(event);
+                                case EAGAIN:
+                                    goto breakout;
+                                case EINTR:
+                                    continue;
+                                default:
                                     goto error;
                                 }
                             }
+                            else if (rn == 0)
+                            {
+                                printf("client left\n"); ///
+                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                                handlerPool_.release(event->handler);
+                                eventPool_.release(event);
+                                goto breakout;
+                            }
                             else
                             {
-                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                eventPool_.release(event);
-                                fprintf(stderr, "Peer::send() Error: %ld\n", sn); //
+                                event->handler->appendRequest(buf.data(), rn);
+                                event->handler->process();
+                                if (event->handler->isResponse())
+                                {
+                                    epoll_event sender;
+                                    sender.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                                    sender.data.ptr = event;
+                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                        goto error;
+                                }
                             }
-                        } while (handler.stillResponsing(sn));
+                        }
                     }
-                    else if (newEventBuf_[i].events & EPOLLERR)
+                    else if (newEventBuf_[i].events & EPOLLOUT)
                     {
-                    error:
-                        fprintf(stderr, "Event Error: %d\n", e); //
+                        if (event->handler == nullptr)
+                            goto error;
+                        ssize_t sn = 0;
+                        do
+                        {
+                            sn = ::send(event->transporter.fd, event->handler->responseBegin(), event->handler->responseLength(), MSG_NOSIGNAL);
+                            if (sn <= 0)
+                            {
+                                switch (errno)
+                                {
+                                case EAGAIN:
+                                    goto breakout;
+                                case EINTR:
+                                    continue;
+                                default:
+                                    goto error;
+                                }
+                            }
+                        } while (event->handler->isResponding(sn));
+
+                        epoll_event sender;
+                        sender.events = EPOLLIN | EPOLLET;
+                        sender.data.ptr = event;
+                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                            goto error;
                     }
+                    else
+                    {
+                        goto error;
+                    }
+                breakout:
+                    break;
+                default:
+                error:
+                    fprintf(stderr, "%s", strerror(errno)); ///
+                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                    handlerPool_.release(event->handler);
+                    eventPool_.release(event);
+                    break;
                 }
             }
         }
-        if (Peer::serInfo_.fd != -1)
-        {
-            epoll_ctl(epollFd_, EPOLL_CTL_DEL, Peer::serInfo_.fd, nullptr);
-            ::close(Peer::serInfo_.fd);
-            Peer::serInfo_.fd = -1;
-        }
-        if (epollFd_ != -1)
-        {
-            ::close(epollFd_);
-            epollFd_ = -1;
-        }
-        if (newEventBuf_ != nullptr)
-        {
-            delete[] newEventBuf_;
-            newEventBuf_ = nullptr;
-        }
-        for (auto &event : eventPool_.myPool())
-            if (event.fd != -1)
-            {
-                ::close(event.fd);
-                event.fd = -1;
-            }
+        reset();
         return 0;
     }
-    // single crt&pem format
+    // single pem format
     // 0 success
     // -1 ip error
     // -2 port error
@@ -293,195 +226,473 @@ public:
     // -12 epoll_create1() error
     // -13 epoll_ctl() error
     // -14 epoll_wait() error
-    int run(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
-            int recvTimeout_s = 3, int recvTimeout_us = 0,
-            unsigned int eventPoolSize = 1024, unsigned int maxBufEntrs = 1024)
-        requires mustPeerTls<Peer>
+    int run_ssl(const char *ip, int port,
+                const char *crt, const char *key,
+                int backlog = 511,
+                size_t eventPoolSize = 1024, size_t handlerPoolSize = 256,
+                int maxBufEntrs = 1024, int bufSize = 4096)
+        requires mustTransporterSSL<Transporter>
     {
-        int n = Peer::listen(ip, port, crt, key, backlog);
-        if (n < 0)
-            return n;
-        accEvent_.fd = Peer::serInfo_.fd;
-        epollFd_ = epoll_create1(0);
-        if (epollFd_ < 0)
+        signal(SIGPIPE, SIG_IGN);
+        int err = accEvent_.transporter.listen_tcp(ip, port, backlog);
+        if (err < 0)
         {
-            ::close(Peer::serInfo_.fd);
-            SSL_CTX_free(Peer::serInfo_.ctx);
-            Peer::serInfo_ = {};
+            reset();
+            return err;
+        }
+        if ((protocolMember_.ctx = SSL_CTX_new(TLS_server_method())) == nullptr)
+        {
+            reset();
+            return -8;
+        }
+        if (SSL_CTX_use_certificate_file(protocolMember_.ctx, crt, SSL_FILETYPE_PEM) <= 0)
+        {
+            reset();
+            return -9;
+        }
+        if (SSL_CTX_use_PrivateKey_file(protocolMember_.ctx, key, SSL_FILETYPE_PEM) <= 0)
+        {
+            reset();
+            return -10;
+        }
+        if (SSL_CTX_check_private_key(protocolMember_.ctx) <= 0)
+        {
+            reset();
+            return -11;
+        }
+        if ((epollFd_ = epoll_create1(0)) < 0)
+        {
+            reset();
             return -12;
         }
+        eventPool_.init(eventPoolSize);
+        handlerPool_.init(handlerPoolSize);
+        newEventBuf_ = new epoll_event[maxBufEntrs];
+        accEvent_.type = 1;
         epoll_event acceptor;
         acceptor.events = EPOLLIN;
         acceptor.data.ptr = &accEvent_;
-        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, Peer::serInfo_.fd, &acceptor) < 0)
+        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, accEvent_.transporter.fd, &acceptor) < 0)
         {
-            ::close(epollFd_);
-            ::close(Peer::serInfo_.fd);
-            SSL_CTX_free(Peer::serInfo_.ctx);
-            Peer::serInfo_ = {};
+            reset();
             return -13;
         }
-        newEventBuf_ = new epoll_event[maxBufEntrs];
-        eventPool_.init(eventPoolSize);
         while (!stopSource_.stop_requested())
         {
-            n = epoll_wait(epollFd_, newEventBuf_, maxBufEntrs, -1);
+            int n = epoll_wait(epollFd_, newEventBuf_, maxBufEntrs, -1);
             if (n < 0)
             {
                 if (errno == EINTR)
                     continue;
-                ::close(epollFd_);
-                ::close(Peer::serInfo_.fd);
-                SSL_CTX_free(Peer::serInfo_.ctx);
-                Peer::serInfo_ = {};
+                reset();
                 return -14;
             }
             for (int i = 0; i < n; ++i)
             {
-                Event *event = reinterpret_cast<Event *>(newEventBuf_[i].data.ptr);
-                int e = 0;
-                if (event->fd == Peer::serInfo_.fd)
+                Event<Transporter, Handler> *event = reinterpret_cast<Event<Transporter, Handler> *>(newEventBuf_[i].data.ptr);
+                if (event == nullptr)
+                    goto error;
+                switch (event->type)
                 {
-                    SSL *ssl = Peer::accept(recvTimeout_s, recvTimeout_us);
-                    if (ssl == nullptr)
-                    {
-                        fprintf(stderr, "Peer::accept() Error\n"); //
-                        continue;
-                    }
-                    int fd = SSL_get_fd(ssl);
-                    Event *recvEvent = eventPool_.acquire();
-                    if (recvEvent == nullptr)
-                        continue;
-                    recvEvent->ssl = ssl;
-                    recvEvent->fd = fd;
-                    recvEvent->events |= (EPOLLIN | EPOLLET);
-                    epoll_event recver;
-                    recver.events = recvEvent->events;
-                    recver.data.ptr = recvEvent;
-                    if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, fd, &recver) < 0)
-                    {
-                        SSL_shutdown(ssl);
-                        SSL_free(ssl);
-                        ::close(fd);
-                        eventPool_.release(recvEvent);
-                        goto error;
-                    }
-                }
-                else
-                {
+                case 1:
                     if (newEventBuf_[i].events & EPOLLIN)
                     {
-                        SSL *&ssl = event->ssl;
-                        int fd = event->fd;
-                        Handler &handler = event->handler;
-                        char buf[4096]{0};
-                        ssize_t rn = 0;
-                        do
+                        Event<Transporter, Handler> *cliEvent = eventPool_.acquire();
+                        if (cliEvent == nullptr)
+                            goto error;
+                        socklen_t socklen = sizeof(cliEvent->transporter.addr);
+                        cliEvent->transporter.fd = ::accept4(accEvent_.transporter.fd, (sockaddr *)&cliEvent->transporter.addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                        if (cliEvent->transporter.fd < 0)
                         {
-                            rn = Peer::recv(ssl, buf, sizeof(buf));
-                            if (rn >= 0)
+                            switch (errno)
                             {
-                                if (rn == 0)
-                                    break;
-                                handler.appendRequest(buf, rn);
-                                handler.process();
-                                if (handler.isResponsing())
-                                {
-                                    event->events |= (EPOLLOUT | EPOLLET);
-                                    epoll_event sender;
-                                    sender.events = event->events;
-                                    sender.data.ptr = event;
-                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
-                                    {
-                                        epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                        eventPool_.release(event);
-                                        goto error;
-                                    }
-                                }
+                            default:
+                                goto error;
                             }
-                            else
+                        }
+                        cliEvent->transporter.ssl = SSL_new(protocolMember_.ctx);
+                        if (cliEvent->transporter.ssl == nullptr)
+                            goto error;
+                        if (SSL_set_fd(cliEvent->transporter.ssl, cliEvent->transporter.fd) <= 0)
+                            goto error;
+                        int e = SSL_accept(cliEvent->transporter.ssl);
+                        if (e < 0)
+                        {
+                            switch (SSL_get_error(cliEvent->transporter.ssl, e))
                             {
-                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                eventPool_.release(event);
-                                if (rn != 0)
-                                    fprintf(stderr, "Peer::recv() Error: %ld\n", rn); //
-                                rn = 0;
+                            case SSL_ERROR_WANT_READ:
+                            {
+                                cliEvent->type = 3;
+                                epoll_event recver;
+                                recver.events = EPOLLIN | EPOLLET;
+                                recver.data.ptr = cliEvent;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &recver) < 0)
+                                    goto error;
                             }
-                        } while (rn >= sizeof(buf));
+                            break;
+                            case SSL_ERROR_WANT_WRITE:
+                            {
+                                cliEvent->type = 3;
+                                epoll_event sender;
+                                sender.events = EPOLLOUT | EPOLLET;
+                                sender.data.ptr = cliEvent;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &sender) < 0)
+                                    goto error;
+                            }
+                            break;
+                            default:
+                                goto error;
+                            }
+                        }
+                        else if (e == 0)
+                        {
+                            printf("client left\n"); ///
+                            eventPool_.release(cliEvent);
+                        }
+                        else
+                        {
+                            cliEvent->type = 2;
+                            cliEvent->handler = handlerPool_.acquire();
+                            if (cliEvent->handler == nullptr)
+                                goto error;
+                            epoll_event recver;
+                            recver.events = EPOLLIN | EPOLLET;
+                            recver.data.ptr = cliEvent;
+                            if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &recver) < 0)
+                                goto error;
+                        }
                     }
                     else if (newEventBuf_[i].events & EPOLLOUT)
                     {
-                        SSL *&ssl = event->ssl;
-                        int fd = event->fd;
-                        Handler &handler = event->handler;
-                        ssize_t sn = 0;
-                        do
+                        goto error;
+                    }
+                    else
+                    {
+                        goto error;
+                    }
+                    break;
+                case 2:
+                    if (newEventBuf_[i].events & EPOLLIN)
+                    {
+                        if (event->handler == nullptr)
+                            goto error;
+                        std::vector<char> buf(bufSize, 0);
+                        while (true)
                         {
-                            sn = Peer::send(ssl, handler.responseBegin(), handler.responseLength());
-                            if (sn >= 0)
+                            ssize_t rn = ::SSL_read(event->transporter.ssl, buf.data(), buf.size());
+                            if (rn < 0)
                             {
-                                event->events &= ~EPOLLOUT;
-                                epoll_event sender;
-                                sender.events = event->events;
-                                sender.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
+                                switch (SSL_get_error(event->transporter.ssl, rn))
                                 {
-                                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                    eventPool_.release(event);
+                                case SSL_ERROR_WANT_READ:
+                                    goto breakout;
+                                default:
                                     goto error;
+                                }
+                            }
+                            else if (rn == 0)
+                            {
+                                int e = SSL_shutdown(event->transporter.ssl);
+                                if (e <= 0)
+                                {
+                                    switch (SSL_get_error(event->transporter.ssl, e))
+                                    {
+                                    case SSL_ERROR_WANT_READ:
+                                    {
+                                        event->type = 4;
+                                        epoll_event recver;
+                                        recver.events = EPOLLIN | EPOLLET;
+                                        recver.data.ptr = event;
+                                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                            goto error;
+                                    }
+                                    break;
+                                    case SSL_ERROR_WANT_WRITE:
+                                    {
+                                        event->type = 4;
+                                        epoll_event sender;
+                                        sender.events = EPOLLOUT | EPOLLET;
+                                        sender.data.ptr = event;
+                                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                            goto error;
+                                    }
+                                    break;
+                                    default:
+                                        goto error;
+                                    }
+                                }
+                                else
+                                {
+                                    printf("client left\n"); ///
+                                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                                    handlerPool_.release(event->handler);
+                                    eventPool_.release(event);
+                                    goto breakout;
                                 }
                             }
                             else
                             {
-                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
-                                eventPool_.release(event);
-                                fprintf(stderr, "Peer::send() Error: %ld\n", sn); //
+                                event->handler->appendRequest(buf.data(), rn);
+                                event->handler->process();
+                                if (event->handler->isResponse())
+                                {
+                                    epoll_event sender;
+                                    sender.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                                    sender.data.ptr = event;
+                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                        goto error;
+                                }
                             }
-                        } while (handler.stillResponsing(sn));
+                        }
                     }
-                    else if (newEventBuf_[i].events & EPOLLERR)
+                    else if (newEventBuf_[i].events & EPOLLOUT)
                     {
-                    error:
-                        fprintf(stderr, "Event Error: %d\n", e); //
+                        if (event->handler == nullptr)
+                            goto error;
+                        ssize_t sn = 0;
+                        do
+                        {
+                            sn = ::SSL_write(event->transporter.ssl, event->handler->responseBegin(), event->handler->responseLength());
+                            if (sn <= 0)
+                            {
+                                switch (SSL_get_error(event->transporter.ssl, sn))
+                                {
+                                case SSL_ERROR_WANT_WRITE:
+                                    goto breakout;
+                                default:
+                                    goto error;
+                                }
+                            }
+                        } while (event->handler->isResponding(sn));
+
+                        epoll_event sender;
+                        sender.events = EPOLLIN | EPOLLET;
+                        sender.data.ptr = event;
+                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                            goto error;
                     }
+                    else
+                    {
+                        goto error;
+                    }
+                breakout:
+                    break;
+                case 3:
+                    if (newEventBuf_[i].events & EPOLLIN)
+                    {
+                        int e = SSL_accept(event->transporter.ssl);
+                        if (e < 0)
+                        {
+                            switch (SSL_get_error(event->transporter.ssl, e))
+                            {
+                            case SSL_ERROR_WANT_READ:
+                                break;
+                            case SSL_ERROR_WANT_WRITE:
+                            {
+                                epoll_event sender;
+                                sender.events = EPOLLOUT | EPOLLET;
+                                sender.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                    goto error;
+                            }
+                            break;
+                            default:
+                                goto error;
+                            }
+                        }
+                        else if (e == 0)
+                        {
+                            printf("client left\n"); ///
+                            eventPool_.release(event);
+                        }
+                        else
+                        {
+                            event->type = 2;
+                            event->handler = handlerPool_.acquire();
+                            if (event->handler == nullptr)
+                                goto error;
+                            epoll_event recver;
+                            recver.events = EPOLLIN | EPOLLET;
+                            recver.data.ptr = event;
+                            if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                goto error;
+                        }
+                    }
+                    else if (newEventBuf_[i].events & EPOLLOUT)
+                    {
+                        int e = SSL_accept(event->transporter.ssl);
+                        if (e < 0)
+                        {
+                            switch (SSL_get_error(event->transporter.ssl, e))
+                            {
+                            case SSL_ERROR_WANT_READ:
+                            {
+                                epoll_event recver;
+                                recver.events = EPOLLIN | EPOLLET;
+                                recver.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                    goto error;
+                            }
+                            break;
+                            case SSL_ERROR_WANT_WRITE:
+                                break;
+                            default:
+                                goto error;
+                            }
+                        }
+                        else if (e == 0)
+                        {
+                            printf("client left\n"); ///
+                            eventPool_.release(event);
+                        }
+                        else
+                        {
+                            event->type = 2;
+                            event->handler = handlerPool_.acquire();
+                            if (event->handler == nullptr)
+                                goto error;
+                            epoll_event recver;
+                            recver.events = EPOLLIN | EPOLLET;
+                            recver.data.ptr = event;
+                            if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                goto error;
+                        }
+                    }
+                    else
+                    {
+                        goto error;
+                    }
+                    break;
+                case 4:
+                    if (newEventBuf_[i].events & EPOLLIN)
+                    {
+                        int e = SSL_shutdown(event->transporter.ssl);
+                        if (e <= 0)
+                        {
+                            switch (SSL_get_error(event->transporter.ssl, e))
+                            {
+                            case SSL_ERROR_WANT_READ:
+                                break;
+                            case SSL_ERROR_WANT_WRITE:
+                            {
+                                epoll_event sender;
+                                sender.events = EPOLLOUT | EPOLLET;
+                                sender.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                    goto error;
+                            }
+                            break;
+                            default:
+                                goto error;
+                            }
+                        }
+                        else
+                        {
+                            printf("client left\n"); ///
+                            epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                            handlerPool_.release(event->handler);
+                            eventPool_.release(event);
+                        }
+                    }
+                    else if (newEventBuf_[i].events & EPOLLOUT)
+                    {
+                        int e = SSL_shutdown(event->transporter.ssl);
+                        if (e <= 0)
+                        {
+                            switch (SSL_get_error(event->transporter.ssl, e))
+                            {
+                            case SSL_ERROR_WANT_READ:
+                            {
+                                epoll_event recver;
+                                recver.events = EPOLLIN | EPOLLET;
+                                recver.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                    goto error;
+                            }
+                            break;
+                            case SSL_ERROR_WANT_WRITE:
+                                break;
+                            default:
+                                goto error;
+                            }
+                        }
+                        else
+                        {
+                            printf("client left\n"); ///
+                            epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                            handlerPool_.release(event->handler);
+                            eventPool_.release(event);
+                        }
+                    }
+                    else
+                    {
+                        goto error;
+                    }
+                    break;
+                default:
+                error:
+                    fprintf(stderr, "%s", strerror(errno)); ///
+                    if (event->transporter.ssl != nullptr)
+                    {
+                        int e = SSL_shutdown(event->transporter.ssl);
+                        if (e <= 0)
+                        {
+                            switch (SSL_get_error(event->transporter.ssl, e))
+                            {
+                            case SSL_ERROR_WANT_READ:
+                            {
+                                event->type = 4;
+                                epoll_event recver;
+                                recver.events = EPOLLIN | EPOLLET;
+                                recver.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                    goto cleanup;
+                            }
+                            break;
+                            case SSL_ERROR_WANT_WRITE:
+                            {
+                                event->type = 4;
+                                epoll_event sender;
+                                sender.events = EPOLLOUT | EPOLLET;
+                                sender.data.ptr = event;
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                    goto cleanup;
+                            }
+                            break;
+                            default:
+                                goto cleanup;
+                            }
+                        }
+                    }
+                cleanup:
+                    ERR_clear_error();
+                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                    handlerPool_.release(event->handler);
+                    eventPool_.release(event);
                 }
             }
         }
-        if (Peer::cliInfo_.fd != -1)
-        {
-            epoll_ctl(epollFd_, EPOLL_CTL_DEL, Peer::cliInfo_.fd, nullptr);
-            SSL_shutdown(Peer::cliInfo_.ssl);
-            SSL_free(Peer::cliInfo_.ssl);
-            ::close(Peer::cliInfo_.fd);
-            SSL_CTX_free(Peer::cliInfo_.ctx);
-            Peer::cliInfo_ = {};
-        }
-        if (Peer::serInfo_.fd != -1)
-        {
-            epoll_ctl(epollFd_, EPOLL_CTL_DEL, Peer::serInfo_.fd, nullptr);
-            SSL_shutdown(Peer::serInfo_.ssl);
-            SSL_free(Peer::serInfo_.ssl);
-            ::close(Peer::serInfo_.fd);
-            SSL_CTX_free(Peer::serInfo_.ctx);
-            Peer::serInfo_ = {};
-        }
-        if (epollFd_ != -1)
-        {
-            ::close(epollFd_);
-            epollFd_ = -1;
-        }
-        if (newEventBuf_ != nullptr)
-        {
-            delete[] newEventBuf_;
-            newEventBuf_ = nullptr;
-        }
-        for (auto &event : eventPool_.myPool())
-            if (event.fd != -1)
-            {
-                ::close(event.fd);
-                event.fd = -1;
-            }
+        reset();
         return 0;
     }
     inline void stop() const noexcept { stopSource_.request_stop(); }
+    inline void reset() noexcept
+    {
+        if constexpr (mustTransporterSSL<Transporter>)
+        {
+            if (protocolMember_.ctx != nullptr)
+                SSL_CTX_free(protocolMember_.ctx);
+            protocolMember_.ctx = nullptr;
+        }
+        epoll_ctl(epollFd_, EPOLL_CTL_DEL, accEvent_.transporter.fd, nullptr);
+        if (newEventBuf_ != nullptr)
+            delete[] newEventBuf_;
+        newEventBuf_ = nullptr;
+        handlerPool_.reset();
+        eventPool_.reset();
+        if (epollFd_ != -1)
+            ::close(epollFd_);
+        epollFd_ = -1;
+        accEvent_.reset();
+    }
 };

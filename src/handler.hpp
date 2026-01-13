@@ -9,7 +9,7 @@ protected:
     std::string requestBuffer_;
     std::string responseBuffer_;
     size_t responseOffset_ = 0;
-    bool isResponsing_ = false;
+    bool isResponding_ = false;
 
 public:
     Handler_base() noexcept = default;
@@ -21,7 +21,7 @@ public:
             requestBuffer_ = other.requestBuffer_;
             responseBuffer_ = other.responseBuffer_;
             responseOffset_ = other.responseOffset_;
-            isResponsing_ = other.isResponsing_;
+            isResponding_ = other.isResponding_;
         }
     }
     Handler_base &operator=(const Handler_base &other)
@@ -38,8 +38,8 @@ public:
             responseBuffer_ = std::move(other.responseBuffer_);
             responseOffset_ = other.responseOffset_;
             other.responseOffset_ = 0;
-            isResponsing_ = other.isResponsing_;
-            other.isResponsing_ = false;
+            isResponding_ = other.isResponding_;
+            other.isResponding_ = false;
         }
     }
     Handler_base &operator=(Handler_base &&other) noexcept
@@ -53,36 +53,44 @@ public:
         std::swap(requestBuffer_, other.requestBuffer_);
         std::swap(responseBuffer_, other.responseBuffer_);
         std::swap(responseOffset_, other.responseOffset_);
-        std::swap(isResponsing_, other.isResponsing_);
+        std::swap(isResponding_, other.isResponding_);
     }
     inline void reset() noexcept
     {
         requestBuffer_.clear();
         responseBuffer_.clear();
         responseOffset_ = 0;
-        isResponsing_ = false;
+        isResponding_ = false;
     }
-    inline void appendRequest(const char *buf, size_t n) { requestBuffer_.append(buf, n); }
+    inline void appendRequest(const char *buf, ssize_t rn)
+    {
+        if (rn <= 0)
+            return;
+        requestBuffer_.append(buf, rn);
+    }
     inline const char *responseBegin() const noexcept { return responseBuffer_.data() + responseOffset_; }
     inline size_t responseLength() const noexcept { return responseBuffer_.size() - responseOffset_; }
-    inline bool isResponsing() noexcept
+    inline bool isResponse(ssize_t offset = 0) noexcept
     {
-        if (isResponsing_)
+        if (isResponding_)
             return false;
-        responseOffset_ = 0;
-        isResponsing_ = false;
+        if (offset < 0)
+            offset = 0;
+        responseOffset_ = offset;
+        if (responseBuffer_.empty())
+            return false;
         if (responseOffset_ < responseBuffer_.size())
-            isResponsing_ = true;
+            isResponding_ = true;
         return true;
     }
-    inline bool stillResponsing(ssize_t sn) noexcept
+    inline bool isResponding(ssize_t sn) noexcept
     {
         if (sn < 0)
             sn = 0;
-        if (!isResponsing_)
+        if (!isResponding_)
         {
             responseOffset_ = 0;
-            isResponsing_ = false;
+            isResponding_ = false;
             return false;
         }
         responseOffset_ += sn;
@@ -90,15 +98,15 @@ public:
         {
             responseBuffer_.clear();
             responseOffset_ = 0;
-            isResponsing_ = false;
+            isResponding_ = false;
             return false;
         }
         return true;
     }
     void stdin2response()
     {
-        std::cout << "RESPONSE:(tap 'Enter' twice to response)" << std::endl;
         responseBuffer_.clear();
+        std::cout << "(tap 'Enter' again to response)" << std::endl;
         std::string line;
         while (std::getline(std::cin, line))
         {
@@ -109,8 +117,7 @@ public:
     }
     void request2stdout()
     {
-        std::cout << "REQUEST:" << std::endl
-                  << requestBuffer_ << std::endl;
+        std::cout << requestBuffer_ << std::endl;
     }
     void process()
     {
@@ -123,17 +130,16 @@ public:
 #include <llhttp.h>
 
 template <Mode_http Mode>
-    requires validModeHttp<Mode>
-class Handler_http : public Handler_base
+class Handler_llhttp : public Handler_base
 {
     llhttp_t parser_;
     llhttp_settings_t settings_;
     size_t requestOffset_ = 0;
 
 public:
-    Handler_http() noexcept { init(); }
-    ~Handler_http() noexcept { reset(); }
-    Handler_http(const Handler_http &other)
+    Handler_llhttp() noexcept { init(); }
+    ~Handler_llhttp() noexcept { reset(); }
+    Handler_llhttp(const Handler_llhttp &other)
         : Handler_base(other)
     {
         if (this != &other)
@@ -143,13 +149,13 @@ public:
             requestOffset_ = other.requestOffset_;
         }
     }
-    Handler_http &operator=(const Handler_http &other)
+    Handler_llhttp &operator=(const Handler_llhttp &other)
     {
         if (&other != this)
-            Handler_http(other).swap(*this);
+            Handler_llhttp(other).swap(*this);
         return *this;
     }
-    Handler_http(Handler_http &&other) noexcept
+    Handler_llhttp(Handler_llhttp &&other) noexcept
         : Handler_base(std::move(other))
     {
         if (this != &other)
@@ -159,13 +165,13 @@ public:
             requestOffset_ = std::move(other.requestOffset_);
         }
     }
-    Handler_http &operator=(Handler_http &&other) noexcept
+    Handler_llhttp &operator=(Handler_llhttp &&other) noexcept
     {
         if (&other != this)
-            Handler_http(std::move(other)).swap(*this);
+            Handler_llhttp(std::move(other)).swap(*this);
         return *this;
     }
-    inline void swap(Handler_http &other) noexcept
+    inline void swap(Handler_llhttp &other) noexcept
     {
         Handler_base::swap(other);
         std::swap(parser_, other.parser_);
@@ -188,47 +194,47 @@ public:
         llhttp_settings_init(&settings_);
         settings_.on_message_begin = [](llhttp_t *p) -> int
         {
-            auto *self = reinterpret_cast<Handler_http *>(p->data);
+            auto *self = reinterpret_cast<Handler_llhttp *>(p->data);
             // cleaning
             return 0;
         };
         settings_.on_header_field = [](llhttp_t *p, const char *at, size_t len) -> int
         {
-            auto *self = reinterpret_cast<Handler_http *>(p->data);
+            auto *self = reinterpret_cast<Handler_llhttp *>(p->data);
             std::cout.write(at, len);
             std::cout << std::endl;
             return 0;
         };
         settings_.on_header_value = [](llhttp_t *p, const char *at, size_t len) -> int
         {
-            auto *self = reinterpret_cast<Handler_http *>(p->data);
+            auto *self = reinterpret_cast<Handler_llhttp *>(p->data);
             std::cout.write(at, len);
             std::cout << std::endl;
             return 0;
         };
         settings_.on_url = [](llhttp_t *p, const char *at, size_t len) -> int
         {
-            auto *self = reinterpret_cast<Handler_http *>(p->data);
+            auto *self = reinterpret_cast<Handler_llhttp *>(p->data);
             std::cout.write(at, len);
             std::cout << std::endl;
             return 0;
         };
         settings_.on_headers_complete = [](llhttp_t *p) -> int
         {
-            auto *self = reinterpret_cast<Handler_http *>(p->data);
+            auto *self = reinterpret_cast<Handler_llhttp *>(p->data);
             // check headers
             return 0;
         };
         settings_.on_body = [](llhttp_t *p, const char *at, size_t len) -> int
         {
-            auto *self = reinterpret_cast<Handler_http *>(p->data);
+            auto *self = reinterpret_cast<Handler_llhttp *>(p->data);
             std::cout.write(at, len);
             std::cout << std::endl;
             return 0;
         };
         settings_.on_message_complete = [](llhttp_t *p) -> int
         {
-            auto *self = reinterpret_cast<Handler_http *>(p->data);
+            auto *self = reinterpret_cast<Handler_llhttp *>(p->data);
             // do business
             return 0;
         };

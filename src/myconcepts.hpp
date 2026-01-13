@@ -1,40 +1,49 @@
 #pragma once
 
 #include <concepts>
-#include <utility>
+#include <vector>
 #include <sys/types.h>
-
-template <typename P, typename... A, typename... B, typename... C>
-concept mustPeer = requires(P peer, A &&...a, B &&...b, C &&...c) {
-    { peer.listen(std::forward<A>(a)...) } -> std::same_as<int>;
-    { peer.recv(std::forward<B>(b)...) } -> std::same_as<ssize_t>;
-    { peer.send(std::forward<C>(c)...) } -> std::same_as<ssize_t>;
-};
-
-class Peer_tcp;
-template <typename P>
-concept mustPeerTcp = std::same_as<P, Peer_tcp>;
-
-class Peer_tls;
-template <typename P>
-concept mustPeerTls = std::same_as<P, Peer_tls>;
-
-template <typename P>
-concept mustTrustedPeer = mustPeerTcp<P> || mustPeerTls<P>;
+#include "transporter.hpp"
 
 template <typename O>
-concept mustResettable = requires(O obj) {
-    { obj.reset() } noexcept -> std::same_as<void>;
+concept mustResettable = requires(O obj) {{ obj.reset() } noexcept -> std::same_as<void>; };
+
+template <typename T>
+concept mustDerivedFromTransporter = std::derived_from<T, Transporter_base>;
+
+template <typename T>
+concept mustTransporter = std::same_as<T, Transporter_base>;
+
+template <typename P>
+struct ProtocolMember
+{
+};
+
+template <typename T>
+concept mustTransporterSSL = std::same_as<T, Transporter_ssl>;
+
+template <>
+struct ProtocolMember<Transporter_ssl>
+{
+    SSL_CTX *ctx = nullptr;
 };
 
 class Handler_base;
+
 template <typename H>
-concept mustHandler = std::derived_from<H, Handler_base>;
+concept mustDerivedFromHandler = std::derived_from<H, Handler_base>;
+
+template <typename H>
+concept mustHandler = std::same_as<H, Handler_base>;
 
 enum class Mode_http
 {
     REQUEST,
     RESPONSE
 };
+
 template <Mode_http M>
-concept validModeHttp = (M == Mode_http::REQUEST || M == Mode_http::RESPONSE);
+class Handler_llhttp;
+
+template <typename H, Mode_http M>
+concept mustHandlerHTTP = std::same_as<H, Handler_llhttp<M>>;

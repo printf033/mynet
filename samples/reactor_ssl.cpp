@@ -1,13 +1,21 @@
-#include "peer.hpp"
+#include "reactor.hpp"
 #include "handler.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
-    const char *name = "127.0.0.1";
-    const char *service = "8080";
+    const char *name = "0.0.0.0";
+    const char *service = "4433";
+    const char *crt = "../certs/ser.crt";
+    const char *key = "../certs/ser.key";
     switch (argc)
     {
+    case 5:
+        key = argv[4];
+        [[fallthrough]];
+    case 4:
+        crt = argv[3];
+        [[fallthrough]];
     case 3:
         service = argv[2];
         [[fallthrough]];
@@ -31,6 +39,6 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    std::cout << "Connecting to " << ip << ":" << port << std::endl;
-    return Peer<Transporter_base, Handler_base>().run_udp(ip, port);
+    std::cout << "listening to " << ip << ":" << port << std::endl;
+    return Reactor<Transporter_ssl, Handler_base>().run_ssl(ip, port, crt, key);
 }
