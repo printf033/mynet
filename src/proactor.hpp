@@ -9,8 +9,8 @@
 #include <cstring>
 #include <stop_token>
 
-template <mustDerivedFromTransporter Transporter, mustDerivedFromHandler Handler>
-    requires mustResettable<Transporter> && mustResettable<Handler>
+template <typename Event>
+    requires mustDerivedFromEventBase<Event> && mustResettable<Event>
 class Proactor // remember to add timers!
 {
     io_uring uring_;
@@ -18,9 +18,9 @@ class Proactor // remember to add timers!
     io_uring_buf_ring *bufRing_ = nullptr;
     int maxBufEntrs_ = 0;
     void *bufBase_ = nullptr;
-    Transporter acceptor_;
-    ObjectPool<Event<Transporter, Handler>> eventPool_;
-    ObjectPool<Handler> handlerPool_;
+    Event acceptor_;
+    ObjectPool<Event> eventPool_;
+    ObjectPool<typename Event::Handler> handlerPool_;
     std::stop_source stopSource_;
 
 public:
@@ -49,7 +49,7 @@ public:
                 unsigned int sqEntries = 512, unsigned int cqEntries = 1024,
                 int maxAcceptEvents = 256, size_t eventPoolSize = 512, size_t handlerPoolSize = 256,
                 int maxBufEntrs = 1024, int bufSize = 4096)
-        requires mustTransporter<Transporter>
+        requires mustEventSocket<Event>
     {
         int err = acceptor_.listen_tcp(ip, port, backlog);
         if (err < 0)
@@ -84,7 +84,7 @@ public:
         io_uring_buf_ring_advance(bufRing_, maxBufEntrs_);
         for (int i = 0; i < maxAcceptEvents; ++i)
         {
-            Event<Transporter, Handler> *recvEvent = eventPool_.acquire();
+            Event *recvEvent = eventPool_.acquire();
             if (recvEvent == nullptr)
             {
                 reset();
@@ -97,8 +97,8 @@ public:
                 reset();
                 return -12;
             }
-            socklen_t socklen = sizeof(recvEvent->transporter.addr);
-            io_uring_prep_accept(sqe, acceptor_.fd, (sockaddr *)&recvEvent->transporter.addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            socklen_t socklen = sizeof(recvEvent->addr);
+            io_uring_prep_accept(sqe, acceptor_.fd, (sockaddr *)&recvEvent->addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
             io_uring_sqe_set_data(sqe, recvEvent);
         }
         if (io_uring_submit(&uring_) < 0)
@@ -122,7 +122,7 @@ public:
             io_uring_for_each_cqe(&uring_, head, cqe)
             {
                 ++count;
-                Event<Transporter, Handler> *event = reinterpret_cast<Event<Transporter, Handler> *>(io_uring_cqe_get_data(cqe));
+                Event *event = reinterpret_cast<Event *>(io_uring_cqe_get_data(cqe));
                 if (event == nullptr)
                     goto error;
                 if (cqe->res < 0)
@@ -139,7 +139,7 @@ public:
                 {
                 case 1:
                 {
-                    event->transporter.fd = cqe->res;
+                    event->fd = cqe->res;
 
                     event->type = 2;
                     event->handler = handlerPool_.acquire();
@@ -148,20 +148,20 @@ public:
                     io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
                     if (sqe == nullptr)
                         goto error;
-                    io_uring_prep_recv_multishot(sqe, event->transporter.fd, nullptr, 0, 0);
+                    io_uring_prep_recv_multishot(sqe, event->fd, nullptr, 0, 0);
                     sqe->buf_group = bgid_;
                     sqe->flags |= IOSQE_BUFFER_SELECT;
                     io_uring_sqe_set_data(sqe, event);
 
-                    Event<Transporter, Handler> *recvEvent = eventPool_.acquire();
+                    Event *recvEvent = eventPool_.acquire();
                     if (recvEvent == nullptr)
                         goto error;
                     recvEvent->type = 1;
                     sqe = io_uring_get_sqe(&uring_);
                     if (sqe == nullptr)
                         goto error;
-                    socklen_t socklen = sizeof(recvEvent->transporter.addr);
-                    io_uring_prep_accept(sqe, acceptor_.fd, (sockaddr *)&recvEvent->transporter.addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                    socklen_t socklen = sizeof(recvEvent->addr);
+                    io_uring_prep_accept(sqe, acceptor_.fd, (sockaddr *)&recvEvent->addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
                     io_uring_sqe_set_data(sqe, recvEvent);
                 }
                 break;
@@ -188,7 +188,7 @@ public:
                             event->handler->process();
                             if (event->handler->isResponse())
                             {
-                                Event<Transporter, Handler> *sendEvent = eventPool_.acquire();
+                                Event *sendEvent = eventPool_.acquire();
                                 if (sendEvent == nullptr)
                                 {
                                     io_uring_buf_ring_add(bufRing_, buf, bufSize, bid, io_uring_buf_ring_mask(maxBufEntrs_), 0);
@@ -196,7 +196,7 @@ public:
                                     goto error;
                                 }
                                 sendEvent->type = 3;
-                                sendEvent->transporter.fd = event->transporter.fd;
+                                sendEvent->fd = event->fd;
                                 sendEvent->handler = event->handler;
                                 io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
                                 if (sqe == nullptr)
@@ -205,7 +205,7 @@ public:
                                     io_uring_buf_ring_advance(bufRing_, 1);
                                     goto error;
                                 }
-                                io_uring_prep_send(sqe, sendEvent->transporter.fd, sendEvent->handler->responseBegin(), sendEvent->handler->responseLength(), MSG_NOSIGNAL);
+                                io_uring_prep_send(sqe, sendEvent->fd, sendEvent->handler->responseBegin(), sendEvent->handler->responseLength(), MSG_NOSIGNAL);
                                 io_uring_sqe_set_data(sqe, sendEvent);
                             }
                             io_uring_buf_ring_add(bufRing_, buf, bufSize, bid, io_uring_buf_ring_mask(maxBufEntrs_), 0);
@@ -224,7 +224,7 @@ public:
                         goto error;
                     if (!event->handler->isResponding(cqe->res))
                     {
-                        event->transporter.fd = -1;
+                        event->fd = -1;
                         eventPool_.release(event);
                     }
                     else
@@ -232,7 +232,7 @@ public:
                         io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
                         if (sqe == nullptr)
                             goto error;
-                        io_uring_prep_send(sqe, event->transporter.fd, event->handler->responseBegin(), event->handler->responseLength(), MSG_NOSIGNAL);
+                        io_uring_prep_send(sqe, event->fd, event->handler->responseBegin(), event->handler->responseLength(), MSG_NOSIGNAL);
                         io_uring_sqe_set_data(sqe, event);
                     }
                 }
@@ -255,11 +255,15 @@ public:
     inline void reset() noexcept
     {
         if (bufRing_ != nullptr)
+        {
             io_uring_free_buf_ring(&uring_, bufRing_, maxBufEntrs_, bgid_);
-        bufRing_ = nullptr;
+            bufRing_ = nullptr;
+        }
         if (bufBase_ != nullptr)
+        {
             ::free(bufBase_);
-        bufBase_ = nullptr;
+            bufBase_ = nullptr;
+        }
         maxBufEntrs_ = 0;
         handlerPool_.reset();
         eventPool_.reset();

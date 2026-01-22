@@ -1,40 +1,19 @@
 #pragma once
 
 #include <concepts>
-#include <vector>
-#include <sys/types.h>
-#include "transporter.hpp"
 
 template <typename O>
 concept mustResettable = requires(O obj) {{ obj.reset() } noexcept -> std::same_as<void>; };
 
-template <typename T>
-concept mustDerivedFromTransporter = std::derived_from<T, Transporter_base>;
-
-template <typename T>
-concept mustTransporter = std::same_as<T, Transporter_base>;
-
-template <typename P>
-struct ProtocolMember
-{
-};
-
-template <typename T>
-concept mustTransporterSSL = std::same_as<T, Transporter_ssl>;
-
-template <>
-struct ProtocolMember<Transporter_ssl>
-{
-    SSL_CTX *ctx = nullptr;
-};
+// Handler
 
 class Handler_base;
 
 template <typename H>
-concept mustDerivedFromHandler = std::derived_from<H, Handler_base>;
+concept mustDerivedFromHandlerBase = std::derived_from<H, Handler_base>;
 
 template <typename H>
-concept mustHandler = std::same_as<H, Handler_base>;
+concept mustHandlerBase = std::same_as<H, Handler_base>;
 
 enum class Mode_http
 {
@@ -43,7 +22,47 @@ enum class Mode_http
 };
 
 template <Mode_http M>
-class Handler_llhttp;
+class Handler_http;
 
 template <typename H, Mode_http M>
-concept mustHandlerHTTP = std::same_as<H, Handler_llhttp<M>>;
+concept mustHandlerHTTP = std::same_as<H, Handler_http<M>>;
+
+// Event
+
+template <typename HandlerType>
+    requires mustDerivedFromHandlerBase<HandlerType> && mustResettable<HandlerType>
+struct Event_base;
+
+template <typename E>
+concept mustDerivedFromEventBase = requires { typename E::Handler; } && std::derived_from<E, Event_base<typename E::Handler>>;
+
+template <typename E>
+concept mustEventBase = requires { typename E::Handler; } && std::same_as<E, Event_base<typename E::Handler>>;
+
+template <typename Handler>
+    requires mustDerivedFromHandlerBase<Handler> && mustResettable<Handler>
+struct Event_socket;
+
+template <typename E>
+concept mustEventSocket = requires { typename E::Handler; } && std::same_as<E, Event_socket<typename E::Handler>>;
+
+template <typename>
+struct Protocol
+{
+};
+
+template <typename Handler>
+    requires mustDerivedFromHandlerBase<Handler> && mustResettable<Handler>
+struct Event_ssl;
+
+template <typename E>
+concept mustEventSSL = requires { typename E::Handler; } && std::same_as<E, Event_ssl<typename E::Handler>>;
+
+#include <openssl/types.h>
+
+template <typename H>
+struct Protocol<Event_ssl<H>>
+{
+    SSL_CTX *ctx = nullptr;
+};
+

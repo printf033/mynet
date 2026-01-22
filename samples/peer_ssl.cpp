@@ -36,5 +36,5 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     std::cout << "Connecting to " << ip << ":" << port << std::endl;
-    return Peer<Transporter_ssl, Handler_base>().run_ssl(ip, port, crt);
+    return Peer<Event_ssl<Handler_base>>().run_ssl(ip, port, crt);
 }

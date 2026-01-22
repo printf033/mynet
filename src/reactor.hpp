@@ -8,16 +8,16 @@
 #include <cstring>
 #include <stop_token>
 
-template <mustDerivedFromTransporter Transporter, mustDerivedFromHandler Handler>
-    requires mustResettable<Transporter> && mustResettable<Handler>
+template <typename Event>
+    requires mustDerivedFromEventBase<Event> && mustResettable<Event>
 class Reactor // remember to add timers!
 {
-    [[no_unique_address]] ProtocolMember<Transporter> protocolMember_;
+    [[no_unique_address]] Protocol<Event> protocol_;
     int epollFd_ = -1;
     epoll_event *newEventBuf_ = nullptr;
-    Event<Transporter, Handler> accEvent_{};
-    ObjectPool<Event<Transporter, Handler>> eventPool_;
-    ObjectPool<Handler> handlerPool_;
+    Event accEvent_{};
+    ObjectPool<Event> eventPool_;
+    ObjectPool<typename Event::Handler> handlerPool_;
     std::stop_source stopSource_;
 
 public:
@@ -41,9 +41,9 @@ public:
     int run_tcp(const char *ip, int port, int backlog = 511,
                 size_t eventPoolSize = 1024, size_t handlerPoolSize = 256,
                 int maxBufEntrs = 1024, int bufSize = 4096)
-        requires mustTransporter<Transporter>
+        requires mustEventSocket<Event>
     {
-        int err = accEvent_.transporter.listen_tcp(ip, port, backlog);
+        int err = accEvent_.listen_tcp(ip, port, backlog);
         if (err < 0)
         {
             reset();
@@ -61,7 +61,7 @@ public:
         epoll_event acceptor;
         acceptor.events = EPOLLIN;
         acceptor.data.ptr = &accEvent_;
-        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, accEvent_.transporter.fd, &acceptor) < 0)
+        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, accEvent_.fd, &acceptor) < 0)
         {
             reset();
             return -9;
@@ -78,7 +78,7 @@ public:
             }
             for (int i = 0; i < n; ++i)
             {
-                Event<Transporter, Handler> *event = reinterpret_cast<Event<Transporter, Handler> *>(newEventBuf_[i].data.ptr);
+                Event *event = reinterpret_cast<Event *>(newEventBuf_[i].data.ptr);
                 if (event == nullptr)
                     goto error;
                 switch (event->type)
@@ -86,12 +86,12 @@ public:
                 case 1:
                     if (newEventBuf_[i].events & EPOLLIN)
                     {
-                        Event<Transporter, Handler> *cliEvent = eventPool_.acquire();
+                        Event *cliEvent = eventPool_.acquire();
                         if (cliEvent == nullptr)
                             goto error;
-                        socklen_t socklen = sizeof(cliEvent->transporter.addr);
-                        cliEvent->transporter.fd = ::accept4(accEvent_.transporter.fd, (sockaddr *)&cliEvent->transporter.addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
-                        if (cliEvent->transporter.fd < 0)
+                        socklen_t socklen = sizeof(cliEvent->addr);
+                        cliEvent->fd = ::accept4(accEvent_.fd, (sockaddr *)&cliEvent->addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                        if (cliEvent->fd < 0)
                         {
                             switch (errno)
                             {
@@ -107,7 +107,7 @@ public:
                         epoll_event recver;
                         recver.events = EPOLLIN | EPOLLET;
                         recver.data.ptr = cliEvent;
-                        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &recver) < 0)
+                        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->fd, &recver) < 0)
                             goto error;
                     }
                     else if (newEventBuf_[i].events & EPOLLOUT)
@@ -127,7 +127,7 @@ public:
                         std::vector<char> buf(bufSize, 0);
                         while (true)
                         {
-                            ssize_t rn = ::recv(event->transporter.fd, buf.data(), buf.size(), 0);
+                            ssize_t rn = ::recv(event->fd, buf.data(), buf.size(), 0);
                             if (rn < 0)
                             {
                                 switch (errno)
@@ -143,7 +143,7 @@ public:
                             else if (rn == 0)
                             {
                                 printf("client left\n"); ///
-                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                                epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->fd, nullptr);
                                 handlerPool_.release(event->handler);
                                 eventPool_.release(event);
                                 goto breakout;
@@ -157,7 +157,7 @@ public:
                                     epoll_event sender;
                                     sender.events = EPOLLIN | EPOLLOUT | EPOLLET;
                                     sender.data.ptr = event;
-                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                                         goto error;
                                 }
                             }
@@ -170,7 +170,7 @@ public:
                         ssize_t sn = 0;
                         do
                         {
-                            sn = ::send(event->transporter.fd, event->handler->responseBegin(), event->handler->responseLength(), MSG_NOSIGNAL);
+                            sn = ::send(event->fd, event->handler->responseBegin(), event->handler->responseLength(), MSG_NOSIGNAL);
                             if (sn <= 0)
                             {
                                 switch (errno)
@@ -188,7 +188,7 @@ public:
                         epoll_event sender;
                         sender.events = EPOLLIN | EPOLLET;
                         sender.data.ptr = event;
-                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                             goto error;
                     }
                     else
@@ -200,7 +200,7 @@ public:
                 default:
                 error:
                     fprintf(stderr, "%s", strerror(errno)); ///
-                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->fd, nullptr);
                     handlerPool_.release(event->handler);
                     eventPool_.release(event);
                     break;
@@ -231,31 +231,30 @@ public:
                 int backlog = 511,
                 size_t eventPoolSize = 1024, size_t handlerPoolSize = 256,
                 int maxBufEntrs = 1024, int bufSize = 4096)
-        requires mustTransporterSSL<Transporter>
+        requires mustEventSSL<Event>
     {
-        signal(SIGPIPE, SIG_IGN);
-        int err = accEvent_.transporter.listen_tcp(ip, port, backlog);
+        int err = accEvent_.listen_tcp(ip, port, backlog);
         if (err < 0)
         {
             reset();
             return err;
         }
-        if ((protocolMember_.ctx = SSL_CTX_new(TLS_server_method())) == nullptr)
+        if ((protocol_.ctx = SSL_CTX_new(TLS_server_method())) == nullptr)
         {
             reset();
             return -8;
         }
-        if (SSL_CTX_use_certificate_file(protocolMember_.ctx, crt, SSL_FILETYPE_PEM) <= 0)
+        if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0)
         {
             reset();
             return -9;
         }
-        if (SSL_CTX_use_PrivateKey_file(protocolMember_.ctx, key, SSL_FILETYPE_PEM) <= 0)
+        if (SSL_CTX_use_PrivateKey_file(protocol_.ctx, key, SSL_FILETYPE_PEM) <= 0)
         {
             reset();
             return -10;
         }
-        if (SSL_CTX_check_private_key(protocolMember_.ctx) <= 0)
+        if (SSL_CTX_check_private_key(protocol_.ctx) <= 0)
         {
             reset();
             return -11;
@@ -272,7 +271,7 @@ public:
         epoll_event acceptor;
         acceptor.events = EPOLLIN;
         acceptor.data.ptr = &accEvent_;
-        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, accEvent_.transporter.fd, &acceptor) < 0)
+        if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, accEvent_.fd, &acceptor) < 0)
         {
             reset();
             return -13;
@@ -289,7 +288,7 @@ public:
             }
             for (int i = 0; i < n; ++i)
             {
-                Event<Transporter, Handler> *event = reinterpret_cast<Event<Transporter, Handler> *>(newEventBuf_[i].data.ptr);
+                Event *event = reinterpret_cast<Event *>(newEventBuf_[i].data.ptr);
                 if (event == nullptr)
                     goto error;
                 switch (event->type)
@@ -297,12 +296,12 @@ public:
                 case 1:
                     if (newEventBuf_[i].events & EPOLLIN)
                     {
-                        Event<Transporter, Handler> *cliEvent = eventPool_.acquire();
+                        Event *cliEvent = eventPool_.acquire();
                         if (cliEvent == nullptr)
                             goto error;
-                        socklen_t socklen = sizeof(cliEvent->transporter.addr);
-                        cliEvent->transporter.fd = ::accept4(accEvent_.transporter.fd, (sockaddr *)&cliEvent->transporter.addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
-                        if (cliEvent->transporter.fd < 0)
+                        socklen_t socklen = sizeof(cliEvent->addr);
+                        cliEvent->fd = ::accept4(accEvent_.fd, (sockaddr *)&cliEvent->addr, &socklen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                        if (cliEvent->fd < 0)
                         {
                             switch (errno)
                             {
@@ -310,15 +309,15 @@ public:
                                 goto error;
                             }
                         }
-                        cliEvent->transporter.ssl = SSL_new(protocolMember_.ctx);
-                        if (cliEvent->transporter.ssl == nullptr)
+                        cliEvent->ssl = SSL_new(protocol_.ctx);
+                        if (cliEvent->ssl == nullptr)
                             goto error;
-                        if (SSL_set_fd(cliEvent->transporter.ssl, cliEvent->transporter.fd) <= 0)
+                        if (SSL_set_fd(cliEvent->ssl, cliEvent->fd) <= 0)
                             goto error;
-                        int e = SSL_accept(cliEvent->transporter.ssl);
+                        int e = SSL_accept(cliEvent->ssl);
                         if (e < 0)
                         {
-                            switch (SSL_get_error(cliEvent->transporter.ssl, e))
+                            switch (SSL_get_error(cliEvent->ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                             {
@@ -326,7 +325,7 @@ public:
                                 epoll_event recver;
                                 recver.events = EPOLLIN | EPOLLET;
                                 recver.data.ptr = cliEvent;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &recver) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->fd, &recver) < 0)
                                     goto error;
                             }
                             break;
@@ -336,7 +335,7 @@ public:
                                 epoll_event sender;
                                 sender.events = EPOLLOUT | EPOLLET;
                                 sender.data.ptr = cliEvent;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &sender) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->fd, &sender) < 0)
                                     goto error;
                             }
                             break;
@@ -358,7 +357,7 @@ public:
                             epoll_event recver;
                             recver.events = EPOLLIN | EPOLLET;
                             recver.data.ptr = cliEvent;
-                            if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->transporter.fd, &recver) < 0)
+                            if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, cliEvent->fd, &recver) < 0)
                                 goto error;
                         }
                     }
@@ -379,10 +378,10 @@ public:
                         std::vector<char> buf(bufSize, 0);
                         while (true)
                         {
-                            ssize_t rn = ::SSL_read(event->transporter.ssl, buf.data(), buf.size());
+                            ssize_t rn = ::SSL_read(event->ssl, buf.data(), buf.size());
                             if (rn < 0)
                             {
-                                switch (SSL_get_error(event->transporter.ssl, rn))
+                                switch (SSL_get_error(event->ssl, rn))
                                 {
                                 case SSL_ERROR_WANT_READ:
                                     goto breakout;
@@ -392,10 +391,10 @@ public:
                             }
                             else if (rn == 0)
                             {
-                                int e = SSL_shutdown(event->transporter.ssl);
+                                int e = SSL_shutdown(event->ssl);
                                 if (e <= 0)
                                 {
-                                    switch (SSL_get_error(event->transporter.ssl, e))
+                                    switch (SSL_get_error(event->ssl, e))
                                     {
                                     case SSL_ERROR_WANT_READ:
                                     {
@@ -403,7 +402,7 @@ public:
                                         epoll_event recver;
                                         recver.events = EPOLLIN | EPOLLET;
                                         recver.data.ptr = event;
-                                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &recver) < 0)
                                             goto error;
                                     }
                                     break;
@@ -413,7 +412,7 @@ public:
                                         epoll_event sender;
                                         sender.events = EPOLLOUT | EPOLLET;
                                         sender.data.ptr = event;
-                                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                                             goto error;
                                     }
                                     break;
@@ -424,7 +423,7 @@ public:
                                 else
                                 {
                                     printf("client left\n"); ///
-                                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->fd, nullptr);
                                     handlerPool_.release(event->handler);
                                     eventPool_.release(event);
                                     goto breakout;
@@ -439,7 +438,7 @@ public:
                                     epoll_event sender;
                                     sender.events = EPOLLIN | EPOLLOUT | EPOLLET;
                                     sender.data.ptr = event;
-                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                    if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                                         goto error;
                                 }
                             }
@@ -452,10 +451,10 @@ public:
                         ssize_t sn = 0;
                         do
                         {
-                            sn = ::SSL_write(event->transporter.ssl, event->handler->responseBegin(), event->handler->responseLength());
+                            sn = ::SSL_write(event->ssl, event->handler->responseBegin(), event->handler->responseLength());
                             if (sn <= 0)
                             {
-                                switch (SSL_get_error(event->transporter.ssl, sn))
+                                switch (SSL_get_error(event->ssl, sn))
                                 {
                                 case SSL_ERROR_WANT_WRITE:
                                     goto breakout;
@@ -468,7 +467,7 @@ public:
                         epoll_event sender;
                         sender.events = EPOLLIN | EPOLLET;
                         sender.data.ptr = event;
-                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                        if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                             goto error;
                     }
                     else
@@ -480,10 +479,10 @@ public:
                 case 3:
                     if (newEventBuf_[i].events & EPOLLIN)
                     {
-                        int e = SSL_accept(event->transporter.ssl);
+                        int e = SSL_accept(event->ssl);
                         if (e < 0)
                         {
-                            switch (SSL_get_error(event->transporter.ssl, e))
+                            switch (SSL_get_error(event->ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                                 break;
@@ -492,7 +491,7 @@ public:
                                 epoll_event sender;
                                 sender.events = EPOLLOUT | EPOLLET;
                                 sender.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                                     goto error;
                             }
                             break;
@@ -514,23 +513,23 @@ public:
                             epoll_event recver;
                             recver.events = EPOLLIN | EPOLLET;
                             recver.data.ptr = event;
-                            if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                            if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &recver) < 0)
                                 goto error;
                         }
                     }
                     else if (newEventBuf_[i].events & EPOLLOUT)
                     {
-                        int e = SSL_accept(event->transporter.ssl);
+                        int e = SSL_accept(event->ssl);
                         if (e < 0)
                         {
-                            switch (SSL_get_error(event->transporter.ssl, e))
+                            switch (SSL_get_error(event->ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                             {
                                 epoll_event recver;
                                 recver.events = EPOLLIN | EPOLLET;
                                 recver.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &recver) < 0)
                                     goto error;
                             }
                             break;
@@ -554,7 +553,7 @@ public:
                             epoll_event recver;
                             recver.events = EPOLLIN | EPOLLET;
                             recver.data.ptr = event;
-                            if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                            if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &recver) < 0)
                                 goto error;
                         }
                     }
@@ -566,10 +565,10 @@ public:
                 case 4:
                     if (newEventBuf_[i].events & EPOLLIN)
                     {
-                        int e = SSL_shutdown(event->transporter.ssl);
+                        int e = SSL_shutdown(event->ssl);
                         if (e <= 0)
                         {
-                            switch (SSL_get_error(event->transporter.ssl, e))
+                            switch (SSL_get_error(event->ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                                 break;
@@ -578,7 +577,7 @@ public:
                                 epoll_event sender;
                                 sender.events = EPOLLOUT | EPOLLET;
                                 sender.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                                     goto error;
                             }
                             break;
@@ -589,24 +588,24 @@ public:
                         else
                         {
                             printf("client left\n"); ///
-                            epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                            epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->fd, nullptr);
                             handlerPool_.release(event->handler);
                             eventPool_.release(event);
                         }
                     }
                     else if (newEventBuf_[i].events & EPOLLOUT)
                     {
-                        int e = SSL_shutdown(event->transporter.ssl);
+                        int e = SSL_shutdown(event->ssl);
                         if (e <= 0)
                         {
-                            switch (SSL_get_error(event->transporter.ssl, e))
+                            switch (SSL_get_error(event->ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                             {
                                 epoll_event recver;
                                 recver.events = EPOLLIN | EPOLLET;
                                 recver.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &recver) < 0)
                                     goto error;
                             }
                             break;
@@ -619,7 +618,7 @@ public:
                         else
                         {
                             printf("client left\n"); ///
-                            epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                            epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->fd, nullptr);
                             handlerPool_.release(event->handler);
                             eventPool_.release(event);
                         }
@@ -632,12 +631,12 @@ public:
                 default:
                 error:
                     fprintf(stderr, "%s", strerror(errno)); ///
-                    if (event->transporter.ssl != nullptr)
+                    if (event->ssl != nullptr)
                     {
-                        int e = SSL_shutdown(event->transporter.ssl);
+                        int e = SSL_shutdown(event->ssl);
                         if (e <= 0)
                         {
-                            switch (SSL_get_error(event->transporter.ssl, e))
+                            switch (SSL_get_error(event->ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                             {
@@ -645,7 +644,7 @@ public:
                                 epoll_event recver;
                                 recver.events = EPOLLIN | EPOLLET;
                                 recver.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &recver) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &recver) < 0)
                                     goto cleanup;
                             }
                             break;
@@ -655,7 +654,7 @@ public:
                                 epoll_event sender;
                                 sender.events = EPOLLOUT | EPOLLET;
                                 sender.data.ptr = event;
-                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->transporter.fd, &sender) < 0)
+                                if (epoll_ctl(epollFd_, EPOLL_CTL_MOD, event->fd, &sender) < 0)
                                     goto cleanup;
                             }
                             break;
@@ -666,7 +665,7 @@ public:
                     }
                 cleanup:
                     ERR_clear_error();
-                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->transporter.fd, nullptr);
+                    epoll_ctl(epollFd_, EPOLL_CTL_DEL, event->fd, nullptr);
                     handlerPool_.release(event->handler);
                     eventPool_.release(event);
                 }
@@ -678,13 +677,13 @@ public:
     inline void stop() const noexcept { stopSource_.request_stop(); }
     inline void reset() noexcept
     {
-        if constexpr (mustTransporterSSL<Transporter>)
+        if constexpr (mustEventSSL<Event>)
         {
-            if (protocolMember_.ctx != nullptr)
-                SSL_CTX_free(protocolMember_.ctx);
-            protocolMember_.ctx = nullptr;
+            if (protocol_.ctx != nullptr)
+                SSL_CTX_free(protocol_.ctx);
+            protocol_.ctx = nullptr;
         }
-        epoll_ctl(epollFd_, EPOLL_CTL_DEL, accEvent_.transporter.fd, nullptr);
+        epoll_ctl(epollFd_, EPOLL_CTL_DEL, accEvent_.fd, nullptr);
         if (newEventBuf_ != nullptr)
             delete[] newEventBuf_;
         newEventBuf_ = nullptr;

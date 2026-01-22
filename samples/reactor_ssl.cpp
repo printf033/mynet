@@ -40,5 +40,5 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     std::cout << "listening to " << ip << ":" << port << std::endl;
-    return Reactor<Transporter_ssl, Handler_base>().run_ssl(ip, port, crt, key);
+    return Reactor<Event_ssl<Handler_base>>().run_ssl(ip, port, crt, key);
 }

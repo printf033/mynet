@@ -1,18 +1,19 @@
 #pragma once
 
 #include "myconcepts.hpp"
-#include "transporter.hpp"
+#include "event.hpp"
 #include "handler.hpp"
 #include <string>
+#include <vector>
 #include <stop_token>
 
-template <mustDerivedFromTransporter Transporter, mustDerivedFromHandler Handler>
-    requires mustResettable<Transporter> && mustResettable<Handler>
+template <typename Event>
+    requires mustDerivedFromEventBase<Event> && mustResettable<Event>
 class Peer // remember to add timers!
 {
-    [[no_unique_address]] ProtocolMember<Transporter> protocolMember_;
-    Transporter transporter_{};
-    Handler handler_{};
+    [[no_unique_address]] Protocol<Event> protocol_;
+    Event event_{};
+    Event::Handler handler_{};
     std::stop_source stopSource_;
 
 public:
@@ -33,12 +34,12 @@ public:
     // -8 getsockopt() error
     int run_tcp(const char *ip, int port,
                 int bufSize = 4096)
-        requires mustTransporter<Transporter>
+        requires mustEventSocket<Event>
     {
         if (ip == nullptr)
             return -1;
-        transporter_.addr.sin_family = AF_INET;
-        if (::inet_pton(AF_INET, ip, &transporter_.addr.sin_addr) <= 0)
+        event_.addr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &event_.addr.sin_addr) <= 0)
         {
             reset();
             return -1;
@@ -48,36 +49,36 @@ public:
             reset();
             return -2;
         }
-        transporter_.addr.sin_port = ::htons(port);
-        transporter_.fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (transporter_.fd < 0)
+        event_.addr.sin_port = ::htons(port);
+        event_.fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (event_.fd < 0)
         {
             reset();
             return -3;
         }
         int flg;
-        if ((flg = ::fcntl(transporter_.fd, F_GETFL, 0)) < 0)
+        if ((flg = ::fcntl(event_.fd, F_GETFL, 0)) < 0)
         {
             reset();
             return -4;
         }
-        if (::fcntl(transporter_.fd, F_SETFL, flg | O_NONBLOCK) < 0)
+        if (::fcntl(event_.fd, F_SETFL, flg | O_NONBLOCK) < 0)
         {
             reset();
             return -4;
         }
         int opt = 1;
-        if (::setsockopt(transporter_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        if (::setsockopt(event_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
         {
             reset();
             return -5;
         }
-        if (::setsockopt(transporter_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        if (::setsockopt(event_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
         {
             reset();
             return -5;
         }
-        if (::connect(transporter_.fd, (const sockaddr *)&transporter_.addr, sizeof(transporter_.addr)) < 0 && errno != EINPROGRESS)
+        if (::connect(event_.fd, (const sockaddr *)&event_.addr, sizeof(event_.addr)) < 0 && errno != EINPROGRESS)
         {
             reset();
             return -6;
@@ -92,10 +93,10 @@ public:
             fd_set writeFds;
             FD_ZERO(&readFds);
             FD_ZERO(&writeFds);
-            FD_SET(transporter_.fd, &readFds);
-            FD_SET(transporter_.fd, &writeFds);
+            FD_SET(event_.fd, &readFds);
+            FD_SET(event_.fd, &writeFds);
             FD_SET(STDIN_FILENO, &readFds);
-            int n = ::select(transporter_.fd + 1, &readFds, &writeFds, nullptr, &timeout);
+            int n = ::select(event_.fd + 1, &readFds, &writeFds, nullptr, &timeout);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -109,7 +110,7 @@ public:
                 timeout.tv_usec = 0;
                 int errno_lag = 0;
                 socklen_t len = sizeof(errno_lag);
-                if (::getsockopt(transporter_.fd, SOL_SOCKET, SO_ERROR, &errno_lag, &len) < 0 || errno_lag != 0)
+                if (::getsockopt(event_.fd, SOL_SOCKET, SO_ERROR, &errno_lag, &len) < 0 || errno_lag != 0)
                 {
                     reset();
                     return -8;
@@ -117,11 +118,11 @@ public:
             }
             else
             {
-                if (FD_ISSET(transporter_.fd, &readFds))
+                if (FD_ISSET(event_.fd, &readFds))
                 {
                     while (true)
                     {
-                        ssize_t rn = ::recv(transporter_.fd, buf.data(), buf.size(), 0);
+                        ssize_t rn = ::recv(event_.fd, buf.data(), buf.size(), 0);
                         if (rn < 0)
                         {
                             switch (errno)
@@ -150,7 +151,7 @@ public:
                     }
                 recvover:;
                 }
-                if (FD_ISSET(transporter_.fd, &writeFds))
+                if (FD_ISSET(event_.fd, &writeFds))
                 {
                     if (FD_ISSET(STDIN_FILENO, &readFds))
                         handler_.stdin2response();
@@ -159,7 +160,7 @@ public:
                         ssize_t sn = 0;
                         do
                         {
-                            sn = ::send(transporter_.fd, handler_.responseBegin(), handler_.responseLength(), MSG_NOSIGNAL);
+                            sn = ::send(event_.fd, handler_.responseBegin(), handler_.responseLength(), MSG_NOSIGNAL);
                             if (sn <= 0)
                             {
                                 switch (errno)
@@ -193,12 +194,12 @@ public:
     // -7 getsockopt() error
     int run_udp(const char *ip, int port,
                 int bufSize = 4096)
-        requires mustTransporter<Transporter>
+        requires mustEventSocket<Event>
     {
         if (ip == nullptr)
             return -1;
-        transporter_.addr.sin_family = AF_INET;
-        if (::inet_pton(AF_INET, ip, &transporter_.addr.sin_addr) <= 0)
+        event_.addr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &event_.addr.sin_addr) <= 0)
         {
             reset();
             return -1;
@@ -208,36 +209,36 @@ public:
             reset();
             return -2;
         }
-        transporter_.addr.sin_port = ::htons(port);
-        transporter_.fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-        if (transporter_.fd < 0)
+        event_.addr.sin_port = ::htons(port);
+        event_.fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (event_.fd < 0)
         {
             reset();
             return -3;
         }
         int flg;
-        if ((flg = ::fcntl(transporter_.fd, F_GETFL, 0)) < 0)
+        if ((flg = ::fcntl(event_.fd, F_GETFL, 0)) < 0)
         {
             reset();
             return -4;
         }
-        if (::fcntl(transporter_.fd, F_SETFL, flg | O_NONBLOCK) < 0)
+        if (::fcntl(event_.fd, F_SETFL, flg | O_NONBLOCK) < 0)
         {
             reset();
             return -4;
         }
         int opt = 1;
-        if (::setsockopt(transporter_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        if (::setsockopt(event_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
         {
             reset();
             return -5;
         }
-        if (::setsockopt(transporter_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        if (::setsockopt(event_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
         {
             reset();
             return -5;
         }
-        if (::setsockopt(transporter_.fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0)
+        if (::setsockopt(event_.fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0)
         {
             reset();
             return -5;
@@ -252,10 +253,10 @@ public:
             fd_set writeFds;
             FD_ZERO(&readFds);
             FD_ZERO(&writeFds);
-            FD_SET(transporter_.fd, &readFds);
-            FD_SET(transporter_.fd, &writeFds);
+            FD_SET(event_.fd, &readFds);
+            FD_SET(event_.fd, &writeFds);
             FD_SET(STDIN_FILENO, &readFds);
-            int n = ::select(transporter_.fd + 1, &readFds, &writeFds, nullptr, &timeout);
+            int n = ::select(event_.fd + 1, &readFds, &writeFds, nullptr, &timeout);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -269,7 +270,7 @@ public:
                 timeout.tv_usec = 0;
                 int errno_lag = 0;
                 socklen_t len = sizeof(errno_lag);
-                if (::getsockopt(transporter_.fd, SOL_SOCKET, SO_ERROR, &errno_lag, &len) < 0 || errno_lag != 0)
+                if (::getsockopt(event_.fd, SOL_SOCKET, SO_ERROR, &errno_lag, &len) < 0 || errno_lag != 0)
                 {
                     reset();
                     return -7;
@@ -277,12 +278,12 @@ public:
             }
             else
             {
-                socklen_t socklen = sizeof(transporter_.addr);
-                if (FD_ISSET(transporter_.fd, &readFds))
+                socklen_t socklen = sizeof(event_.addr);
+                if (FD_ISSET(event_.fd, &readFds))
                 {
                     while (true)
                     {
-                        ssize_t rn = ::recvfrom(transporter_.fd, buf.data(), buf.size(), 0, (sockaddr *)&transporter_.addr, &socklen);
+                        ssize_t rn = ::recvfrom(event_.fd, buf.data(), buf.size(), 0, (sockaddr *)&event_.addr, &socklen);
                         if (rn < 0)
                         {
                             switch (errno)
@@ -305,7 +306,7 @@ public:
                     }
                 recvover:;
                 }
-                if (FD_ISSET(transporter_.fd, &writeFds))
+                if (FD_ISSET(event_.fd, &writeFds))
                 {
                     if (FD_ISSET(STDIN_FILENO, &readFds))
                         handler_.stdin2response();
@@ -314,7 +315,7 @@ public:
                         ssize_t sn = 0;
                         do
                         {
-                            sn = ::sendto(transporter_.fd, handler_.responseBegin(), handler_.responseLength(), MSG_NOSIGNAL, (sockaddr *)&transporter_.addr, socklen);
+                            sn = ::sendto(event_.fd, handler_.responseBegin(), handler_.responseLength(), MSG_NOSIGNAL, (sockaddr *)&event_.addr, socklen);
                             if (sn < 0)
                             {
                                 switch (errno)
@@ -355,13 +356,12 @@ public:
     int run_ssl(const char *ip, int port,
                 const char *crt = nullptr,
                 int bufSize = 4096)
-        requires mustTransporterSSL<Transporter>
+        requires mustEventSSL<Event>
     {
-        signal(SIGPIPE, SIG_IGN);
         if (ip == nullptr)
             return -1;
-        transporter_.addr.sin_family = AF_INET;
-        if (::inet_pton(AF_INET, ip, &transporter_.addr.sin_addr) <= 0)
+        event_.addr.sin_family = AF_INET;
+        if (::inet_pton(AF_INET, ip, &event_.addr.sin_addr) <= 0)
         {
             reset();
             return -1;
@@ -371,64 +371,64 @@ public:
             reset();
             return -2;
         }
-        transporter_.addr.sin_port = ::htons(port);
-        if ((transporter_.fd = ::socket(AF_INET, SOCK_STREAM, 0)) < 0)
+        event_.addr.sin_port = ::htons(port);
+        if ((event_.fd = ::socket(AF_INET, SOCK_STREAM, 0)) < 0)
         {
             reset();
             return -3;
         }
         int flg;
-        if ((flg = ::fcntl(transporter_.fd, F_GETFL, 0)) < 0)
+        if ((flg = ::fcntl(event_.fd, F_GETFL, 0)) < 0)
         {
             reset();
             return -4;
         }
-        if (::fcntl(transporter_.fd, F_SETFL, flg | O_NONBLOCK) < 0)
+        if (::fcntl(event_.fd, F_SETFL, flg | O_NONBLOCK) < 0)
         {
             reset();
             return -4;
         }
         int opt = 1;
-        if (::setsockopt(transporter_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        if (::setsockopt(event_.fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
         {
             reset();
             return -5;
         }
-        if (::setsockopt(transporter_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+        if (::setsockopt(event_.fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
         {
             reset();
             return -5;
         }
-        if (::connect(transporter_.fd, (const sockaddr *)&transporter_.addr, sizeof(transporter_.addr)) < 0 && errno != EINPROGRESS)
+        if (::connect(event_.fd, (const sockaddr *)&event_.addr, sizeof(event_.addr)) < 0 && errno != EINPROGRESS)
         {
             reset();
             return -6;
         }
-        if ((protocolMember_.ctx = SSL_CTX_new(TLS_client_method())) == nullptr)
+        if ((protocol_.ctx = SSL_CTX_new(TLS_client_method())) == nullptr)
         {
             reset();
             return -7;
         }
-        if (SSL_CTX_set_default_verify_paths(protocolMember_.ctx) <= 0)
+        if (SSL_CTX_set_default_verify_paths(protocol_.ctx) <= 0)
         {
             reset();
             return -8;
         }
         if (crt == nullptr)
-            SSL_CTX_set_verify(protocolMember_.ctx, SSL_VERIFY_NONE, nullptr);
+            SSL_CTX_set_verify(protocol_.ctx, SSL_VERIFY_NONE, nullptr);
         else
-            SSL_CTX_set_verify(protocolMember_.ctx, SSL_VERIFY_PEER, nullptr);
-        if ((transporter_.ssl = SSL_new(protocolMember_.ctx)) == nullptr)
+            SSL_CTX_set_verify(protocol_.ctx, SSL_VERIFY_PEER, nullptr);
+        if ((event_.ssl = SSL_new(protocol_.ctx)) == nullptr)
         {
             reset();
             return -9;
         }
-        if (SSL_set_fd(transporter_.ssl, transporter_.fd) <= 0)
+        if (SSL_set_fd(event_.ssl, event_.fd) <= 0)
         {
             reset();
             return -10;
         }
-        if (crt != nullptr && SSL_CTX_load_verify_locations(protocolMember_.ctx, crt, nullptr) <= 0)
+        if (crt != nullptr && SSL_CTX_load_verify_locations(protocol_.ctx, crt, nullptr) <= 0)
         {
             reset();
             return -11;
@@ -437,17 +437,17 @@ public:
         timeout.tv_sec = 5;
         timeout.tv_usec = 0;
         std::vector<char> buf(bufSize, 0);
-        int type = 1;
+        event_.type = 1;
         while (!stopSource_.stop_requested())
         {
             fd_set readFds;
             fd_set writeFds;
             FD_ZERO(&readFds);
             FD_ZERO(&writeFds);
-            FD_SET(transporter_.fd, &readFds);
-            FD_SET(transporter_.fd, &writeFds);
+            FD_SET(event_.fd, &readFds);
+            FD_SET(event_.fd, &writeFds);
             FD_SET(STDIN_FILENO, &readFds);
-            int n = ::select(transporter_.fd + 1, &readFds, &writeFds, nullptr, &timeout);
+            int n = ::select(event_.fd + 1, &readFds, &writeFds, nullptr, &timeout);
             if (n < 0)
             {
                 if (errno == EINTR)
@@ -461,7 +461,7 @@ public:
                 timeout.tv_usec = 0;
                 int errno_lag = 0;
                 socklen_t len = sizeof(errno_lag);
-                if (::getsockopt(transporter_.fd, SOL_SOCKET, SO_ERROR, &errno_lag, &len) < 0 || errno_lag != 0)
+                if (::getsockopt(event_.fd, SOL_SOCKET, SO_ERROR, &errno_lag, &len) < 0 || errno_lag != 0)
                 {
                     reset();
                     return -13;
@@ -469,25 +469,25 @@ public:
             }
             else
             {
-                switch (type)
+                switch (event_.type)
                 {
                 case 1:
-                    if (FD_ISSET(transporter_.fd, &readFds))
+                    if (FD_ISSET(event_.fd, &readFds))
                     {
                         goto error;
                     }
-                    else if (FD_ISSET(transporter_.fd, &writeFds))
+                    else if (FD_ISSET(event_.fd, &writeFds))
                     {
-                        int e = SSL_connect(transporter_.ssl);
+                        int e = SSL_connect(event_.ssl);
                         if (e < 0)
                         {
-                            switch (SSL_get_error(transporter_.ssl, e))
+                            switch (SSL_get_error(event_.ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
-                                type = 3;
+                                event_.type = 3;
                                 break;
                             case SSL_ERROR_WANT_WRITE:
-                                type = 3;
+                                event_.type = 3;
                                 break;
                             default:
                                 goto error;
@@ -500,7 +500,7 @@ public:
                         }
                         else
                         {
-                            type = 2;
+                            event_.type = 2;
                         }
                     }
                     else
@@ -509,14 +509,14 @@ public:
                     }
                     break;
                 case 2:
-                    if (FD_ISSET(transporter_.fd, &readFds))
+                    if (FD_ISSET(event_.fd, &readFds))
                     {
                         while (true)
                         {
-                            ssize_t rn = ::SSL_read(transporter_.ssl, buf.data(), buf.size());
+                            ssize_t rn = ::SSL_read(event_.ssl, buf.data(), buf.size());
                             if (rn < 0)
                             {
-                                switch (SSL_get_error(transporter_.ssl, rn))
+                                switch (SSL_get_error(event_.ssl, rn))
                                 {
                                 case SSL_ERROR_WANT_READ:
                                     goto recvover;
@@ -526,16 +526,16 @@ public:
                             }
                             else if (rn == 0)
                             {
-                                int e = SSL_shutdown(transporter_.ssl);
+                                int e = SSL_shutdown(event_.ssl);
                                 if (e <= 0)
                                 {
-                                    switch (SSL_get_error(transporter_.ssl, e))
+                                    switch (SSL_get_error(event_.ssl, e))
                                     {
                                     case SSL_ERROR_WANT_READ:
-                                        type = 4;
+                                        event_.type = 4;
                                         break;
                                     case SSL_ERROR_WANT_WRITE:
-                                        type = 4;
+                                        event_.type = 4;
                                         break;
                                     default:
                                         goto error;
@@ -556,7 +556,7 @@ public:
                         }
                     recvover:;
                     }
-                    if (FD_ISSET(transporter_.fd, &writeFds))
+                    if (FD_ISSET(event_.fd, &writeFds))
                     {
                         if (FD_ISSET(STDIN_FILENO, &readFds))
                             handler_.stdin2response();
@@ -565,10 +565,10 @@ public:
                             ssize_t sn = 0;
                             do
                             {
-                                sn = ::SSL_write(transporter_.ssl, handler_.responseBegin(), handler_.responseLength());
+                                sn = ::SSL_write(event_.ssl, handler_.responseBegin(), handler_.responseLength());
                                 if (sn <= 0)
                                 {
-                                    switch (SSL_get_error(transporter_.ssl, sn))
+                                    switch (SSL_get_error(event_.ssl, sn))
                                     {
                                     case SSL_ERROR_WANT_WRITE:
                                         goto sendlater;
@@ -582,12 +582,12 @@ public:
                     }
                     break;
                 case 3:
-                    if (FD_ISSET(transporter_.fd, &readFds))
+                    if (FD_ISSET(event_.fd, &readFds))
                     {
-                        int e = SSL_connect(transporter_.ssl);
+                        int e = SSL_connect(event_.ssl);
                         if (e < 0)
                         {
-                            switch (SSL_get_error(transporter_.ssl, e))
+                            switch (SSL_get_error(event_.ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                                 break;
@@ -604,15 +604,15 @@ public:
                         }
                         else
                         {
-                            type = 2;
+                            event_.type = 2;
                         }
                     }
-                    else if (FD_ISSET(transporter_.fd, &writeFds))
+                    else if (FD_ISSET(event_.fd, &writeFds))
                     {
-                        int e = SSL_connect(transporter_.ssl);
+                        int e = SSL_connect(event_.ssl);
                         if (e < 0)
                         {
-                            switch (SSL_get_error(transporter_.ssl, e))
+                            switch (SSL_get_error(event_.ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                                 break;
@@ -629,7 +629,7 @@ public:
                         }
                         else
                         {
-                            type = 2;
+                            event_.type = 2;
                         }
                     }
                     else
@@ -638,12 +638,12 @@ public:
                     }
                     break;
                 case 4:
-                    if (FD_ISSET(transporter_.fd, &readFds))
+                    if (FD_ISSET(event_.fd, &readFds))
                     {
-                        int e = SSL_shutdown(transporter_.ssl);
+                        int e = SSL_shutdown(event_.ssl);
                         if (e <= 0)
                         {
-                            switch (SSL_get_error(transporter_.ssl, e))
+                            switch (SSL_get_error(event_.ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                                 break;
@@ -658,12 +658,12 @@ public:
                             stop();
                         }
                     }
-                    else if (FD_ISSET(transporter_.fd, &writeFds))
+                    else if (FD_ISSET(event_.fd, &writeFds))
                     {
-                        int e = SSL_shutdown(transporter_.ssl);
+                        int e = SSL_shutdown(event_.ssl);
                         if (e <= 0)
                         {
-                            switch (SSL_get_error(transporter_.ssl, e))
+                            switch (SSL_get_error(event_.ssl, e))
                             {
                             case SSL_ERROR_WANT_READ:
                                 break;
@@ -686,16 +686,16 @@ public:
                 default:
                 error:
                     fprintf(stderr, "%s", strerror(errno)); ///
-                    int e = SSL_shutdown(transporter_.ssl);
+                    int e = SSL_shutdown(event_.ssl);
                     if (e <= 0)
                     {
-                        switch (SSL_get_error(transporter_.ssl, e))
+                        switch (SSL_get_error(event_.ssl, e))
                         {
                         case SSL_ERROR_WANT_READ:
-                            type = 4;
+                            event_.type = 4;
                             break;
                         case SSL_ERROR_WANT_WRITE:
-                            type = 4;
+                            event_.type = 4;
                             break;
                         default:
                             goto error;
@@ -715,13 +715,13 @@ public:
     inline void stop() const noexcept { stopSource_.request_stop(); }
     inline void reset() noexcept
     {
-        if constexpr (mustTransporterSSL<Transporter>)
+        if constexpr (mustEventSSL<Event>)
         {
-            if (protocolMember_.ctx != nullptr)
-                SSL_CTX_free(protocolMember_.ctx);
-            protocolMember_.ctx = nullptr;
+            if (protocol_.ctx != nullptr)
+                SSL_CTX_free(protocol_.ctx);
+            protocol_.ctx = nullptr;
         }
         handler_.reset();
-        transporter_.reset();
+        event_.reset();
     }
 };

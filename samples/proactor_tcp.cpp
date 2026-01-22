@@ -32,5 +32,5 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     std::cout << "listening to " << ip << ":" << port << std::endl;
-    return Proactor<Transporter_base, Handler_base>().run_tcp(ip, port);
+    return Proactor<Event_socket<Handler_base>>().run_tcp(ip, port);
 }

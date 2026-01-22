@@ -32,5 +32,5 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     std::cout << "Connecting to " << ip << ":" << port << std::endl;
-    return Peer<Transporter_base, Handler_base>().run_udp(ip, port);
+    return Peer<Event_socket<Handler_base>>().run_udp(ip, port);
 }

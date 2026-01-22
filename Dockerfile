@@ -12,7 +12,8 @@ RUN sed -i "s|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu
     make \
     pkg-config \
     libssl-dev \
-    liburing-dev && \
+    liburing-dev \
+    libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
 COPY . .
