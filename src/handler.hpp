@@ -129,7 +129,7 @@ public:
 #include "myconcepts.hpp"
 #include <llhttp.h>
 
-template <Mode_http Mode>
+template <MODE_http Mode>
 class Handler_http : public Handler_base
 {
     llhttp_t parser_;
@@ -180,7 +180,7 @@ public:
     }
     inline void reset() noexcept
     {
-        if constexpr (Mode == Mode_http::REQUEST)
+        if constexpr (Mode == MODE_http::REQUEST)
             llhttp_init(&parser_, HTTP_REQUEST, &settings_);
         else
             llhttp_init(&parser_, HTTP_RESPONSE, &settings_);
@@ -238,7 +238,7 @@ public:
             // do business
             return 0;
         };
-        if constexpr (Mode == Mode_http::REQUEST)
+        if constexpr (Mode == MODE_http::REQUEST)
             llhttp_init(&parser_, HTTP_REQUEST, &settings_);
         else
             llhttp_init(&parser_, HTTP_RESPONSE, &settings_);

@@ -15,16 +15,16 @@ concept mustDerivedFromHandlerBase = std::derived_from<H, Handler_base>;
 template <typename H>
 concept mustHandlerBase = std::same_as<H, Handler_base>;
 
-enum class Mode_http
+enum class MODE_http
 {
     REQUEST,
     RESPONSE
 };
 
-template <Mode_http M>
+template <MODE_http M>
 class Handler_http;
 
-template <typename H, Mode_http M>
+template <typename H, MODE_http M>
 concept mustHandlerHTTP = std::same_as<H, Handler_http<M>>;
 
 // Event
