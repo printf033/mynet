@@ -15,7 +15,7 @@ int main(int argc, char *argv[])
         name = argv[1];
         [[fallthrough]];
     default:
-        std::cout << "Resolving " << name << ":" << service << std::endl;
+        std::cout << "resolving " << name << ":" << service << std::endl;
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
     if (e != 0)
     {
         std::cerr << "Error: " << gai_strerror(e) << std::endl;
-        return -1;
+        return EXIT_FAILURE;
     }
     auto *addr = reinterpret_cast<sockaddr_in *>(res->ai_addr);
     char ip[INET_ADDRSTRLEN];
