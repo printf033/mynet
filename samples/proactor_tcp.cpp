@@ -1,11 +1,16 @@
-#include "proactor.hpp"
+#include "error.hpp"
 #include "handler.hpp"
+#include "log.hpp"
+#include "proactor.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
+    // Send mylog's output to stderr before anything can log: the data this
+    // program streams over stdout must stay untouched.
+    mynetlog::init();
     const char *name = "0.0.0.0";
-    const char *service = "8080";
+    const char *service = "8888";
     switch (argc)
     {
     case 3:
@@ -15,7 +20,7 @@ int main(int argc, char *argv[])
         name = argv[1];
         [[fallthrough]];
     default:
-        std::cout << "resolving " << name << ":" << service << std::endl;
+        LOG_INFO("resolving {}:{}", name, service);
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
@@ -23,7 +28,7 @@ int main(int argc, char *argv[])
     int e = getaddrinfo(name, service, &hints, &res);
     if (e != 0)
     {
-        std::cerr << "Error: " << gai_strerror(e) << std::endl;
+        LOG_ERROR("cannot resolve {}:{}: {}", name, service, gai_strerror(e));
         return EXIT_FAILURE;
     }
     auto *addr = reinterpret_cast<sockaddr_in *>(res->ai_addr);
@@ -31,6 +36,13 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    std::cout << "listening to " << ip << ":" << port << std::endl;
-    return Proactor<Event_socket<Handler_base>>().run_tcp(ip, port);
+    LOG_INFO("listening to {}:{}", ip, port);
+    // Same front end as reactor_tcp: echo, plus the raw bytes in the log, so
+    // an encrypted client is visible rather than silent.
+    if (std::optional<Err> err = Proactor<EventSocket<HandlerTrace>>().run_tcp(ip, port))
+    {
+        LOG_ERROR("mynet: {}", to_string(*err));
+        return to_exit_code(*err);
+    }
+    return 0;
 }

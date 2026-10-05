@@ -1,16 +1,25 @@
-#include "peer.hpp"
+#include "error.hpp"
 #include "handler.hpp"
+#include "log.hpp"
+#include "peer.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
-    const char *name = "0.0.0.0";
-    const char *service = "4433";
-    const char *crt = "../certs/ser.crt";
+    // Send mylog's output to stderr before anything can log: the data this
+    // program streams over stdout must stay untouched.
+    mynetlog::init();
+    const char *name = "127.0.0.1";
+    const char *service = "8888";
+    const char *serverName = nullptr;
+    const char *caFile = nullptr;
     switch (argc)
     {
+    case 5:
+        caFile = argv[4];
+        [[fallthrough]];
     case 4:
-        crt = argv[3];
+        serverName = argv[3];
         [[fallthrough]];
     case 3:
         service = argv[2];
@@ -19,7 +28,7 @@ int main(int argc, char *argv[])
         name = argv[1];
         [[fallthrough]];
     default:
-        std::cout << "resolving " << name << ":" << service << std::endl;
+        LOG_INFO("resolving {}:{}", name, service);
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
@@ -27,7 +36,7 @@ int main(int argc, char *argv[])
     int e = getaddrinfo(name, service, &hints, &res);
     if (e != 0)
     {
-        std::cerr << "Error: " << gai_strerror(e) << std::endl;
+        LOG_ERROR("cannot resolve {}:{}: {}", name, service, gai_strerror(e));
         return EXIT_FAILURE;
     }
     auto *addr = reinterpret_cast<sockaddr_in *>(res->ai_addr);
@@ -35,6 +44,15 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    std::cout << "connecting to " << ip << ":" << port << std::endl;
-    return Peer<Event_ssl<Handler_base>>().run_ssl(ip, port, crt);
+    LOG_INFO("connecting to {}:{}", ip, port);
+    // A client has no certificate of its own, so the third argument is the
+    // name the client asks for in SNI and the fourth is the CA bundle the
+    // server's certificate is checked against (no bundle, no check).
+    if (std::optional<Err> err = Peer<EventSsl<HandlerBase>>().run_ssl(
+            ip, port, serverName != nullptr ? serverName : name, caFile))
+    {
+        LOG_ERROR("mynet: {}", to_string(*err));
+        return to_exit_code(*err);
+    }
+    return 0;
 }

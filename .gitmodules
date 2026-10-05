@@ -1,0 +1,3 @@
+[submodule "third_party/mylog"]
+	path = third_party/mylog
+	url = git@github.com:printf033/mylog.git

@@ -1,7 +1,7 @@
 #include "error.hpp"
 #include "handler.hpp"
 #include "log.hpp"
-#include "peer.hpp"
+#include "proactor.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
@@ -9,10 +9,18 @@ int main(int argc, char *argv[])
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
     mynetlog::init();
-    const char *name = "127.0.0.1";
+    const char *name = "0.0.0.0";
     const char *service = "8888";
+    const char *crt = "../certs/ser.crt";
+    const char *key = "../certs/ser.key";
     switch (argc)
     {
+    case 5:
+        key = argv[4];
+        [[fallthrough]];
+    case 4:
+        crt = argv[3];
+        [[fallthrough]];
     case 3:
         service = argv[2];
         [[fallthrough]];
@@ -36,8 +44,10 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    LOG_INFO("connecting to {}:{}", ip, port);
-    if (std::optional<Err> err = Peer<EventSocket<HandlerBase>>().run_udp(ip, port))
+    LOG_INFO("listening to {}:{}", ip, port);
+    // Same front end as reactor_ssl: echo, plus what arrived written down --
+    // the decrypted plaintext on this listener.
+    if (std::optional<Err> err = Proactor<EventSsl<HandlerTrace>>().run_ssl(ip, port, crt, key))
     {
         LOG_ERROR("mynet: {}", to_string(*err));
         return to_exit_code(*err);

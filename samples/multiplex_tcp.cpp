@@ -1,15 +1,29 @@
 #include "error.hpp"
 #include "handler.hpp"
 #include "log.hpp"
-#include "peer.hpp"
+#include "multiplexer.hpp"
+#include "reactor.hpp"
 #include <netdb.h>
 
+// A TCP port that speaks framed, multiplexed streams rather than HTTP.
+//
+// The point of the sample is where the layer boundary sits: the multiplexer
+// owns framing, stream identifiers, flow control and teardown, and hands each
+// stream a plain byte stream -- here HandlerTrace, which writes down whatever
+// its client sent and echoes it back. A stream handler never sees a frame
+// header, and the multiplexer never sees an application message.
+//
+// The admission limit is 128 concurrent streams (mynetmux::kDefaultMaxStreams,
+// advertised as SETTINGS_MAX_CONCURRENT_STREAMS and settable through
+// Multiplexer::setMaxConcurrentStreams). A peer that opens past it is refused
+// with RST_STREAM rather than queued, because holding the frames would only
+// move the backlog somewhere less visible.
 int main(int argc, char *argv[])
 {
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
     mynetlog::init();
-    const char *name = "127.0.0.1";
+    const char *name = "0.0.0.0";
     const char *service = "8888";
     switch (argc)
     {
@@ -36,8 +50,8 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    LOG_INFO("connecting to {}:{}", ip, port);
-    if (std::optional<Err> err = Peer<EventSocket<HandlerBase>>().run_udp(ip, port))
+    LOG_INFO("listening to {}:{} (multiplexed streams)", ip, port);
+    if (std::optional<Err> err = Reactor<EventSocket<Multiplexer<HandlerTrace>>>().run_tcp(ip, port))
     {
         LOG_ERROR("mynet: {}", to_string(*err));
         return to_exit_code(*err);

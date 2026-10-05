@@ -1,0 +1,58 @@
+# mynet house style.
+#
+# Do not run clang-format directly: use scripts/format.sh. clang-format 23.1.1
+# renders the C++26 `= delete("reason")` form as `= delete ("reason")`, because
+# it classifies `delete` as a control statement and exposes no option to split
+# that decision away from `if`/`for`/`while`. The wrapper puts the space back.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: Latest
+ColumnLimit: 0
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: true
+  AfterCaseLabel: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeLambdaBody: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+AllowShortFunctionsOnASingleLine: All
+AllowShortLambdasOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+PointerAlignment: Right
+ReferenceAlignment: Right
+DerivePointerAlignment: false
+IndentPPDirectives: None
+SpaceBeforeParens: ControlStatements
+SortIncludes: CaseSensitive
+FixNamespaceComments: true
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+ContinuationIndentWidth: 4
+AlignAfterOpenBracket: Align
+BreakConstructorInitializers: BeforeComma
+PackConstructorInitializers: Never
+EmptyLineBeforeAccessModifier: LogicalBlock
+NamespaceIndentation: All
+ReflowComments: false
+AlignTrailingComments: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true

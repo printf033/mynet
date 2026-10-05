@@ -1,7 +1,7 @@
 #include "error.hpp"
-#include "handler.hpp"
 #include "log.hpp"
-#include "peer.hpp"
+#include "proactor.hpp"
+#include "udp_echo.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
@@ -9,7 +9,7 @@ int main(int argc, char *argv[])
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
     mynetlog::init();
-    const char *name = "127.0.0.1";
+    const char *name = "0.0.0.0";
     const char *service = "8888";
     switch (argc)
     {
@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_socktype = SOCK_DGRAM;
     int e = getaddrinfo(name, service, &hints, &res);
     if (e != 0)
     {
@@ -36,8 +36,13 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    LOG_INFO("connecting to {}:{}", ip, port);
-    if (std::optional<Err> err = Peer<EventSocket<HandlerBase>>().run_udp(ip, port))
+    LOG_INFO("listening to {}:{} (udp)", ip, port);
+    // Same front end as reactor_udp, driven by io_uring instead of epoll. One
+    // recvmsg is armed at a time because the sender's address is part of the
+    // message and there is no connection to key a per-session buffer on; the
+    // read is re-armed as each completion is retired.
+    UdpEcho handler;
+    if (std::optional<Err> err = Proactor<EventSocket<UdpEcho>>().run_udp(ip, port, handler))
     {
         LOG_ERROR("mynet: {}", to_string(*err));
         return to_exit_code(*err);
