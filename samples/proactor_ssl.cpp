@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
 {
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
-    mynetlog::init();
+    mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
     const char *crt = "../certs/ser.crt";
@@ -46,11 +46,11 @@ int main(int argc, char *argv[])
     freeaddrinfo(res);
     LOG_INFO("listening to {}:{}", ip, port);
     // Same front end as reactor_ssl: echo, plus what arrived written down --
-    // the decrypted plaintext on this listener.
-    if (std::optional<Err> err = Proactor<EventSsl<HandlerTrace>>().run_ssl(ip, port, crt, key))
+    using namespace mynet;
+    if (auto res = Proactor<EventSsl<HandlerBase>>().runSsl(ip, port, crt, key); !res)
     {
-        LOG_ERROR("mynet: {}", to_string(*err));
-        return to_exit_code(*err);
+        LOG_ERROR("mynet: {}", toString(res.error()));
+        return toExitCode(res.error());
     }
     return 0;
 }

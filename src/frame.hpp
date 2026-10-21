@@ -1,192 +1,192 @@
 #pragma once
 
 #include "buffer.hpp"
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 
-// Stream framing, in the shape HTTP/2 defines it.
-//
-// A multiplexed connection carries many logical exchanges over one byte
-// stream, and the only way that works is if every byte belongs to exactly one
-// of them. That is what a frame header buys: a length, a type, a flag byte and
-// a stream identifier, so a reader can skip or route a frame it does not
-// understand without guessing where it ends.
-//
-// The header is HTTP/2's, byte for byte, and that is deliberate. The hard part
-// of h2 is not this struct -- it is HPACK, the settings dance and the state
-// machine -- and none of those are baked in here. What is baked in is the one
-// layout the rest of the world already parses, so an h3 (or custom) protocol
-// on top of this codec stays a wire-compatible cousin rather than a private
-// dialect nobody else can read.
-//
-//   +-----------------------------------------------+
-//   |                 Length (24)                   |
-//   +---------------+---------------+---------------+
-//   |   Type (8)    |   Flags (8)   |               |
-//   +-+-------------+---------------+---------------+
-//   |R|            Stream Identifier (31)           |
-//   +=+=============================================+
-//   |                   Frame Payload (0...)      ...
-//   +-----------------------------------------------+
-//
-// The reserved bit must be zero on the wire; a reader that meets it reports an
-// error instead of masking it away, because a peer that sets it is speaking a
-// different protocol than the one this decoder was told to read.
-namespace mynetframe
+namespace mynet
 {
-    // Nine bytes of header, then the payload it counts.
-    inline constexpr size_t kHeaderBytes = 9;
 
-    // 16 KiB is HTTP/2's own default maximum frame size, and the value both
-    // ends advertise in SETTINGS. A larger frame is not "bigger data", it is a
-    // claim about a protocol this decoder has not agreed to.
-    inline constexpr uint32_t kDefaultMaxFrameSize = 16384;
-
-    // The reserved bit of the stream identifier field.
-    inline constexpr uint8_t kStreamIdReservedMask = 0x80;
-    inline constexpr uint32_t kStreamIdMask = 0x7fffffffu;
-
-    inline void appendBigEndian32(std::string &out, uint32_t value)
+    namespace frame
     {
-        out.push_back(static_cast<char>((value >> 24) & 0xffu));
-        out.push_back(static_cast<char>((value >> 16) & 0xffu));
-        out.push_back(static_cast<char>((value >> 8) & 0xffu));
-        out.push_back(static_cast<char>(value & 0xffu));
+        /// @brief HTTP/2 标准 9 字节帧头长度
+        inline constexpr size_t kHeaderBytes = 9;
+
+        /// @brief HTTP/2 默认协商的最大帧载荷大小 (16 KiB)
+        inline constexpr uint32_t kDefaultMaxFrameSize = 16 << 10;
+
+        /// @brief 流标识符第 32 位保留掩码
+        inline constexpr uint8_t kStreamIdReservedMask = 0x80;
+        inline constexpr uint32_t kStreamIdMask = 0x7fffffffu;
+
+        /**
+         * @brief 高性能大端网络序 32 位整数追加（单指令 bswap 转换）
+         */
+        inline void appendBigEndian32(std::string &out, uint32_t value)
+        {
+            const uint32_t be = std::byteswap(value);
+            out.append(reinterpret_cast<const char *>(&be), sizeof(be));
+        }
+
+        /**
+         * @brief 高性能读取大端网络序 32 位整数（单指令 bswap 反转）
+         */
+        [[nodiscard]] inline uint32_t readBigEndian32(const char *p) noexcept
+        {
+            uint32_t val = 0;
+            std::memcpy(&val, p, sizeof(val));
+            return std::byteswap(val);
+        }
+    } // namespace frame
+
+    /**
+     * @brief HTTP/2 标准协议帧类型枚举
+     */
+    enum class FRAME_TYPE : uint8_t
+    {
+        DATA = 0x0,
+        HEADERS = 0x1,
+        PRIORITY = 0x2,
+        RESET = 0x3,
+        SETTINGS = 0x4,
+        PUSH_PROMISE = 0x5,
+        PING = 0x6,
+        GOAWAY = 0x7,
+        WINDOW_UPDATE = 0x8,
+        CONTINUATION = 0x9
+    };
+
+    namespace FrameFlags
+    {
+        inline constexpr uint8_t kEndStream = 0x1;
+        inline constexpr uint8_t kAck = 0x1;
+        inline constexpr uint8_t kEndHeaders = 0x4;
+        inline constexpr uint8_t kPadded = 0x8;
+        inline constexpr uint8_t kPriority = 0x20;
+    } // namespace FrameFlags
+
+    /**
+     * @brief 协议分帧解析错误枚举
+     */
+    enum class FRAME_ERROR : uint8_t
+    {
+        FRAME_TOO_LARGE = 0,
+        RESERVED_BIT_SET = 1
+    };
+
+    [[nodiscard]] constexpr std::string_view toString(FRAME_ERROR err) noexcept
+    {
+        switch (err)
+        {
+        case FRAME_ERROR::FRAME_TOO_LARGE:
+            return "frame length exceeds the configured maximum";
+        case FRAME_ERROR::RESERVED_BIT_SET:
+            return "the reserved bit of the stream identifier was set";
+        }
+        return "unknown framing error";
     }
 
-    [[nodiscard]] inline uint32_t readBigEndian32(const char *p) noexcept
+    /**
+     * @brief HTTP/2 标准协议帧实体结构体
+     */
+    struct Frame
     {
-        const auto *b = reinterpret_cast<const unsigned char *>(p);
-        return (static_cast<uint32_t>(b[0]) << 24) | (static_cast<uint32_t>(b[1]) << 16) |
-               (static_cast<uint32_t>(b[2]) << 8) | static_cast<uint32_t>(b[3]);
-    }
-} // namespace mynetframe
+        uint32_t streamId = 0;
+        FRAME_TYPE type = FRAME_TYPE::DATA;
+        uint8_t flags = 0;
+        std::string payload{};
 
-enum class FrameType : uint8_t
-{
-    data = 0x0,
-    headers = 0x1,
-    priority = 0x2,
-    reset = 0x3,
-    settings = 0x4,
-    pushPromise = 0x5,
-    ping = 0x6,
-    goaway = 0x7,
-    windowUpdate = 0x8,
-};
+        [[nodiscard]] inline bool hasFlag(uint8_t flag) const noexcept { return (flags & flag) != 0; }
+    };
 
-// Flags are only flags in the company of a frame type: bit 0 means END_STREAM
-// on DATA and ACK on SETTINGS and PING, which is why they share a namespace
-// with the type's name spelled out.
-namespace FrameFlags
-{
-    inline constexpr uint8_t kEndStream = 0x1;
-    inline constexpr uint8_t kAck = 0x1;
-    inline constexpr uint8_t kEndHeaders = 0x4;
-    inline constexpr uint8_t kPadded = 0x8;
-    inline constexpr uint8_t kPriority = 0x20;
-} // namespace FrameFlags
-
-enum class FrameError : uint8_t
-{
-    frameTooLarge,
-    reservedBitSet,
-};
-
-[[nodiscard]] constexpr std::string_view to_string(FrameError err) noexcept
-{
-    switch (err)
+    /**
+     * @brief 无状态极速协议帧解析器
+     *
+     * 针对流式拆包优化：若数据未达完整帧边界则保持只读游标不推进，杜绝中间状态维护；
+     * 一旦收敛完整帧则直接消耗缓冲区并以 std::expected 交付。
+     */
+    class FrameDecoder
     {
-    case FrameError::frameTooLarge:
-        return "frame length exceeds the configured maximum";
-    case FrameError::reservedBitSet:
-        return "the reserved bit of the stream identifier was set";
-    }
-    return "unknown framing error";
-}
+    public:
+        FrameDecoder() noexcept = default;
 
-struct Frame
-{
-    uint32_t streamId = 0;
-    FrameType type = FrameType::data;
-    uint8_t flags = 0;
-    std::string payload{};
+        inline void setMaxFrameSize(uint32_t n) noexcept { maxFrameSize_ = (n == 0) ? frame::kDefaultMaxFrameSize : n; }
 
-    [[nodiscard]] inline bool hasFlag(uint8_t flag) const noexcept { return (flags & flag) != 0; }
-};
+        [[nodiscard]] inline uint32_t maxFrameSize() const noexcept { return maxFrameSize_; }
 
-// One frame at a time, out of whatever bytes have arrived so far.
-//
-// The decoder is stateless by design: a frame is a prefix of the buffer or it
-// is not, so an interrupted read needs no bookkeeping to resume -- the bytes
-// stay where they were and the next call re-reads the same header. That is
-// also why it reports three outcomes rather than two. "Not yet" and "not ever"
-// are different answers, and collapsing them into one empty result is how a
-// peer gets a protocol error for arriving in two packets.
-class FrameDecoder
-{
-public:
-    FrameDecoder() noexcept = default;
+        /**
+         * @brief 从缓冲区中解析下一个完整协议帧
+         *
+         * @param in 待解析的输入缓冲区引用
+         * @return std::expected<std::optional<Frame>, FRAME_ERROR>
+         *         nullopt 表示数据尚不足一帧；有值表示解析出的完整帧；unexpected 表示协议契约破损错误。
+         */
+        [[nodiscard]] inline std::expected<std::optional<Frame>, FRAME_ERROR> next(Buffer &in) const
+        {
+            const size_t available = in.readableBytes();
+            if (available < frame::kHeaderBytes) [[unlikely]]
+            {
+                return std::optional<Frame>{};
+            }
 
-    inline void setMaxFrameSize(uint32_t n) noexcept
+            const auto *p = reinterpret_cast<const unsigned char *>(in.readableBegin());
+            const uint32_t length =
+                (static_cast<uint32_t>(p[0]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | static_cast<uint32_t>(p[2]);
+
+            if (length > maxFrameSize_) [[unlikely]]
+            {
+                return std::unexpected(FRAME_ERROR::FRAME_TOO_LARGE);
+            }
+            if (available < frame::kHeaderBytes + static_cast<size_t>(length))
+            {
+                return std::optional<Frame>{};
+            }
+            if ((p[5] & frame::kStreamIdReservedMask) != 0) [[unlikely]]
+            {
+                return std::unexpected(FRAME_ERROR::RESERVED_BIT_SET);
+            }
+
+            Frame frame;
+            frame.streamId = frame::readBigEndian32(reinterpret_cast<const char *>(p + 5)) & frame::kStreamIdMask;
+            frame.type = static_cast<FRAME_TYPE>(p[3]);
+            frame.flags = p[4];
+            frame.payload.assign(in.readableBegin() + frame::kHeaderBytes, length);
+            in.retrieve(frame::kHeaderBytes + static_cast<size_t>(length));
+            return std::optional<Frame>{std::move(frame)};
+        }
+
+    private:
+        uint32_t maxFrameSize_ = frame::kDefaultMaxFrameSize;
+    };
+
+    /**
+     * @brief 按照大端网络序高速序列化并打包追加一个协议帧
+     */
+    inline void appendFrame(std::string &out, const Frame &frame)
     {
-        maxFrameSize_ = n == 0 ? mynetframe::kDefaultMaxFrameSize : n;
-    }
-    [[nodiscard]] inline uint32_t maxFrameSize() const noexcept { return maxFrameSize_; }
+        const uint32_t length = static_cast<uint32_t>(frame.payload.size());
+        const uint32_t streamId = frame.streamId & frame::kStreamIdMask;
 
-    // nullopt  -- fewer bytes than one whole frame; read more and call again.
-    // Frame    -- one whole frame, already consumed from `in`.
-    // FrameError -- the byte stream cannot become a legal frame no matter how
-    //               much more arrives, so the connection is out of contract.
-    [[nodiscard]] inline std::expected<std::optional<Frame>, FrameError> next(Buffer &in) const
-    {
-        const size_t available = in.readableBytes();
-        if (available < mynetframe::kHeaderBytes)
-            return std::optional<Frame>{};
+        char hdr[frame::kHeaderBytes];
+        hdr[0] = static_cast<char>((length >> 16) & 0xffu);
+        hdr[1] = static_cast<char>((length >> 8) & 0xffu);
+        hdr[2] = static_cast<char>(length & 0xffu);
+        hdr[3] = static_cast<char>(std::to_underlying(frame.type));
+        hdr[4] = static_cast<char>(frame.flags);
 
-        const auto *p = reinterpret_cast<const unsigned char *>(in.readableBegin());
-        const uint32_t length =
-            (static_cast<uint32_t>(p[0]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | static_cast<uint32_t>(p[2]);
-        if (length > maxFrameSize_)
-            return std::unexpected(FrameError::frameTooLarge);
-        if (available < mynetframe::kHeaderBytes + static_cast<size_t>(length))
-            return std::optional<Frame>{};
-        if ((p[5] & mynetframe::kStreamIdReservedMask) != 0)
-            return std::unexpected(FrameError::reservedBitSet);
+        const uint32_t beStream = std::byteswap(streamId);
+        std::memcpy(hdr + 5, &beStream, sizeof(beStream));
 
-        Frame frame;
-        frame.streamId = (static_cast<uint32_t>(p[5] & 0x7fu) << 24) | (static_cast<uint32_t>(p[6]) << 16) |
-                         (static_cast<uint32_t>(p[7]) << 8) | static_cast<uint32_t>(p[8]);
-        frame.type = static_cast<FrameType>(p[3]);
-        frame.flags = p[4];
-        frame.payload.assign(in.readableBegin() + mynetframe::kHeaderBytes, length);
-        in.retrieve(mynetframe::kHeaderBytes + static_cast<size_t>(length));
-        return std::optional<Frame>{std::move(frame)};
+        out.reserve(out.size() + frame::kHeaderBytes + frame.payload.size());
+        out.append(hdr, frame::kHeaderBytes);
+        out.append(frame.payload);
     }
 
-private:
-    uint32_t maxFrameSize_ = mynetframe::kDefaultMaxFrameSize;
-};
-
-// Append one frame, header first, in network order -- most significant byte
-// first, in the one layout every reader of this codec already knows.
-inline void appendFrame(std::string &out, const Frame &frame)
-{
-    const uint32_t length = static_cast<uint32_t>(frame.payload.size());
-    const uint32_t streamId = frame.streamId & mynetframe::kStreamIdMask;
-    out.push_back(static_cast<char>((length >> 16) & 0xffu));
-    out.push_back(static_cast<char>((length >> 8) & 0xffu));
-    out.push_back(static_cast<char>(length & 0xffu));
-    out.push_back(static_cast<char>(std::to_underlying(frame.type)));
-    out.push_back(static_cast<char>(frame.flags));
-    out.push_back(static_cast<char>((streamId >> 24) & 0x7fu));
-    out.push_back(static_cast<char>((streamId >> 16) & 0xffu));
-    out.push_back(static_cast<char>((streamId >> 8) & 0xffu));
-    out.push_back(static_cast<char>(streamId & 0xffu));
-    out.append(frame.payload);
-}
+} // namespace mynet

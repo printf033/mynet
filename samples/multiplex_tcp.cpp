@@ -9,7 +9,7 @@
 //
 // The point of the sample is where the layer boundary sits: the multiplexer
 // owns framing, stream identifiers, flow control and teardown, and hands each
-// stream a plain byte stream -- here HandlerTrace, which writes down whatever
+// stream a plain byte stream -- here HandlerBase, which writes down whatever
 // its client sent and echoes it back. A stream handler never sees a frame
 // header, and the multiplexer never sees an application message.
 //
@@ -22,7 +22,7 @@ int main(int argc, char *argv[])
 {
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
-    mynetlog::init();
+    mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
     switch (argc)
@@ -51,10 +51,11 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     LOG_INFO("listening to {}:{} (multiplexed streams)", ip, port);
-    if (std::optional<Err> err = Reactor<EventSocket<Multiplexer<HandlerTrace>>>().run_tcp(ip, port))
+    using namespace mynet;
+    if (auto res = Reactor<EventSocket<Multiplexer<HandlerBase>>>().runTcp(ip, port); !res)
     {
-        LOG_ERROR("mynet: {}", to_string(*err));
-        return to_exit_code(*err);
+        LOG_ERROR("mynet: {}", toString(res.error()));
+        return toExitCode(res.error());
     }
     return 0;
 }

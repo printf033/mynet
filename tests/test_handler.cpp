@@ -1,9 +1,11 @@
-// HandlerBase, HandlerHttp and HandlerTrace: what a front end owes the
+// HandlerBase and HandlerHttp: what a front end owes the
 // connection that drives it -- the request buffer it reads into, the response
 // queue it drains, and the back-pressure credit in between.
 #include "handler.hpp"
 #include <gtest/gtest.h>
 #include <string>
+
+using namespace mynet;
 
 namespace
 {
@@ -100,7 +102,7 @@ TEST(HandlerBase, ResetClearsRequestsResponsesAndTheCloseFlag)
 
 TEST(HandlerHttp, ParsesRequestLineHeadersAndBody)
 {
-    HandlerHttp<HttpMode::request> handler;
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "POST /submit?x=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello");
     handler.process();
 
@@ -118,7 +120,7 @@ TEST(HandlerHttp, ParsesRequestLineHeadersAndBody)
 
 TEST(HandlerHttp, AnswersWithAMinimalKeepAliveEcho)
 {
-    HandlerHttp<HttpMode::request> handler;
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi");
     handler.process();
     ASSERT_TRUE(handler.hasResponse());
@@ -131,7 +133,7 @@ TEST(HandlerHttp, AnswersWithAMinimalKeepAliveEcho)
 
 TEST(HandlerHttp, Http10WithoutConnectionKeepAliveIsNotKeepAlive)
 {
-    HandlerHttp<HttpMode::request> handler;
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET / HTTP/1.0\r\n\r\n");
     handler.process();
     EXPECT_FALSE(handler.keepAlive());
@@ -139,7 +141,7 @@ TEST(HandlerHttp, Http10WithoutConnectionKeepAliveIsNotKeepAlive)
 
 TEST(HandlerHttp, ARequestSplitAcrossTwoAppendsStillParses)
 {
-    HandlerHttp<HttpMode::request> handler;
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET /split HTTP/1.1\r\nHost: ex");
     handler.process();
     // llhttp parses incrementally, so the request line is already understood
@@ -157,7 +159,7 @@ TEST(HandlerHttp, ARequestSplitAcrossTwoAppendsStillParses)
 
 TEST(HandlerHttp, ParseErrorAnswers400AndCloses)
 {
-    HandlerHttp<HttpMode::request> handler;
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "\x01\x02 not a request \x03\r\n\r\n");
     handler.process();
     ASSERT_TRUE(handler.hasResponse());
@@ -166,14 +168,36 @@ TEST(HandlerHttp, ParseErrorAnswers400AndCloses)
     EXPECT_TRUE(handler.closeAfterResponse());
 }
 
-// ---- HandlerTrace ----
-
-TEST(HandlerTrace, EchoesWhatItReceivesAndKeepsTheRequestContract)
+TEST(HandlerHttp, NullHeaderNameDoesNotCrash)
 {
-    HandlerTrace handler;
-    feed(handler, "raw bytes");
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
+    EXPECT_TRUE(handler.headerValue(nullptr).empty());
+}
+
+TEST(HandlerBase, NullPushResponseDoesNotCrash)
+{
+    HandlerBase handler;
+    handler.pushResponse(static_cast<const char *>(nullptr));
+    handler.pushResponse(nullptr, 0);
+    EXPECT_FALSE(handler.hasResponse());
+}
+
+TEST(HandlerHttp, EmptyHeaderValueIsPreserved)
+{
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
+    feed(handler, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Empty:\r\n\r\n");
     handler.process();
-    ASSERT_TRUE(handler.hasResponse());
-    EXPECT_EQ(handler.takeResponse(), "raw bytes");
-    EXPECT_FALSE(handler.closeAfterResponse());
+    EXPECT_EQ(handler.headerValue("Host"), "localhost");
+    EXPECT_EQ(handler.headerValue("X-Empty"), "");
+    // Check that X-Empty is indeed in the headers vector
+    bool found = false;
+    for (const auto &h : handler.headers())
+    {
+        if (h.first == "X-Empty")
+        {
+            found = true;
+            EXPECT_EQ(h.second, "");
+        }
+    }
+    EXPECT_TRUE(found);
 }

@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 #include <string>
 
+using namespace mynet;
+
 namespace
 {
     constexpr const char *kText = "the quick brown fox";
@@ -59,14 +61,14 @@ TEST(Buffer, LongLivedBufferStillReadsItsTailAfterCompaction)
     // at least half the backing store. The observable contract either way is
     // that the live tail is exactly what was not consumed.
     Buffer b;
-    std::string chunk(4096, 'a');
+    std::string chunk(4 << 10, 'a');
     b.append(chunk);
-    b.append(std::string("tail"));
-    ASSERT_EQ(b.readableBytes(), 4100u);
-    b.retrieve(4096);
+    b.append("tail");
+    ASSERT_EQ(b.readableBytes(), (4 << 10) + 4u);
+    b.retrieve(4 << 10);
     EXPECT_EQ(b.readableBytes(), size_t{4});
     EXPECT_EQ(std::string(b.readableBegin(), b.readableBytes()), "tail");
-    b.append(std::string("more"));
+    b.append("more");
     EXPECT_EQ(std::string(b.readableBegin(), b.readableBytes()), "tailmore");
 }
 
@@ -84,22 +86,31 @@ TEST(Buffer, RetrieveAllAsStringOnEmptyBufferIsEmpty)
     EXPECT_TRUE(b.retrieveAllAsString().empty());
 }
 
-TEST(Buffer, AppendRejectsNullAndNonPositiveLengths)
+TEST(Buffer, AppendRejectsNullAndZeroLength)
 {
     Buffer b;
     b.append(static_cast<const char *>(nullptr), size_t{5});
-    b.append(kText, ssize_t{0});
-    b.append(kText, ssize_t{-3});
     b.append(kText, size_t{0});
-    b.append(static_cast<const char *>(nullptr), ssize_t{7});
+    b.append(static_cast<const char *>(nullptr), size_t{0});
     EXPECT_TRUE(b.empty());
+}
+
+TEST(Buffer, AppendNaturalTypesWithoutAmbiguity)
+{
+    Buffer b;
+    b.append("0123456789", 10); // int literal: no ambiguity
+    b.append(kText, 1u);        // unsigned int: no ambiguity
+    b.append("tail");           // const char[] literal: matches string_view unambiguously
+    const std::string str = "!";
+    b.append(str); // std::string converts to string_view
+    EXPECT_EQ(b.retrieveAllAsString(), "0123456789ttail!");
 }
 
 TEST(Buffer, AppendCharAndStringOverloadsAgree)
 {
     Buffer b;
     b.append('x');
-    b.append(std::string("yz"));
+    b.append("yz");
     EXPECT_EQ(b.retrieveAllAsString(), "xyz");
 }
 
@@ -109,16 +120,16 @@ TEST(Buffer, ResetClearsBytesButKeepsTheObjectUsable)
     b.append(kText, kTextSize);
     b.reset();
     EXPECT_TRUE(b.empty());
-    b.append(std::string("next"));
+    b.append("next");
     EXPECT_EQ(b.retrieveAllAsString(), "next");
 }
 
 TEST(Buffer, HighWaterMarkIsExclusiveAndSettable)
 {
     Buffer b;
-    EXPECT_EQ(b.highWaterMark(), 64u * 1024u);
+    EXPECT_EQ(b.highWaterMark(), 64 << 10);
     b.setHighWaterMark(4);
-    b.append(std::string("abcd"));
+    b.append("abcd");
     EXPECT_FALSE(b.overHighWater()); // exactly at the mark: not over it
     b.append('e');
     EXPECT_TRUE(b.overHighWater());
@@ -130,8 +141,8 @@ TEST(Buffer, SwapExchangesContentsAndWaterMarks)
 {
     Buffer a;
     Buffer b;
-    a.append(std::string("aaa"));
-    b.append(std::string("bbbb"));
+    a.append("aaa");
+    b.append("bbbb");
     a.setHighWaterMark(11);
     b.setHighWaterMark(22);
     a.swap(b);
@@ -145,15 +156,64 @@ TEST(Buffer, WritableViewGrowsWithReserve)
 {
     Buffer b;
     const size_t before = b.writableBytes();
-    b.reserve(before + 1024);
-    EXPECT_GE(b.writableBytes(), before + 1024);
+    b.reserve(before + (1 << 10));
+    EXPECT_GE(b.writableBytes(), before + (1 << 10));
 }
 
-TEST(Buffer, MoveTransfersTheBytes)
+TEST(Buffer, MoveConstructorPreservesInvariantsAndAvoidsUnderflow)
 {
     Buffer a;
-    a.append(kText, kTextSize);
+    a.append("0123456789", 10);
+    a.retrieve(4); // readIndex_ = 4, readableBytes() = 6
+    EXPECT_EQ(a.readableBytes(), size_t{6});
+
     Buffer b(std::move(a));
-    EXPECT_EQ(b.readableBytes(), kTextSize);
-    EXPECT_EQ(std::string(b.readableBegin(), b.readableBytes()), kText);
+
+    // Verify moved-from object state (must be 0, not underflow to SIZE_MAX - 3)
+    EXPECT_TRUE(a.empty());
+    EXPECT_EQ(a.readableBytes(), size_t{0});
+    EXPECT_EQ(a.retrieveAllAsString(), "");
+
+    // Verify destination object state
+    EXPECT_FALSE(b.empty());
+    EXPECT_EQ(b.readableBytes(), size_t{6});
+    EXPECT_EQ(b.retrieveAllAsString(), "456789");
+
+    // Source object remains fully functional
+    a.append("fresh");
+    EXPECT_EQ(a.readableBytes(), size_t{5});
+    EXPECT_EQ(a.retrieveAllAsString(), "fresh");
+}
+
+TEST(Buffer, MoveAssignmentPreservesInvariantsAndAvoidsUnderflow)
+{
+    Buffer a;
+    a.append("abcdefgh", 8);
+    a.retrieve(3); // readIndex_ = 3, readableBytes() = 5
+    EXPECT_EQ(a.readableBytes(), size_t{5});
+
+    Buffer b;
+    b.append("existing", 8);
+    b = std::move(a);
+
+    // Verify moved-from object state
+    EXPECT_TRUE(a.empty());
+    EXPECT_EQ(a.readableBytes(), size_t{0});
+    EXPECT_EQ(a.retrieveAllAsString(), "");
+
+    // Verify destination object state
+    EXPECT_FALSE(b.empty());
+    EXPECT_EQ(b.readableBytes(), size_t{5});
+    EXPECT_EQ(b.retrieveAllAsString(), "defgh");
+}
+
+TEST(Buffer, ViewsProvideZeroCopyAccess)
+{
+    Buffer b;
+    b.append("hello world");
+    EXPECT_EQ(b.readableView(), "hello world");
+    const auto span = b.readableSpan();
+    EXPECT_EQ(span.size(), 11u);
+    EXPECT_EQ(span[0], 'h');
+    EXPECT_EQ(span[10], 'd');
 }

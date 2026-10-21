@@ -7,6 +7,8 @@
 #include <set>
 #include <vector>
 
+using namespace mynet;
+
 namespace
 {
     struct Tracked
@@ -91,8 +93,71 @@ TEST(ObjectPool, ReleaseOfNullIsIgnored)
 {
     ObjectPool<Tracked> pool;
     pool.init(1);
-    pool.release(nullptr);
+    EXPECT_FALSE(pool.release(nullptr));
     EXPECT_EQ(pool.available(), size_t{1});
+}
+
+TEST(ObjectPool, DoubleReleaseIsSafelyRejectedWithoutCorruptingPool)
+{
+    ObjectPool<Tracked> pool;
+    pool.init(2);
+
+    Tracked *a = pool.acquire();
+    Tracked *b = pool.acquire();
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(pool.available(), size_t{0});
+
+    // First release succeeds
+    EXPECT_TRUE(pool.release(a));
+    EXPECT_EQ(pool.available(), size_t{1});
+
+    // Bug 1 verification: second release of same pointer MUST fail and MUST NOT inflate available_
+    EXPECT_FALSE(pool.release(a));
+    EXPECT_EQ(pool.available(), size_t{1});
+    EXPECT_LE(pool.available(), pool.capacity());
+
+    // Release b
+    EXPECT_TRUE(pool.release(b));
+    EXPECT_EQ(pool.available(), size_t{2});
+    EXPECT_FALSE(pool.release(b)); // second release of b fails
+    EXPECT_EQ(pool.available(), size_t{2});
+    EXPECT_LE(pool.available(), pool.capacity());
+
+    // Subsequent acquires return distinct valid objects
+    Tracked *r1 = pool.acquire();
+    Tracked *r2 = pool.acquire();
+    EXPECT_NE(r1, nullptr);
+    EXPECT_NE(r2, nullptr);
+    EXPECT_NE(r1, r2);
+    EXPECT_EQ(pool.acquire(), nullptr);
+}
+
+TEST(ObjectPool, ForeignPointerReleaseIsRejectedWithoutLeak)
+{
+    ObjectPool<Tracked> pool;
+    pool.init(2);
+
+    auto *foreign = new Tracked();
+    EXPECT_FALSE(pool.release(foreign)); // Bug 2 verification: foreign pointer rejected
+    EXPECT_EQ(pool.available(), size_t{2});
+    delete foreign; // cleanly managed by caller, never leaked into pool
+}
+
+TEST(ObjectPool, MisalignedPointerReleaseIsRejected)
+{
+    ObjectPool<Tracked> pool;
+    pool.init(2);
+    Tracked *a = pool.acquire();
+    ASSERT_NE(a, nullptr);
+
+    // Byte-offset pointer into the pool storage
+    auto *misaligned = reinterpret_cast<Tracked *>(reinterpret_cast<char *>(a) + 1);
+    EXPECT_FALSE(pool.release(misaligned));
+    EXPECT_EQ(pool.available(), size_t{1});
+
+    EXPECT_TRUE(pool.release(a));
+    EXPECT_EQ(pool.available(), size_t{2});
 }
 
 TEST(ObjectPool, ReinitReplacesTheWholeSet)

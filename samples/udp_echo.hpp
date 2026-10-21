@@ -13,7 +13,7 @@
 // The stream half is deliberately inert -- there is no stream protocol on a
 // datagram socket -- and the datagram half does the work: every message is
 // written down in full, sender included, and sent back unchanged.
-class UdpEcho : public HandlerBase, public DatagramHandler
+class UdpEcho : public mynet::HandlerBase, public mynet::DatagramHandler
 {
 public:
     // Nothing on this socket is a stream, so no bytes accumulate here and the
@@ -22,14 +22,13 @@ public:
 
     void reset() noexcept override
     {
-        HandlerBase::reset();
-        DatagramHandler::reset();
+        mynet::HandlerBase::reset();
+        mynet::DatagramHandler::reset();
     }
 
     void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
     {
-        LOG_INFO("UdpEcho: {} sent {} byte(s)", datagramPeerText(peer), n);
-        mynetdump::writeDown("UdpEcho", reinterpret_cast<const unsigned char *>(data), n);
+        LOG_INFO("UdpEcho: {} sent {} byte(s)", mynet::datagramPeerText(peer), n);
         pushReply(peer, data, n);
     }
 };

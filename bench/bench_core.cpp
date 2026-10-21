@@ -1,5 +1,5 @@
 // Benchmarks for the byte-moving core: the buffer, the frame codec, the
-// handler queue, the object pool and the hexdump formatter.
+// handler queue, the object pool and the multiplexer.
 //
 // The harness is deliberately tiny. Google Benchmark is a fine project, but
 // adding a distribution to time five loops inside a library that already
@@ -22,11 +22,9 @@
 #include "buffer.hpp"
 #include "frame.hpp"
 #include "handler.hpp"
-#include "hexdump.hpp"
 #include "log.hpp"
 #include "multiplexer.hpp"
 #include "objectPool.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -37,6 +35,7 @@
 
 namespace
 {
+    using namespace mynet;
     using Clock = std::chrono::steady_clock;
 
     // Every benchmark's result ends up here, once per run of the body. Summing
@@ -60,13 +59,13 @@ namespace
     template <typename Body>
     Sample run(Body &&body, size_t opsPerIteration = 1)
     {
-        size_t iterations = 1 << 8;
+        size_t iterations = 256;
         for (;;)
         {
             const auto start = Clock::now();
             body(iterations);
             const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
-            if (elapsed >= kMinSeconds || iterations >= (size_t{1} << 26))
+            if (elapsed >= kMinSeconds || iterations >= (1 << 26))
                 break;
             iterations *= 8;
         }
@@ -78,7 +77,7 @@ namespace
             const auto start = Clock::now();
             body(iterations);
             const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
-            perOp.push_back(elapsed * 1e9 / static_cast<double>(iterations * opsPerIteration));
+            perOp.push_back(elapsed * (1000.0 * 1000.0 * 1000.0) / static_cast<double>(iterations * opsPerIteration));
         }
         std::sort(perOp.begin(), perOp.end());
         return Sample{perOp.front(), perOp[perOp.size() / 2], iterations};
@@ -88,7 +87,8 @@ namespace
     {
         char throughput[32] = "";
         if (bytesPerOp > 0)
-            std::snprintf(throughput, sizeof throughput, "  %9.1f MB/s", bytesPerOp * 1e3 / sample.medianNsPerOp);
+            std::snprintf(throughput, sizeof throughput, "  %9.1f MB/s",
+                          bytesPerOp * (1000.0 * 1.0) / sample.medianNsPerOp);
         std::printf("%-40s %10.1f ns/op%s  (best %8.1f, %zu x)\n", name, sample.medianNsPerOp, throughput,
                     sample.bestNsPerOp, sample.iterations);
     }
@@ -97,10 +97,10 @@ namespace
     {
         Frame frame;
         frame.streamId = 1;
-        frame.type = FrameType::data;
+        frame.type = FRAME_TYPE::DATA;
         frame.payload.assign(payloadBytes, 'x');
         std::string out;
-        out.reserve(count * (mynetframe::kHeaderBytes + payloadBytes));
+        out.reserve(count * (frame::kHeaderBytes + payloadBytes));
         for (size_t i = 0; i < count; ++i)
             appendFrame(out, frame);
         return out;
@@ -110,48 +110,54 @@ namespace
 
     void benchBuffer()
     {
-        const std::string block(1024, 'x');
+        const std::string block(1 << 10, 'x');
         const std::string sixteen("0123456789abcdef");
-        const Sample appendRetrieve = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            Buffer buffer;
-            for (size_t i = 0; i < iterations; ++i)
+        const Sample appendRetrieve = run(
+            [&](size_t iterations)
             {
-                buffer.append(block);
-                sink += buffer.readableBytes();
-                buffer.retrieveAll();
-            }
-            g_sink += sink;
-        });
-        report("Buffer::append+retrieveAll (1KiB)", appendRetrieve, 1024.0);
+                uint64_t sink = 0;
+                Buffer buffer;
+                for (size_t i = 0; i < iterations; ++i)
+                {
+                    buffer.append(block);
+                    sink += buffer.readableBytes();
+                    buffer.retrieveAll();
+                }
+                g_sink += sink;
+            });
+        report("Buffer::append+retrieveAll (1KiB)", appendRetrieve, static_cast<double>(1 << 10));
 
-        const Sample appendSmall = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            Buffer buffer;
-            for (size_t i = 0; i < iterations; ++i)
+        const Sample appendSmall = run(
+            [&](size_t iterations)
             {
-                for (int k = 0; k < 64; ++k)
-                    buffer.append(sixteen);
-                sink += buffer.readableBytes();
-                buffer.retrieveAll();
-            }
-            g_sink += sink;
-        },
-                                       64);
+                uint64_t sink = 0;
+                Buffer buffer;
+                for (size_t i = 0; i < iterations; ++i)
+                {
+                    for (int k = 0; k < 64; ++k)
+                        buffer.append(sixteen);
+                    sink += buffer.readableBytes();
+                    buffer.retrieveAll();
+                }
+                g_sink += sink;
+            },
+            64);
         report("Buffer::append (16B) to 1KiB + drain", appendSmall);
 
-        const Sample retrieve = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            Buffer buffer;
-            std::string chunk(16, 'x');
-            for (size_t i = 0; i < iterations; ++i)
+        const Sample retrieve = run(
+            [&](size_t iterations)
             {
-                buffer.append(chunk);
-                sink += buffer.readableBytes();
-                buffer.retrieve(16);
-            }
-            g_sink += sink;
-        });
+                uint64_t sink = 0;
+                Buffer buffer;
+                std::string chunk(16, 'x');
+                for (size_t i = 0; i < iterations; ++i)
+                {
+                    buffer.append(chunk);
+                    sink += buffer.readableBytes();
+                    buffer.retrieve(16);
+                }
+                g_sink += sink;
+            });
         report("Buffer::append+retrieve (16B)", retrieve, 16.0);
     }
 
@@ -161,19 +167,21 @@ namespace
     {
         Frame frame;
         frame.streamId = 1;
-        frame.type = FrameType::data;
+        frame.type = FRAME_TYPE::DATA;
         frame.payload.assign(payloadBytes, 'x');
         std::string out;
-        const Sample sample = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            for (size_t i = 0; i < iterations; ++i)
+        const Sample sample = run(
+            [&](size_t iterations)
             {
-                out.clear();
-                appendFrame(out, frame);
-                sink += out.size();
-            }
-            g_sink += sink;
-        });
+                uint64_t sink = 0;
+                for (size_t i = 0; i < iterations; ++i)
+                {
+                    out.clear();
+                    appendFrame(out, frame);
+                    sink += out.size();
+                }
+                g_sink += sink;
+            });
         char label[64];
         std::snprintf(label, sizeof label, "appendFrame (payload %zuB)", payloadBytes);
         report(label, sample, static_cast<double>(payloadBytes));
@@ -184,15 +192,16 @@ namespace
         // One megabyte of frames per pass, whatever the payload size: a pass has to
         // stay a fixed amount of work for ns/op to mean anything, and a fixed
         // frame count would make the 16 KiB case move 4096 times the bytes.
-        const size_t kFrames = std::max<size_t>(64, (size_t{1} << 20) / (payloadBytes + mynetframe::kHeaderBytes));
+        const size_t kFrames = std::max<size_t>(64, (1 << 20) / (payloadBytes + frame::kHeaderBytes));
         const std::string bytes = frameStream(kFrames, payloadBytes);
         const Sample sample = run(
-            [&](size_t iterations) {
+            [&](size_t iterations)
+            {
                 uint64_t sink = 0;
                 for (size_t pass = 0; pass < iterations; ++pass)
                 {
                     Buffer in;
-                    in.append(bytes.data(), static_cast<ssize_t>(bytes.size()));
+                    in.append(bytes);
                     FrameDecoder decoder;
                     while (in.readableBytes() > 0)
                     {
@@ -212,18 +221,20 @@ namespace
 
     void benchBigEndian()
     {
-        const Sample sample = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            char raw[4] = {'\x12', '\x34', '\x56', '\x78'};
-            std::string out;
-            for (size_t i = 0; i < iterations; ++i)
+        const Sample sample = run(
+            [&](size_t iterations)
             {
-                sink += mynetframe::readBigEndian32(raw);
-                out.clear();
-                mynetframe::appendBigEndian32(out, static_cast<uint32_t>(sink));
-            }
-            g_sink += sink;
-        });
+                uint64_t sink = 0;
+                char raw[4] = {'\x12', '\x34', '\x56', '\x78'};
+                std::string out;
+                for (size_t i = 0; i < iterations; ++i)
+                {
+                    sink += frame::readBigEndian32(raw);
+                    out.clear();
+                    frame::appendBigEndian32(out, static_cast<uint32_t>(sink));
+                }
+                g_sink += sink;
+            });
         report("read+appendBigEndian32", sample);
     }
 
@@ -236,7 +247,8 @@ namespace
         pool.init(kSlots);
         std::vector<HandlerBase *> held(kSlots, nullptr);
         const Sample sample = run(
-            [&](size_t iterations) {
+            [&](size_t iterations)
+            {
                 uint64_t sink = 0;
                 for (size_t i = 0; i < iterations; ++i)
                 {
@@ -259,55 +271,33 @@ namespace
     void benchHandlerQueue()
     {
         HandlerBase handler;
-        const std::string body(1024, 'x');
-        const Sample pushTake = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            for (size_t i = 0; i < iterations; ++i)
+        const std::string body(1 << 10, 'x');
+        const Sample pushTake = run(
+            [&](size_t iterations)
             {
-                handler.pushResponse(body);
-                sink += handler.takeResponse().size();
-            }
-            g_sink += sink;
-        });
-        report("HandlerBase::pushResponse+takeResponse (1KiB)", pushTake, 1024.0);
+                uint64_t sink = 0;
+                for (size_t i = 0; i < iterations; ++i)
+                {
+                    handler.pushResponse(body);
+                    sink += handler.takeResponse().size();
+                }
+                g_sink += sink;
+            });
+        report("HandlerBase::pushResponse+takeResponse (1KiB)", pushTake, static_cast<double>(1 << 10));
 
-        const Sample echo = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            for (size_t i = 0; i < iterations; ++i)
+        const Sample echo = run(
+            [&](size_t iterations)
             {
-                handler.appendRequest(body.data(), static_cast<ssize_t>(body.size()));
-                handler.process();
-                sink += handler.takeResponse().size();
-            }
-            g_sink += sink;
-        });
-        report("HandlerBase::process echo (1KiB)", echo, 1024.0);
-    }
-
-    // ---- hexdump ----
-
-    void benchHexdump()
-    {
-        const unsigned char bytes[16] = {0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x00,
-                                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-        const Sample shape = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            for (size_t i = 0; i < iterations; ++i)
-                sink += mynetdump::shapeOf(bytes, sizeof bytes)[0];
-            g_sink += sink;
-        });
-        report("mynetdump::shapeOf (16B)", shape);
-
-        const Sample writeDown = run([&](size_t iterations) {
-            uint64_t sink = 0;
-            for (size_t i = 0; i < iterations; ++i)
-            {
-                mynetdump::writeDown("bench", bytes, sizeof bytes);
-                sink += 1;
-            }
-            g_sink += sink;
-        });
-        report("mynetdump::writeDown (16B, logging on)", writeDown);
+                uint64_t sink = 0;
+                for (size_t i = 0; i < iterations; ++i)
+                {
+                    handler.appendRequest(body.data(), static_cast<ssize_t>(body.size()));
+                    handler.process();
+                    sink += handler.takeResponse().size();
+                }
+                g_sink += sink;
+            });
+        report("HandlerBase::process echo (1KiB)", echo, static_cast<double>(1 << 10));
     }
 
     // ---- multiplexer ----
@@ -325,10 +315,13 @@ namespace
         NoopMux mux;
         mux.process(); // announce SETTINGS once, outside the measurement
         while (mux.hasResponse())
-            mux.takeResponse();
+        {
+            (void)mux.takeResponse();
+        }
 
         const Sample sample = run(
-            [&](size_t iterations) {
+            [&](size_t iterations)
+            {
                 uint64_t sink = 0;
                 for (size_t pass = 0; pass < iterations; ++pass)
                 {
@@ -337,11 +330,11 @@ namespace
                         const uint32_t id = static_cast<uint32_t>(k * 2 + 1);
                         std::string bytes;
                         appendFrame(bytes, Frame{.streamId = id,
-                                                 .type = FrameType::headers,
+                                                 .type = FRAME_TYPE::HEADERS,
                                                  .flags = FrameFlags::kEndHeaders,
                                                  .payload = "h"});
                         appendFrame(bytes, Frame{.streamId = id,
-                                                 .type = FrameType::data,
+                                                 .type = FRAME_TYPE::DATA,
                                                  .flags = FrameFlags::kEndStream,
                                                  .payload = "payload"});
                         mux.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
@@ -359,7 +352,7 @@ namespace
 
 int main()
 {
-    mynetlog::init(); // the sink must exist before the first LOG_*
+    mynet::log::init(); // the sink must exist before the first LOG_*
     std::printf("mynet benchmarks -- %s\n",
 #ifdef __OPTIMIZE__
                 "optimised build, no sanitizer"
@@ -371,15 +364,14 @@ int main()
 
     benchBuffer();
     benchFrameEncode(16);
-    benchFrameEncode(1024);
-    benchFrameEncode(16384);
+    benchFrameEncode(1 << 10);
+    benchFrameEncode(16 << 10);
     benchFrameDecode(16);
-    benchFrameDecode(1024);
-    benchFrameDecode(16384);
+    benchFrameDecode(1 << 10);
+    benchFrameDecode(16 << 10);
     benchBigEndian();
     benchObjectPool();
     benchHandlerQueue();
-    benchHexdump();
     benchMultiplexerRoundTrip();
 
     std::printf("\nns/op is the median of %d runs of the same body; 'best' is the fastest of them.\n", kRepeats);

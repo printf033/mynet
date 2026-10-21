@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
 {
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
-    mynetlog::init();
+    mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
     switch (argc)
@@ -43,10 +43,11 @@ int main(int argc, char *argv[])
     // every peer shares, so there is no per-connection state to pool and the
     // handler outlives every message instead of being recycled with a socket.
     UdpEcho handler;
-    if (std::optional<Err> err = Reactor<EventSocket<UdpEcho>>().run_udp(ip, port, handler))
+    using namespace mynet;
+    if (auto res = Reactor<EventSocket<UdpEcho>>().runUdp(ip, port, handler); !res)
     {
-        LOG_ERROR("mynet: {}", to_string(*err));
-        return to_exit_code(*err);
+        LOG_ERROR("mynet: {}", toString(res.error()));
+        return toExitCode(res.error());
     }
     return 0;
 }

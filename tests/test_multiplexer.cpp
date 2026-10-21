@@ -14,9 +14,11 @@
 #include <utility>
 #include <vector>
 
+using namespace mynet;
+
 namespace
 {
-    [[nodiscard]] Frame makeFrame(FrameType type, uint32_t streamId, uint8_t flags = 0, std::string payload = {})
+    [[nodiscard]] Frame makeFrame(FRAME_TYPE type, uint32_t streamId, uint8_t flags = 0, std::string payload = {})
     {
         Frame frame;
         frame.streamId = streamId;
@@ -32,7 +34,7 @@ namespace
         std::string out;
         out.push_back(static_cast<char>((id >> 8) & 0xffu));
         out.push_back(static_cast<char>(id & 0xffu));
-        mynetframe::appendBigEndian32(out, value);
+        frame::appendBigEndian32(out, value);
         return out;
     }
 
@@ -51,7 +53,7 @@ namespace
         std::vector<uint32_t> closes;
         std::vector<std::pair<uint32_t, std::string>> headers;
         std::vector<std::pair<uint32_t, std::string>> data;
-        std::optional<StreamError> error;
+        std::optional<STREAM_ERROR> error;
         std::string why;
 
         void onStreamOpen(uint32_t id) noexcept override { opens.push_back(id); }
@@ -64,7 +66,7 @@ namespace
         {
             data.emplace_back(id, std::string(bytes));
         }
-        void onProtocolError(StreamError code, std::string_view reason) noexcept override
+        void onProtocolError(STREAM_ERROR code, std::string_view reason) noexcept override
         {
             error = code;
             why.assign(reason);
@@ -88,7 +90,7 @@ namespace
             std::vector<Frame> frames;
             Buffer in;
             if (!bytes.empty())
-                in.append(bytes.data(), static_cast<ssize_t>(bytes.size()));
+                in.append(bytes);
             FrameDecoder decoder;
             while (in.readableBytes() > 0)
             {
@@ -109,7 +111,7 @@ namespace
         }
     };
 
-    [[nodiscard]] size_t countOfType(const std::vector<Frame> &frames, FrameType type)
+    [[nodiscard]] size_t countOfType(const std::vector<Frame> &frames, FRAME_TYPE type)
     {
         return static_cast<size_t>(
             std::count_if(frames.begin(), frames.end(), [type](const Frame &f) { return f.type == type; }));
@@ -122,7 +124,7 @@ TEST(Multiplexer, FirstProcessAnnouncesSettings)
     mux.process();
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::settings);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::SETTINGS);
     EXPECT_EQ(frames[0].streamId, 0u);
     EXPECT_EQ(frames[0].flags, 0);
     ASSERT_EQ(frames[0].payload.size() % 6, 0u);
@@ -134,7 +136,7 @@ TEST(Multiplexer, FirstProcessAnnouncesSettings)
     for (size_t off = 0; off + 6 <= frames[0].payload.size(); off += 6)
     {
         const uint16_t id = settingIdAt(frames[0].payload, off);
-        const uint32_t value = mynetframe::readBigEndian32(frames[0].payload.data() + off + 2);
+        const uint32_t value = frame::readBigEndian32(frames[0].payload.data() + off + 2);
         if (id == mynetmux::kSettingMaxConcurrentStreams)
         {
             sawStreams = true;
@@ -148,7 +150,7 @@ TEST(Multiplexer, FirstProcessAnnouncesSettings)
         if (id == mynetmux::kSettingMaxFrameSize)
         {
             sawFrameSize = true;
-            EXPECT_EQ(value, mynetframe::kDefaultMaxFrameSize);
+            EXPECT_EQ(value, frame::kDefaultMaxFrameSize);
         }
     }
     EXPECT_TRUE(sawStreams);
@@ -164,10 +166,10 @@ TEST(Multiplexer, SettingsFromThePeerIsAcknowledgedAndNothingElseIsSent)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::settings, 0, 0, setting(mynetmux::kSettingMaxConcurrentStreams, 8)));
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mynetmux::kSettingMaxConcurrentStreams, 8)));
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::settings);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::SETTINGS);
     EXPECT_TRUE(frames[0].hasFlag(FrameFlags::kAck));
     EXPECT_TRUE(frames[0].payload.empty());
 }
@@ -177,10 +179,10 @@ TEST(Multiplexer, SettingsAckWithAPayloadIsAProtocolError)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::settings, 0, FrameFlags::kAck, std::string(1, 'x')));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, FrameFlags::kAck, std::string(1, 'x')));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
-    EXPECT_EQ(countOfType(mux.takeFrames(), FrameType::goaway), 1u);
+    EXPECT_EQ(countOfType(mux.takeFrames(), FRAME_TYPE::GOAWAY), 1u);
 }
 
 TEST(Multiplexer, HeadersOpenAStreamAndItsDataEchoesBack)
@@ -188,7 +190,7 @@ TEST(Multiplexer, HeadersOpenAStreamAndItsDataEchoesBack)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::headers, 1, FrameFlags::kEndHeaders, "hdrs"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "hdrs"));
     EXPECT_EQ(mux.openStreams(), 1u);
     EXPECT_EQ(mux.lastPeerStreamId(), 1u);
     ASSERT_EQ(mux.opens.size(), 1u);
@@ -198,14 +200,14 @@ TEST(Multiplexer, HeadersOpenAStreamAndItsDataEchoesBack)
     EXPECT_EQ(mux.headers[0].second, "hdrs");
     EXPECT_TRUE(mux.takeFrames().empty()); // headers alone produce no frame
 
-    mux.push(makeFrame(FrameType::data, 1, 0, "ping"));
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "ping"));
     ASSERT_EQ(mux.data.size(), 1u);
     EXPECT_EQ(mux.data[0].first, 1u);
     EXPECT_EQ(mux.data[0].second, "ping");
 
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::data);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::DATA);
     EXPECT_EQ(frames[0].streamId, 1u);
     EXPECT_EQ(frames[0].payload, "ping");
     EXPECT_FALSE(frames[0].hasFlag(FrameFlags::kEndStream));
@@ -219,9 +221,9 @@ TEST(Multiplexer, EndStreamAfterTheEchoClosesTheStream)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::headers, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
     mux.takeFrames();
-    mux.push(makeFrame(FrameType::data, 1, FrameFlags::kEndStream, "bye"));
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kEndStream, "bye"));
 
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 2u);
@@ -240,10 +242,10 @@ TEST(Multiplexer, HeadersWithEndStreamCloseAnIdleStream)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::headers, 1, FrameFlags::kEndHeaders | FrameFlags::kEndStream, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders | FrameFlags::kEndStream, "h"));
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::data);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::DATA);
     EXPECT_EQ(frames[0].streamId, 1u);
     EXPECT_TRUE(frames[0].hasFlag(FrameFlags::kEndStream));
     EXPECT_TRUE(frames[0].payload.empty());
@@ -256,15 +258,15 @@ TEST(Multiplexer, PingIsAcknowledgedWithTheSamePayload)
     mux.warmUp();
 
     const std::string opaque(8, '\x2a');
-    mux.push(makeFrame(FrameType::ping, 0, 0, opaque));
+    mux.push(makeFrame(FRAME_TYPE::PING, 0, 0, opaque));
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::ping);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::PING);
     EXPECT_TRUE(frames[0].hasFlag(FrameFlags::kAck));
     EXPECT_EQ(frames[0].payload, opaque);
 
     // An ACK from the peer is the end of it, not another ping.
-    mux.push(makeFrame(FrameType::ping, 0, FrameFlags::kAck, opaque));
+    mux.push(makeFrame(FRAME_TYPE::PING, 0, FrameFlags::kAck, opaque));
     EXPECT_TRUE(mux.takeFrames().empty());
 }
 
@@ -273,8 +275,8 @@ TEST(Multiplexer, PingWithTheWrongPayloadLengthIsAProtocolError)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::ping, 0, 0, "short"));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    mux.push(makeFrame(FRAME_TYPE::PING, 0, 0, "short"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
 }
 
 TEST(Multiplexer, AnEvenStreamIdIsAProtocolError)
@@ -282,13 +284,13 @@ TEST(Multiplexer, AnEvenStreamIdIsAProtocolError)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::headers, 2, 0, "h"));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 2, 0, "h"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
     EXPECT_FALSE(mux.goawayReceived());
 
     const std::vector<Frame> frames = mux.takeFrames();
-    ASSERT_EQ(countOfType(frames, FrameType::goaway), 1u);
+    ASSERT_EQ(countOfType(frames, FRAME_TYPE::GOAWAY), 1u);
     EXPECT_NE(mux.why.find("the peer may not open"), std::string::npos);
     EXPECT_TRUE(mux.opens.empty());
 }
@@ -298,9 +300,9 @@ TEST(Multiplexer, DataOnAStreamThatWasNeverOpenedIsAProtocolError)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::data, 1, 0, "bytes"));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
-    EXPECT_EQ(countOfType(mux.takeFrames(), FrameType::goaway), 1u);
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "bytes"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_EQ(countOfType(mux.takeFrames(), FRAME_TYPE::GOAWAY), 1u);
 }
 
 TEST(Multiplexer, ResetOnAFinishedStreamIsOnlyAReset)
@@ -308,17 +310,17 @@ TEST(Multiplexer, ResetOnAFinishedStreamIsOnlyAReset)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::headers, 1, FrameFlags::kEndStream, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndStream, "h"));
     mux.takeFrames(); // stream 1 is now closed and below lastPeerStreamId_
     ASSERT_EQ(mux.openStreams(), 0u);
 
-    mux.push(makeFrame(FrameType::data, 1, 0, "late"));
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "late"));
     EXPECT_FALSE(mux.error.has_value()); // a race the peer can recover from
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::reset);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
     EXPECT_EQ(frames[0].streamId, 1u);
-    EXPECT_EQ(mynetframe::readBigEndian32(frames[0].payload.data()), std::to_underlying(StreamError::streamClosed));
+    EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::STREAM_CLOSED));
 }
 
 TEST(Multiplexer, DataBiggerThanTheReceiveWindowIsAFlowControlError)
@@ -328,15 +330,15 @@ TEST(Multiplexer, DataBiggerThanTheReceiveWindowIsAFlowControlError)
 
     // Raise the frame size ceiling first, or the decoder refuses the bytes
     // before the flow-control check ever sees them.
-    mux.push(makeFrame(FrameType::settings, 0, 0, setting(mynetmux::kSettingMaxFrameSize, 1u << 20)));
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mynetmux::kSettingMaxFrameSize, 1 << 20)));
     mux.takeFrames();
-    mux.push(makeFrame(FrameType::headers, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
     mux.takeFrames();
 
-    mux.push(makeFrame(FrameType::data, 1, 0, std::string(mynetmux::kInitialWindowSize + 1, 'x')));
-    EXPECT_EQ(mux.error, StreamError::flowControlError);
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(mynetmux::kInitialWindowSize + 1, 'x')));
+    EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
-    EXPECT_EQ(countOfType(mux.takeFrames(), FrameType::goaway), 1u);
+    EXPECT_EQ(countOfType(mux.takeFrames(), FRAME_TYPE::GOAWAY), 1u);
 }
 
 TEST(Multiplexer, WindowUpdateForTheConnectionGrowsTheSendWindow)
@@ -345,14 +347,14 @@ TEST(Multiplexer, WindowUpdateForTheConnectionGrowsTheSendWindow)
     mux.warmUp();
 
     std::string increment;
-    mynetframe::appendBigEndian32(increment, 4096);
-    mux.push(makeFrame(FrameType::windowUpdate, 0, 0, increment));
-    EXPECT_EQ(mux.connectionSendWindow(), mynetmux::kInitialWindowSize + 4096u);
+    frame::appendBigEndian32(increment, 4 << 10);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 0, 0, increment));
+    EXPECT_EQ(mux.connectionSendWindow(), mynetmux::kInitialWindowSize + (4 << 10));
 
     std::string zero;
-    mynetframe::appendBigEndian32(zero, 0);
-    mux.push(makeFrame(FrameType::windowUpdate, 0, 0, zero));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    frame::appendBigEndian32(zero, 0);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 0, 0, zero));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
 }
 
 TEST(Multiplexer, PushPromiseIsAProtocolErrorOnAServer)
@@ -360,8 +362,8 @@ TEST(Multiplexer, PushPromiseIsAProtocolErrorOnAServer)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::pushPromise, 1, 0, "h"));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    mux.push(makeFrame(FRAME_TYPE::PUSH_PROMISE, 1, 0, "h"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_NE(mux.why.find("PUSH_PROMISE"), std::string::npos);
 }
 
@@ -370,7 +372,7 @@ TEST(Multiplexer, PriorityIsIgnoredAndLeavesTheConnectionAlone)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::priority, 1, 0, std::string(5, '\0')));
+    mux.push(makeFrame(FRAME_TYPE::PRIORITY, 1, 0, std::string(5, '\0')));
     EXPECT_FALSE(mux.error.has_value());
     EXPECT_FALSE(mux.closeAfterResponse());
     EXPECT_FALSE(mux.hasResponse());
@@ -383,19 +385,19 @@ TEST(Multiplexer, GoawayFromThePeerRefusesNewStreams)
     mux.warmUp();
 
     std::string payload;
-    mynetframe::appendBigEndian32(payload, 1u);
-    mynetframe::appendBigEndian32(payload, 0u);
-    mux.push(makeFrame(FrameType::goaway, 0, 0, payload));
+    frame::appendBigEndian32(payload, 1u);
+    frame::appendBigEndian32(payload, 0u);
+    mux.push(makeFrame(FRAME_TYPE::GOAWAY, 0, 0, payload));
     EXPECT_TRUE(mux.goawayReceived());
     EXPECT_TRUE(mux.takeFrames().empty());
 
-    mux.push(makeFrame(FrameType::headers, 3, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 3, 0, "h"));
     EXPECT_EQ(mux.openStreams(), 0u);
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::reset);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
     EXPECT_EQ(frames[0].streamId, 3u);
-    EXPECT_EQ(mynetframe::readBigEndian32(frames[0].payload.data()), std::to_underlying(StreamError::refusedStream));
+    EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::REFUSED_STREAM));
 }
 
 TEST(Multiplexer, ShortGoawayPayloadIsAProtocolError)
@@ -403,8 +405,8 @@ TEST(Multiplexer, ShortGoawayPayloadIsAProtocolError)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::goaway, 0, 0, "abc"));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    mux.push(makeFrame(FRAME_TYPE::GOAWAY, 0, 0, "abc"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
 }
 
 TEST(Multiplexer, MaxConcurrentStreamsBoundsTheStreamTable)
@@ -414,19 +416,19 @@ TEST(Multiplexer, MaxConcurrentStreamsBoundsTheStreamTable)
     EXPECT_EQ(mux.maxConcurrentStreams(), 2u);
     mux.warmUp();
 
-    mux.push(makeFrame(FrameType::headers, 1, 0, "h"));
-    mux.push(makeFrame(FrameType::headers, 3, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 3, 0, "h"));
     EXPECT_EQ(mux.openStreams(), 2u);
     mux.takeFrames();
 
-    mux.push(makeFrame(FrameType::headers, 5, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 5, 0, "h"));
     EXPECT_EQ(mux.openStreams(), 2u);
     EXPECT_FALSE(mux.error.has_value()); // refused, not a broken connection
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::reset);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
     EXPECT_EQ(frames[0].streamId, 5u);
-    EXPECT_EQ(mynetframe::readBigEndian32(frames[0].payload.data()), std::to_underlying(StreamError::refusedStream));
+    EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::REFUSED_STREAM));
     ASSERT_EQ(mux.opens.size(), 2u);
 }
 
@@ -444,7 +446,7 @@ TEST(Multiplexer, AFrameSplitAcrossAppendsIsBufferedUntilWhole)
     mux.warmUp();
 
     std::string bytes;
-    appendFrame(bytes, makeFrame(FrameType::headers, 1, FrameFlags::kEndHeaders, "hello"));
+    appendFrame(bytes, makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "hello"));
     ASSERT_GT(bytes.size(), size_t{5});
 
     mux.appendRequest(bytes.data(), 5);
@@ -466,18 +468,18 @@ TEST(Multiplexer, AFrameLongerThanTheCeilingEndsTheConnection)
 
     // 16385 bytes is one past the default maximum, and the frame itself is
     // well formed: what fails is the length it claims.
-    mux.push(makeFrame(FrameType::data, 1, 0, std::string(mynetframe::kDefaultMaxFrameSize + 1, 'x')));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(frame::kDefaultMaxFrameSize + 1, 'x')));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
     const std::vector<Frame> frames = mux.takeFrames();
-    ASSERT_EQ(countOfType(frames, FrameType::goaway), 1u);
+    ASSERT_EQ(countOfType(frames, FRAME_TYPE::GOAWAY), 1u);
 }
 
 TEST(Multiplexer, ResetReturnsTheConnectionToAFreshState)
 {
     ProbeMux mux;
     mux.warmUp();
-    mux.push(makeFrame(FrameType::headers, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
     mux.takeFrames();
     ASSERT_EQ(mux.openStreams(), 1u);
 
@@ -490,21 +492,21 @@ TEST(Multiplexer, ResetReturnsTheConnectionToAFreshState)
     mux.process(); // a recycled connection announces itself again
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
-    EXPECT_EQ(frames[0].type, FrameType::settings);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::SETTINGS);
 }
 
 TEST(Multiplexer, PaddedDataHasItsPaddingRemovedBeforeTheHandlerSeesIt)
 {
     ProbeMux mux;
     mux.warmUp();
-    mux.push(makeFrame(FrameType::headers, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
     mux.takeFrames();
 
     std::string payload;
     payload.push_back('\x03'); // three bytes of padding follow the content
     payload += "body";
     payload.append(3, '\0');
-    mux.push(makeFrame(FrameType::data, 1, FrameFlags::kPadded, payload));
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kPadded, payload));
 
     ASSERT_EQ(mux.data.size(), 1u);
     EXPECT_EQ(mux.data[0].second, "body");
@@ -517,12 +519,146 @@ TEST(Multiplexer, PaddingLongerThanThePayloadIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
-    mux.push(makeFrame(FrameType::headers, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
     mux.takeFrames();
 
     std::string payload;
     payload.push_back('\x7f'); // claims 127 bytes of padding in a 1 byte payload
-    mux.push(makeFrame(FrameType::data, 1, FrameFlags::kPadded, payload));
-    EXPECT_EQ(mux.error, StreamError::protocolError);
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kPadded, payload));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_NE(mux.why.find("padding"), std::string::npos);
+}
+
+TEST(Multiplexer, WindowUpdateConnectionOverflowIsFlowControlError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    std::string increment;
+    frame::appendBigEndian32(increment, 0x7fffffffu);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 0, 0, increment));
+    EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, WindowUpdateStreamOverflowIsReset)
+{
+    ProbeMux mux;
+    mux.warmUp();
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.takeFrames();
+
+    std::string increment;
+    frame::appendBigEndian32(increment, 0x7fffffffu);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 1, 0, increment));
+
+    const std::vector<Frame> frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
+    EXPECT_EQ(frames[0].streamId, 1u);
+    EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::FLOW_CONTROL_ERROR));
+}
+
+TEST(Multiplexer, RstStreamOnIdleStreamIsProtocolError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    std::string errCode;
+    frame::appendBigEndian32(errCode, std::to_underlying(STREAM_ERROR::CANCEL));
+    mux.push(makeFrame(FRAME_TYPE::RESET, 99, 0, errCode));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, SettingsInitialWindowSizeOverflowIsFlowControlError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mynetmux::kSettingInitialWindowSize, 0x80000000u)));
+    EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, SettingsInvalidMaxFrameSizeIsProtocolError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    // Max frame size less than 16384 is illegal in HTTP/2
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mynetmux::kSettingMaxFrameSize, 1024)));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, DataOnConnectionStreamIsProtocolError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    mux.push(makeFrame(FRAME_TYPE::DATA, 0, 0, "payload"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, PriorityOnConnectionStreamIsProtocolError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    mux.push(makeFrame(FRAME_TYPE::PRIORITY, 0, 0, "12345"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, WindowUpdateOnIdleStreamIsProtocolError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    std::string increment;
+    frame::appendBigEndian32(increment, 1024);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 77, 0, increment));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, UnexpectedContinuationFrameIsProtocolError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    mux.push(makeFrame(FRAME_TYPE::CONTINUATION, 1, 0, "headerblock"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, InitialWindowReductionPausesStreamUntilWindowUpdate)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    // Open stream 1 with headers
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.takeFrames();
+
+    // Reduce initial window size to 0
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mynetmux::kSettingInitialWindowSize, 0)));
+    mux.takeFrames();
+
+    // Push data to stream 1 - should be queued because sendWindow is <= 0
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "hello"));
+    EXPECT_TRUE(mux.takeFrames().empty()); // No DATA frame sent
+
+    // Now send WINDOW_UPDATE to restore send window
+    std::string increment;
+    frame::appendBigEndian32(increment, 1000);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 1, 0, increment));
+
+    // Data should now be pumped
+    const std::vector<Frame> frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::DATA);
+    EXPECT_EQ(frames[0].payload, "hello");
 }

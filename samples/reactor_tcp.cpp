@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
 {
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
-    mynetlog::init();
+    mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
     switch (argc)
@@ -37,13 +37,14 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     LOG_INFO("listening to {}:{}", ip, port);
-    // HandlerTrace echoes like HandlerBase and additionally writes the raw
+    // HandlerBase echoes like HandlerBase and additionally writes the raw
     // bytes down, so a TLS client that lands on this plain port still shows
     // its (encrypted) ClientHello instead of nothing at all.
-    if (std::optional<Err> err = Reactor<EventSocket<HandlerTrace>>().run_tcp(ip, port))
+    using namespace mynet;
+    if (auto res = Reactor<EventSocket<HandlerBase>>().runTcp(ip, port); !res)
     {
-        LOG_ERROR("mynet: {}", to_string(*err));
-        return to_exit_code(*err);
+        LOG_ERROR("mynet: {}", toString(res.error()));
+        return toExitCode(res.error());
     }
     return 0;
 }

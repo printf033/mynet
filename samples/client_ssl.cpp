@@ -1,14 +1,14 @@
+#include "client.hpp"
 #include "error.hpp"
 #include "handler.hpp"
 #include "log.hpp"
-#include "peer.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
-    mynetlog::init();
+    mynet::log::init();
     const char *name = "127.0.0.1";
     const char *service = "8888";
     const char *serverName = nullptr;
@@ -48,11 +48,12 @@ int main(int argc, char *argv[])
     // A client has no certificate of its own, so the third argument is the
     // name the client asks for in SNI and the fourth is the CA bundle the
     // server's certificate is checked against (no bundle, no check).
-    if (std::optional<Err> err = Peer<EventSsl<HandlerBase>>().run_ssl(
-            ip, port, serverName != nullptr ? serverName : name, caFile))
+    using namespace mynet;
+    if (auto res = Client<EventSsl<HandlerBase>>().runSsl(ip, port, serverName != nullptr ? serverName : name, caFile);
+        !res)
     {
-        LOG_ERROR("mynet: {}", to_string(*err));
-        return to_exit_code(*err);
+        LOG_ERROR("mynet: {}", toString(res.error()));
+        return toExitCode(res.error());
     }
     return 0;
 }

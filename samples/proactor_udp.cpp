@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
 {
     // Send mylog's output to stderr before anything can log: the data this
     // program streams over stdout must stay untouched.
-    mynetlog::init();
+    mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
     switch (argc)
@@ -42,10 +42,11 @@ int main(int argc, char *argv[])
     // message and there is no connection to key a per-session buffer on; the
     // read is re-armed as each completion is retired.
     UdpEcho handler;
-    if (std::optional<Err> err = Proactor<EventSocket<UdpEcho>>().run_udp(ip, port, handler))
+    using namespace mynet;
+    if (auto res = Proactor<EventSocket<UdpEcho>>().runUdp(ip, port, handler); !res)
     {
-        LOG_ERROR("mynet: {}", to_string(*err));
-        return to_exit_code(*err);
+        LOG_ERROR("mynet: {}", toString(res.error()));
+        return toExitCode(res.error());
     }
     return 0;
 }

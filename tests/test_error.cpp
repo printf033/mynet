@@ -1,51 +1,69 @@
-// Err and IoEnd: two enums whose whole point is that every value has exactly
+// ERR and IO_END: two enums whose whole point is that every value has exactly
 // one name and one meaning, so every value is walked here rather than sampled.
 #include "error.hpp"
 #include <gtest/gtest.h>
 #include <string_view>
+#include <utility>
 
-namespace
-{
-    // The number of enumerators in Err. When a value is added this fails until the
-    // walk below covers it, which is the reminder the walk exists for.
-    constexpr int kErrCount = 30;
-} // namespace
+using namespace mynet;
 
-TEST(Err, EveryValueHasTextAndAnExitCode)
+TEST(ERR, EveryValueHasTextAndAnExitCode)
 {
-    for (int i = 0; i < kErrCount; ++i)
+    for (size_t i = 0; i < kErrCount; ++i)
     {
-        const Err err = static_cast<Err>(i);
-        const std::string_view text = to_string(err);
-        EXPECT_FALSE(text.empty()) << "Err value " << i << " has no text";
-        EXPECT_NE(text, "unknown error") << "Err value " << i << " fell through to the default";
-        EXPECT_EQ(to_exit_code(err), i + 1) << "exit codes are one-based";
+        const ERR err = static_cast<ERR>(i);
+        const std::string_view text = toString(err);
+        EXPECT_FALSE(text.empty()) << "ERR value " << i << " has no text";
+        EXPECT_NE(text, "unknown error") << "ERR value " << i << " fell through to the default";
+        EXPECT_EQ(toExitCode(err), static_cast<int>(i) + 2)
+            << "exit codes are two-based (reserving 1 for generic error)";
     }
 }
 
-TEST(Err, LastEnumeratorIsIncludedInTheWalk)
+TEST(ERR, LastEnumeratorIsIncludedInTheWalk)
 {
-    EXPECT_EQ(std::to_underlying(Err::not_initialised), kErrCount - 1);
+    EXPECT_EQ(std::to_underlying(ERR::NOT_INITIALISED), kErrCount - 1);
 }
 
-TEST(Err, UnknownValueIsNamedRatherThanEmpty)
+TEST(ERR, UnknownValueIsNamedRatherThanEmpty)
 {
-    EXPECT_EQ(to_string(static_cast<Err>(0xff)), "unknown error");
+    EXPECT_EQ(toString(static_cast<ERR>(0xff)), "unknown error");
+    EXPECT_EQ(toExitCode(static_cast<ERR>(0xff)), kGenericExitCode);
 }
 
-TEST(Err, TextIsStableForASpotCheckValue)
+TEST(ERR, TextIsStableForASpotCheckValue)
 {
-    EXPECT_EQ(to_string(Err::bind_failed), "bind() failed");
-    EXPECT_EQ(to_string(Err::ssl_key_mismatch), "the private key does not match the certificate");
-    EXPECT_EQ(to_string(Err::not_initialised), "the event loop was not initialised");
+    EXPECT_EQ(toString(ERR::BIND_FAILED), "bind() failed");
+    EXPECT_EQ(toString(ERR::SSL_KEY_MISMATCH), "the private key does not match the certificate");
+    EXPECT_EQ(toString(ERR::NOT_INITIALISED), "the event loop was not initialised");
 }
 
-TEST(IoEnd, CoversTheFourOrdinaryOutcomesOfATransfer)
+TEST(ERR, ReflectionNameOf)
+{
+    EXPECT_EQ(nameOf(ERR::BIND_FAILED), "BIND_FAILED");
+    EXPECT_EQ(nameOf(ERR::SSL_KEY_MISMATCH), "SSL_KEY_MISMATCH");
+    EXPECT_EQ(nameOf(ERR::NOT_INITIALISED), "NOT_INITIALISED");
+    EXPECT_EQ(kErrCount, 29);
+}
+
+TEST(IO_END, CoversTheFourOrdinaryOutcomesOfATransfer)
 {
     // None of these is an error, which is the reason they are a separate enum:
     // a reader that gets one is being told whether to retry, wait, or stop.
-    EXPECT_EQ(std::to_underlying(IoEnd::wouldblock), 0);
-    EXPECT_EQ(std::to_underlying(IoEnd::interrupted), 1);
-    EXPECT_EQ(std::to_underlying(IoEnd::eof), 2);
-    EXPECT_EQ(std::to_underlying(IoEnd::fatal), 3);
+    EXPECT_EQ(std::to_underlying(IO_END::WOULDBLOCK), 0);
+    EXPECT_EQ(std::to_underlying(IO_END::INTERRUPTED), 1);
+    EXPECT_EQ(std::to_underlying(IO_END::EOF_REACHED), 2);
+    EXPECT_EQ(std::to_underlying(IO_END::FATAL), 3);
+    EXPECT_EQ(kIoEndCount, 4);
+
+    EXPECT_EQ(nameOf(IO_END::WOULDBLOCK), "WOULDBLOCK");
+    EXPECT_EQ(nameOf(IO_END::INTERRUPTED), "INTERRUPTED");
+    EXPECT_EQ(nameOf(IO_END::EOF_REACHED), "EOF_REACHED");
+    EXPECT_EQ(nameOf(IO_END::FATAL), "FATAL");
+
+    EXPECT_EQ(toString(IO_END::WOULDBLOCK), "socket would block");
+    EXPECT_EQ(toString(IO_END::INTERRUPTED), "operation interrupted by signal");
+    EXPECT_EQ(toString(IO_END::EOF_REACHED), "orderly end of stream");
+    EXPECT_EQ(toString(IO_END::FATAL), "fatal link failure");
+    EXPECT_EQ(toString(static_cast<IO_END>(0xff)), "unknown io outcome");
 }
