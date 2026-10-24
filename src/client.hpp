@@ -6,6 +6,7 @@
  */
 
 #include "concepts.hpp"
+#include "datagram.hpp"
 #include "error.hpp"
 #include "event.hpp"
 #include "log.hpp"
@@ -45,7 +46,7 @@ namespace mynet
         requires DerivedFromEventBase<Event> && Resettable<Event>
     class Client
     {
-        enum class PEER_STATE : uint8_t
+        enum class CLIENT_STATE : uint8_t
         {
             CONNECTING = 0,
             HANDSHAKE = 1,
@@ -72,7 +73,7 @@ namespace mynet
          * @param ip Remote IPv4 literal address.
          * @param port Remote port.
          * @param bufSize Buffer size for socket read/write operations.
-         * @return nullopt on success, or error code on failure.
+         * @return Result<> 成功返回 {}，失败返回 std::unexpected(ERR::...)
          */
         [[nodiscard]] Result<> runTcp(const char *ip, int port, int bufSize = 16 << 10)
             requires SocketEvent<Event>
@@ -91,12 +92,17 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
-            state_ = PEER_STATE::CONNECTING;
+            state_ = CLIENT_STATE::CONNECTING;
             return runLoop();
         }
 
         /**
          * @brief Run UDP client connection to remote peer.
+         *
+         * UDP 退出语义：UDP 无连接、无 FIN，客户端在 stdin EOF 且发送队列与
+         * 回显出队全部收尾后即视为完成并返回（“已发完即退出”）；
+         * 请求-响应模式下若需等待回包或限时退出，由调用方通过 stop()
+         * （跨线程）控制。对端不可达（异步 ECONNREFUSED）以失败返回。
          */
         [[nodiscard]] Result<> runUdp(const char *ip, int port, int bufSize = 4 << 10)
             requires SocketEvent<Event>
@@ -114,7 +120,7 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
-            state_ = PEER_STATE::OPEN;
+            state_ = CLIENT_STATE::OPEN;
             return runLoop();
         }
 
@@ -176,7 +182,7 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
-            state_ = PEER_STATE::CONNECTING;
+            state_ = CLIENT_STATE::CONNECTING;
             return runLoop();
         }
 
@@ -239,7 +245,7 @@ namespace mynet
             fatal_ = false;
             failReason_.reset();
             type_ = 0;
-            state_ = PEER_STATE::CLOSED;
+            state_ = CLIENT_STATE::CLOSED;
         }
 
         [[nodiscard]] inline size_t sent() const noexcept { return sentTotal_; }
@@ -249,14 +255,6 @@ namespace mynet
         [[nodiscard]] inline int fd() const noexcept { return fd_; }
 
     private:
-        [[nodiscard]] inline std::string peerText() const
-        {
-            char buf[64];
-            std::snprintf(buf, sizeof(buf), "%s:%d", ::inet_ntoa(addr_.sin_addr),
-                          static_cast<int>(::ntohs(addr_.sin_port)));
-            return buf;
-        }
-
         [[nodiscard]] inline Result<> setup(const char *ip, int port, int type, int bufSize)
         {
             reset();
@@ -287,6 +285,8 @@ namespace mynet
             }
             bufSize_ = bufSize;
             type_ = type;
+            sentTotal_ = 0;
+            recvTotal_ = 0;
             return {};
         }
 
@@ -378,11 +378,11 @@ namespace mynet
             {
                 peerEof_ = true;
             }
-            if (state_ == PEER_STATE::CONNECTING || state_ == PEER_STATE::HANDSHAKE)
+            if (state_ == CLIENT_STATE::CONNECTING || state_ == CLIENT_STATE::HANDSHAKE)
             {
                 handshakeOrConnect();
             }
-            if (state_ == PEER_STATE::OPEN)
+            if (state_ == CLIENT_STATE::OPEN)
             {
                 if (events & EPOLLIN)
                 {
@@ -448,34 +448,34 @@ namespace mynet
 
         inline void handshakeOrConnect()
         {
-            if (state_ == PEER_STATE::CONNECTING)
+            if (state_ == CLIENT_STATE::CONNECTING)
             {
                 int soError = 0;
                 socklen_t len = sizeof(soError);
                 if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &soError, &len) < 0 || soError != 0) [[unlikely]]
                 {
-                    LOG_ERROR("Client::handshakeOrConnect: connect to {} failed: {}", peerText(),
+                    LOG_ERROR("Client::handshakeOrConnect: connect to {} failed: {}", datagramPeerText(addr_),
                               soError != 0 ? log::errnoText(soError) : log::errnoText(errno));
                     fatal_ = true;
                     failReason_ = ERR::CONNECT_FAILED;
                     peerEof_ = true;
                     return;
                 }
-                state_ = ssl_ != nullptr ? PEER_STATE::HANDSHAKE : PEER_STATE::OPEN;
+                state_ = ssl_ != nullptr ? CLIENT_STATE::HANDSHAKE : CLIENT_STATE::OPEN;
             }
-            if (state_ == PEER_STATE::HANDSHAKE)
+            if (state_ == CLIENT_STATE::HANDSHAKE)
             {
                 int e = SSL_connect(ssl_);
                 if (e == 1)
                 {
-                    state_ = PEER_STATE::OPEN;
+                    state_ = CLIENT_STATE::OPEN;
                 }
                 else
                 {
                     int reason = SSL_get_error(ssl_, e);
                     if (reason != SSL_ERROR_WANT_READ && reason != SSL_ERROR_WANT_WRITE) [[unlikely]]
                     {
-                        LOG_ERROR("Client::handshakeOrConnect: TLS handshake with {} failed: {}", peerText(),
+                        LOG_ERROR("Client::handshakeOrConnect: TLS handshake with {} failed: {}", datagramPeerText(addr_),
                                   log::sslText());
                         fatal_ = true;
                         failReason_ = ERR::CONNECT_FAILED;
@@ -507,7 +507,7 @@ namespace mynet
 
         inline void flushToPeer()
         {
-            if (state_ != PEER_STATE::OPEN)
+            if (state_ != CLIENT_STATE::OPEN)
             {
                 return;
             }
@@ -548,6 +548,19 @@ namespace mynet
             }
         }
 
+        /**
+         * @brief TLS 半关闭：发出 close_notify 后即完成本侧收尾
+         *
+         * 设计取舍（中文说明）：SSL_shutdown() 返回 0 表示 close_notify 已
+         * 冲刷到内核、但对端 close_notify 未收到；本客户端不做双向等待，
+         * 直接结束 shutdown 流程。若返回 -1 且 WANT_WRITE，则 close_notify
+         * 尚未发完，置位 pendingShutdown_ 借 EPOLLOUT 继续驱动直至发出。
+         * 若返回 -1 且 WANT_READ，则 close_notify 已发出、正在等对端回复，
+         * 按半关闭语义直接完成收尾——不可置位重试：写事件就绪恒真，
+         * 会以全速忙旋重试 SSL_shutdown 直至对端响应（CPU 空转挂死）。
+         * 不引入“等待对端 close_notify”的重试状态机，
+         * 否则需区分 WANT_READ 才挂 EPOLLIN，徒增状态而收益有限。
+         */
         inline void halfClosePeer()
         {
             if (ssl_ != nullptr)
@@ -556,11 +569,20 @@ namespace mynet
                 if (e < 0)
                 {
                     int reason = SSL_get_error(ssl_, e);
-                    if (reason == SSL_ERROR_WANT_READ || reason == SSL_ERROR_WANT_WRITE)
+                    if (reason == SSL_ERROR_WANT_WRITE)
                     {
+                        // close_notify 未发完：借 EPOLLOUT 继续驱动（写就绪后重试有意义）
                         pendingShutdown_ = true;
                         return;
                     }
+                    if (reason == SSL_ERROR_WANT_READ)
+                    {
+                        // close_notify 已发出、在等对端回复：半关闭语义到此完成。
+                        // 若置位重试，写就绪恒真会导致每 tick 忙旋 SSL_shutdown
+                        pendingShutdown_ = false;
+                        return;
+                    }
+                    // 其余错误（SYSCALL/ZERO_RETURN 等）：放弃半关闭，走关闭收尾
                 }
                 pendingShutdown_ = false;
                 return;
@@ -643,7 +665,7 @@ namespace mynet
             {
                 events |= EPOLLIN;
             }
-            if (state_ == PEER_STATE::CONNECTING || state_ == PEER_STATE::HANDSHAKE || toPeerOffset_ < toPeer_.size() ||
+            if (state_ == CLIENT_STATE::CONNECTING || state_ == CLIENT_STATE::HANDSHAKE || toPeerOffset_ < toPeer_.size() ||
                 pendingShutdown_)
             {
                 events |= EPOLLOUT;
@@ -655,7 +677,10 @@ namespace mynet
                 peerEof_ = true;
             }
             const bool udpAnswered =
-                type_ == SOCK_DGRAM && stdinEof_ && backlog() == 0 && recvTotal_ > 0 && toOutOffset_ == toOut_.size();
+                // UDP 无连接、无 FIN：若仍要求 recvTotal_ > 0，单向发送（fire-and-forget、
+                // 对端宕机/丢包）时永远无法退出。已发完且回包已收尾即视为完成；
+                // 对“等回包”语义的请求-响应模式，调用方用 stop() 或截止时间控制退出
+                type_ == SOCK_DGRAM && stdinEof_ && backlog() == 0 && toOutOffset_ == toOut_.size();
             if (fatal_ || udpAnswered || (peerEof_ && toOutOffset_ == toOut_.size() && backlog() == 0))
             {
                 loop_.quit();
@@ -668,7 +693,7 @@ namespace mynet
         {
             while (true)
             {
-                if (state_ != PEER_STATE::OPEN)
+                if (state_ != CLIENT_STATE::OPEN)
                 {
                     return std::unexpected(IO_END::WOULDBLOCK);
                 }
@@ -703,6 +728,16 @@ namespace mynet
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                 {
                     return std::unexpected(IO_END::WOULDBLOCK);
+                }
+                if (type_ == SOCK_DGRAM && errno == ECONNREFUSED) [[unlikely]]
+                {
+                    // connected UDP 上对端不可达：内核异步回的 ICMP 错误在 recv 浮出。
+                    // 结果与通用错误路径相同（FATAL），特判价值在于：
+                    // ① 给出可定位的诊断日志（UDP 不可达，而非笼统 recv failed）；
+                    // ② 记录 failReason_，否则 runUdp 会静默返回成功
+                    failReason_ = ERR::UDP_UNREACHABLE;
+                    LOG_WARN("Client::readSome: fd {}: UDP peer unreachable: {}", fd_, log::errnoText(errno));
+                    return std::unexpected(IO_END::FATAL);
                 }
                 LOG_WARN("Client::readSome: fd {}: recv() failed: {}", fd_, log::errnoText(errno));
                 return std::unexpected(IO_END::FATAL);
@@ -753,6 +788,14 @@ namespace mynet
                 {
                     return std::unexpected(IO_END::EOF_REACHED);
                 }
+                if (type_ == SOCK_DGRAM && errno == ECONNREFUSED) [[unlikely]]
+                {
+                    // 同 readSome：结果与通用路径一致（FATAL），特判用于
+                    // 可定位的 UDP 不可达诊断日志 + 记录 failReason_
+                    failReason_ = ERR::UDP_UNREACHABLE;
+                    LOG_WARN("Client::writeSome: fd {}: UDP peer unreachable: {}", fd_, log::errnoText(errno));
+                    return std::unexpected(IO_END::FATAL);
+                }
                 LOG_WARN("Client::writeSome: fd {}: send() failed: {}", fd_, log::errnoText(errno));
                 return std::unexpected(IO_END::FATAL);
             }
@@ -775,7 +818,7 @@ namespace mynet
         int type_ = 0;
         bool fatal_ = false;
         std::optional<ERR> failReason_{};
-        PEER_STATE state_ = PEER_STATE::CLOSED;
+        CLIENT_STATE state_ = CLIENT_STATE::CLOSED;
         std::string toPeer_{};
         size_t toPeerOffset_ = 0;
         std::string toOut_{};

@@ -11,7 +11,7 @@ namespace
 {
     void feed(HandlerBase &handler, const std::string &bytes)
     {
-        handler.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
+        (void)handler.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
     }
 } // namespace
 
@@ -36,8 +36,8 @@ TEST(HandlerBase, ProcessOnAnEmptyBufferProducesNothing)
 TEST(HandlerBase, ResponseQueueIsFifo)
 {
     HandlerBase handler;
-    handler.pushResponse("first");
-    handler.pushResponse(std::string("second"));
+    (void)handler.pushResponse("first");
+    (void)handler.pushResponse(std::string("second"));
     EXPECT_EQ(handler.responseCount(), size_t{2});
     EXPECT_EQ(handler.takeResponse(), "first");
     EXPECT_EQ(handler.takeResponse(), "second");
@@ -49,7 +49,7 @@ TEST(HandlerBase, PushResponseFromABufferCopiesTheBytes)
 {
     HandlerBase handler;
     const std::string bytes = "abcdef";
-    handler.pushResponse(bytes.data(), 3);
+    (void)handler.pushResponse(std::string_view(bytes.data(), 3));
     EXPECT_EQ(handler.takeResponse(), "abc");
 }
 
@@ -90,7 +90,7 @@ TEST(HandlerBase, ResetClearsRequestsResponsesAndTheCloseFlag)
 {
     HandlerBase handler;
     feed(handler, "request");
-    handler.pushResponse("response");
+    (void)handler.pushResponse("response");
     handler.setCloseAfterResponse(true);
     handler.reset();
     EXPECT_EQ(handler.requestBytes(), size_t{0});
@@ -137,6 +137,25 @@ TEST(HandlerHttp, Http10WithoutConnectionKeepAliveIsNotKeepAlive)
     feed(handler, "GET / HTTP/1.0\r\n\r\n");
     handler.process();
     EXPECT_FALSE(handler.keepAlive());
+    // 回写字节级断言：HTTP/1.0 无 Connection 头时响应必须带 Connection: close，
+    // 防止 onMessageComplete 动态回写逻辑回归为恒 keep-alive
+    ASSERT_TRUE(handler.hasResponse());
+    const std::string response = handler.takeResponse();
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos);
+    EXPECT_EQ(response.find("Connection: keep-alive"), std::string::npos);
+    EXPECT_TRUE(handler.closeAfterResponse());
+}
+
+TEST(HandlerHttp, Http11WithConnectionCloseSetsCloseAfterResponse)
+{
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
+    feed(handler, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
+    handler.process();
+    EXPECT_FALSE(handler.keepAlive());
+    EXPECT_TRUE(handler.closeAfterResponse());
+    ASSERT_TRUE(handler.hasResponse());
+    const std::string response = handler.takeResponse();
+    EXPECT_NE(response.find("Connection: close\r\n"), std::string::npos);
 }
 
 TEST(HandlerHttp, ARequestSplitAcrossTwoAppendsStillParses)
@@ -177,8 +196,8 @@ TEST(HandlerHttp, NullHeaderNameDoesNotCrash)
 TEST(HandlerBase, NullPushResponseDoesNotCrash)
 {
     HandlerBase handler;
-    handler.pushResponse(static_cast<const char *>(nullptr));
-    handler.pushResponse(nullptr, 0);
+    (void)handler.pushResponse(std::string_view{});
+    (void)handler.pushResponse(std::string_view(nullptr, 0));
     EXPECT_FALSE(handler.hasResponse());
 }
 

@@ -244,7 +244,11 @@ namespace
     {
         constexpr size_t kSlots = 128;
         ObjectPool<HandlerBase> pool;
-        pool.init(kSlots);
+        if (!pool.init(kSlots))
+        {
+            std::fprintf(stderr, "bench: pool init failed\n");
+            std::exit(1);
+        }
         std::vector<HandlerBase *> held(kSlots, nullptr);
         const Sample sample = run(
             [&](size_t iterations)

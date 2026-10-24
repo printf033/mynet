@@ -133,8 +133,11 @@ namespace mynet
          *
          * @param now 当前时间戳
          * @return size_t 实际执行的回调数量
+         *
+         * @note 回调可能在闭包内部抛出异常，故本函数不标 noexcept，
+         *       异常传播策略交由调用方决定；否则回调一抛即 terminate。
          */
-        inline size_t handleExpired(Time now) noexcept
+        inline size_t handleExpired(Time now)
         {
             std::vector<Callback> callbacks;
             {

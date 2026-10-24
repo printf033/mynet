@@ -11,6 +11,7 @@
 #include "event.hpp"
 #include "log.hpp"
 #include "objectPool.hpp"
+#include <bit>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -177,11 +178,23 @@ namespace mynet
                 return std::unexpected(ERR::URING_QUEUE_FAILED);
             }
             uringInited_ = true;
-            sessionPool_.init(datagram_ != nullptr ? 1 : (sessionPoolSize > 0 ? sessionPoolSize : 1));
-            acceptPool_.init(static_cast<size_t>(maxAcceptEvents > 0 ? maxAcceptEvents : 1));
+            const size_t sessionSlots = datagram_ != nullptr ? 1 : (sessionPoolSize > 0 ? sessionPoolSize : 1);
+            if (auto poolRes = sessionPool_.init(sessionSlots); !poolRes) [[unlikely]]
+            {
+                LOG_ERROR("Proactor::serve: initialising session pool ({} slots) failed", sessionSlots);
+                reset();
+                return std::unexpected(ERR::POOL_ALLOC_FAILED);
+            }
+            const size_t acceptSlots = static_cast<size_t>(maxAcceptEvents > 0 ? maxAcceptEvents : 1);
+            if (auto poolRes = acceptPool_.init(acceptSlots); !poolRes) [[unlikely]]
+            {
+                LOG_ERROR("Proactor::serve: initialising accept pool ({} slots) failed", acceptSlots);
+                reset();
+                return std::unexpected(ERR::POOL_ALLOC_FAILED);
+            }
             sessions_.reserve(sessionPoolSize > 0 ? sessionPoolSize : 1);
             maxAccepts_ = maxAcceptEvents > 0 ? maxAcceptEvents : 1;
-            maxBufEntrs_ = maxBufEntrs > 0 ? maxBufEntrs : 0;
+            maxBufEntrs_ = maxBufEntrs > 0 ? static_cast<int>(std::bit_ceil(static_cast<unsigned int>(maxBufEntrs))) : 0;
             bufSize_ = bufSize > 0 ? bufSize : (4 << 10);
             if (maxBufEntrs_ > 0)
             {
@@ -359,6 +372,7 @@ namespace mynet
             bool sendPosted = false;
             bool pollPosted = false;
             bool pollRetired = false;
+            bool inCancelQueue = false;
 
             inline void reset() noexcept
             {
@@ -371,6 +385,7 @@ namespace mynet
                 sendPosted = false;
                 pollPosted = false;
                 pollRetired = false;
+                inCancelQueue = false;
             }
         };
 
@@ -583,6 +598,7 @@ namespace mynet
             session->sendPosted = false;
             session->pollPosted = false;
             session->pollRetired = false;
+            session->inCancelQueue = false;
             session->conn.setFd(fd);
             session->conn.addr() = addr;
             session->conn.touch();
@@ -634,7 +650,9 @@ namespace mynet
 
         [[nodiscard]] inline IO_STATUS postRecv(Session *session)
         {
-            if (session->conn.ssl() != nullptr)
+            // kTLS RX offload 生效的 TLS 会话：内核已解密，recv 直接吐明文，
+            // 可复用 multishot + buffer ring 快路径；其余 TLS 会话仍走 poll→同步 SSL_read
+            if (session->conn.ssl() != nullptr && !session->conn.ktlsRxActive())
             {
                 return postPoll(session);
             }
@@ -655,7 +673,7 @@ namespace mynet
 
         inline void onRecvDone(io_uring_cqe *cqe, Session *session)
         {
-            if (session->conn.ssl() != nullptr)
+            if (session->conn.ssl() != nullptr && !session->conn.ktlsRxActive())
             {
                 if (!(cqe->flags & IORING_CQE_F_MORE))
                 {
@@ -702,7 +720,14 @@ namespace mynet
                         char *buf = reinterpret_cast<char *>(bufBase_) +
                                     static_cast<size_t>(bid) * static_cast<size_t>(bufSize_);
                         Handler &handler = session->conn.handler();
-                        handler.appendRequest(buf, static_cast<ssize_t>(cqe->res));
+                        if (!handler.appendRequest(buf, static_cast<ssize_t>(cqe->res))) [[unlikely]]
+                        {
+                            // 解析缓冲扩容失败：请求流断裂，降级关闭会话；本次读缓冲已回收
+                            LOG_ERROR("Proactor: appendRequest failed (allocation), fd {} closing", session->conn.fd());
+                            session->dead = true;
+                            recycleBuffer(bid);
+                            return;
+                        }
                         if (handler.requestOverLimit()) [[unlikely]]
                         {
                             handler.onParseError("request exceeds the read limit");
@@ -738,6 +763,10 @@ namespace mynet
                     closeSession(session);
                     settleSession(session);
                     return;
+                }
+                if (!session->sendPosted)
+                {
+                    sendPending(session);
                 }
             }
             else if (!session->dead && !session->recvPosted)
@@ -821,6 +850,7 @@ namespace mynet
                 return;
             }
             Conn &conn = session->conn;
+            // kTLS RX 会话的接收已走 buffer ring 快路径，但发送仍需同步 SSL_write（TX 未 offload）
             if (conn.ssl() != nullptr)
             {
                 return;
@@ -909,7 +939,11 @@ namespace mynet
             }
             if (session->inFlight > 0)
             {
-                cancelScratch_.push_back(session);
+                if (!session->inCancelQueue)
+                {
+                    cancelScratch_.push_back(session);
+                    session->inCancelQueue = true;
+                }
             }
             else
             {
@@ -923,60 +957,70 @@ namespace mynet
             for (Session *session : cancelScratch_)
             {
                 bool sqeAvailable = true;
-                if (session->pollPosted || session->pollRetired)
+                if (session->inFlight > 0)
                 {
-                    io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
-                    if (sqe == nullptr)
+                    if (session->pollPosted || session->pollRetired)
                     {
-                        sqeAvailable = false;
+                        io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
+                        if (sqe == nullptr)
+                        {
+                            sqeAvailable = false;
+                        }
+                        else
+                        {
+                            io_uring_prep_poll_remove(sqe, reinterpret_cast<uint64_t>(&session->pollOp));
+                            io_uring_sqe_set_data(sqe, nullptr);
+                        }
                     }
-                    else
+                    if (sqeAvailable && session->recvPosted)
                     {
-                        io_uring_prep_poll_remove(sqe, reinterpret_cast<uint64_t>(&session->pollOp));
-                        io_uring_sqe_set_data(sqe, nullptr);
+                        io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
+                        if (sqe == nullptr)
+                        {
+                            sqeAvailable = false;
+                        }
+                        else
+                        {
+                            io_uring_prep_cancel64(sqe, reinterpret_cast<uint64_t>(&session->recvOp), 0);
+                            io_uring_sqe_set_data(sqe, nullptr);
+                        }
                     }
-                }
-                if (sqeAvailable && session->recvPosted)
-                {
-                    io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
-                    if (sqe == nullptr)
+                    if (sqeAvailable && session->sendPosted)
                     {
-                        sqeAvailable = false;
-                    }
-                    else
-                    {
-                        io_uring_prep_cancel64(sqe, reinterpret_cast<uint64_t>(&session->recvOp), 0);
-                        io_uring_sqe_set_data(sqe, nullptr);
-                    }
-                }
-                if (sqeAvailable && session->sendPosted)
-                {
-                    io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
-                    if (sqe == nullptr)
-                    {
-                        sqeAvailable = false;
-                    }
-                    else
-                    {
-                        io_uring_prep_cancel64(sqe, reinterpret_cast<uint64_t>(&session->sendOp), 0);
-                        io_uring_sqe_set_data(sqe, nullptr);
+                        io_uring_sqe *sqe = io_uring_get_sqe(&uring_);
+                        if (sqe == nullptr)
+                        {
+                            sqeAvailable = false;
+                        }
+                        else
+                        {
+                            io_uring_prep_cancel64(sqe, reinterpret_cast<uint64_t>(&session->sendOp), 0);
+                            io_uring_sqe_set_data(sqe, nullptr);
+                        }
                     }
                 }
                 if (!sqeAvailable)
                 {
                     break;
                 }
+                session->inCancelQueue = false;
                 ++done;
             }
             if (done > 0)
             {
+                std::vector<Session *> processed(cancelScratch_.begin(),
+                                                 cancelScratch_.begin() + static_cast<long>(done));
                 cancelScratch_.erase(cancelScratch_.begin(), cancelScratch_.begin() + static_cast<long>(done));
+                for (Session *s : processed)
+                {
+                    settleSession(s);
+                }
             }
         }
 
         inline void settleSession(Session *session)
         {
-            if (session->dead && session->inFlight == 0)
+            if (session->dead && session->inFlight == 0 && !session->inCancelQueue)
             {
                 recycleSession(session);
             }

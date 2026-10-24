@@ -1,5 +1,6 @@
 #pragma once
 
+#include "error.hpp"
 #include "log.hpp"
 #include <arpa/inet.h>
 #include <cstddef>
@@ -85,6 +86,7 @@ namespace mynet
 
         inline void pushReply(const sockaddr_in &peer, const char *buf, size_t n)
         {
+            contract_assert(buf != nullptr);
             if (replies_.size() >= maxPendingReplies_) [[unlikely]]
             {
                 ++droppedReplies_;
@@ -92,7 +94,7 @@ namespace mynet
                          replies_.size(), n, datagramPeerText(peer));
                 return;
             }
-            replies_.push_back(DatagramReply{peer, (buf != nullptr && n > 0) ? std::string(buf, n) : std::string()});
+            replies_.push_back(DatagramReply{peer, (n > 0) ? std::string(buf, n) : std::string()});
         }
 
         inline void pushReply(const sockaddr_in &peer, std::string bytes)
@@ -111,7 +113,7 @@ namespace mynet
         [[nodiscard]] inline size_t replyCount() const noexcept { return replies_.size(); }
         [[nodiscard]] inline const DatagramReply &peekReply() const noexcept { return replies_.front(); }
 
-        inline DatagramReply takeReply()
+        [[nodiscard]] inline DatagramReply takeReply()
         {
             if (replies_.empty()) [[unlikely]]
             {
@@ -127,7 +129,11 @@ namespace mynet
         inline void setMaxDatagramBytes(size_t n) noexcept { maxDatagramBytes_ = n; }
         [[nodiscard]] inline size_t maxDatagramBytes() const noexcept { return maxDatagramBytes_; }
 
-        inline void setMaxPendingReplies(size_t n) noexcept { maxPendingReplies_ = n; }
+        inline void setMaxPendingReplies(size_t n) noexcept
+        {
+            contract_assert(n > 0);
+            maxPendingReplies_ = n;
+        }
         [[nodiscard]] inline size_t maxPendingReplies() const noexcept { return maxPendingReplies_; }
 
     protected:

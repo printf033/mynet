@@ -3,10 +3,10 @@
 #include "buffer.hpp"
 #include "concepts.hpp"
 #include "log.hpp"
+#include "ringQueue.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <deque>
 #include <llhttp.h>
 #include <string>
 #include <string_view>
@@ -27,7 +27,17 @@ namespace mynet
     class HandlerBase
     {
     public:
-        HandlerBase() noexcept = default;
+        /**
+         * @brief 构造时一次性定容响应队列
+         *
+         * 默认 64 槽对齐流水线深度：开箱即可用，后续连接层可在建连时调用
+         * reserveResponses() 按协议需求重新定容（init 幂等）。
+         */
+        explicit HandlerBase(size_t responseCapacity = 64) noexcept
+        {
+            (void)responseQueue_.init(responseCapacity); // 槽位分配失败降级为容量 0 拒收，不折损零异常构造
+        }
+
         virtual ~HandlerBase() noexcept = default;
 
         HandlerBase(const HandlerBase &) = delete ("a handler holds parser state bound to one connection");
@@ -47,12 +57,24 @@ namespace mynet
 
         // ---- 读取侧控制 (Read Side) ----
 
-        inline void appendRequest(const char *buf, ssize_t rn) noexcept
+        /**
+         * @brief 追加一段对端请求字节到解析缓冲（零异常，失败显式错误码）
+         *
+         * Buffer::append() 为 nothrow 接口：堆扩容失败以 ERR::BUF_ALLOC_FAILED
+         * 交付，缓冲区保持原样，调用方据此可安全丢弃本次读到的字节（对端重传
+         * 或连接关闭兜底）。
+         *
+         * @param buf 对端字节首地址（允许为 nullptr，此时为无操作）
+         * @param rn 本次读取的字节数（须非负）
+         * @return 成功 {}；解析缓冲扩容失败 std::unexpected(ERR::BUF_ALLOC_FAILED)
+         */
+        [[nodiscard]] inline Result<> appendRequest(const char *buf, ssize_t rn) noexcept
         {
             if (buf != nullptr && rn > 0) [[likely]]
             {
-                requestBuffer_.append(buf, static_cast<size_t>(rn));
+                return requestBuffer_.append(buf, static_cast<size_t>(rn));
             }
+            return {};
         }
 
         [[nodiscard]] inline bool requestOverLimit() const noexcept
@@ -92,29 +114,52 @@ namespace mynet
                 return std::string();
             }
             std::string out = std::move(responseQueue_.front());
-            responseQueue_.pop_front();
+            responseQueue_.pop();
             return out;
         }
 
-        inline void pushResponse(std::string s) { responseQueue_.push_back(std::move(s)); }
-
-        inline void pushResponse(const char *s)
+        /**
+         * @brief 推入一条完整响应（定容队列，满队显式拒绝）
+         */
+        [[nodiscard]] inline Result<> pushResponse(std::string s) noexcept
         {
-            if (s != nullptr)
-            {
-                responseQueue_.emplace_back(s);
-            }
+            return responseQueue_.push(std::move(s));
         }
 
-        inline void pushResponse(const char *buf, size_t n)
+        /**
+         * @brief 推入一段视图响应（零拷贝适配 string_view 与连续字节）
+         */
+        [[nodiscard]] inline Result<> pushResponse(std::string_view sv) noexcept
         {
-            if (buf != nullptr && n > 0)
+            if (sv.data() == nullptr || sv.empty())
             {
-                responseQueue_.emplace_back(buf, n);
+                return {};
             }
+            return responseQueue_.emplace(sv);
         }
 
-        inline void pushResponse(std::string_view sv) { responseQueue_.emplace_back(sv.data(), sv.size()); }
+        /**
+         * @brief 推入以空终止的字符串字面量（重载消歧义，内部转为 string_view）
+         */
+        [[nodiscard]] inline Result<> pushResponse(const char *s) noexcept
+        {
+            if (s == nullptr) [[unlikely]]
+            {
+                return {};
+            }
+            return pushResponse(std::string_view(s));
+        }
+
+        /**
+         * @brief 预分配响应队列槽位（连接建立时调用一次）
+         *
+         * @param capacity 槽位数量（允许流水线化的最大响应条数）
+         * @return 成功 {}；槽位分配失败 std::unexpected(ERR::POOL_ALLOC_FAILED)
+         */
+        [[nodiscard]] inline Result<> reserveResponses(size_t capacity) noexcept
+        {
+            return responseQueue_.init(capacity);
+        }
 
         // ---- 生命周期管理 (Lifecycle) ----
 
@@ -133,18 +178,20 @@ namespace mynet
          */
         void process()
         {
-            const size_t readable = requestBuffer_.readableBytes();
-            if (readable == 0) [[unlikely]]
+            if (requestBuffer_.empty()) [[unlikely]]
             {
                 return;
             }
-            pushResponse(requestBuffer_.readableBegin(), readable);
+            if (!pushResponse(requestBuffer_.readableView())) [[unlikely]]
+            {
+                LOG_WARN("Handler::process: response queue full, echoing dropped");
+            }
             requestBuffer_.retrieveAll();
         }
 
     protected:
         Buffer requestBuffer_;
-        std::deque<std::string> responseQueue_;
+        RingQueue responseQueue_;
         size_t maxRequestBytes_ = 4 << 20;
         bool closeAfterResponse_ = false;
     };
@@ -219,11 +266,11 @@ namespace mynet
             return llhttp_method_name(static_cast<llhttp_method_t>(parser_.method));
         }
 
-        [[nodiscard]] inline std::string headerValue(const char *name) const
+        [[nodiscard]] inline std::string_view headerValue(const char *name) const noexcept
         {
             if (name == nullptr) [[unlikely]]
             {
-                return std::string();
+                return {};
             }
             const size_t targetLen = std::strlen(name);
             for (const auto &kv : headers_)
@@ -256,7 +303,7 @@ namespace mynet
                     return kv.second;
                 }
             }
-            return std::string();
+            return {};
         }
 
         void onMessageComplete() noexcept override
@@ -267,9 +314,19 @@ namespace mynet
                 resp.reserve(128 + body_.size());
                 resp.append("HTTP/1.1 200 OK\r\nContent-Length: ");
                 resp.append(std::to_string(body_.size()));
-                resp.append("\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\n\r\n");
+                resp.append("\r\nContent-Type: application/octet-stream\r\nConnection: ");
+                // 按 llhttp 解析结论回写连接语义，避免对 Connection: close 的请求错误地续连
+                resp.append(keepAlive() ? "keep-alive" : "close");
+                resp.append("\r\n\r\n");
                 resp.append(body_);
-                pushResponse(std::move(resp));
+                if (!pushResponse(std::move(resp))) [[unlikely]]
+                {
+                    LOG_WARN("HandlerHttp: response queue full, response dropped");
+                }
+                if (!keepAlive())
+                {
+                    closeAfterResponse_ = true;
+                }
             }
         }
 
@@ -281,7 +338,10 @@ namespace mynet
                 static constexpr std::string_view kBadResponse = "HTTP/1.1 400 Bad Request\r\n"
                                                                  "Content-Length: 0\r\n"
                                                                  "Connection: close\r\n\r\n";
-                pushResponse(kBadResponse);
+                if (!pushResponse(kBadResponse)) [[unlikely]]
+                {
+                    LOG_WARN("HandlerHttp: response queue full, 400 dropped");
+                }
             }
             closeAfterResponse_ = true;
         }

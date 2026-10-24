@@ -1,6 +1,7 @@
 #pragma once
 
 #include "buffer.hpp"
+#include "error.hpp"
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -171,6 +172,8 @@ namespace mynet
      */
     inline void appendFrame(std::string &out, const Frame &frame)
     {
+        // 24 位长度域上限是线路硬约束：超限 payload 无法编码，必须在线上失步前失败
+        contract_assert(frame.payload.size() <= 0xffffffu);
         const uint32_t length = static_cast<uint32_t>(frame.payload.size());
         const uint32_t streamId = frame.streamId & frame::kStreamIdMask;
 

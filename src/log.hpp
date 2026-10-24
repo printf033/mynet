@@ -2,7 +2,7 @@
 
 /**
  * @file log.hpp
- * @brief Integration layer connecting mynet with mylog (third_party/mylog).
+ * @brief mynet 与 mylog（third_party/mylog）的集成层。
  */
 
 #include "logger.hpp"
@@ -22,8 +22,8 @@ namespace mynet
         {
 
             /**
-             * @brief Sink log messages to stderr to avoid corrupting stdout pipes.
-             * @param msg The log message view.
+             * @brief 将日志消息写入 stderr，避免污染 stdout 管道。
+             * @param msg 日志消息视图。
              */
             inline void toStderr(void * /*ctx*/, std::string_view msg) noexcept
             {
@@ -34,7 +34,7 @@ namespace mynet
             }
 
             /**
-             * @brief Flush stderr buffer.
+             * @brief 刷新 stderr 缓冲。
              */
             inline void flushStderr(void * /*ctx*/) noexcept
             {
@@ -44,7 +44,7 @@ namespace mynet
         } // namespace detail
 
         /**
-         * @brief Initialize logging configuration for mynet, routing sink to stderr.
+         * @brief 初始化 mynet 的日志配置，输出落点定为 stderr。
          */
         inline void init() noexcept
         {
@@ -58,19 +58,23 @@ namespace mynet
         }
 
         /**
-         * @brief Retrieve human-readable string representation of an errno.
-         * @param err The errno value.
-         * @return String view describing the error.
+         * @brief 获取 errno 的可读字符串描述。
+         * @param err errno 值。
+         * @return 描述该错误的字符串视图，生命周期至本线程下次调用为止。
          */
         [[nodiscard]] inline std::string_view errnoText(int err) noexcept
         {
-            const char *text = std::strerror(err);
+            // strerror 非线程安全（POSIX 已弃用），改用 strerror_r；
+            // Linux 下 _GNU_SOURCE 恒定义，GNU 版直接返回指向 buf 的指针；
+            // 缓冲必须 thread_local，否则返回的 string_view 指向已析构的栈帧
+            thread_local char buf[256];
+            const char *text = ::strerror_r(err, buf, sizeof(buf));
             return text != nullptr ? std::string_view{text} : std::string_view{"unknown error"};
         }
 
         /**
-         * @brief Retrieve oldest queued OpenSSL error string.
-         * @return String view describing the SSL error.
+         * @brief 取出最早的排队 OpenSSL 错误字符串。
+         * @return 描述该 SSL 错误的字符串视图，生命周期至本线程下次调用为止。
          */
         [[nodiscard]] inline std::string_view sslText() noexcept
         {

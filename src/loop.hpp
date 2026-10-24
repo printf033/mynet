@@ -46,6 +46,13 @@ namespace mynet
          */
         [[nodiscard]] inline Result<> init() noexcept
         {
+            // 运行中禁止重建：此时 epoll 集与 eventfd 正被 run() 持有，
+            // 重建会摧毁活跃描述符并使 in-flight 事件全部悬垂
+            if (running_.load(std::memory_order_acquire)) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::init: refused to re-init while the loop is running");
+                return std::unexpected(ERR::LOOP_ALREADY_RUNNING);
+            }
             if (epollFd_ >= 0 && wakeFd_ >= 0) [[likely]]
             {
                 return {};
@@ -232,7 +239,12 @@ namespace mynet
 
                 for (int i = 0; i < n; ++i)
                 {
-                    if (events_[i].data.u64 == kWakeToken) [[unlikely]]
+                    // 派发前快照当前事件：回调可能关闭连接并使 events_ 中
+                    // 同一轮稍后的 data.ptr 悬垂（连接对象可能已回池复用），
+                    // 快照本身是平凡值拷贝，消费逻辑不变
+                    const uint32_t ev = events_[i].events;
+                    const uint64_t token = events_[i].data.u64;
+                    if (token == kWakeToken) [[unlikely]]
                     {
                         drainWakeup();
                         doPendingTasks();
@@ -240,7 +252,7 @@ namespace mynet
                     }
                     if (eventCallback_) [[likely]]
                     {
-                        eventCallback_(events_[i].events, events_[i].data.ptr);
+                        eventCallback_(ev, reinterpret_cast<void *>(static_cast<uintptr_t>(token)));
                     }
                 }
             }
@@ -300,16 +312,19 @@ namespace mynet
 
         inline uint64_t runAfter(std::chrono::milliseconds delay, TimerCallback callback)
         {
+            contract_assert(callback != nullptr);
             return timerQueue_.addTimer(Clock::now() + delay, std::move(callback));
         }
 
         inline uint64_t runEvery(std::chrono::milliseconds interval, TimerCallback callback)
         {
+            contract_assert(callback != nullptr);
             return timerQueue_.addTimer(Clock::now() + interval, std::move(callback), interval);
         }
 
         inline uint64_t runAt(Time when, TimerCallback callback)
         {
+            contract_assert(callback != nullptr);
             return timerQueue_.addTimer(when, std::move(callback));
         }
 
@@ -325,16 +340,19 @@ namespace mynet
             {
                 return -1;
             }
-            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(next - Clock::now()).count();
-            if (left <= 0)
+            const Time now = Clock::now();
+            if (next <= now)
             {
                 return 0;
             }
-            if (left > std::numeric_limits<int>::max())
+            // next > now 保证差值非负；先分桶截断再做 duration_cast，
+            // 避免极大过期时间在有符号差值上未定义溢出
+            if (next - now > std::chrono::milliseconds(std::numeric_limits<int>::max()))
             {
                 return std::numeric_limits<int>::max();
             }
-            return static_cast<int>(left);
+            return static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(next - now).count());
         }
 
         inline void doPendingTasks()
@@ -377,7 +395,7 @@ namespace mynet
             }
         }
 
-        static constexpr uint64_t kWakeToken = 1;
+        static constexpr uint64_t kWakeToken = ~uint64_t{0};
 
         int epollFd_ = -1;
         int wakeFd_ = -1;

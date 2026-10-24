@@ -29,8 +29,11 @@ if(MYNET_IS_TOP_LEVEL)
 endif()
 
 # C++26 contracts and reflection flags for GCC
+# 全库 no-exception 策略：错误处理统一走 Result<T>/std::expected 与 contract_assert，
+# 源码不使用任何 try/catch/throw；-fno-exceptions 使编译器强制该约定，
+# 遗漏的隐式异常路径（如 STL 扩容 OOM）在此模式下直接 abort，显式可预测。
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    add_compile_options(-fcontracts -freflection)
+    add_compile_options(-fcontracts -freflection -fno-exceptions)
     add_link_options(-fcontracts)
 endif()
 

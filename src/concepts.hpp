@@ -1,5 +1,6 @@
 #pragma once
 
+#include "error.hpp"
 #include <concepts>
 #include <cstdint>
 #include <string>
@@ -37,7 +38,8 @@ namespace mynet
     template <typename H>
     concept ProtocolHandler =
         DerivedFromHandlerBase<H> && Resettable<H> && requires(H &h, const char *buf, ssize_t rn) {
-            { h.appendRequest(buf, rn) } noexcept;
+            // 零异常纪律：摄入路径 noexcept，扩容失败经错误码交付
+            { h.appendRequest(buf, rn) } noexcept -> std::same_as<Result<>>;
             { h.hasResponse() } noexcept -> std::same_as<bool>;
             { h.takeResponse() } -> std::same_as<std::string>;
             { h.requestOverLimit() } noexcept -> std::same_as<bool>;

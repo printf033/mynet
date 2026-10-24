@@ -13,7 +13,7 @@
 // its client sent and echoes it back. A stream handler never sees a frame
 // header, and the multiplexer never sees an application message.
 //
-// The admission limit is 128 concurrent streams (mynetmux::kDefaultMaxStreams,
+// The admission limit is 128 concurrent streams (mux::kDefaultMaxStreams,
 // advertised as SETTINGS_MAX_CONCURRENT_STREAMS and settable through
 // Multiplexer::setMaxConcurrentStreams). A peer that opens past it is refused
 // with RST_STREAM rather than queued, because holding the frames would only

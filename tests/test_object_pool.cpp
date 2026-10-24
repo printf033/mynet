@@ -3,6 +3,8 @@
 // which is the property an epoll registration depends on.
 #include "objectPool.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <thread>
 #include <gtest/gtest.h>
 #include <set>
 #include <vector>
@@ -33,7 +35,7 @@ TEST(ObjectPool, StartsAtZeroCapacity)
 TEST(ObjectPool, InitCreatesCapacityObjects)
 {
     ObjectPool<Tracked> pool;
-    pool.init(4);
+    ASSERT_TRUE(pool.init(4));
     EXPECT_EQ(pool.capacity(), size_t{4});
     EXPECT_EQ(pool.available(), size_t{4});
 }
@@ -41,7 +43,7 @@ TEST(ObjectPool, InitCreatesCapacityObjects)
 TEST(ObjectPool, AcquireConsumesAvailabilityAndExhaustsToNull)
 {
     ObjectPool<Tracked> pool;
-    pool.init(2);
+    ASSERT_TRUE(pool.init(2));
     EXPECT_NE(pool.acquire(), nullptr);
     EXPECT_EQ(pool.available(), size_t{1});
     EXPECT_NE(pool.acquire(), nullptr);
@@ -52,7 +54,7 @@ TEST(ObjectPool, AcquireConsumesAvailabilityAndExhaustsToNull)
 TEST(ObjectPool, AcquireHandsOutDistinctSlots)
 {
     ObjectPool<Tracked> pool;
-    pool.init(8);
+    ASSERT_TRUE(pool.init(8));
     std::set<Tracked *> seen;
     for (int i = 0; i < 8; ++i)
     {
@@ -66,7 +68,7 @@ TEST(ObjectPool, AcquireHandsOutDistinctSlots)
 TEST(ObjectPool, ReleaseMakesTheSameSlotAvailableAgain)
 {
     ObjectPool<Tracked> pool;
-    pool.init(1);
+    ASSERT_TRUE(pool.init(1));
     Tracked *first = pool.acquire();
     ASSERT_NE(first, nullptr);
     EXPECT_EQ(pool.acquire(), nullptr);
@@ -79,7 +81,7 @@ TEST(ObjectPool, ResetDropsEverySlotIncludingLiveOnes)
 {
     const int before = Tracked::live;
     ObjectPool<Tracked> pool;
-    pool.init(3);
+    ASSERT_TRUE(pool.init(3));
     EXPECT_EQ(Tracked::live, before + 3);
     EXPECT_NE(pool.acquire(), nullptr); // an outstanding slot must not survive reset()
     pool.reset();
@@ -92,7 +94,7 @@ TEST(ObjectPool, ResetDropsEverySlotIncludingLiveOnes)
 TEST(ObjectPool, ReleaseOfNullIsIgnored)
 {
     ObjectPool<Tracked> pool;
-    pool.init(1);
+    ASSERT_TRUE(pool.init(1));
     EXPECT_FALSE(pool.release(nullptr));
     EXPECT_EQ(pool.available(), size_t{1});
 }
@@ -100,7 +102,7 @@ TEST(ObjectPool, ReleaseOfNullIsIgnored)
 TEST(ObjectPool, DoubleReleaseIsSafelyRejectedWithoutCorruptingPool)
 {
     ObjectPool<Tracked> pool;
-    pool.init(2);
+    ASSERT_TRUE(pool.init(2));
 
     Tracked *a = pool.acquire();
     Tracked *b = pool.acquire();
@@ -136,7 +138,7 @@ TEST(ObjectPool, DoubleReleaseIsSafelyRejectedWithoutCorruptingPool)
 TEST(ObjectPool, ForeignPointerReleaseIsRejectedWithoutLeak)
 {
     ObjectPool<Tracked> pool;
-    pool.init(2);
+    ASSERT_TRUE(pool.init(2));
 
     auto *foreign = new Tracked();
     EXPECT_FALSE(pool.release(foreign)); // Bug 2 verification: foreign pointer rejected
@@ -147,7 +149,7 @@ TEST(ObjectPool, ForeignPointerReleaseIsRejectedWithoutLeak)
 TEST(ObjectPool, MisalignedPointerReleaseIsRejected)
 {
     ObjectPool<Tracked> pool;
-    pool.init(2);
+    ASSERT_TRUE(pool.init(2));
     Tracked *a = pool.acquire();
     ASSERT_NE(a, nullptr);
 
@@ -164,9 +166,9 @@ TEST(ObjectPool, ReinitReplacesTheWholeSet)
 {
     const int before = Tracked::live;
     ObjectPool<Tracked> pool;
-    pool.init(2);
+    ASSERT_TRUE(pool.init(2));
     Tracked *old = pool.acquire();
-    pool.init(5); // init() is defined as "make room for this many", not "add"
+    ASSERT_TRUE(pool.init(5)); // init() is defined as "make room for this many", not "add"
     EXPECT_EQ(Tracked::live, before + 5);
     EXPECT_EQ(pool.capacity(), size_t{5});
     EXPECT_EQ(pool.available(), size_t{5});
@@ -178,7 +180,7 @@ TEST(ObjectPool, ReinitReplacesTheWholeSet)
 TEST(ObjectPool, InitZeroIsAnEmptyPool)
 {
     ObjectPool<Tracked> pool;
-    pool.init(0);
+    ASSERT_TRUE(pool.init(0));
     EXPECT_EQ(pool.capacity(), size_t{0});
     EXPECT_EQ(pool.acquire(), nullptr);
 }
@@ -186,7 +188,7 @@ TEST(ObjectPool, InitZeroIsAnEmptyPool)
 TEST(ObjectPool, ReleasedSlotsAreReusedBeforeFreshOnes)
 {
     ObjectPool<Tracked> pool;
-    pool.init(3);
+    ASSERT_TRUE(pool.init(3));
     Tracked *a = pool.acquire();
     Tracked *b = pool.acquire();
     Tracked *c = pool.acquire();
@@ -201,3 +203,25 @@ TEST(ObjectPool, ReleasedSlotsAreReusedBeforeFreshOnes)
     EXPECT_TRUE(second == a || second == b);
     EXPECT_NE(first, second);
 }
+
+#ifdef MYNET_DEBUG
+namespace
+{
+    // 供死亡测试使用的跨线程借用：线程创建与 join 必须整体发生在被 fork 的
+    // 死亡语句内部（gtest fast 风格只复制调用线程，外部创建的线程在子进程中不存在）。
+    void crossThreadAcquire(ObjectPool<Tracked> &pool)
+    {
+        std::thread cross([&pool] { (void)pool.acquire(); });
+        cross.join();
+    }
+} // namespace
+
+TEST(ObjectPoolDeath, CrossThreadUseAborts)
+{
+    // D4：Debug 构建下，非 init 线程借用/归还应确定性中止（非静默 UB）。
+    ObjectPool<Tracked> pool;
+    std::thread binder([&pool] { (void)pool.init(4); });
+    binder.join();
+    EXPECT_DEATH(crossThreadAcquire(pool), "ObjectPool used across threads");
+}
+#endif

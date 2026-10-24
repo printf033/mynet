@@ -46,6 +46,12 @@ namespace mynet
         ACCEPT_FAILED,          ///< accept4() 接收新连接失败
         STDOUT_FAILED,          ///< 客户端写入 stdout 失败（如对端管道断开）
         TIMER_NOT_FOUND,        ///< 定时器取消失败（已触发或不存在）
+        POOL_ALLOC_FAILED,      ///< 对象池堆内存分配失败（init() 阶段底层分配器返回空）
+        BUF_ALLOC_FAILED,       ///< Buffer 底层堆内存分配/扩容失败（容量需求超出可用内存）
+        QUEUE_FULL,             ///< 定容队列已满，新元素被拒绝（不覆盖、不静默丢弃）
+        RECV_TIMEOUT,           ///< 等待对端数据超时（如 UDP 请求-响应模式在截止时间内未收到回包）
+        LOOP_ALREADY_RUNNING,   ///< 事件循环已在运行中，拒绝重复初始化/重置
+        UDP_UNREACHABLE,        ///< connected UDP 对端不可达（异步 ECONNREFUSED：ICMP 错误在后续 recv/send 浮出）
         NOT_INITIALISED         ///< 事件循环在初始化完成前被错误调用
     };
 
@@ -53,7 +59,7 @@ namespace mynet
      * @brief 编译期校验 ERR 枚举总数与反射信息一致
      */
     inline constexpr size_t kErrCount = mylog::reflect::countEnumMembers<ERR>();
-    static_assert(kErrCount == 29, "Expected 29 library runtime error enumerators");
+    static_assert(kErrCount == 35, "Expected 35 library runtime error enumerators");
 
     /**
      * @brief 非阻塞传输终止原因枚举
@@ -106,6 +112,12 @@ namespace mynet
             "accept4() failed",
             "write() to stdout failed",
             "no timer with that id is armed",
+            "the object pool ran out of memory while allocating slots",
+            "the buffer could not grow: the allocator returned no memory",
+            "the bounded queue is full and the element was refused",
+            "timed out waiting for data from the peer",
+            "the event loop is already running",
+            "the connected UDP peer is unreachable or refused the datagram",
             "the event loop was not initialised"};
 
         static_assert(kErrDescriptions.size() == kErrCount, "kErrDescriptions count must match ERR enum member count");

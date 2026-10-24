@@ -84,6 +84,9 @@ namespace mynet
                 SSL_free(ssl_);
                 ssl_ = nullptr;
             }
+#ifdef MYNET_HAVE_KTLS
+            ktlsRx_ = false;
+#endif
             if (fd_ != -1)
             {
                 ::close(fd_);
@@ -163,6 +166,11 @@ namespace mynet
                 LOG_ERROR("Connection::startTLS: SSL_new() failed on fd {}: {}", fd_, log::sslText());
                 return std::unexpected(ERR::SSL_NEW_FAILED);
             }
+#ifdef MYNET_HAVE_KTLS
+            ktlsRx_ = false;
+            // 请求内核 TLS RX offload；仅当握手后 BIO_get_ktls_recv 确认生效时才走快路径
+            SSL_set_options(ssl_, SSL_OP_ENABLE_KTLS);
+#endif
             if (SSL_set_fd(ssl_, fd_) != 1) [[unlikely]]
             {
                 LOG_ERROR("Connection::startTLS: SSL_set_fd({}) failed: {}", fd_, log::sslText());
@@ -186,6 +194,15 @@ namespace mynet
             if (r == 1)
             {
                 handshakeDone_ = true;
+#ifdef MYNET_HAVE_KTLS
+                // 内核完成 RX offload 时读 BIO 已切换为 kTLS：后续 recv() 直接返回明文，
+                // Proactor 可安全复用 multishot + buffer ring 快路径；未生效则保持慢路径
+                ktlsRx_ = BIO_get_ktls_recv(SSL_get_rbio(ssl_)) > 0;
+                if (ktlsRx_) [[unlikely]]
+                {
+                    LOG_INFO("Connection::doHandshake: fd {}: kTLS RX offload active", fd_);
+                }
+#endif
                 return HANDSHAKE_STATUS::DONE;
             }
             switch (SSL_get_error(ssl_, r))
@@ -200,6 +217,17 @@ namespace mynet
                 LOG_WARN("Connection::doHandshake: fd {}: {}", fd_, log::sslText());
                 return HANDSHAKE_STATUS::FAILED;
             }
+        }
+
+        /// kTLS RX offload 是否已生效（握手后由内核确认）；仅诊断与 Proactor 路径选择使用。
+        /// 构建探测未命中时恒返回 false，调用方无需条件编译，慢路径零回归。
+        [[nodiscard]] inline bool ktlsRxActive() const noexcept
+        {
+#ifdef MYNET_HAVE_KTLS
+            return ktlsRx_;
+#else
+            return false;
+#endif
         }
 
         [[nodiscard]] inline const unsigned char *alpnSelected(unsigned int *len) const noexcept
@@ -238,6 +266,10 @@ namespace mynet
                 std::expected<size_t, IO_END> rn = doRecv(buf, sizeof(buf));
                 if (!rn)
                 {
+                    if (rn.error() == IO_END::INTERRUPTED)
+                    {
+                        continue;
+                    }
                     if (rn.error() == IO_END::EOF_REACHED)
                     {
                         peerGone_ = true;
@@ -256,7 +288,13 @@ namespace mynet
                     break;
                 }
 
-                handler_.appendRequest(buf, static_cast<ssize_t>(*rn));
+                if (!handler_.appendRequest(buf, static_cast<ssize_t>(*rn))) [[unlikely]]
+                {
+                    // 解析缓冲扩容失败：请求流断裂，已收字节不可复用，连接降级关闭
+                    LOG_ERROR("Connection: appendRequest failed (allocation), fd {} closing", fd_);
+                    peerGone_ = true;
+                    return IO_STATUS::CLOSE;
+                }
                 touch();
                 if (handler_.requestOverLimit()) [[unlikely]]
                 {
@@ -443,6 +481,9 @@ namespace mynet
         sockaddr_in addr_{};
         SSL *ssl_ = nullptr;
         bool handshakeDone_ = false;
+#ifdef MYNET_HAVE_KTLS
+        bool ktlsRx_ = false;
+#endif
         HandlerType handler_{};
 
         std::deque<std::string> writeQueue_;

@@ -11,17 +11,16 @@
 #include "handler.hpp"
 #include "log.hpp"
 #include "objectPool.hpp"
+#include "streamTable.hpp"
 #include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -90,9 +89,19 @@ namespace mynet
         inline void setMaxConcurrentStreams(size_t n)
         {
             maxStreams_ = n == 0 ? 1 : n;
-            if (streams_.empty())
+            if (streams_.size() == 0)
             {
-                streamPool_.init(maxStreams_);
+                if (auto poolRes = streamPool_.init(maxStreams_); !poolRes) [[unlikely]]
+                {
+                    // 池不可用时 ensureStreamPool/acquire 侧自然降级，不影响已建立的流
+                    LOG_ERROR("Multiplexer::setMaxConcurrentStreams: initialising stream pool ({} slots) failed",
+                              maxStreams_);
+                }
+                if (auto tableRes = streams_.init(maxStreams_); !tableRes) [[unlikely]]
+                {
+                    LOG_ERROR("Multiplexer::setMaxConcurrentStreams: initialising stream table ({} slots) failed",
+                              maxStreams_);
+                }
             }
         }
 
@@ -117,14 +126,14 @@ namespace mynet
         void reset() noexcept override
         {
             HandlerBase::reset();
-            for (auto &entry : streams_)
-            {
-                if (entry.second.handler != nullptr)
+            streams_.clear(
+                [this]([[maybe_unused]] const uint32_t id, StreamSlot &slot)
                 {
-                    streamPool_.release(entry.second.handler);
-                }
-            }
-            streams_.clear();
+                    if (slot.handler != nullptr)
+                    {
+                        streamPool_.release(slot.handler);
+                    }
+                });
             ensureStreamPool();
             connSendWindow_ = mux::kInitialWindowSize;
             connRecvWindow_ = mux::kInitialWindowSize;
@@ -214,9 +223,26 @@ namespace mynet
     private:
         inline void ensureStreamPool()
         {
-            if (streamPool_.capacity() == 0) [[unlikely]]
+            if (streamPool_.capacity() == 0 || !streams_.ready()) [[unlikely]]
             {
-                streamPool_.init(maxStreams_);
+                if (streamPool_.capacity() == 0)
+                {
+                    if (auto poolRes = streamPool_.init(maxStreams_); !poolRes) [[unlikely]]
+                    {
+                        // noexcept 链上不能抛：池保持不可用，acquire() 返回 nullptr 自然降级
+                        LOG_ERROR("Multiplexer::ensureStreamPool: initialising stream pool ({} slots) failed",
+                                  maxStreams_);
+                    }
+                }
+                if (!streams_.ready())
+                {
+                    if (auto tableRes = streams_.init(maxStreams_); !tableRes) [[unlikely]]
+                    {
+                        // 表不可用时 open() 返回 nullptr，openStream 侧以 REFUSED_STREAM 自然降级
+                        LOG_ERROR("Multiplexer::ensureStreamPool: initialising stream table ({} slots) failed",
+                                  maxStreams_);
+                    }
+                }
             }
         }
 
@@ -225,9 +251,10 @@ namespace mynet
             StreamHandler *handler = nullptr;
             int64_t sendWindow = mux::kInitialWindowSize;
             uint32_t recvWindow = mux::kInitialWindowSize;
+            uint32_t pendingOffset = 0; ///< 在途 chunk 已发出的字节数（partial 发送游标）
             bool remoteEnded = false;
             bool finalSent = false;
-            std::deque<std::string> pending{};
+            std::string pending{}; ///< 在途响应块（collectResponses 阶段只保留一个，发送不完驻留）
         };
 
         // ---- Frame dispatch ----
@@ -359,7 +386,14 @@ namespace mynet
             slot->recvWindow -= static_cast<uint32_t>(bytes.size());
 
             onStreamData(frame.streamId, bytes);
-            slot->handler->appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
+            if (auto res = slot->handler->appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size())); !res)
+                [[unlikely]]
+            {
+                LOG_ERROR("Multiplexer: stream {} appendRequest failed: {}", frame.streamId, toString(res.error()));
+                sendResetStream(frame.streamId, STREAM_ERROR::INTERNAL_ERROR);
+                closeStream(frame.streamId);
+                return;
+            }
             slot->handler->process();
             collectResponses(frame.streamId, *slot);
 
@@ -416,17 +450,12 @@ namespace mynet
                         return;
                     }
                     const int64_t delta = static_cast<int64_t>(value) - static_cast<int64_t>(initialSendWindow_);
-                    initialSendWindow_ = value;
-                    for (auto &entry : streams_)
+                    if (!applyDeltaToAllStreams(delta)) [[unlikely]]
                     {
-                        int64_t newWin = entry.second.sendWindow + delta;
-                        if (newWin > static_cast<int64_t>(frame::kStreamIdMask)) [[unlikely]]
-                        {
-                            protocolFailure(STREAM_ERROR::FLOW_CONTROL_ERROR, "stream window overflow on SETTINGS");
-                            return;
-                        }
-                        entry.second.sendWindow = newWin;
+                        protocolFailure(STREAM_ERROR::FLOW_CONTROL_ERROR, "stream send window overflow from SETTINGS");
+                        return;
                     }
+                    initialSendWindow_ = value;
                     pumpAll();
                     break;
                 }
@@ -591,12 +620,24 @@ namespace mynet
             }
             handler->reset();
             lastPeerStreamId_ = id;
-            StreamSlot &slot = streams_[id];
-            slot.handler = handler;
-            slot.sendWindow = static_cast<int64_t>(initialSendWindow_);
-            slot.recvWindow = mux::kInitialWindowSize;
+            StreamSlot *slot = streams_.open(id);
+            if (slot == nullptr) [[unlikely]]
+            {
+                // 表不可用或装填因子超限：回滚池租约，按 REFUSED_STREAM 降级
+                streamPool_.release(handler);
+                LOG_WARN("Multiplexer::openStream: stream table is full at {} active streams, refusing stream {}",
+                         streams_.size(), id);
+                return nullptr;
+            }
+            slot->handler = handler;
+            slot->sendWindow = static_cast<int64_t>(initialSendWindow_);
+            slot->recvWindow = mux::kInitialWindowSize;
+            slot->pendingOffset = 0;
+            slot->remoteEnded = false; // 墓碑复用槽位继承旧流标志：全部状态字段显式复位
+            slot->finalSent = false;
+            slot->pending.clear();
             onStreamOpen(id);
-            return &slot;
+            return slot;
         }
 
         inline void endRemoteSide(uint32_t id, StreamSlot &slot)
@@ -608,16 +649,16 @@ namespace mynet
 
         inline void closeStream(uint32_t id)
         {
-            auto it = streams_.find(id);
-            if (it == streams_.end())
+            StreamSlot *slot = streams_.find(id);
+            if (slot == nullptr)
             {
                 return;
             }
-            if (it->second.handler != nullptr)
+            if (slot->handler != nullptr)
             {
-                streamPool_.release(it->second.handler);
+                streamPool_.release(slot->handler);
             }
-            streams_.erase(it);
+            streams_.erase(id);
             onStreamClose(id);
         }
 
@@ -625,24 +666,36 @@ namespace mynet
 
         inline void collectResponses(uint32_t id, StreamSlot &slot)
         {
-            while (slot.handler->hasResponse())
-            {
-                slot.pending.push_back(slot.handler->takeResponse());
-            }
             pumpStream(id, slot);
         }
 
         inline void pumpStream(uint32_t id, StreamSlot &slot)
         {
-            while (!slot.pending.empty())
+            while (true)
             {
+                if (slot.pendingOffset >= slot.pending.size())
+                {
+                    if (slot.handler != nullptr && slot.handler->hasResponse())
+                    {
+                        slot.pending = slot.handler->takeResponse();
+                        slot.pendingOffset = 0;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                std::string &chunk = slot.pending;
+                const size_t chunkRemaining = chunk.size() - slot.pendingOffset;
+                const char *chunkData = chunk.data() + slot.pendingOffset;
+
                 if (slot.sendWindow <= 0 || connSendWindow_ <= 0)
                 {
                     return;
                 }
-                std::string &chunk = slot.pending.front();
                 const size_t allowed =
-                    std::min({chunk.size(), static_cast<size_t>(slot.sendWindow), static_cast<size_t>(connSendWindow_),
+                    std::min({chunkRemaining, static_cast<size_t>(slot.sendWindow), static_cast<size_t>(connSendWindow_),
                               static_cast<size_t>(decoder_.maxFrameSize())});
                 if (allowed == 0)
                 {
@@ -651,19 +704,17 @@ namespace mynet
                 Frame frame;
                 frame.streamId = id;
                 frame.type = FRAME_TYPE::DATA;
-                frame.payload.assign(chunk, 0, allowed);
+                frame.payload.assign(chunkData, allowed);
                 appendFrame(outScratch_, frame);
                 flushOut();
                 slot.sendWindow -= static_cast<int64_t>(allowed);
                 connSendWindow_ -= static_cast<int64_t>(allowed);
-                if (allowed == chunk.size())
-                {
-                    slot.pending.pop_front();
-                }
-                else
-                {
-                    chunk.erase(0, allowed);
-                }
+                slot.pendingOffset += static_cast<uint32_t>(allowed);
+            }
+            // 在途块已发尽：若无更多响应块则维持游标等待后续 WINDOW_UPDATE 推进
+            if (slot.pendingOffset < slot.pending.size() || (slot.handler != nullptr && slot.handler->hasResponse()))
+            {
+                return;
             }
             if (!slot.remoteEnded || slot.finalSent)
             {
@@ -681,19 +732,26 @@ namespace mynet
 
         inline void pumpAll()
         {
+            if (!streams_.ready())
+            {
+                return;
+            }
             std::vector<uint32_t> ids;
             ids.reserve(streams_.size());
-            for (const auto &entry : streams_)
+            for (size_t i = 0; i < streams_.capacity(); ++i)
             {
-                ids.push_back(entry.first);
+                const uint32_t id = streams_.keyAt(i);
+                if (id != 0)
+                {
+                    ids.push_back(id);
+                }
             }
             std::sort(ids.begin(), ids.end());
             for (uint32_t id : ids)
             {
-                auto it = streams_.find(id);
-                if (it != streams_.end())
+                if (StreamSlot *slot = streams_.find(id); slot != nullptr)
                 {
-                    pumpStream(id, it->second);
+                    pumpStream(id, *slot);
                 }
             }
         }
@@ -781,7 +839,13 @@ namespace mynet
             {
                 return;
             }
-            pushResponse(std::move(outScratch_));
+            if (!pushResponse(std::move(outScratch_))) [[unlikely]]
+            {
+                // 响应队列满：MUX 帧是不可丢弃的控制数据，丢弃并记录；
+                // 实际背压由 writeHighWaterMark 在连接层先行拦截，此路径仅防御性
+                LOG_ERROR("Multiplexer::flushOut: response queue full, mux output dropped ({} bytes)",
+                          outScratch_.size());
+            }
             outScratch_.clear();
         }
 
@@ -817,12 +881,44 @@ namespace mynet
 
         [[nodiscard]] inline StreamSlot *stream(uint32_t id)
         {
-            auto it = streams_.find(id);
-            return it == streams_.end() ? nullptr : &it->second;
+            return streams_.find(id);
+        }
+
+        /**
+         * @brief SETTINGS initial-window 变更的流级窗口平移（两遍：先验证后提交）。
+         * @return false 表示存在流会溢出，调用方以 FLOW_CONTROL_ERROR 整体失败。
+         */
+        inline bool applyDeltaToAllStreams(int64_t delta)
+        {
+            if (!streams_.ready())
+            {
+                return true; // 无表即无流，无需平移
+            }
+            for (size_t i = 0; i < streams_.capacity(); ++i)
+            {
+                const uint32_t id = streams_.keyAt(i);
+                if (id != 0)
+                {
+                    StreamSlot *slot = streams_.slotAt(i);
+                    if (slot->sendWindow + delta > static_cast<int64_t>(frame::kStreamIdMask)) [[unlikely]]
+                    {
+                        return false;
+                    }
+                }
+            }
+            for (size_t i = 0; i < streams_.capacity(); ++i)
+            {
+                const uint32_t id = streams_.keyAt(i);
+                if (id != 0)
+                {
+                    streams_.slotAt(i)->sendWindow += delta;
+                }
+            }
+            return true;
         }
 
         ObjectPool<StreamHandler> streamPool_{};
-        std::unordered_map<uint32_t, StreamSlot> streams_{};
+        mux::StreamTable<StreamSlot> streams_{};
         FrameDecoder decoder_{};
         std::string outScratch_{};
         size_t maxStreams_ = mux::kDefaultMaxStreams;
@@ -835,6 +931,3 @@ namespace mynet
     };
 
 } // namespace mynet
-
-// 命名空间别名
-namespace mynetmux = mynet::mux;

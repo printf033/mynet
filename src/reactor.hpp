@@ -225,8 +225,13 @@ namespace mynet
                 return std::unexpected(ERR::EPOLL_CREATE_FAILED);
             }
             loop_.reserveEvents(maxEvents > 0 ? static_cast<size_t>(maxEvents) : (1 << 10));
-            connPool_.init(connectionPoolSize > 0 ? connectionPoolSize : (1 << 10));
-            sweepScratch_.reserve(connectionPoolSize > 0 ? connectionPoolSize : (1 << 10));
+            const size_t connSlots = connectionPoolSize > 0 ? connectionPoolSize : (1 << 10);
+            if (auto poolRes = connPool_.init(connSlots); !poolRes) [[unlikely]]
+            {
+                LOG_ERROR("Reactor::serve: initialising connection pool ({} slots) failed", connSlots);
+                return std::unexpected(ERR::POOL_ALLOC_FAILED);
+            }
+            sweepScratch_.reserve(connSlots);
             loop_.setEventCallback([this](uint32_t events, void *ptr) { onEvent(events, ptr); });
             if (auto res = loop_.addFd(listener_.fd, EPOLLIN | EPOLLET, &listener_); !res) [[unlikely]]
             {
@@ -330,6 +335,13 @@ namespace mynet
 
         inline void onConnection(Conn *conn, uint32_t events)
         {
+            // 陈旧事件守卫：同一轮 epoll_wait 里回调可能已关闭本连接，
+            // 对象回池后 fd 被重置为 -1；后续到达的残留事件直接丢弃，
+            // 否则会对已释放对象重新派发 IO
+            if (conn->fd() < 0) [[unlikely]]
+            {
+                return;
+            }
             if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN)) [[unlikely]]
             {
                 closeConn(conn);
@@ -365,7 +377,12 @@ namespace mynet
             }
         }
 
-        [[nodiscard]] inline IO_STATUS updateInterest(Conn *conn)
+        /**
+         * @brief 根据 Conn 当前读写意愿计算期望的 epoll 兴趣集。
+         * @param conn 目标连接。
+         * @return 期望兴趣集（恒含 EPOLLET），无任何兴趣时为 0。
+         */
+        [[nodiscard]] inline uint32_t computeInterest(const Conn *conn) const noexcept
         {
             uint32_t wanted = EPOLLET;
             if (conn->wantRead())
@@ -376,46 +393,75 @@ namespace mynet
             {
                 wanted |= EPOLLOUT;
             }
+            return wanted;
+        }
+
+        /**
+         * @brief 将期望兴趣集写入内核（仅当与当前注册集不同时调用 epoll_ctl）。
+         * @param conn 目标连接。
+         * @param wanted 期望兴趣集（需已含 EPOLLET）。
+         * @return true=内核已同步；false=epoll_ctl 失败，调用方应关闭连接。
+         */
+        inline bool applyInterest(Conn *conn, uint32_t wanted)
+        {
+            if (wanted == conn->events())
+            {
+                return true;
+            }
+            if (!loop_.modFd(conn->fd(), wanted, conn)) [[unlikely]]
+            {
+                return false;
+            }
+            conn->setEvents(wanted);
+            return true;
+        }
+
+        /**
+         * @brief 边缘触发下的“重读”策略：读意愿刚恢复但内核尚未投递就绪事件时，
+         *        同步驱动一次读取，并以读取后的最新意愿重新收敛兴趣集。
+         * @param conn 目标连接。
+         * @return KEEP=继续维持连接；CLOSE=连接需关闭。
+         */
+        [[nodiscard]] inline IO_STATUS rearmRead(Conn *conn)
+        {
+            if (conn->handleRead() == IO_STATUS::CLOSE) [[unlikely]]
+            {
+                return IO_STATUS::CLOSE;
+            }
+            const uint32_t after = computeInterest(conn);
+            if ((after & ~static_cast<uint32_t>(EPOLLET)) == 0)
+            {
+                return IO_STATUS::CLOSE;
+            }
+            if (!applyInterest(conn, after)) [[unlikely]]
+            {
+                return IO_STATUS::CLOSE;
+            }
+            return IO_STATUS::KEEP;
+        }
+
+        /**
+         * @brief 将连接的 epoll 兴趣集与其当前读写意愿同步（纯编排，不做 I/O）。
+         * @param conn 目标连接。
+         * @return KEEP=继续维持连接；CLOSE=连接需关闭。
+         */
+        [[nodiscard]] inline IO_STATUS updateInterest(Conn *conn)
+        {
+            const uint32_t wanted = computeInterest(conn);
             if ((wanted & ~static_cast<uint32_t>(EPOLLET)) == 0)
             {
                 return IO_STATUS::CLOSE;
             }
-            const bool rearmRead = (wanted & EPOLLIN) != 0 && (conn->events() & EPOLLIN) == 0;
-            if (wanted != conn->events())
+            // 注意：判定必须基于本次 apply 之前的注册集（旧 events），
+            // 与原实现行为完全一致，否则读意愿刚恢复时不会同步重读。
+            const bool needRearmRead = (wanted & EPOLLIN) != 0 && (conn->events() & EPOLLIN) == 0;
+            if (!applyInterest(conn, wanted)) [[unlikely]]
             {
-                if (!loop_.modFd(conn->fd(), wanted, conn)) [[unlikely]]
-                {
-                    return IO_STATUS::CLOSE;
-                }
-                conn->setEvents(wanted);
+                return IO_STATUS::CLOSE;
             }
-            if (rearmRead)
+            if (needRearmRead)
             {
-                if (conn->handleRead() == IO_STATUS::CLOSE) [[unlikely]]
-                {
-                    return IO_STATUS::CLOSE;
-                }
-                uint32_t after = EPOLLET;
-                if (conn->wantRead())
-                {
-                    after |= EPOLLIN;
-                }
-                if (conn->wantWrite())
-                {
-                    after |= EPOLLOUT;
-                }
-                if ((after & ~static_cast<uint32_t>(EPOLLET)) == 0)
-                {
-                    return IO_STATUS::CLOSE;
-                }
-                if (after != conn->events())
-                {
-                    if (!loop_.modFd(conn->fd(), after, conn)) [[unlikely]]
-                    {
-                        return IO_STATUS::CLOSE;
-                    }
-                    conn->setEvents(after);
-                }
+                return rearmRead(conn);
             }
             return IO_STATUS::KEEP;
         }

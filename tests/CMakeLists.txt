@@ -9,7 +9,10 @@ function(mynet_unit_test name)
         GTest::gtest_main
     )
     add_test(NAME ${name} COMMAND ${name})
-    set_tests_properties(${name} PROPERTIES TIMEOUT 120)
+    # OOM 探针用例（如 Buffer 扩容失败路径）依赖分配器返回 null 而非直接 abort：
+    # 对 ASan/UBSan 构建统一放宽 allocator_may_return_null，普通构建无影响。
+    set_tests_properties(${name} PROPERTIES TIMEOUT 120
+        ENVIRONMENT "ASAN_OPTIONS=allocator_may_return_null=1:abort_on_error=0")
 endfunction()
 
 mynet_unit_test(test_buffer)

@@ -28,7 +28,19 @@ namespace
 
     struct FakeHandler : public HandlerBase
     {
-        void appendRequest(const char *, ssize_t) noexcept {}
+        [[nodiscard]] Result<> appendRequest(const char *, ssize_t) noexcept { return {}; }
+        bool hasResponse() noexcept { return false; }
+        std::string takeResponse() { return ""; }
+        bool requestOverLimit() noexcept { return false; }
+        void process() {}
+        void reset() noexcept {}
+    };
+
+    struct ThrowingAppendHandler : public HandlerBase
+    {
+        // 历史语义：appendRequest 曾允许抛出 bad_alloc，现被 ProtocolHandler
+        // 约束拒绝——非 noexcept、非 Result<> 返回的摄入路径不再是合法协议头。
+        void appendRequest(const char *, ssize_t) {}
         bool hasResponse() noexcept { return false; }
         std::string takeResponse() { return ""; }
         bool requestOverLimit() noexcept { return false; }
@@ -48,7 +60,7 @@ namespace
 
     struct NonDerivedHandler
     {
-        void appendRequest(const char *, ssize_t) noexcept {}
+        [[nodiscard]] Result<> appendRequest(const char *, ssize_t) noexcept { return {}; }
         bool hasResponse() noexcept { return false; }
         std::string takeResponse() { return ""; }
         bool requestOverLimit() noexcept { return false; }
@@ -93,6 +105,7 @@ TEST(Concepts, ProtocolHandlerContractEnforcement)
     static_assert(ProtocolHandler<HandlerBase>);
     static_assert(ProtocolHandler<FakeHandler>);
     static_assert(ProtocolHandler<HandlerHttp<HTTP_MODE::REQUEST>>);
+    static_assert(!ProtocolHandler<ThrowingAppendHandler>); // 旧语义：允许抛出的摄入路径现被约束拒绝
 
     static_assert(!ProtocolHandler<DeletedProcessHandler>);
     static_assert(!ProtocolHandler<DeletedTakeResponseHandler>);
@@ -100,6 +113,7 @@ TEST(Concepts, ProtocolHandlerContractEnforcement)
     static_assert(!ProtocolHandler<NoReset>);
 
     EXPECT_TRUE(ProtocolHandler<HandlerBase>);
+    EXPECT_FALSE(ProtocolHandler<ThrowingAppendHandler>);
     EXPECT_FALSE(ProtocolHandler<DeletedProcessHandler>);
     EXPECT_FALSE(ProtocolHandler<DeletedTakeResponseHandler>);
     EXPECT_FALSE(ProtocolHandler<NonDerivedHandler>);
