@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 #
-# Format the C++ sources -- src/, samples/, tests/ and bench/ -- with the
-# house style in .clang-format, then repair the one construct clang-format gets
-# wrong.
+# 使用 .clang-format 中的规范格式化 C++ 源码（src/、examples/、tests/ 与 bench/），
+# 随后修复 clang-format 处理不当的特定语法结构。
 #
-# clang-format 23.1.1 prints C++26 `= delete("reason")` as `= delete ("reason")`:
-# it treats `delete` as a control statement, and SpaceBeforeParens is the same
-# knob that gives us `if (`, `for (` and `while (`. No setting separates them,
-# and SpaceBeforeParensOptions has no `AfterDelete` key in this version. The
-# perl pass below restores the spacing; both spellings are the same token
-# sequence, so nothing else changes.
+# clang-format 23.1.1 会将 C++26 的 `= delete("reason")` 格式化为 `= delete ("reason")`：
+# 它将 `delete` 误归类为控制语句，且 SpaceBeforeParens 与 `if (`、`for (`、`while (` 共用
+# 同一个配置项。当前版本中没有任何选项可以将其单独拆分，SpaceBeforeParensOptions 亦无
+# `AfterDelete` 配置项。下方的 perl 处理会恢复正确的紧凑空格；两种写法在词法记号上完全等价，
+# 因此不会产生其他任何副作用。
 #
-# Usage: scripts/format.sh [file ...]      (no arguments: the whole tree)
+# 用法：scripts/format.sh [file ...]      （无参数时格式化整棵源码树）
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,7 +17,7 @@ mapfile -t files < <(
     if [ "$#" -gt 0 ]; then
         printf '%s\n' "$@"
     else
-        find "$root/src" "$root/samples" "$root/tests" "$root/bench" \
+        find "$root/src" "$root/examples" "$root/tests" "$root/bench" \
             -type f \( -name '*.hpp' -o -name '*.cpp' \)
     fi
 )

@@ -1,29 +1,23 @@
-// Benchmarks for the byte-moving core: the buffer, the frame codec, the
-// handler queue, the object pool and the multiplexer.
+// 字节传输核心基准测试：涵盖 Buffer 缓冲区、帧编解码器、
+// Handler 响应队列、ObjectPool 对象池与 Multiplexer 多路复用器。
 //
-// The harness is deliberately tiny. Google Benchmark is a fine project, but
-// adding a distribution to time five loops inside a library that already
-// depends on four system packages would be a heavier dependency than the code
-// under test -- and the shape those frameworks give is short enough to write
-// down here:
+// 测试框架设计刻意保持极简。Google Benchmark 非常优秀，但在一个已依赖
+// 4 个系统包的库中引入它来测试几个循环，其依赖体量反而超过了被测代码本身。
+// 测试逻辑主要包含：
 //
-//   * calibrate: grow the iteration count until one run lasts long enough for
-//     the clock to be a better signal than the noise (~50 ms);
-//   * measure: repeat that run and keep the middle one, because the median is
-//     the run that saw ordinary interference rather than none or lots;
-//   * report: normalise to ns per operation and, where a byte count means
-//     something, MB/s.
+//   * 校准 (calibrate)：逐步增加迭代次数，直到单次运行时间足够长 (~50 ms)，使时钟信号远大于噪声；
+//   * 测量 (measure)：重复运行多次并取中位数，以反映常规干扰下的真实性能；
+//   * 报告 (report)：归一化为单次操作耗时 (ns/op)，并在涉及字节量时换算为吞吐量 (MB/s)。
 //
-// Numbers are only comparable to numbers taken the same way. The conditions
-// are printed at the top of the report: an optimised build, no sanitizer, one
-// process, and log output aimed away from the measured path.
+// 性能数据仅在相同测试条件下具备可比性。测试环境包括：优化编译、关闭 Sanitizer、
+// 单进程运行，并将日志输出重定向至远离被测路径的终端。
 //
-// Run it as:  ./bench_core 2>/dev/null     (log lines go to stderr)
+// 运行命令：./bench 2>/dev/null （日志行输出至 stderr）
 #include "buffer.hpp"
-#include "frame.hpp"
 #include "handler.hpp"
+#include "http/v2/frame.hpp"
+#include "http/v2/multiplexer.hpp"
 #include "log.hpp"
-#include "multiplexer.hpp"
 #include "objectPool.hpp"
 #include <algorithm>
 #include <chrono>
@@ -38,9 +32,8 @@ namespace
     using namespace mynet;
     using Clock = std::chrono::steady_clock;
 
-    // Every benchmark's result ends up here, once per run of the body. Summing
-    // into a local first and touching this after the loop is the difference
-    // between measuring the work and measuring the cache line the result lands in.
+    // 存放所有基准测试的累加结果，每次运行循环后写入一次。先累加到局部变量，
+    // 循环结束后再写入全局变量，避免将缓存行竞争误计入被测任务的开销。
     volatile uint64_t g_sink = 0;
 
     constexpr double kMinSeconds = 0.05;
@@ -53,9 +46,8 @@ namespace
         size_t iterations = 0;
     };
 
-    // `body(iterations)` performs `iterations * opsPerIteration` logical
-    // operations. The second argument is what turns a "pass" over a fixed data set
-    // into a per-operation number.
+    // `body(iterations)` 执行 `iterations * opsPerIteration` 次逻辑操作。
+    // 第二个参数用于将针对固定数据集的一轮扫描换算为单次操作的性能指标。
     template <typename Body>
     Sample run(Body &&body, size_t opsPerIteration = 1)
     {
@@ -106,7 +98,7 @@ namespace
         return out;
     }
 
-    // ---- buffer ----
+    // ---- 缓冲区 (Buffer) 基准测试 ----
 
     void benchBuffer()
     {
@@ -119,7 +111,7 @@ namespace
                 Buffer buffer;
                 for (size_t i = 0; i < iterations; ++i)
                 {
-                    buffer.append(block);
+                    [[maybe_unused]] auto _ = buffer.append(block);
                     sink += buffer.readableBytes();
                     buffer.retrieveAll();
                 }
@@ -134,8 +126,8 @@ namespace
                 Buffer buffer;
                 for (size_t i = 0; i < iterations; ++i)
                 {
-                    for (int k = 0; k < 64; ++k)
-                        buffer.append(sixteen);
+                    for (int k = 0; k < 64; ++k) [[maybe_unused]]
+                        auto _ = buffer.append(sixteen);
                     sink += buffer.readableBytes();
                     buffer.retrieveAll();
                 }
@@ -152,7 +144,7 @@ namespace
                 std::string chunk(16, 'x');
                 for (size_t i = 0; i < iterations; ++i)
                 {
-                    buffer.append(chunk);
+                    [[maybe_unused]] auto _ = buffer.append(chunk);
                     sink += buffer.readableBytes();
                     buffer.retrieve(16);
                 }
@@ -161,7 +153,7 @@ namespace
         report("Buffer::append+retrieve (16B)", retrieve, 16.0);
     }
 
-    // ---- framing ----
+    // ---- 分帧 (Framing) 基准测试 ----
 
     void benchFrameEncode(size_t payloadBytes)
     {
@@ -189,9 +181,8 @@ namespace
 
     void benchFrameDecode(size_t payloadBytes)
     {
-        // One megabyte of frames per pass, whatever the payload size: a pass has to
-        // stay a fixed amount of work for ns/op to mean anything, and a fixed
-        // frame count would make the 16 KiB case move 4096 times the bytes.
+        // 无论负载大小，每轮扫描固定处理 1 MB 的分帧数据：单轮工作量必须保持固定
+        // 才能使 ns/op 具备可比性，若固定帧数会导致 16 KiB 场景搬移 4096 倍的字节量。
         const size_t kFrames = std::max<size_t>(64, (1 << 20) / (payloadBytes + frame::kHeaderBytes));
         const std::string bytes = frameStream(kFrames, payloadBytes);
         const Sample sample = run(
@@ -201,7 +192,7 @@ namespace
                 for (size_t pass = 0; pass < iterations; ++pass)
                 {
                     Buffer in;
-                    in.append(bytes);
+                    [[maybe_unused]] auto _ = in.append(bytes);
                     FrameDecoder decoder;
                     while (in.readableBytes() > 0)
                     {
@@ -238,7 +229,7 @@ namespace
         report("read+appendBigEndian32", sample);
     }
 
-    // ---- pool ----
+    // ---- 对象池 (ObjectPool) 基准测试 ----
 
     void benchObjectPool()
     {
@@ -270,7 +261,7 @@ namespace
         report("ObjectPool acquire+release (128)", sample);
     }
 
-    // ---- handler ----
+    // ---- 协议处理器 (Handler) 基准测试 ----
 
     void benchHandlerQueue()
     {
@@ -282,7 +273,7 @@ namespace
                 uint64_t sink = 0;
                 for (size_t i = 0; i < iterations; ++i)
                 {
-                    handler.pushResponse(body);
+                    [[maybe_unused]] auto _ = handler.pushResponse(body);
                     sink += handler.takeResponse().size();
                 }
                 g_sink += sink;
@@ -295,7 +286,7 @@ namespace
                 uint64_t sink = 0;
                 for (size_t i = 0; i < iterations; ++i)
                 {
-                    handler.appendRequest(body.data(), static_cast<ssize_t>(body.size()));
+                    [[maybe_unused]] auto _ = handler.appendRequest(body.data(), static_cast<ssize_t>(body.size()));
                     handler.process();
                     sink += handler.takeResponse().size();
                 }
@@ -304,7 +295,7 @@ namespace
         report("HandlerBase::process echo (1KiB)", echo, static_cast<double>(1 << 10));
     }
 
-    // ---- multiplexer ----
+    // ---- 多路复用器 (Multiplexer) 基准测试 ----
 
     void benchMultiplexerRoundTrip()
     {
@@ -313,14 +304,13 @@ namespace
         };
         constexpr size_t kStreams = 64;
 
-        // One connection, reused by every pass. Constructing the multiplexer builds
-        // the stream pool, and a fresh pool per pass would put that construction on
-        // the same line as the round trip it is supposed to measure.
+        // 每轮扫描复用同一条连接。构造多路复用器会构建流对象池，
+        // 若每轮都新建对象池，会将池构造开销与往返测量混杂在一起。
         NoopMux mux;
-        mux.process(); // announce SETTINGS once, outside the measurement
+        mux.process(); // 在测量路径之外预先宣告一次 SETTINGS 帧
         while (mux.hasResponse())
         {
-            (void)mux.takeResponse();
+            [[maybe_unused]] auto _ = mux.takeResponse();
         }
 
         const Sample sample = run(
@@ -341,7 +331,7 @@ namespace
                                                  .type = FRAME_TYPE::DATA,
                                                  .flags = FrameFlags::kEndStream,
                                                  .payload = "payload"});
-                        mux.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
+                        [[maybe_unused]] auto _ = mux.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
                         mux.process();
                         while (mux.hasResponse())
                             sink += mux.takeResponse().size();
@@ -356,7 +346,7 @@ namespace
 
 int main()
 {
-    mynet::log::init(); // the sink must exist before the first LOG_*
+    mynet::log::init(); // 在首次产生 LOG_* 之前初始化日志输出
     std::printf("mynet benchmarks -- %s\n",
 #ifdef __OPTIMIZE__
                 "optimised build, no sanitizer"
@@ -379,6 +369,6 @@ int main()
     benchMultiplexerRoundTrip();
 
     std::printf("\nns/op is the median of %d runs of the same body; 'best' is the fastest of them.\n", kRepeats);
-    std::printf("Log lines go to stderr: run ./bench_core 2>/dev/null for a clean report.\n");
+    std::printf("Log lines go to stderr: run ./bench 2>/dev/null for a clean report.\n");
     return EXIT_SUCCESS;
 }

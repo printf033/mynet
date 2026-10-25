@@ -6,8 +6,8 @@
 
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
@@ -37,9 +37,8 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     LOG_INFO("listening to {}:{}", ip, port);
-    // HandlerBase echoes like HandlerBase and additionally writes the raw
-    // bytes down, so a TLS client that lands on this plain port still shows
-    // its (encrypted) ClientHello instead of nothing at all.
+    // HandlerBase 实现回显并同时记录原始报文字节，
+    // 因此即使 TLS 客户端意外连接到此明文端口，也能在日志中看到其（加密的）ClientHello 而非完全无响应。
     using namespace mynet;
     if (auto res = Reactor<EventSocket<HandlerBase>>().runTcp(ip, port); !res)
     {

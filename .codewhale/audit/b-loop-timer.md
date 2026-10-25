@@ -143,7 +143,7 @@
 
 ## 遗留验证项（未竟事项）
 
-- [ ] `g++ -std=c++26 -I src -fsyntax-only src/loop.hpp src/timer.hpp`（经 third_party include 路径补齐 reflection.hpp）独立复跑，确认无编译告警层面的新证据。
+- [ ] `g++ -std=c++26 -I src -fsyntax-only src/loop.hpp src/timer.hpp`（经 thirdparty include 路径补齐 reflection.hpp）独立复跑，确认无编译告警层面的新证据。
 - [ ] 发现 2 的有符号溢出探针：独立 TU 构造 `steady_clock::now() + years(300)` 与 `Time::max()` 两种截止时间，验证 `nextTimeout()` 返回值与定时器是否触发。
 - [ ] 发现 1 的压力探针：单 loop + 定时器回调高频关连接 + 饱和 epoll_wait 返回数组，观察陈旧事件派发计数（当前实现下应为非零）。
 - [ ] tests/test_timer.cpp 补充：回调抛异常、空回调、负 interval、`runAt(Time::max())` 四个缺口用例。

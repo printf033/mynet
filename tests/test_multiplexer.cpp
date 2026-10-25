@@ -1,10 +1,9 @@
-// Multiplexer<HandlerBase>: one byte stream carrying many exchanges. These
-// tests drive it the way a connection would -- whole frames appended to the
-// request buffer -- and read its answer back off the response queue, which is
-// the only interface the layer above actually relies on.
-#include "frame.hpp"
+// Multiplexer<HandlerBase>：在单条物理字节流上承载多个独立的流式交互。
+// 这些测试模拟网络连接的行为驱动它——将完整的帧追加到请求缓冲区，
+// 并从响应队列中读回其回复，这是上层唯一实际依赖的接口。
 #include "handler.hpp"
-#include "multiplexer.hpp"
+#include "http/v2/frame.hpp"
+#include "http/v2/multiplexer.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -28,7 +27,7 @@ namespace
         return frame;
     }
 
-    // A minimal 6 byte settings entry.
+    // 极简 6 字节 SETTINGS 设置项条目。
     [[nodiscard]] std::string setting(uint16_t id, uint32_t value)
     {
         std::string out;
@@ -44,8 +43,8 @@ namespace
         return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
     }
 
-    // Records the hooks a protocol front end would override, so a test can assert
-    // on what the layer above was told rather than on internals.
+    // 记录上层协议前端可重写的钩子函数，
+    // 以便测试能针对通知上层的事件进行断言，而非侵入内部实现。
     class TwoPartHandler : public HandlerBase
     {
     public:
@@ -53,8 +52,8 @@ namespace
         {
             if (requestBytes() > 0)
             {
-                (void)pushResponse("part1_");
-                (void)pushResponse("part2");
+                [[maybe_unused]] auto _1 = pushResponse("part1_");
+                [[maybe_unused]] auto _2 = pushResponse("part2");
                 requestClear();
             }
         }
@@ -67,7 +66,7 @@ namespace
         {
             std::string bytes;
             appendFrame(bytes, frame);
-            (void)appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
+            [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
             process();
         }
 
@@ -79,7 +78,9 @@ namespace
             std::vector<Frame> frames;
             Buffer in;
             if (!bytes.empty())
-                (void)in.append(bytes);
+            {
+                [[maybe_unused]] auto _ = in.append(bytes);
+            }
             FrameDecoder decoder;
             while (in.readableBytes() > 0)
             {
@@ -94,7 +95,7 @@ namespace
         void warmUp()
         {
             process();
-            (void)takeFrames();
+            [[maybe_unused]] auto _ = takeFrames();
             push(makeFrame(FRAME_TYPE::SETTINGS, 0, FrameFlags::kAck, {}));
         }
     };
@@ -125,16 +126,16 @@ namespace
             why.assign(reason);
         }
 
-        // Append one whole frame, then let the multiplexer read whatever it can.
+        // 追加一个完整帧，然后让多路复用器尽可能读取并处理。
         void push(const Frame &frame)
         {
             std::string bytes;
             appendFrame(bytes, frame);
-            (void)appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
+            [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
             process();
         }
 
-        // Everything the multiplexer has written, decoded back into frames.
+        // 获取多路复用器写入的所有数据，并将其重新解码为帧列表。
         std::vector<Frame> takeFrames()
         {
             std::string bytes;
@@ -143,7 +144,9 @@ namespace
             std::vector<Frame> frames;
             Buffer in;
             if (!bytes.empty())
-                (void)in.append(bytes);
+            {
+                [[maybe_unused]] auto _ = in.append(bytes);
+            }
             FrameDecoder decoder;
             while (in.readableBytes() > 0)
             {
@@ -155,8 +158,8 @@ namespace
             return frames;
         }
 
-        // Send our own SETTINGS and swallow it, so later assertions see only the
-        // frames the case under test produced.
+        // 预先发送本端 SETTINGS 并消费其输出，
+        // 使得后续断言仅关注被测场景自身生成的帧。
         void warmUp()
         {
             process();
@@ -181,7 +184,7 @@ TEST(Multiplexer, FirstProcessAnnouncesSettings)
     EXPECT_EQ(frames[0].streamId, 0u);
     EXPECT_EQ(frames[0].flags, 0);
     ASSERT_EQ(frames[0].payload.size() % 6, 0u);
-    EXPECT_EQ(frames[0].payload.size(), 18u); // three settings
+    EXPECT_EQ(frames[0].payload.size(), 18u); // 包含 3 项设置（每项 6 字节）
 
     bool sawStreams = false;
     bool sawWindow = false;
@@ -210,7 +213,7 @@ TEST(Multiplexer, FirstProcessAnnouncesSettings)
     EXPECT_TRUE(sawWindow);
     EXPECT_TRUE(sawFrameSize);
 
-    mux.process(); // the settings were announced once, not per call
+    mux.process(); // 设置帧仅宣告一次，而非每次调用都重复宣告
     EXPECT_FALSE(mux.hasResponse());
 }
 
@@ -251,7 +254,7 @@ TEST(Multiplexer, HeadersOpenAStreamAndItsDataEchoesBack)
     ASSERT_EQ(mux.headers.size(), 1u);
     EXPECT_EQ(mux.headers[0].first, 1u);
     EXPECT_EQ(mux.headers[0].second, "hdrs");
-    EXPECT_TRUE(mux.takeFrames().empty()); // headers alone produce no frame
+    EXPECT_TRUE(mux.takeFrames().empty()); // 仅收到首部帧时不产生回复帧
 
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "ping"));
     ASSERT_EQ(mux.data.size(), 1u);
@@ -311,19 +314,18 @@ TEST(Multiplexer, AReusedTombstoneSlotStartsWithCleanStreamFlags)
     mux.setMaxConcurrentStreams(1);
     mux.warmUp();
 
-    // Stream 1 opens, echoes one exchange, and closes. Its table slot stays
-    // behind as a tombstone carrying remoteEnded/finalSent from the old life.
+    // 流 1 开启，完成一轮交互并关闭。其流表槽位
+    // 变为带有历史状态（remoteEnded/finalSent）的墓碑标记。
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kEndStream, "bye"));
     mux.takeFrames();
     ASSERT_EQ(mux.openStreams(), 0u);
 
-    // A later, larger stream id whose probe chain starts at the same slot
-    // (ids 1 and 17 hash identically in an 8-slot table) reuses that tombstone.
-    // The reused slot must behave like a fresh stream: the DATA after HEADERS
-    // echoes, it is not mistaken for traffic after END_STREAM, and the final
-    // DATA still flows.
+    // 后续流 ID 更大、探测序列起始于同一槽位的流
+    // （在 8 槽位表中流 ID 1 与 17 哈希值相同）复用该墓碑槽位。
+    // 复用的槽位必须表现得如全新流一般：HEADERS 之后的 DATA 正常回显，
+    // 不会误判为 END_STREAM 之后的非法流量，最终的 DATA 帧仍可顺利发送。
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 17, FrameFlags::kEndHeaders, "h2"));
     mux.push(makeFrame(FRAME_TYPE::DATA, 17, 0, "again"));
     ASSERT_FALSE(mux.error.has_value()) << mux.why;
@@ -355,7 +357,7 @@ TEST(Multiplexer, PingIsAcknowledgedWithTheSamePayload)
     EXPECT_TRUE(frames[0].hasFlag(FrameFlags::kAck));
     EXPECT_EQ(frames[0].payload, opaque);
 
-    // An ACK from the peer is the end of it, not another ping.
+    // 收到对端的 ACK 即宣告此轮 PING 结束，不应再次回复 PING。
     mux.push(makeFrame(FRAME_TYPE::PING, 0, FrameFlags::kAck, opaque));
     EXPECT_TRUE(mux.takeFrames().empty());
 }
@@ -401,11 +403,11 @@ TEST(Multiplexer, ResetOnAFinishedStreamIsOnlyAReset)
     mux.warmUp();
 
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndStream, "h"));
-    mux.takeFrames(); // stream 1 is now closed and below lastPeerStreamId_
+    mux.takeFrames(); // 流 1 已关闭，且编号小于等于 lastPeerStreamId_
     ASSERT_EQ(mux.openStreams(), 0u);
 
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "late"));
-    EXPECT_FALSE(mux.error.has_value()); // a race the peer can recover from
+    EXPECT_FALSE(mux.error.has_value()); // 属于对端可自行恢复的竞态，非连接级错误
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
@@ -418,8 +420,7 @@ TEST(Multiplexer, DataBiggerThanTheReceiveWindowIsAFlowControlError)
     ProbeMux mux;
     mux.warmUp();
 
-    // Raise the frame size ceiling first, or the decoder refuses the bytes
-    // before the flow-control check ever sees them.
+    // 首先调高帧大小上限，否则解码器在流控检查之前就会直接拒绝该字节流。
     mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mux::kSettingMaxFrameSize, 1 << 20)));
     mux.takeFrames();
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
@@ -466,7 +467,7 @@ TEST(Multiplexer, PriorityIsIgnoredAndLeavesTheConnectionAlone)
     EXPECT_FALSE(mux.error.has_value());
     EXPECT_FALSE(mux.closeAfterResponse());
     EXPECT_FALSE(mux.hasResponse());
-    EXPECT_TRUE(mux.opens.empty()); // a hint is not a stream
+    EXPECT_TRUE(mux.opens.empty()); // 优先级提示帧不构成新流
 }
 
 TEST(Multiplexer, GoawayFromThePeerRefusesNewStreams)
@@ -513,7 +514,7 @@ TEST(Multiplexer, MaxConcurrentStreamsBoundsTheStreamTable)
 
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 5, 0, "h"));
     EXPECT_EQ(mux.openStreams(), 2u);
-    EXPECT_FALSE(mux.error.has_value()); // refused, not a broken connection
+    EXPECT_FALSE(mux.error.has_value()); // 仅拒绝该流，不破坏连接
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
@@ -539,12 +540,12 @@ TEST(Multiplexer, AFrameSplitAcrossAppendsIsBufferedUntilWhole)
     appendFrame(bytes, makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "hello"));
     ASSERT_GT(bytes.size(), size_t{5});
 
-    (void)mux.appendRequest(bytes.data(), 5);
+    [[maybe_unused]] auto _ = mux.appendRequest(bytes.data(), 5);
     mux.process();
     EXPECT_EQ(mux.openStreams(), 0u);
     EXPECT_TRUE(mux.headers.empty());
 
-    (void)mux.appendRequest(bytes.data() + 5, static_cast<ssize_t>(bytes.size() - 5));
+    [[maybe_unused]] auto _ = mux.appendRequest(bytes.data() + 5, static_cast<ssize_t>(bytes.size() - 5));
     mux.process();
     EXPECT_EQ(mux.openStreams(), 1u);
     ASSERT_EQ(mux.headers.size(), 1u);
@@ -556,8 +557,7 @@ TEST(Multiplexer, AFrameLongerThanTheCeilingEndsTheConnection)
     ProbeMux mux;
     mux.warmUp();
 
-    // 16385 bytes is one past the default maximum, and the frame itself is
-    // well formed: what fails is the length it claims.
+    // 16385 字节比默认上限多 1 字节，帧结构本身合法：报错点在于其声明的载荷超长。
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(frame::kDefaultMaxFrameSize + 1, 'x')));
     EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
@@ -579,7 +579,7 @@ TEST(Multiplexer, ResetReturnsTheConnectionToAFreshState)
     EXPECT_EQ(mux.connectionSendWindow(), mux::kInitialWindowSize);
     EXPECT_FALSE(mux.goawayReceived());
 
-    mux.process(); // a recycled connection announces itself again
+    mux.process(); // 重置后的连接重新对外宣告自身的设置帧
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FRAME_TYPE::SETTINGS);
@@ -593,7 +593,7 @@ TEST(Multiplexer, PaddedDataHasItsPaddingRemovedBeforeTheHandlerSeesIt)
     mux.takeFrames();
 
     std::string payload;
-    payload.push_back('\x03'); // three bytes of padding follow the content
+    payload.push_back('\x03'); // 载荷内容之后紧跟 3 字节填充
     payload += "body";
     payload.append(3, '\0');
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kPadded, payload));
@@ -613,7 +613,7 @@ TEST(Multiplexer, PaddingLongerThanThePayloadIsAProtocolError)
     mux.takeFrames();
 
     std::string payload;
-    payload.push_back('\x7f'); // claims 127 bytes of padding in a 1 byte payload
+    payload.push_back('\x7f'); // 1 字节载荷却声明含有 127 字节填充（越界）
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kPadded, payload));
     EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_NE(mux.why.find("padding"), std::string::npos);
@@ -676,7 +676,7 @@ TEST(Multiplexer, SettingsInvalidMaxFrameSizeIsProtocolError)
     ProbeMux mux;
     mux.warmUp();
 
-    // Max frame size less than 16384 is illegal in HTTP/2
+    // HTTP/2 规范中最大帧大小小于 16384 是非法的
     mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mux::kSettingMaxFrameSize, 1024)));
     EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
@@ -729,24 +729,24 @@ TEST(Multiplexer, InitialWindowReductionPausesStreamUntilWindowUpdate)
     ProbeMux mux;
     mux.warmUp();
 
-    // Open stream 1 with headers
+    // 发送 HEADERS 开启流 1
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
     mux.takeFrames();
 
-    // Reduce initial window size to 0
+    // 将初始流控窗口大小缩小至 0
     mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mux::kSettingInitialWindowSize, 0)));
     mux.takeFrames();
 
-    // Push data to stream 1 - should be queued because sendWindow is <= 0
+    // 向流 1 发送数据——因 sendWindow <= 0，数据应排队挂起
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "hello"));
-    EXPECT_TRUE(mux.takeFrames().empty()); // No DATA frame sent
+    EXPECT_TRUE(mux.takeFrames().empty()); // 不应发出 DATA 帧
 
-    // Now send WINDOW_UPDATE to restore send window
+    // 发送 WINDOW_UPDATE 恢复发送窗口
     std::string increment;
     frame::appendBigEndian32(increment, 1000);
     mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 1, 0, increment));
 
-    // Data should now be pumped
+    // 此时挂起的数据应被正常推送发送
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FRAME_TYPE::DATA);
@@ -759,7 +759,7 @@ TEST(Multiplexer, StreamWithMultipleResponsesSendsAllPartsBeforeEndStream)
     mux.warmUp();
 
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "headers"));
-    (void)mux.takeFrames();
+    [[maybe_unused]] auto _ = mux.takeFrames();
 
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kEndStream, "ping"));
     const std::vector<Frame> frames = mux.takeFrames();
@@ -785,7 +785,7 @@ TEST(Multiplexer, SettingsInitialWindowDeltaOverflowIsFlowControlError)
     mux.warmUp();
 
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
-    (void)mux.takeFrames();
+    [[maybe_unused]] auto _ = mux.takeFrames();
 
     std::string increment;
     frame::appendBigEndian32(increment, 1000);

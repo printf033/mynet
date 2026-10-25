@@ -1,7 +1,8 @@
-// HandlerBase and HandlerHttp: what a front end owes the
-// connection that drives it -- the request buffer it reads into, the response
-// queue it drains, and the back-pressure credit in between.
+// HandlerBase 与 HandlerHttp：协议前端对驱动它的连接所承担的契约——
+// 读取数据的请求缓冲区、消费输出的响应队列，以及介于两者之间的背压信用额度。
+#include "datagram.hpp"
 #include "handler.hpp"
+#include "http/v1/handler.hpp"
 #include <gtest/gtest.h>
 #include <string>
 
@@ -11,7 +12,7 @@ namespace
 {
     void feed(HandlerBase &handler, const std::string &bytes)
     {
-        (void)handler.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
+        [[maybe_unused]] auto _ = handler.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
     }
 } // namespace
 
@@ -23,7 +24,7 @@ TEST(HandlerBase, ProcessEchoesWhateverWasAppended)
     handler.process();
     ASSERT_TRUE(handler.hasResponse());
     EXPECT_EQ(handler.takeResponse(), "hello");
-    EXPECT_EQ(handler.requestBytes(), size_t{0}); // the echo consumed the request
+    EXPECT_EQ(handler.requestBytes(), size_t{0}); // 回显操作已完整消费请求
 }
 
 TEST(HandlerBase, ProcessOnAnEmptyBufferProducesNothing)
@@ -36,12 +37,12 @@ TEST(HandlerBase, ProcessOnAnEmptyBufferProducesNothing)
 TEST(HandlerBase, ResponseQueueIsFifo)
 {
     HandlerBase handler;
-    (void)handler.pushResponse("first");
-    (void)handler.pushResponse(std::string("second"));
+    [[maybe_unused]] auto _1 = handler.pushResponse("first");
+    [[maybe_unused]] auto _2 = handler.pushResponse(std::string("second"));
     EXPECT_EQ(handler.responseCount(), size_t{2});
     EXPECT_EQ(handler.takeResponse(), "first");
     EXPECT_EQ(handler.takeResponse(), "second");
-    EXPECT_TRUE(handler.takeResponse().empty()); // draining an empty queue is not an error
+    EXPECT_TRUE(handler.takeResponse().empty()); // 消费空队列不属于错误
     EXPECT_FALSE(handler.hasResponse());
 }
 
@@ -49,7 +50,7 @@ TEST(HandlerBase, PushResponseFromABufferCopiesTheBytes)
 {
     HandlerBase handler;
     const std::string bytes = "abcdef";
-    (void)handler.pushResponse(std::string_view(bytes.data(), 3));
+    [[maybe_unused]] auto _ = handler.pushResponse(std::string_view(bytes.data(), 3));
     EXPECT_EQ(handler.takeResponse(), "abc");
 }
 
@@ -64,7 +65,7 @@ TEST(HandlerBase, RequestLimitDrivesReadCredit)
     feed(handler, "defghi");
     EXPECT_EQ(handler.requestBytes(), size_t{9});
     EXPECT_TRUE(handler.requestOverLimit());
-    EXPECT_EQ(handler.readCredit(), size_t{0}); // no credit past the limit, never underflowed
+    EXPECT_EQ(handler.readCredit(), size_t{0}); // 超出上限时不发放信用，永不下溢
 }
 
 TEST(HandlerBase, RequestConsumeAndClearMoveTheCursor)
@@ -90,7 +91,7 @@ TEST(HandlerBase, ResetClearsRequestsResponsesAndTheCloseFlag)
 {
     HandlerBase handler;
     feed(handler, "request");
-    (void)handler.pushResponse("response");
+    [[maybe_unused]] auto _ = handler.pushResponse("response");
     handler.setCloseAfterResponse(true);
     handler.reset();
     EXPECT_EQ(handler.requestBytes(), size_t{0});
@@ -98,7 +99,7 @@ TEST(HandlerBase, ResetClearsRequestsResponsesAndTheCloseFlag)
     EXPECT_FALSE(handler.closeAfterResponse());
 }
 
-// ---- HandlerHttp ----
+// ---- HandlerHttp 单元测试 ----
 
 TEST(HandlerHttp, ParsesRequestLineHeadersAndBody)
 {
@@ -109,7 +110,7 @@ TEST(HandlerHttp, ParsesRequestLineHeadersAndBody)
     EXPECT_EQ(handler.url(), "/submit?x=1");
     EXPECT_EQ(handler.body(), "hello");
     EXPECT_EQ(handler.headerValue("Host"), "example.com");
-    EXPECT_EQ(handler.headerValue("host"), "example.com"); // lookup is case-insensitive
+    EXPECT_EQ(handler.headerValue("host"), "example.com"); // 首部查找忽略大小写
     EXPECT_EQ(handler.headerValue("Missing"), "");
     EXPECT_EQ(std::string(handler.methodName()), "POST");
     EXPECT_EQ(handler.httpMajor(), 1);
@@ -163,11 +164,9 @@ TEST(HandlerHttp, ARequestSplitAcrossTwoAppendsStillParses)
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET /split HTTP/1.1\r\nHost: ex");
     handler.process();
-    // llhttp parses incrementally, so the request line is already understood
-    // when the first append ends: the URL is readable while the header
-    // section is still open, and the header value is not yet the final one.
-    // What the test pins down is that the second append resumes the same
-    // message rather than being read as a fresh one.
+    // llhttp 支持增量解析，因此在首次追加结束时请求行已被解析完成：
+    // 当首部段仍处于打开状态时 URL 已可读，且首部值尚非最终完整值。
+    // 本测试验证第二次追加会无缝续接同一条消息，而非被当作全新消息处理。
     EXPECT_EQ(handler.url(), "/split");
     EXPECT_NE(handler.headerValue("Host"), "example.com");
     feed(handler, "ample.com\r\n\r\n");
@@ -196,8 +195,8 @@ TEST(HandlerHttp, NullHeaderNameDoesNotCrash)
 TEST(HandlerBase, NullPushResponseDoesNotCrash)
 {
     HandlerBase handler;
-    (void)handler.pushResponse(std::string_view{});
-    (void)handler.pushResponse(std::string_view(nullptr, 0));
+    [[maybe_unused]] auto _1 = handler.pushResponse(std::string_view{});
+    [[maybe_unused]] auto _2 = handler.pushResponse(std::string_view(nullptr, 0));
     EXPECT_FALSE(handler.hasResponse());
 }
 
@@ -208,7 +207,7 @@ TEST(HandlerHttp, EmptyHeaderValueIsPreserved)
     handler.process();
     EXPECT_EQ(handler.headerValue("Host"), "localhost");
     EXPECT_EQ(handler.headerValue("X-Empty"), "");
-    // Check that X-Empty is indeed in the headers vector
+    // 验证 X-Empty 确实存在于首部列表中
     bool found = false;
     for (const auto &h : handler.headers())
     {
@@ -219,4 +218,29 @@ TEST(HandlerHttp, EmptyHeaderValueIsPreserved)
         }
     }
     EXPECT_TRUE(found);
+}
+
+TEST(HandlerDatagramEcho, EchoesDatagramToPeer)
+{
+    HandlerDatagramEcho handler;
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(12345);
+    inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+
+    EXPECT_FALSE(handler.hasReply());
+    handler.onDatagram(peer, "ping_datagram", 13);
+    EXPECT_TRUE(handler.hasReply());
+    EXPECT_EQ(handler.replyCount(), 1u);
+
+    auto reply = handler.takeReply();
+    EXPECT_EQ(reply.bytes, "ping_datagram");
+    EXPECT_EQ(reply.peer.sin_port, htons(12345));
+    EXPECT_FALSE(handler.hasReply());
+
+    // 验证 reset 正常清理
+    handler.onDatagram(peer, "after_reset", 11);
+    EXPECT_TRUE(handler.hasReply());
+    handler.reset();
+    EXPECT_FALSE(handler.hasReply());
 }

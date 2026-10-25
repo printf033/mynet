@@ -1,6 +1,6 @@
-// FrameDecoder and appendFrame: the three-outcome contract ("not yet", "one
-// frame", "never a frame") and the byte layout the two functions share.
-#include "frame.hpp"
+// FrameDecoder 与 appendFrame：三态契约（"数据不足暂无"、"成功解码一帧"、
+// "协议错误永不成帧"）以及两函数共享的底层字节布局。
+#include "http/v2/frame.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -30,7 +30,7 @@ namespace
     Buffer bufferOf(const std::string &bytes)
     {
         Buffer b;
-        b.append(bytes.data(), bytes.size());
+        [[maybe_unused]] auto _ = b.append(bytes.data(), bytes.size());
         return b;
     }
 } // namespace
@@ -38,11 +38,11 @@ namespace
 TEST(FrameDecoder, IncompleteHeaderAsksForMoreBytes)
 {
     FrameDecoder decoder;
-    Buffer in = bufferOf(std::string(8, 'x')); // one byte short of a header
+    Buffer in = bufferOf(std::string(8, 'x')); // 比 9 字节帧头少 1 字节
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->has_value());
-    EXPECT_EQ(in.readableBytes(), size_t{8}); // nothing consumed while waiting
+    EXPECT_EQ(in.readableBytes(), size_t{8}); // 等待数据期间不消费任何字节
 }
 
 TEST(FrameDecoder, EmptyBufferIsNotAnError)
@@ -58,11 +58,11 @@ TEST(FrameDecoder, PayloadSplitAcrossReadsStaysUnconsumed)
 {
     FrameDecoder decoder;
     const std::string header = makeHeader(10, FRAME_TYPE::DATA, 0, 1);
-    Buffer in = bufferOf(header + "abc"); // 3 of the 10 payload bytes
+    Buffer in = bufferOf(header + "abc"); // 10 字节载荷中仅到达 3 字节
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->has_value());
-    EXPECT_EQ(in.readableBytes(), header.size() + 3); // the header is re-read next time
+    EXPECT_EQ(in.readableBytes(), header.size() + 3); // 下次到达时重新从帧头起读取
 }
 
 TEST(FrameDecoder, WholeFrameCarriesItsFieldsAndIsConsumed)
@@ -132,9 +132,8 @@ TEST(FrameDecoder, ReservedBitIsAnErrorOnceTheFrameIsWhole)
 
 TEST(FrameDecoder, ReservedBitWaitsForTheWholeFrame)
 {
-    // The order is deliberate: a frame that is merely incomplete is "not yet"
-    // even when its header already carries the reserved bit, so a peek at a
-    // half-arrived frame never tears the connection down.
+    // 校验顺序是刻意设计的：仅部分到达的不完整帧返回“暂无帧”，
+    // 即使其帧头已携带保留位，因此偷窥半到达的帧绝不会导致连接被误断开。
     FrameDecoder decoder;
     Buffer in = bufferOf(makeHeader(4, FRAME_TYPE::DATA, 0, 1, true) + "ab");
     const Decoded result = decoder.next(in);
@@ -195,14 +194,14 @@ TEST(AppendFrame, RoundTripsEveryField)
 TEST(AppendFrame, MasksTheReservedBitOfTheStreamIdentifier)
 {
     Frame frame;
-    frame.streamId = 0x80000001u; // the reserved bit set by accident
+    frame.streamId = 0x80000001u; // 意外设置了最高位的保留位
     frame.type = FRAME_TYPE::DATA;
     std::string wire;
     appendFrame(wire, frame);
     EXPECT_EQ(static_cast<unsigned char>(wire[5]) & frame::kStreamIdReservedMask, 0u);
 
-    // The same bytes decode cleanly, with the reserved bit gone rather than
-    // reported: masking on the way out is what keeps the round trip legal.
+    // 相同的字节能被正常解码，保留位被清除而非报错：
+    // 在出站时进行掩码处理保证了往返传输的合规性。
     Buffer in = bufferOf(wire);
     FrameDecoder decoder;
     const Decoded result = decoder.next(in);

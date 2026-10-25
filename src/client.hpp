@@ -2,7 +2,7 @@
 
 /**
  * @file client.hpp
- * @brief High-performance client-side bidirectional pipe connecting stdin/stdout to network sockets.
+ * @brief 高性能客户端双向数据管道，连接标准输入/输出与网络套接字。
  */
 
 #include "concepts.hpp"
@@ -38,9 +38,9 @@ namespace mynet
 
     /**
      * @class Client
-     * @brief Full-duplex streaming network client bridging standard streams with TCP/TLS/UDP.
+     * @brief 全双工流式网络客户端，桥接标准流与 TCP/TLS/UDP。
      *
-     * @tparam Event Event base wrapper type satisfying DerivedFromEventBase and Resettable.
+     * @tparam Event 满足 DerivedFromEventBase 与 Resettable 约束的事件包装类型。
      */
     template <typename Event>
         requires DerivedFromEventBase<Event> && Resettable<Event>
@@ -59,20 +59,20 @@ namespace mynet
 
         ~Client() noexcept { reset(); }
 
-        Client(const Client &) = delete ("a client owns a socket and the loop registration that drives it");
-        Client &operator=(const Client &) = delete ("a client owns a socket and the loop registration that drives it");
-        Client(Client &&) noexcept = delete ("a client owns a socket and the loop registration that drives it");
+        Client(const Client &) = delete("a client owns a socket and the loop registration that drives it");
+        Client &operator=(const Client &) = delete("a client owns a socket and the loop registration that drives it");
+        Client(Client &&) noexcept = delete("a client owns a socket and the loop registration that drives it");
         Client &
-        operator=(Client &&) noexcept = delete ("a client owns a socket and the loop registration that drives it");
+        operator=(Client &&) noexcept = delete("a client owns a socket and the loop registration that drives it");
 
         static constexpr size_t kHighWater = 256ULL << 10;
         static constexpr size_t kLowWater = 64ULL << 10;
 
         /**
-         * @brief Run TCP client connection to remote peer until EOF on both directions.
-         * @param ip Remote IPv4 literal address.
-         * @param port Remote port.
-         * @param bufSize Buffer size for socket read/write operations.
+         * @brief 运行 TCP 客户端连接至远端对端，直到双向 EOF。
+         * @param ip 远端 IPv4 字面量地址。
+         * @param port 远端端口。
+         * @param bufSize 套接字读写操作的缓冲区大小。
          * @return Result<> 成功返回 {}，失败返回 std::unexpected(ERR::...)
          */
         [[nodiscard]] Result<> runTcp(const char *ip, int port, int bufSize = 16 << 10)
@@ -97,7 +97,7 @@ namespace mynet
         }
 
         /**
-         * @brief Run UDP client connection to remote peer.
+         * @brief 运行 UDP 客户端连接至远端对端。
          *
          * UDP 退出语义：UDP 无连接、无 FIN，客户端在 stdin EOF 且发送队列与
          * 回显出队全部收尾后即视为完成并返回（“已发完即退出”）；
@@ -125,7 +125,13 @@ namespace mynet
         }
 
         /**
-         * @brief Run TLS/SSL client connection to remote peer.
+         * @brief 启动与远端对端的 TLS/SSL 客户端连接。
+         * @param ip 远端 IPv4 字面量地址。
+         * @param port 远端端口。
+         * @param serverName SNI 服务器名称指示。
+         * @param caFile 用于验证服务端的 CA 证书路径。
+         * @param bufSize 套接字读写操作的缓冲区大小。
+         * @return Result<> 成功返回 {}，失败返回 std::unexpected(ERR::...)
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *serverName = nullptr,
                                       const char *caFile = nullptr, int bufSize = 16 << 10)
@@ -187,19 +193,19 @@ namespace mynet
         }
 
         /**
-         * @brief Stop the peer event loop from any thread.
+         * @brief 从任意线程安全停止对端事件循环。
          */
         inline void stop() noexcept { stopSource_.request_stop(); }
 
         /**
-         * @brief Reset peer state and clean up sockets/timers.
+         * @brief 重置对端状态并清理套接字与定时器资源。
          */
         inline void reset() noexcept
         {
             loop_.quit();
             if (stopTimer_ != 0)
             {
-                (void)loop_.cancelTimer(stopTimer_);
+                [[maybe_unused]] auto _ = loop_.cancelTimer(stopTimer_);
                 stopTimer_ = 0;
             }
             stopSource_ = std::stop_source{};
@@ -210,7 +216,7 @@ namespace mynet
             }
             if (stdinRegistered_ && !stdinPaused_)
             {
-                (void)loop_.delFd(STDIN_FILENO);
+                [[maybe_unused]] auto _ = loop_.delFd(STDIN_FILENO);
             }
             stdinRegistered_ = false;
             stdinPaused_ = false;
@@ -221,7 +227,7 @@ namespace mynet
             }
             if (fd_ != -1)
             {
-                (void)loop_.delFd(fd_);
+                [[maybe_unused]] auto _ = loop_.delFd(fd_);
                 ::close(fd_);
                 fd_ = -1;
             }
@@ -475,8 +481,8 @@ namespace mynet
                     int reason = SSL_get_error(ssl_, e);
                     if (reason != SSL_ERROR_WANT_READ && reason != SSL_ERROR_WANT_WRITE) [[unlikely]]
                     {
-                        LOG_ERROR("Client::handshakeOrConnect: TLS handshake with {} failed: {}", datagramPeerText(addr_),
-                                  log::sslText());
+                        LOG_ERROR("Client::handshakeOrConnect: TLS handshake with {} failed: {}",
+                                  datagramPeerText(addr_), log::sslText());
                         fatal_ = true;
                         failReason_ = ERR::CONNECT_FAILED;
                         peerEof_ = true;
@@ -638,7 +644,7 @@ namespace mynet
             {
                 return;
             }
-            (void)loop_.delFd(STDIN_FILENO);
+            [[maybe_unused]] auto _ = loop_.delFd(STDIN_FILENO);
             stdinPaused_ = true;
         }
 
@@ -665,8 +671,8 @@ namespace mynet
             {
                 events |= EPOLLIN;
             }
-            if (state_ == CLIENT_STATE::CONNECTING || state_ == CLIENT_STATE::HANDSHAKE || toPeerOffset_ < toPeer_.size() ||
-                pendingShutdown_)
+            if (state_ == CLIENT_STATE::CONNECTING || state_ == CLIENT_STATE::HANDSHAKE ||
+                toPeerOffset_ < toPeer_.size() || pendingShutdown_)
             {
                 events |= EPOLLOUT;
             }

@@ -1,6 +1,5 @@
-// Buffer: the read cursor, the lazy compaction behind it, the water mark
-// that decides when a connection is told to stop reading, and the direct
-// write window that recv-style callers can fill in place.
+// Buffer：读游标推进、惰性紧凑整理、触发连接背压的水位线，
+// 以及供 recv 系系统调用原地直写的连续可写窗口。
 #include "buffer.hpp"
 #include <gtest/gtest.h>
 #include <string>
@@ -18,8 +17,8 @@ TEST(Buffer, StartsEmpty)
     Buffer b;
     EXPECT_TRUE(b.empty());
     EXPECT_EQ(b.readableBytes(), size_t{0});
-    EXPECT_EQ(b.writableBytes(), size_t{0}); // no storage yet: nothing to write into
-    EXPECT_EQ(b.readableBegin(), b.readableBegin()); // a valid pointer to nothing
+    EXPECT_EQ(b.writableBytes(), size_t{0});         // 初始无底层存储：无可写空间
+    EXPECT_EQ(b.readableBegin(), b.readableBegin()); // 指向空缓冲区的安全指针
 }
 
 TEST(Buffer, AppendThenReadBack)
@@ -43,11 +42,11 @@ TEST(Buffer, AppendRejectsNullAndZeroLength)
 TEST(Buffer, AppendNaturalTypesWithoutAmbiguity)
 {
     Buffer b;
-    EXPECT_TRUE(b.append("0123456789", 10)); // int literal: no ambiguity
-    EXPECT_TRUE(b.append(kText, 1u));        // unsigned int: no ambiguity
-    EXPECT_TRUE(b.append("tail"));           // const char[] literal: matches string_view unambiguously
+    EXPECT_TRUE(b.append("0123456789", 10)); // 整数字面量：无重载二义性
+    EXPECT_TRUE(b.append(kText, 1u));        // 无符号整数：无重载二义性
+    EXPECT_TRUE(b.append("tail"));           // const char[] 字符数组：明确匹配 string_view
     const std::string str = "!";
-    EXPECT_TRUE(b.append(str)); // std::string converts to string_view
+    EXPECT_TRUE(b.append(str)); // std::string 自动转为 string_view
     EXPECT_EQ(b.readableView(), "0123456789ttail!");
     b.retrieveAll();
 }
@@ -89,9 +88,8 @@ TEST(Buffer, RetrieveExactlyReadableIsEmpty)
 
 TEST(Buffer, LongLivedBufferStillReadsItsTailAfterCompaction)
 {
-    // The compaction branch needs a dead prefix of at least 4096 bytes that is
-    // at least half the backing store. The observable contract either way is
-    // that the live tail is exactly what was not consumed.
+    // 紧凑整理分支要求已被消费的前缀至少达 4096 字节且占底层存储的一半以上。
+    // 无论是否触发整理，可观测的契约均保证存活的尾部数据即为未被消费的数据。
     Buffer b;
     std::string chunk(4 << 10, 'a');
     ASSERT_TRUE(b.append(chunk));
@@ -136,7 +134,7 @@ TEST(Buffer, HighWaterMarkIsExclusiveAndSettable)
     EXPECT_EQ(b.highWaterMark(), 64 << 10);
     b.setHighWaterMark(4);
     ASSERT_TRUE(b.append("abcd"));
-    EXPECT_FALSE(b.overHighWater()); // exactly at the mark: not over it
+    EXPECT_FALSE(b.overHighWater()); // 恰好在水位线上：不算超出
     ASSERT_TRUE(b.append('e'));
     EXPECT_TRUE(b.overHighWater());
     b.setHighWaterMark(100);
@@ -160,18 +158,17 @@ TEST(Buffer, SwapExchangesContentsAndWaterMarks)
 
 TEST(Buffer, EnsureWritableCompactsTheConsumedPrefixInPlace)
 {
-    // Fill exactly the backing store (first growth is exact), consume a prefix,
-    // then demand a window that only fits once the dead prefix is reclaimed
-    // in place: window + readable must add back up to the original capacity,
-    // proving no reallocation happened.
+    // 精确填满底层存储（首次扩容为精确分配），消费部分前缀，
+    // 随后请求只有在就地回收已消费前缀后才放得下的写入窗口：
+    // 窗口大小与可读字节数相加必须严格等于原容量，证明未发生重新分配。
     Buffer b;
     const std::string chunk(4 << 10, 'a');
     ASSERT_TRUE(b.append(chunk));
-    ASSERT_EQ(b.writableBytes(), size_t{0}); // exact first allocation
+    ASSERT_EQ(b.writableBytes(), size_t{0}); // 首次精确分配
     b.retrieve(2 << 10);
     ASSERT_TRUE(b.ensureWritable(2 << 10));
     EXPECT_EQ(b.readableBytes(), size_t{2 << 10});
-    EXPECT_EQ(b.writableBytes() + b.readableBytes(), size_t{4 << 10}); // in place, same block
+    EXPECT_EQ(b.writableBytes() + b.readableBytes(), size_t{4 << 10}); // 原地就地复用同一内存块
     EXPECT_EQ(std::string(b.readableBegin(), b.readableBytes()), std::string(2 << 10, 'a'));
     ASSERT_TRUE(b.append("tail"));
     EXPECT_EQ(std::string(b.readableBegin() + (2 << 10), 4), "tail");
@@ -187,20 +184,19 @@ TEST(Buffer, DirectWriteWindowCommitRoundTrip)
     b.commitWritten(16);
     EXPECT_EQ(b.readableBytes(), size_t{16});
     EXPECT_EQ(b.readableView(), "0123456789abcdef");
-    EXPECT_EQ(b.writableBytes() + b.readableBytes(), size_t{16}); // window shrank by exactly the commit
+    EXPECT_EQ(b.writableBytes() + b.readableBytes(), size_t{16}); // 可写窗口恰好扣减了提交的字节数
 }
 
 TEST(Buffer, AppendFailureKeepsTheBufferIntact)
 {
-    // A nothrow allocation beyond the sanitizer/OS ceiling must fail without
-    // touching the buffer; the error path then has to leave prior bytes
-    // readable and the object usable.
+    // 超出系统限制的 nothrow 分配失败时不得污染缓冲区；
+    // 错误路径必须保持已有字节可读且对象依然可用。
     Buffer b;
     ASSERT_TRUE(b.append("keep me"));
-    EXPECT_FALSE(b.ensureWritable(~size_t{0})); // exact-need growth of SIZE_MAX cannot succeed
+    EXPECT_FALSE(b.ensureWritable(~size_t{0})); // 请求 SIZE_MAX 容量必然失败
     EXPECT_EQ(b.readableView(), "keep me");
     const std::string huge(1 << 10, 'x');
-    EXPECT_TRUE(b.append(huge)); // the buffer still works normally afterwards
+    EXPECT_TRUE(b.append(huge)); // 之后缓冲区仍可正常工作
     EXPECT_EQ(b.readableBytes(), size_t{7} + huge.size());
 }
 
@@ -208,22 +204,22 @@ TEST(Buffer, MoveConstructorPreservesInvariantsAndAvoidsUnderflow)
 {
     Buffer a;
     ASSERT_TRUE(a.append("0123456789", 10));
-    a.retrieve(4); // readIndex_ = 4, readableBytes() = 6
+    a.retrieve(4); // 此时 readIndex_ = 4，readableBytes() = 6
     EXPECT_EQ(a.readableBytes(), size_t{6});
 
     Buffer b(std::move(a));
 
-    // Verify moved-from object state (must be 0, not underflow to SIZE_MAX - 3)
+    // 校验被移动源对象状态（必须清零，不能下溢为 SIZE_MAX - 3）
     EXPECT_TRUE(a.empty());
     EXPECT_EQ(a.readableBytes(), size_t{0});
     EXPECT_EQ(a.readableView(), "");
 
-    // Verify destination object state
+    // 校验移动目标对象状态
     EXPECT_FALSE(b.empty());
     EXPECT_EQ(b.readableBytes(), size_t{6});
     EXPECT_EQ(b.readableView(), "456789");
 
-    // Source object remains fully functional
+    // 源对象依然完全可用
     ASSERT_TRUE(a.append("fresh"));
     EXPECT_EQ(a.readableBytes(), size_t{5});
     EXPECT_EQ(a.readableView(), "fresh");
@@ -233,19 +229,19 @@ TEST(Buffer, MoveAssignmentPreservesInvariantsAndAvoidsUnderflow)
 {
     Buffer a;
     ASSERT_TRUE(a.append("abcdefgh", 8));
-    a.retrieve(3); // readIndex_ = 3, readableBytes() = 5
+    a.retrieve(3); // 此时 readIndex_ = 3，readableBytes() = 5
     EXPECT_EQ(a.readableBytes(), size_t{5});
 
     Buffer b;
     ASSERT_TRUE(b.append("existing", 8));
     b = std::move(a);
 
-    // Verify moved-from object state
+    // 校验被移动源对象状态
     EXPECT_TRUE(a.empty());
     EXPECT_EQ(a.readableBytes(), size_t{0});
     EXPECT_EQ(a.readableView(), "");
 
-    // Verify destination object state
+    // 校验移动目标对象状态
     EXPECT_FALSE(b.empty());
     EXPECT_EQ(b.readableBytes(), size_t{5});
     EXPECT_EQ(b.readableView(), "defgh");

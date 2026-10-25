@@ -1,6 +1,8 @@
 #include "concepts.hpp"
+#include "datagram.hpp"
 #include "event.hpp"
 #include "handler.hpp"
+#include "http/v1/handler.hpp"
 #include <gtest/gtest.h>
 
 using namespace mynet;
@@ -122,10 +124,15 @@ TEST(Concepts, ProtocolHandlerContractEnforcement)
 TEST(Concepts, DerivedFromDatagramHandlerConstraints)
 {
     static_assert(DerivedFromDatagramHandler<DatagramHandler>);
+    static_assert(DerivedFromDatagramHandler<HandlerDatagramEcho>);
+    static_assert(DerivedFromHandlerBase<HandlerDatagramEcho>);
+    static_assert(Resettable<HandlerDatagramEcho>);
     static_assert(!DerivedFromDatagramHandler<HandlerBase>);
     static_assert(!DerivedFromDatagramHandler<NonDerivedHandler>);
 
     EXPECT_TRUE(DerivedFromDatagramHandler<DatagramHandler>);
+    EXPECT_TRUE(DerivedFromDatagramHandler<HandlerDatagramEcho>);
+    EXPECT_TRUE(DerivedFromHandlerBase<HandlerDatagramEcho>);
     EXPECT_FALSE(DerivedFromDatagramHandler<HandlerBase>);
 }
 
@@ -135,18 +142,18 @@ TEST(Concepts, EventConceptsEvaluationOnCompleteTypes)
     using SockEv = EventSocket<HandlerBase>;
     using SslEv = EventSsl<HandlerBase>;
 
-    // DerivedFromEventBase
+    // 概念约束测试：DerivedFromEventBase
     static_assert(DerivedFromEventBase<BaseEv>);
     static_assert(DerivedFromEventBase<SockEv>);
     static_assert(DerivedFromEventBase<SslEv>);
     static_assert(!DerivedFromEventBase<HandlerBase>);
 
-    // SocketEvent
+    // 概念约束测试：SocketEvent
     static_assert(SocketEvent<SockEv>);
     static_assert(!SocketEvent<BaseEv>);
     static_assert(!SocketEvent<SslEv>);
 
-    // SslEvent
+    // 概念约束测试：SslEvent
     static_assert(SslEvent<SslEv>);
     static_assert(!SslEvent<BaseEv>);
     static_assert(!SslEvent<SockEv>);

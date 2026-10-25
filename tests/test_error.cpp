@@ -1,5 +1,5 @@
-// ERR and IO_END: two enums whose whole point is that every value has exactly
-// one name and one meaning, so every value is walked here rather than sampled.
+// ERR 与 IO_END：两个强类型枚举，其核心在于每个枚举值都具有唯一定义与明确语义，
+// 因此此处对每一个枚举值进行全量遍历校验，而非抽样检查。
 #include "error.hpp"
 #include <gtest/gtest.h>
 #include <string_view>
@@ -50,8 +50,8 @@ TEST(ERR, ReflectionNameOf)
 
 TEST(IO_END, CoversTheFourOrdinaryOutcomesOfATransfer)
 {
-    // None of these is an error, which is the reason they are a separate enum:
-    // a reader that gets one is being told whether to retry, wait, or stop.
+    // 这些状态均不属于致命错误，因此独立成枚举：
+    // 读取者据此判断是需要重试、等待就绪还是停止传输。
     EXPECT_EQ(std::to_underlying(IO_END::WOULDBLOCK), 0);
     EXPECT_EQ(std::to_underlying(IO_END::INTERRUPTED), 1);
     EXPECT_EQ(std::to_underlying(IO_END::EOF_REACHED), 2);

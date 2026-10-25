@@ -1,13 +1,12 @@
 #include "error.hpp"
 #include "log.hpp"
-#include "proactor.hpp"
-#include "udp_echo.hpp"
+#include "reactor.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
@@ -24,6 +23,8 @@ int main(int argc, char *argv[])
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
+    // UDP 监听器绑定的套接字类型，与流式示例通过相同的路径解析，
+    // 因此 /etc/services 中的服务名称依然适用。
     hints.ai_socktype = SOCK_DGRAM;
     int e = getaddrinfo(name, service, &hints, &res);
     if (e != 0)
@@ -37,13 +38,11 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     LOG_INFO("listening to {}:{} (udp)", ip, port);
-    // Same front end as reactor_udp, driven by io_uring instead of epoll. One
-    // recvmsg is armed at a time because the sender's address is part of the
-    // message and there is no connection to key a per-session buffer on; the
-    // read is re-armed as each completion is retired.
-    UdpEcho handler;
+    // 整个套接字共享一个处理器：数据报套接字是所有对端共享的单一端点，
+    // 无需池化连接级状态，处理器的生命周期贯穿所有消息，而非随单个套接字连接回收。
     using namespace mynet;
-    if (auto res = Proactor<EventSocket<UdpEcho>>().runUdp(ip, port, handler); !res)
+    HandlerDatagramEcho handler;
+    if (auto res = Reactor<EventSocket<HandlerDatagramEcho>>().runUdp(ip, port, handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

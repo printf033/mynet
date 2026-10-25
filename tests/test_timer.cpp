@@ -28,20 +28,20 @@ TEST(TimerQueue, SingleShotTimerExpiresAndCleansUp)
     EXPECT_EQ(q.size(), 1u);
     EXPECT_EQ(q.nextExpire(), now + 100ms);
 
-    // Before deadline: should not expire
+    // 超时时间之前：不应触发
     EXPECT_EQ(q.handleExpired(now + 50ms), 0u);
     EXPECT_FALSE(fired);
     EXPECT_EQ(q.size(), 1u);
 
-    // After deadline: expires and fires callback
+    // 达到超时时间：触发并执行回调
     EXPECT_EQ(q.handleExpired(now + 150ms), 1u);
     EXPECT_TRUE(fired);
 
-    // Bug 1 verification: single-shot timer is completely erased from timers_
+    // 缺陷验证：单次定时器在触发后被彻底从 timers_ 集合中清除
     EXPECT_EQ(q.size(), 0u);
     EXPECT_EQ(q.nextExpire(), TimerQueue::Time::max());
 
-    // Calling cancelTimer on an already-expired single-shot timer returns TIMER_NOT_FOUND
+    // 对已过期的单次定时器调用 cancelTimer 必须返回 TIMER_NOT_FOUND
     EXPECT_EQ(q.cancelTimer(id).error(), ERR::TIMER_NOT_FOUND);
 }
 
@@ -54,15 +54,15 @@ TEST(TimerQueue, DoubleCancelReturnsNotFoundError)
     const uint64_t id = q.addTimer(now + 200ms, [&fired] { fired = true; });
     EXPECT_EQ(q.size(), 1u);
 
-    // First cancel succeeds
+    // 首次取消成功
     EXPECT_TRUE(q.cancelTimer(id).has_value());
-    // Optimization 2 verification: size() reflects active timers immediately
+    // 优化验证：size() 立即准确反映当前活跃定时器数量
     EXPECT_EQ(q.size(), 0u);
 
-    // Bug 2 verification: second cancel returns TIMER_NOT_FOUND
+    // 缺陷验证：二次取消返回 TIMER_NOT_FOUND
     EXPECT_EQ(q.cancelTimer(id).error(), ERR::TIMER_NOT_FOUND);
 
-    // When time passes, the cancelled timer never runs
+    // 经过超时时间后，已取消的定时器绝不执行
     EXPECT_EQ(q.handleExpired(now + 300ms), 0u);
     EXPECT_FALSE(fired);
     EXPECT_EQ(q.size(), 0u);
@@ -77,22 +77,22 @@ TEST(TimerQueue, RepeatingTimerReschedulesUntilCancelled)
     const uint64_t id = q.addTimer(now + 50ms, [&count] { ++count; }, 50ms);
     EXPECT_EQ(q.size(), 1u);
 
-    // First tick
+    // 第一次触发
     EXPECT_EQ(q.handleExpired(now + 55ms), 1u);
     EXPECT_EQ(count, 1);
     EXPECT_EQ(q.size(), 1u);
     EXPECT_GE(q.nextExpire(), now + 100ms);
 
-    // Second tick
+    // 第二次触发
     EXPECT_EQ(q.handleExpired(now + 105ms), 1u);
     EXPECT_EQ(count, 2);
     EXPECT_EQ(q.size(), 1u);
 
-    // Cancel repeating timer
+    // 取消周期定时器
     EXPECT_TRUE(q.cancelTimer(id).has_value());
     EXPECT_EQ(q.size(), 0u);
 
-    // Third tick: should not run
+    // 第三次触发：已取消，不再执行
     EXPECT_EQ(q.handleExpired(now + 200ms), 0u);
     EXPECT_EQ(count, 2);
     EXPECT_EQ(q.cancelTimer(id).error(), ERR::TIMER_NOT_FOUND);
@@ -116,12 +116,12 @@ TEST(TimerQueue, RepeatingTimerSelfCancelInsideCallback)
 
     EXPECT_EQ(q.size(), 1u);
 
-    // First trigger cancels itself
+    // 首次触发时在回调内自我取消
     EXPECT_EQ(q.handleExpired(now + 60ms), 1u);
     EXPECT_EQ(count, 1);
     EXPECT_EQ(q.size(), 0u);
 
-    // Second trigger should not execute
+    // 第二次触发不应执行
     EXPECT_EQ(q.handleExpired(now + 200ms), 0u);
     EXPECT_EQ(count, 1);
     EXPECT_EQ(q.cancelTimer(id).error(), ERR::TIMER_NOT_FOUND);
@@ -134,7 +134,7 @@ TEST(TimerQueue, HeapOrderingAndDropDeadTop)
 
     std::vector<int> executionOrder;
 
-    // Add timers in out-of-order deadlines: t3 (300ms), t1 (100ms), t2 (200ms)
+    // 以乱序的截止时间添加定时器：t3 (300ms), t1 (100ms), t2 (200ms)
     q.addTimer(now + 300ms, [&] { executionOrder.push_back(3); });
     uint64_t id1 = q.addTimer(now + 100ms, [&] { executionOrder.push_back(1); });
     q.addTimer(now + 200ms, [&] { executionOrder.push_back(2); });
@@ -142,21 +142,21 @@ TEST(TimerQueue, HeapOrderingAndDropDeadTop)
     EXPECT_EQ(q.size(), 3u);
     EXPECT_EQ(q.nextExpire(), now + 100ms);
 
-    // Cancel t1 (which sits at top of min-heap)
+    // 取消位于最小堆堆顶的 t1
     EXPECT_TRUE(q.cancelTimer(id1).has_value());
     EXPECT_EQ(q.size(), 2u);
 
-    // nextExpire() should automatically drop dead top t1 and return t2 (now + 200ms)
+    // nextExpire() 自动丢弃堆顶无效的 t1，并返回 t2 的时间 (now + 200ms)
     EXPECT_EQ(q.nextExpire(), now + 200ms);
 
-    // Fire at 250ms -> only t2 executes
+    // 在 250ms 时触发 -> 仅 t2 执行
     EXPECT_EQ(q.handleExpired(now + 250ms), 1u);
     ASSERT_EQ(executionOrder.size(), 1u);
     EXPECT_EQ(executionOrder[0], 2);
     EXPECT_EQ(q.size(), 1u);
     EXPECT_EQ(q.nextExpire(), now + 300ms);
 
-    // Fire at 350ms -> t3 executes
+    // 在 350ms 时触发 -> t3 执行
     EXPECT_EQ(q.handleExpired(now + 350ms), 1u);
     ASSERT_EQ(executionOrder.size(), 2u);
     EXPECT_EQ(executionOrder[1], 3);
@@ -188,10 +188,10 @@ TEST(TimerQueue, ConcurrentAddCancelThreadSafety)
                     ids.push_back(id);
                 }
 
-                // Cancel half of the timers
+                // 取消其中一半定时器
                 for (size_t i = 0; i < ids.size(); i += 2)
                 {
-                    (void)q.cancelTimer(ids[i]);
+                    [[maybe_unused]] auto _ = q.cancelTimer(ids[i]);
                 }
             });
     }
@@ -201,10 +201,10 @@ TEST(TimerQueue, ConcurrentAddCancelThreadSafety)
         w.join();
     }
 
-    // 4 threads * 200 timers = 800 added, half cancelled = 400 active
+    // 4 线程 * 200 个定时器 = 800 个，取消一半 = 400 个存活
     EXPECT_EQ(q.size(), 400u);
 
-    // Trigger all remaining timers
+    // 触发所有剩余定时器
     size_t fired = q.handleExpired(now + 10s);
     EXPECT_EQ(fired, 400u);
     EXPECT_EQ(executed.load(), 400);
@@ -223,8 +223,8 @@ TEST(TimerQueue, InvariantsHoldDuringRepeatingCallbackExecution)
         [&]
         {
             callbackRan = true;
-            // Invariant check: during callback execution, the repeating timer must
-            // ALREADY be in the heap with its rescheduled deadline, not in limbo!
+            // 不变量校验：在回调执行期间，周期定时器必须
+            // 已经以重新调度的截止时间驻留在堆中，而不是处于悬空游离态！
             EXPECT_EQ(q.size(), 1u);
             EXPECT_NE(q.nextExpire(), TimerQueue::Time::max());
             EXPECT_GE(q.nextExpire(), now + 150ms);
@@ -247,25 +247,25 @@ TEST(TimerQueue, MixedBatchReschedulesRepeatingTimerWithoutStarvation)
     bool singleFired = false;
     int repeatCount = 0;
 
-    // Add a single-shot timer and a repeating timer both expiring at now + 50ms
+    // 添加一个单次定时器和一个周期定时器，均在 now + 50ms 到期
     q.addTimer(now + 50ms, [&] { singleFired = true; });
     uint64_t repeatId = q.addTimer(now + 50ms, [&] { ++repeatCount; }, 100ms);
 
     EXPECT_EQ(q.size(), 2u);
 
-    // Both expire in the same batch
+    // 两者在同一个批次中到期
     size_t fired = q.handleExpired(now + 60ms);
     EXPECT_EQ(fired, 2u);
     EXPECT_TRUE(singleFired);
     EXPECT_EQ(repeatCount, 1);
 
-    // Key invariant: nextExpire() must reflect the rescheduled repeating timer (now + 150ms)
-    // and NEVER falsely report Time::max() (which would starve epoll_wait with timeout -1)
+    // 关键不变量：nextExpire() 必须准确反映重新调度的周期定时器 (now + 150ms)，
+    // 绝不能误报 Time::max()（否则会导致 epoll_wait 以 -1 超时陷入永久阻塞）
     EXPECT_EQ(q.size(), 1u);
     EXPECT_NE(q.nextExpire(), TimerQueue::Time::max());
     EXPECT_GE(q.nextExpire(), now + 150ms);
 
-    // Clean up
+    // 清理资源
     EXPECT_TRUE(q.cancelTimer(repeatId).has_value());
     EXPECT_EQ(q.size(), 0u);
     EXPECT_EQ(q.nextExpire(), TimerQueue::Time::max());

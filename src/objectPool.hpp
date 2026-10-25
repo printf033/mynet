@@ -2,12 +2,12 @@
 
 #include "concepts.hpp"
 #include "error.hpp"
-#include <limits>
-#include <memory>
-#include <new>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <memory>
+#include <new>
 #include <thread>
 #include <utility>
 
@@ -24,22 +24,23 @@ namespace mynet
 // Release 构建下宏与成员全部展开为空，零存储与零指令开销。
 // ---------------------------------------------------------------------------
 #ifdef MYNET_DEBUG
-#define MYNET_POOL_BIND_OWNER()                                                                                          \
-    do                                                                                                                  \
-    {                                                                                                                   \
-        ownerToken_ = mynet::poolDetail::currentThreadToken();                                                          \
+#define MYNET_POOL_BIND_OWNER()                                                                                        \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        ownerToken_ = mynet::poolDetail::currentThreadToken();                                                         \
     } while (false)
-#define MYNET_POOL_ASSERT_OWNER()                                                                                        \
-    do                                                                                                                  \
-    {                                                                                                                   \
-        if (ownerToken_ != 0 && ownerToken_ != mynet::poolDetail::currentThreadToken()) [[unlikely]]                     \
-        {                                                                                                               \
-            std::fprintf(stderr,                                                                                        \
-                         "mynet::ObjectPool used across threads: owner token %llu != caller token %llu (non-thread-safe pool)\n", \
-                         static_cast<unsigned long long>(ownerToken_),                                                   \
-                         static_cast<unsigned long long>(mynet::poolDetail::currentThreadToken()));                      \
-            std::abort();                                                                                               \
-        }                                                                                                               \
+#define MYNET_POOL_ASSERT_OWNER()                                                                                      \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (ownerToken_ != 0 && ownerToken_ != mynet::poolDetail::currentThreadToken()) [[unlikely]]                   \
+        {                                                                                                              \
+            std::fprintf(stderr,                                                                                       \
+                         "mynet::ObjectPool used across threads: owner token %llu != caller token %llu "               \
+                         "(non-thread-safe pool)\n",                                                                   \
+                         static_cast<unsigned long long>(ownerToken_),                                                 \
+                         static_cast<unsigned long long>(mynet::poolDetail::currentThreadToken()));                    \
+            std::abort();                                                                                              \
+        }                                                                                                              \
     } while (false)
 #else
 #define MYNET_POOL_BIND_OWNER() static_cast<void>(0)

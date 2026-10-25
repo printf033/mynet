@@ -40,26 +40,29 @@ endif()
 # -----------------------------------------------------------------------------
 # Options: default to ON for standalone builds, OFF when consumed as a subproject
 # -----------------------------------------------------------------------------
-option(MYNET_BUILD_SAMPLES "Build sample applications" ${MYNET_IS_TOP_LEVEL})
+if(DEFINED MYNET_BUILD_SAMPLES AND NOT DEFINED MYNET_BUILD_EXAMPLES)
+    set(MYNET_BUILD_EXAMPLES ${MYNET_BUILD_SAMPLES})
+endif()
+option(MYNET_BUILD_EXAMPLES "Build example applications" ${MYNET_IS_TOP_LEVEL})
 option(MYNET_BUILD_TESTS   "Build tests"               ${MYNET_IS_TOP_LEVEL})
 option(MYNET_BUILD_BENCH   "Build benchmarks"          ${MYNET_IS_TOP_LEVEL})
 
 # -----------------------------------------------------------------------------
 # Subprojects & Dependencies
 # -----------------------------------------------------------------------------
-# Disable subproject samples/tests/benchmarks so building mynet stays focused
+# Disable subproject examples/tests/benchmarks so building mynet stays focused
 set(MYLOG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(MYLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(MYLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/mylog)
+add_subdirectory(thirdparty/mylog)
 
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
 add_subdirectory(src)
 
-if(MYNET_BUILD_SAMPLES)
-    add_subdirectory(samples)
+if(MYNET_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 if(MYNET_BUILD_TESTS)
@@ -68,7 +71,7 @@ if(MYNET_BUILD_TESTS)
 endif()
 
 if(MYNET_BUILD_BENCH)
-    add_subdirectory(bench)
+    add_subdirectory(bench bench_build)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -80,8 +83,8 @@ if(MYNET_IS_TOP_LEVEL)
         file(GLOB_RECURSE MYNET_CXX_FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-            "${CMAKE_CURRENT_SOURCE_DIR}/samples/*.hpp"
-            "${CMAKE_CURRENT_SOURCE_DIR}/samples/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/*.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.hpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/bench/*.hpp"

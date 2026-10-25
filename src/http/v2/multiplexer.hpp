@@ -2,13 +2,13 @@
 
 /**
  * @file multiplexer.hpp
- * @brief HTTP/2 frame multiplexer for carrying multiple independent logical exchanges over a single connection.
+ * @brief HTTP/2 分帧多路复用器，用于在单条物理连接上承载多个独立的逻辑流交互。
  */
 
+#include "../../handler.hpp"
 #include "buffer.hpp"
 #include "concepts.hpp"
 #include "frame.hpp"
-#include "handler.hpp"
 #include "log.hpp"
 #include "objectPool.hpp"
 #include "streamTable.hpp"
@@ -29,7 +29,7 @@ namespace mynet
 
     /**
      * @namespace mux
-     * @brief Protocol constants and setting identifiers for stream multiplexing.
+     * @brief 流多路复用的协议常量与设置项标识符。
      */
     namespace mux
     {
@@ -43,7 +43,7 @@ namespace mynet
 
     /**
      * @enum STREAM_ERROR
-     * @brief The reason a multiplexed stream or connection was terminated early.
+     * @brief 多路复用流或连接提前终止的错误原因枚举。
      */
     enum class STREAM_ERROR : uint8_t
     {
@@ -59,12 +59,12 @@ namespace mynet
 
     /**
      * @class Multiplexer
-     * @brief Demultiplexes a single byte stream into multiple independent exchanges.
+     * @brief 将单一字节流解复用为多个独立逻辑交互流的多路复用器。
      *
-     * Implements the HandlerBase concept so it can be held concretely inside Connection<Multiplexer<H>>.
-     * Manages frame decoding, flow control windows, stream lifecycle, and response serialization.
+     * 实现 HandlerBase 契约概念，可直接作为 Connection<Multiplexer<H>> 的协议处理器。
+     * 负责分帧解码、流控窗口管理、流生命周期跟踪与响应数据序列化。
      *
-     * @tparam StreamHandler The protocol handler type instantiated per stream.
+     * @tparam StreamHandler 每条独立流所实例化的协议处理器类型。
      */
     template <typename StreamHandler>
         requires ProtocolHandler<StreamHandler>
@@ -75,16 +75,16 @@ namespace mynet
 
         Multiplexer() noexcept = default;
         ~Multiplexer() noexcept override = default;
-        Multiplexer(const Multiplexer &) = delete ("a multiplexer owns the stream table and the frames bound to it");
+        Multiplexer(const Multiplexer &) = delete("a multiplexer owns the stream table and the frames bound to it");
         Multiplexer &
-        operator=(const Multiplexer &) = delete ("a multiplexer owns the stream table and the frames bound to it");
-        Multiplexer(Multiplexer &&) = delete ("a multiplexer owns the stream table and the frames bound to it");
+        operator=(const Multiplexer &) = delete("a multiplexer owns the stream table and the frames bound to it");
+        Multiplexer(Multiplexer &&) = delete("a multiplexer owns the stream table and the frames bound to it");
         Multiplexer &
-        operator=(Multiplexer &&) = delete ("a multiplexer owns the stream table and the frames bound to it");
+        operator=(Multiplexer &&) = delete("a multiplexer owns the stream table and the frames bound to it");
 
         /**
-         * @brief Set the maximum allowed concurrent active streams.
-         * @param n Maximum number of concurrent streams.
+         * @brief 设置允许的最大并发活跃流数量。
+         * @param n 最大并发流数量。
          */
         inline void setMaxConcurrentStreams(size_t n)
         {
@@ -121,7 +121,7 @@ namespace mynet
         [[nodiscard]] inline bool goawayReceived() const noexcept { return goawayReceived_; }
 
         /**
-         * @brief Reset the multiplexer state, reclaiming pooled streams.
+         * @brief 重置多路复用器状态，回收对象池中的所有流。
          */
         void reset() noexcept override
         {
@@ -143,55 +143,45 @@ namespace mynet
             outScratch_.clear();
         }
 
-        // ---- Hooks a protocol front end may override ----
+        // ---- 协议前端可重写的钩子函数 ----
 
         /**
-         * @brief Hook called when a new stream is opened.
-         * @param id The stream identifier.
+         * @brief 新流开启时调用的钩子。
+         * @param id 流标识符。
          */
-        virtual void onStreamOpen(uint32_t id) noexcept { (void)id; }
+        virtual void onStreamOpen([[maybe_unused]] uint32_t id) noexcept {}
 
         /**
-         * @brief Hook called when headers arrive for a stream.
-         * @param id The stream identifier.
-         * @param block Unparsed header payload block.
+         * @brief 流的首部到达时调用的钩子。
+         * @param id 流标识符。
+         * @param block 未解析的首部载荷块。
          */
-        virtual void onStreamHeaders(uint32_t id, std::string_view block) noexcept
+        virtual void onStreamHeaders([[maybe_unused]] uint32_t id, [[maybe_unused]] std::string_view block) noexcept {}
+
+        /**
+         * @brief 流的 DATA 载荷到达时调用的钩子。
+         * @param id 流标识符。
+         * @param bytes 载荷数据切片。
+         */
+        virtual void onStreamData([[maybe_unused]] uint32_t id, [[maybe_unused]] std::string_view bytes) noexcept {}
+
+        /**
+         * @brief 流终止或关闭时调用的钩子。
+         * @param id 流标识符。
+         */
+        virtual void onStreamClose([[maybe_unused]] uint32_t id) noexcept {}
+
+        /**
+         * @brief 发生不可恢复的协议错误时调用的钩子。
+         * @param code 协议错误码。
+         * @param why 错误原因描述。
+         */
+        virtual void onProtocolError([[maybe_unused]] STREAM_ERROR code, [[maybe_unused]] std::string_view why) noexcept
         {
-            (void)id;
-            (void)block;
         }
 
         /**
-         * @brief Hook called when DATA payload arrives for a stream.
-         * @param id The stream identifier.
-         * @param bytes Payload data chunk.
-         */
-        virtual void onStreamData(uint32_t id, std::string_view bytes) noexcept
-        {
-            (void)id;
-            (void)bytes;
-        }
-
-        /**
-         * @brief Hook called when a stream is terminated or closed.
-         * @param id The stream identifier.
-         */
-        virtual void onStreamClose(uint32_t id) noexcept { (void)id; }
-
-        /**
-         * @brief Hook called when an unrecoverable protocol error occurs.
-         * @param code The error code.
-         * @param why Human-readable explanation.
-         */
-        virtual void onProtocolError(STREAM_ERROR code, std::string_view why) noexcept
-        {
-            (void)code;
-            (void)why;
-        }
-
-        /**
-         * @brief Parse arriving request bytes frame by frame and dispatch them.
+         * @brief 逐帧解析到达的请求字节流并进行分发。
          */
         void process()
         {
@@ -210,7 +200,7 @@ namespace mynet
                 }
                 if (!parsed->has_value())
                 {
-                    return; // Partial frame waiting for more wire data
+                    return; // 帧不完整，等待后续更多网络数据到达
                 }
                 handleFrame(std::move(parsed->value()));
                 if (closeAfterResponse_) [[unlikely]]
@@ -257,7 +247,7 @@ namespace mynet
             std::string pending{}; ///< 在途响应块（collectResponses 阶段只保留一个，发送不完驻留）
         };
 
-        // ---- Frame dispatch ----
+        // ---- 帧分发处理 ----
 
         inline void handleFrame(Frame frame)
         {
@@ -579,7 +569,7 @@ namespace mynet
             LOG_INFO("Multiplexer: peer sent GOAWAY (last stream {}, code {})", lastId, std::to_underlying(code));
         }
 
-        // ---- Stream lifecycle ----
+        // ---- 流生命周期管理 ----
 
         inline bool canOpenStream(uint32_t id, const char *what)
         {
@@ -662,12 +652,9 @@ namespace mynet
             onStreamClose(id);
         }
 
-        // ---- Response path ----
+        // ---- 响应发送路径 ----
 
-        inline void collectResponses(uint32_t id, StreamSlot &slot)
-        {
-            pumpStream(id, slot);
-        }
+        inline void collectResponses(uint32_t id, StreamSlot &slot) { pumpStream(id, slot); }
 
         inline void pumpStream(uint32_t id, StreamSlot &slot)
         {
@@ -695,8 +682,8 @@ namespace mynet
                     return;
                 }
                 const size_t allowed =
-                    std::min({chunkRemaining, static_cast<size_t>(slot.sendWindow), static_cast<size_t>(connSendWindow_),
-                              static_cast<size_t>(decoder_.maxFrameSize())});
+                    std::min({chunkRemaining, static_cast<size_t>(slot.sendWindow),
+                              static_cast<size_t>(connSendWindow_), static_cast<size_t>(decoder_.maxFrameSize())});
                 if (allowed == 0)
                 {
                     return;
@@ -772,7 +759,7 @@ namespace mynet
             }
         }
 
-        // ---- Outbound frames ----
+        // ---- 出站帧构建与发送 ----
 
         inline void sendSettings()
         {
@@ -879,10 +866,7 @@ namespace mynet
             return true;
         }
 
-        [[nodiscard]] inline StreamSlot *stream(uint32_t id)
-        {
-            return streams_.find(id);
-        }
+        [[nodiscard]] inline StreamSlot *stream(uint32_t id) { return streams_.find(id); }
 
         /**
          * @brief SETTINGS initial-window 变更的流级窗口平移（两遍：先验证后提交）。

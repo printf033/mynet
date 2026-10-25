@@ -1,26 +1,17 @@
 #include "error.hpp"
-#include "handler.hpp"
 #include "log.hpp"
-#include "reactor.hpp"
+#include "proactor.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
-    const char *crt = "../certs/ser.crt";
-    const char *key = "../certs/ser.key";
     switch (argc)
     {
-    case 5:
-        key = argv[4];
-        [[fallthrough]];
-    case 4:
-        crt = argv[3];
-        [[fallthrough]];
     case 3:
         service = argv[2];
         [[fallthrough]];
@@ -32,7 +23,7 @@ int main(int argc, char *argv[])
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_socktype = SOCK_DGRAM;
     int e = getaddrinfo(name, service, &hints, &res);
     if (e != 0)
     {
@@ -44,11 +35,13 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    LOG_INFO("listening to {}:{}", ip, port);
-    // HandlerBase echoes like HandlerBase and writes what it received down;
-    // on a TLS listener that means the plaintext after decryption.
+    LOG_INFO("listening to {}:{} (udp)", ip, port);
+    // 与 reactor_udp 相同的前端实现，底层由 io_uring 代替 epoll 驱动。
+    // 每次仅下发单个 recvmsg 操作，因为发送端地址是消息的一部分且不存在连接来关联会话级缓冲区；
+    // 每次接收完成处理完毕后立即重新装填读取操作。
     using namespace mynet;
-    if (auto res = Reactor<EventSsl<HandlerBase>>().runSsl(ip, port, crt, key); !res)
+    HandlerDatagramEcho handler;
+    if (auto res = Proactor<EventSocket<HandlerDatagramEcho>>().runUdp(ip, port, handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

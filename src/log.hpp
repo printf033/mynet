@@ -2,7 +2,7 @@
 
 /**
  * @file log.hpp
- * @brief mynet 与 mylog（third_party/mylog）的集成层。
+ * @brief mynet 与 mylog（thirdparty/mylog）的集成层。
  */
 
 #include "logger.hpp"

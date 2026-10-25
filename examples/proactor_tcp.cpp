@@ -1,15 +1,15 @@
-#include "client.hpp"
 #include "error.hpp"
 #include "handler.hpp"
 #include "log.hpp"
+#include "proactor.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
-    const char *name = "127.0.0.1";
+    const char *name = "0.0.0.0";
     const char *service = "8888";
     switch (argc)
     {
@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_socktype = SOCK_STREAM;
     int e = getaddrinfo(name, service, &hints, &res);
     if (e != 0)
     {
@@ -36,8 +36,11 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
+    LOG_INFO("listening to {}:{}", ip, port);
+    // 与 reactor_tcp 相同的前端实现：回显并在日志中记录原始报文字节，
+    // 以便加密客户端连接时可被观察到而非保持沉默。
     using namespace mynet;
-    if (auto res = Client<EventSocket<HandlerBase>>().runUdp(ip, port); !res)
+    if (auto res = Proactor<EventSocket<HandlerBase>>().runTcp(ip, port); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

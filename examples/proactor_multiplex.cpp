@@ -1,13 +1,18 @@
 #include "error.hpp"
+#include "handler.hpp"
+#include "http/v2/multiplexer.hpp"
 #include "log.hpp"
-#include "reactor.hpp"
-#include "udp_echo.hpp"
+#include "proactor.hpp"
 #include <netdb.h>
 
+// 与 reactor_multiplex 相同的分帧多路复用流端口，基于 io_uring 前端引擎实现而非 epoll。
+//
+// Multiplexer 之下的逻辑不随底层引擎改变：Multiplexer 继承自 HandlerBase，因此在两个示例中
+// 具有相同的分层边界，唯一的区别仅在于向其递送字节的读写路径。
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";
@@ -24,9 +29,7 @@ int main(int argc, char *argv[])
     }
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_INET;
-    // The socket type a UDP listener binds, resolved through the same path as
-    // the stream samples so a service name in /etc/services still applies.
-    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_socktype = SOCK_STREAM;
     int e = getaddrinfo(name, service, &hints, &res);
     if (e != 0)
     {
@@ -38,13 +41,9 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    LOG_INFO("listening to {}:{} (udp)", ip, port);
-    // One handler for the whole socket: a datagram socket is a single endpoint
-    // every peer shares, so there is no per-connection state to pool and the
-    // handler outlives every message instead of being recycled with a socket.
-    UdpEcho handler;
+    LOG_INFO("listening to {}:{} (multiplexed streams)", ip, port);
     using namespace mynet;
-    if (auto res = Reactor<EventSocket<UdpEcho>>().runUdp(ip, port, handler); !res)
+    if (auto res = Proactor<EventSocket<Multiplexer<HandlerBase>>>().runTcp(ip, port); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

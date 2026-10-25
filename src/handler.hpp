@@ -2,12 +2,12 @@
 
 #include "buffer.hpp"
 #include "concepts.hpp"
+#include "datagram.hpp"
 #include "log.hpp"
 #include "ringQueue.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <llhttp.h>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -35,15 +35,16 @@ namespace mynet
          */
         explicit HandlerBase(size_t responseCapacity = 64) noexcept
         {
-            (void)responseQueue_.init(responseCapacity); // 槽位分配失败降级为容量 0 拒收，不折损零异常构造
+            [[maybe_unused]] auto _ =
+                responseQueue_.init(responseCapacity); // 槽位分配失败降级为容量 0 拒收，不折损零异常构造
         }
 
         virtual ~HandlerBase() noexcept = default;
 
-        HandlerBase(const HandlerBase &) = delete ("a handler holds parser state bound to one connection");
-        HandlerBase &operator=(const HandlerBase &) = delete ("a handler holds parser state bound to one connection");
-        HandlerBase(HandlerBase &&) = delete ("a handler holds parser state bound to one connection");
-        HandlerBase &operator=(HandlerBase &&) = delete ("a handler holds parser state bound to one connection");
+        HandlerBase(const HandlerBase &) = delete("a handler holds parser state bound to one connection");
+        HandlerBase &operator=(const HandlerBase &) = delete("a handler holds parser state bound to one connection");
+        HandlerBase(HandlerBase &&) = delete("a handler holds parser state bound to one connection");
+        HandlerBase &operator=(HandlerBase &&) = delete("a handler holds parser state bound to one connection");
 
         /**
          * @brief 重置处理器状态（虚函数，以便派生类重置专属解析器）
@@ -121,10 +122,7 @@ namespace mynet
         /**
          * @brief 推入一条完整响应（定容队列，满队显式拒绝）
          */
-        [[nodiscard]] inline Result<> pushResponse(std::string s) noexcept
-        {
-            return responseQueue_.push(std::move(s));
-        }
+        [[nodiscard]] inline Result<> pushResponse(std::string s) noexcept { return responseQueue_.push(std::move(s)); }
 
         /**
          * @brief 推入一段视图响应（零拷贝适配 string_view 与连续字节）
@@ -197,311 +195,39 @@ namespace mynet
     };
 
     /**
-     * @brief HTTP 编解码模式枚举
-     */
-    enum class HTTP_MODE : uint8_t
-    {
-        REQUEST = 0,
-        RESPONSE = 1
-    };
-
-    /**
-     * @brief 基于 llhttp 的极速 HTTP/1.x 编解码协议处理器
+     * @class HandlerDatagramEcho
+     * @brief UDP 数据报标准回显协议处理器
      *
-     * 支持完整的 HTTP 请求与响应解析、Keep-Alive 自动推断、流水线边界识别与自动 400 Bad Request 错误自愈。
+     * 具备 HandlerBase（满足 EventSocket / Proactor 容器生命周期契约）与
+     * DatagramHandler（提供无连接数据报发送与接收管理）双重特性，
+     * 收到对端数据报后原样回显给发送端。
      */
-    template <HTTP_MODE Mode>
-    class HandlerHttp : public HandlerBase
+    class HandlerDatagramEcho : public HandlerBase, public DatagramHandler
     {
     public:
-        HandlerHttp() noexcept { init(); }
+        HandlerDatagramEcho() noexcept = default;
+        ~HandlerDatagramEcho() noexcept override = default;
 
-        ~HandlerHttp() noexcept override = default;
+        HandlerDatagramEcho(const HandlerDatagramEcho &) = delete("a datagram echo handler owns socket reply state");
+        HandlerDatagramEcho &
+        operator=(const HandlerDatagramEcho &) = delete("a datagram echo handler owns socket reply state");
+        HandlerDatagramEcho(HandlerDatagramEcho &&) = delete("a datagram echo handler owns socket reply state");
+        HandlerDatagramEcho &
+        operator=(HandlerDatagramEcho &&) = delete("a datagram echo handler owns socket reply state");
 
-        HandlerHttp(const HandlerHttp &) = delete ("a handler holds parser state bound to one connection");
-        HandlerHttp &operator=(const HandlerHttp &) = delete ("a handler holds parser state bound to one connection");
-        HandlerHttp(HandlerHttp &&) = delete ("a handler holds parser state bound to one connection");
-        HandlerHttp &operator=(HandlerHttp &&) = delete ("a handler holds parser state bound to one connection");
-
-        inline void init() noexcept
-        {
-            llhttp_settings_init(&settings_);
-            settings_.on_message_begin = &HandlerHttp::cbMessageBegin;
-            settings_.on_url = &HandlerHttp::cbUrl;
-            settings_.on_header_field = &HandlerHttp::cbHeaderField;
-            settings_.on_header_value = &HandlerHttp::cbHeaderValue;
-            settings_.on_headers_complete = &HandlerHttp::cbHeadersComplete;
-            settings_.on_body = &HandlerHttp::cbBody;
-            settings_.on_message_complete = &HandlerHttp::cbMessageComplete;
-            llhttp_init(&parser_, parserType(), &settings_);
-            parser_.data = this;
-        }
+        // 此套接字上无流式数据，无需流式解析
+        void process() noexcept {}
 
         void reset() noexcept override
         {
-            init();
-            url_.clear();
-            headers_.clear();
-            body_.clear();
-            currentField_.clear();
-            currentValue_.clear();
-            inValue_ = false;
             HandlerBase::reset();
+            DatagramHandler::reset();
         }
 
-        // ---- 解析元数据快速提取 ----
-
-        [[nodiscard]] inline const std::string &url() const noexcept { return url_; }
-        [[nodiscard]] inline const std::string &body() const noexcept { return body_; }
-        [[nodiscard]] inline const std::vector<std::pair<std::string, std::string>> &headers() const noexcept
+        void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
-            return headers_;
-        }
-        [[nodiscard]] inline int httpMajor() const noexcept { return parser_.http_major; }
-        [[nodiscard]] inline int httpMinor() const noexcept { return parser_.http_minor; }
-        [[nodiscard]] inline bool keepAlive() const noexcept { return llhttp_should_keep_alive(&parser_) != 0; }
-        [[nodiscard]] inline uint8_t method() const noexcept { return parser_.method; }
-        [[nodiscard]] inline const char *methodName() const noexcept
-        {
-            return llhttp_method_name(static_cast<llhttp_method_t>(parser_.method));
-        }
-
-        [[nodiscard]] inline std::string_view headerValue(const char *name) const noexcept
-        {
-            if (name == nullptr) [[unlikely]]
-            {
-                return {};
-            }
-            const size_t targetLen = std::strlen(name);
-            for (const auto &kv : headers_)
-            {
-                if (kv.first.size() != targetLen)
-                {
-                    continue;
-                }
-                bool equal = true;
-                for (size_t i = 0; i < kv.first.size(); ++i)
-                {
-                    char a = kv.first[i];
-                    char b = name[i];
-                    if (a >= 'A' && a <= 'Z')
-                    {
-                        a = static_cast<char>(a - 'A' + 'a');
-                    }
-                    if (b >= 'A' && b <= 'Z')
-                    {
-                        b = static_cast<char>(b - 'A' + 'a');
-                    }
-                    if (a != b)
-                    {
-                        equal = false;
-                        break;
-                    }
-                }
-                if (equal)
-                {
-                    return kv.second;
-                }
-            }
-            return {};
-        }
-
-        void onMessageComplete() noexcept override
-        {
-            if constexpr (Mode == HTTP_MODE::REQUEST)
-            {
-                std::string resp;
-                resp.reserve(128 + body_.size());
-                resp.append("HTTP/1.1 200 OK\r\nContent-Length: ");
-                resp.append(std::to_string(body_.size()));
-                resp.append("\r\nContent-Type: application/octet-stream\r\nConnection: ");
-                // 按 llhttp 解析结论回写连接语义，避免对 Connection: close 的请求错误地续连
-                resp.append(keepAlive() ? "keep-alive" : "close");
-                resp.append("\r\n\r\n");
-                resp.append(body_);
-                if (!pushResponse(std::move(resp))) [[unlikely]]
-                {
-                    LOG_WARN("HandlerHttp: response queue full, response dropped");
-                }
-                if (!keepAlive())
-                {
-                    closeAfterResponse_ = true;
-                }
-            }
-        }
-
-        void onParseError(const char *reason) noexcept override
-        {
-            (void)reason;
-            if constexpr (Mode == HTTP_MODE::REQUEST)
-            {
-                static constexpr std::string_view kBadResponse = "HTTP/1.1 400 Bad Request\r\n"
-                                                                 "Content-Length: 0\r\n"
-                                                                 "Connection: close\r\n\r\n";
-                if (!pushResponse(kBadResponse)) [[unlikely]]
-                {
-                    LOG_WARN("HandlerHttp: response queue full, 400 dropped");
-                }
-            }
-            closeAfterResponse_ = true;
-        }
-
-        void process()
-        {
-            while (true)
-            {
-                const size_t avail = requestBuffer_.readableBytes();
-                if (avail == 0)
-                {
-                    return;
-                }
-                const char *data = requestBuffer_.readableBegin();
-                const auto err = static_cast<llhttp_errno_t>(llhttp_execute(&parser_, data, avail));
-                const char *pos = llhttp_get_error_pos(&parser_);
-                const size_t consumed =
-                    (pos != nullptr && pos >= data && pos <= data + avail) ? static_cast<size_t>(pos - data) : 0;
-                if (consumed > 0)
-                {
-                    requestBuffer_.retrieve(consumed);
-                }
-
-                switch (err)
-                {
-                case HPE_OK:
-                    requestBuffer_.retrieveAll();
-                    return;
-                case HPE_PAUSED:
-                    llhttp_resume(&parser_);
-                    if (consumed == 0)
-                    {
-                        return;
-                    }
-                    break;
-                case HPE_PAUSED_UPGRADE:
-                    llhttp_resume_after_upgrade(&parser_);
-                    onUpgrade();
-                    return;
-                default:
-                {
-                    const char *reason = llhttp_get_error_reason(&parser_);
-                    LOG_WARN("Handler: HTTP message parse error: {}", reason != nullptr ? reason : "unknown");
-                    onParseError(reason);
-                    requestBuffer_.retrieveAll();
-                    return;
-                }
-                }
-            }
-        }
-
-    private:
-        llhttp_t parser_{};
-        llhttp_settings_t settings_{};
-
-        std::string url_;
-        std::vector<std::pair<std::string, std::string>> headers_;
-        std::string body_;
-        std::string currentField_;
-        std::string currentValue_;
-        bool inValue_ = false;
-
-        static constexpr llhttp_type_t parserType() noexcept
-        {
-            return Mode == HTTP_MODE::REQUEST ? HTTP_REQUEST : HTTP_RESPONSE;
-        }
-
-        // ---- llhttp 回调跳板 ----
-
-        static int cbMessageBegin(llhttp_t *p)
-        {
-            auto *self = static_cast<HandlerHttp *>(p->data);
-            if (self == nullptr) [[unlikely]]
-            {
-                return HPE_OK;
-            }
-            self->url_.clear();
-            self->headers_.clear();
-            self->body_.clear();
-            self->currentField_.clear();
-            self->currentValue_.clear();
-            self->inValue_ = false;
-            return HPE_OK;
-        }
-
-        static int cbUrl(llhttp_t *p, const char *at, size_t len)
-        {
-            auto *self = static_cast<HandlerHttp *>(p->data);
-            if (self != nullptr) [[likely]]
-            {
-                self->url_.append(at, len);
-            }
-            return HPE_OK;
-        }
-
-        static int cbHeaderField(llhttp_t *p, const char *at, size_t len)
-        {
-            auto *self = static_cast<HandlerHttp *>(p->data);
-            if (self == nullptr) [[unlikely]]
-            {
-                return HPE_OK;
-            }
-            if (self->inValue_)
-            {
-                self->headers_.emplace_back(std::move(self->currentField_), std::move(self->currentValue_));
-                self->currentField_.clear();
-                self->currentValue_.clear();
-                self->inValue_ = false;
-            }
-            self->currentField_.append(at, len);
-            return HPE_OK;
-        }
-
-        static int cbHeaderValue(llhttp_t *p, const char *at, size_t len)
-        {
-            auto *self = static_cast<HandlerHttp *>(p->data);
-            if (self == nullptr) [[unlikely]]
-            {
-                return HPE_OK;
-            }
-            self->inValue_ = true;
-            self->currentValue_.append(at, len);
-            return HPE_OK;
-        }
-
-        static int cbHeadersComplete(llhttp_t *p)
-        {
-            auto *self = static_cast<HandlerHttp *>(p->data);
-            if (self == nullptr) [[unlikely]]
-            {
-                return HPE_OK;
-            }
-            if (self->inValue_ || !self->currentField_.empty())
-            {
-                self->headers_.emplace_back(std::move(self->currentField_), std::move(self->currentValue_));
-                self->currentField_.clear();
-                self->currentValue_.clear();
-                self->inValue_ = false;
-            }
-            return HPE_OK;
-        }
-
-        static int cbBody(llhttp_t *p, const char *at, size_t len)
-        {
-            auto *self = static_cast<HandlerHttp *>(p->data);
-            if (self != nullptr) [[likely]]
-            {
-                self->body_.append(at, len);
-            }
-            return HPE_OK;
-        }
-
-        static int cbMessageComplete(llhttp_t *p)
-        {
-            auto *self = static_cast<HandlerHttp *>(p->data);
-            if (self != nullptr) [[likely]]
-            {
-                self->onMessageComplete();
-            }
-            return HPE_PAUSED;
+            LOG_INFO("HandlerDatagramEcho: {} sent {} byte(s)", datagramPeerText(peer), n);
+            pushReply(peer, data, n);
         }
     };
 

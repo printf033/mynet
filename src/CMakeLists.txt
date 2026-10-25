@@ -61,7 +61,7 @@ target_link_libraries(mynet INTERFACE
     llhttp
 )
 
-# Sanitizer helper target (used in tests and samples)
+# Sanitizer 辅助目标（用于 tests 和 examples）
 option(MYNET_SANITIZE "Enable ASan/UBSan for Debug builds" ${MYNET_IS_TOP_LEVEL})
 
 add_library(mynet_sanitized INTERFACE)

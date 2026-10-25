@@ -4,7 +4,7 @@
 - 日期：2026-10-22
 - 范围：仅 `src/client.hpp`（789 行）、`src/datagram.hpp`（140 行），只读
 - 基线：错误语义 `Result<T> = std::expected<T, ERR>`；参数校验走 `contract_assert`；`= delete("reason")` 带原因；noexcept 纪律；中文 Doxygen
-- 编译实证：`g++ (GCC) 16.2.1 20260810`，`g++ -std=c++26 -freflection -I src -I third_party/mylog/src -fsyntax-only src/client.hpp src/datagram.hpp` 均通过（EXIT=0，仅 pragma-once 主文件警告）。注：仓库标准命令 `-I src` 缺 `reflection.hpp`/`logger.hpp` 路径（需 `-I third_party/mylog/src`）与 `-freflection`。
+- 编译实证：`g++ (GCC) 16.2.1 20260810`，`g++ -std=c++26 -freflection -I src -I thirdparty/mylog/src -fsyntax-only src/client.hpp src/datagram.hpp` 均通过（EXIT=0，仅 pragma-once 主文件警告）。注：仓库标准命令 `-I src` 缺 `reflection.hpp`/`logger.hpp` 路径（需 `-I thirdparty/mylog/src`）与 `-freflection`。
 - 探针：`/tmp/audit-d.*`（tmpfs 沙箱会话隔离，已随会话销毁；源码与结论摘录如下）
 
 ---
@@ -105,7 +105,7 @@
 
 | 项 | 命令/方法 | 结果 |
 |---|---|---|
-| 语法验证 | `g++ -std=c++26 -freflection -I src -I third_party/mylog/src -fsyntax-only src/client.hpp`（及 datagram.hpp） | EXIT=0 |
+| 语法验证 | `g++ -std=c++26 -freflection -I src -I thirdparty/mylog/src -fsyntax-only src/client.hpp`（及 datagram.hpp） | EXIT=0 |
 | datagram 行为 | 探针：`setMaxPendingReplies(0)` 后 push | `count=0 dropped=1 hasReply=0`（0=全丢） |
 | Client 删除语义 | `static_assert(!is_copy/move_constructible_v<Client<EventSocket<HandlerBase>>>)` 等 4 项 + `is_empty_v<Protocol<EventSocket<HandlerBase>>>` | 全部通过 |
 | UDP echo 回环 | 真 socket echo server + 真实 `Client::runUdp` | `received=4 sent=4 elapsed=0ms` 正常退出 |

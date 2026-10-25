@@ -124,20 +124,23 @@ flowchart TD
 
 `Connection<HandlerType>` unifies socket state, TLS encryption, protocol handling, and outgoing write queues:
 - **Transport Symmetry**: Plain TCP and encrypted TLS share the same data path (`doRecv` / `doSend`). TLS is treated as a transport property rather than requiring a separate loop or wrapper.
-- **Pipelining Safety**: Responses reside in an internal `std::deque<std::string>` write queue by value. Multiple responses generated from a single batch read are guaranteed to arrive in-order without overwriting shared buffers.
+- **Pipelining Safety**: Responses reside in an internal fixed-capacity `RingQueue<std::string>` write queue by value. Multiple responses generated from a single batch read are guaranteed to arrive in-order without dynamic allocations during enqueuing or overwriting shared buffers.
 - **Backpressure**: Integrated high-watermark inspection and `readCredit()` hooks pause reads when downstream consumer queues become saturated.
 - **Reference-Counted Lifetime in Proactor**: In `Proactor`, connections are wrapped inside `Session` structs tracking `inFlight` ring operations. Connections are never returned to the pool while the kernel has outstanding writes or reads.
 
 ### 3. Zero-Allocation Memory Architecture
 
-- **`ObjectPool<Object>`**: Pre-allocates a contiguous array of slots via `std::unique_ptr<Slot[]>` with an index-based free stack (`std::vector<size_t>`). Objects are pinned in memory so epoll data pointers and io_uring completion context pointers remain 100% stable, completely bypassing heap allocation during connection accept/release cycles.
-- **`Buffer`**: A contiguous dynamic buffer with an offset-based read cursor. Storage is compacted in-place only when dead prefix space exceeds 4 KiB and occupies at least half of the allocation, amortizing compaction overhead while keeping memory footprints bounded.
+- **`ObjectPool<Object>`**: Pre-allocates a contiguous array of slots via `std::unique_ptr<Slot[]>` with an index-based ring queue (`RingQueue<size_t>`). Objects are pinned in memory so epoll data pointers and io_uring completion context pointers remain 100% stable, completely bypassing heap allocation during connection accept/release cycles.
+- **`Buffer`**: A zero-exception, self-managed contiguous byte buffer (`operator new[](std::nothrow)`) with sliding-window auto-compaction and direct zero-copy write window (`writableBytes()`, `writableBegin()`, `commitWritten()`, `ensureWritable()`, `readableView()`). Storage is compacted in-place only when dead prefix space exceeds 4 KiB and occupies at least half of the allocation, amortizing compaction overhead while keeping memory footprints bounded.
+- **`RingQueue<T>`**: Fixed-capacity contiguous circular ring buffer (`src/ringQueue.hpp`) providing $O(1)$ zero-allocation enqueue/dequeue operations with bounded memory footprints.
+- **`StreamTable<T>`**: Open-addressing flat hash table (`src/http/v2/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
 
 ### 4. HTTP/2 Framing & Stream Multiplexer
 
 - **Wire Compatibility**: `FrameDecoder` and `appendFrame` parse and construct 9-byte HTTP/2 standard frames (`DATA`, `HEADERS`, `PRIORITY`, `RST_STREAM`, `SETTINGS`, `PUSH_PROMISE`, `PING`, `GOAWAY`, `WINDOW_UPDATE`).
 - **`Multiplexer<StreamHandler>`**: Enables many independent logical request/response streams over a single byte stream.
   - Implements credit-based flow control at both connection and stream levels.
+  - Utilizes `mux::StreamTable<StreamSlot>` for zero-allocation stream lookups and lifecycles.
   - Automatically sends `WINDOW_UPDATE` frames when window thresholds drop below half.
   - Handles concurrent stream capacity limits via `SETTINGS_MAX_CONCURRENT_STREAMS` and rejects over-capacity requests with `RST_STREAM`.
   - Dispatches to individual `StreamHandler` instances sourced from an `ObjectPool`.
@@ -145,7 +148,7 @@ flowchart TD
 ### 5. Datagram Transport (UDP)
 
 - **`DatagramHandler`**: Unlike connected stream sockets, UDP sockets are connectionless and must handle interleaved peers on a single file descriptor. `DatagramHandler` associates peer addresses (`sockaddr_in`) directly with message buffers (`DatagramReply`).
-- **Overload Handling**: Configurable reply queues drop overflow datagrams with explicit metrics logging, preventing unbounded memory growth under sudden traffic spikes.
+- **Overload Handling**: Backed by a fixed-capacity `RingQueue<DatagramReply>`, dropping overflow datagrams with explicit metrics logging, preventing unbounded memory growth under sudden traffic spikes.
 
 ### 6. Modern C++26 & Strongly-Typed Error Semantics
 
@@ -171,20 +174,20 @@ Benchmarks run on Linux (x86_64, GCC 15, Release build `-O2`, single process, wi
 ```text
 benchmark                                      latency        throughput
 --------------------------------------------------------------------------------
-Buffer::append+retrieveAll (1KiB)              11.0 ns/op    92,950.8 MB/s
-Buffer::append (16B) to 1KiB + drain            3.0 ns/op             --
-Buffer::append+retrieve (16B)                   3.2 ns/op     5,059.1 MB/s
-appendFrame (payload 16B)                       4.7 ns/op     3,430.8 MB/s
-appendFrame (payload 1024B)                    12.7 ns/op    80,516.0 MB/s
-appendFrame (payload 16384B)                  161.1 ns/op   101,672.5 MB/s
-FrameDecoder::next (payload 16B)               12.8 ns/op     1,249.5 MB/s
-FrameDecoder::next (payload 1024B)             82.3 ns/op    12,442.8 MB/s
-FrameDecoder::next (payload 16384B)          1135.2 ns/op    14,433.3 MB/s
-read+appendBigEndian32                          0.6 ns/op             --
-ObjectPool acquire+release (128)                6.9 ns/op             --
-HandlerBase::pushResponse+takeResponse (1KiB)  23.2 ns/op    44,127.1 MB/s
-HandlerBase::process echo (1KiB)               33.4 ns/op    30,664.0 MB/s
-Multiplexer open+echo+close (64 streams)      590.4 ns/op             --
+Buffer::append+retrieveAll (1KiB)              12.7 ns/op    80,477.0 MB/s
+Buffer::append (16B) to 1KiB + drain            2.5 ns/op             --
+Buffer::append+retrieve (16B)                   4.0 ns/op     4,041.9 MB/s
+appendFrame (payload 16B)                       4.5 ns/op     3,555.4 MB/s
+appendFrame (payload 1024B)                    12.3 ns/op    83,077.8 MB/s
+appendFrame (payload 16384B)                  223.4 ns/op    73,328.8 MB/s
+FrameDecoder::next (payload 16B)               12.6 ns/op     1,268.1 MB/s
+FrameDecoder::next (payload 1024B)             77.5 ns/op    13,216.9 MB/s
+FrameDecoder::next (payload 16384B)          1104.7 ns/op    14,831.4 MB/s
+read+appendBigEndian32                          0.7 ns/op             --
+ObjectPool acquire+release (128)                3.8 ns/op             --
+HandlerBase::pushResponse+takeResponse (1KiB)  22.5 ns/op    45,605.2 MB/s
+HandlerBase::process echo (1KiB)               47.1 ns/op    21,760.2 MB/s
+Multiplexer open+echo+close (64 streams)      553.4 ns/op             --
 ```
 
 ---
@@ -236,7 +239,7 @@ make -j$(nproc)
 | :--- | :--- | :--- |
 | `CMAKE_BUILD_TYPE` | `Debug` | Build profile (`Debug`, `Release`, `RelWithDebInfo`) |
 | `BUILD_TESTING` | `ON` | Build Google Test unit test executables |
-| `MYNET_BUILD_BENCH` | `ON` | Build micro-benchmark executables (`bench/bench_core`) |
+| `MYNET_BUILD_BENCH` | `ON` | Build micro-benchmark executables (`bench/bench`) |
 
 ### 4. Docker Quickstart
 
@@ -304,7 +307,7 @@ int main() {
 ```cpp
 #include "error.hpp"
 #include "handler.hpp"
-#include "multiplexer.hpp"
+#include "http/v2/multiplexer.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -369,27 +372,34 @@ mynet/
 │   ├── error.hpp               # Strongly-typed Err & IoEnd definitions
 │   ├── log.hpp                 # Logging facade (mylog -> stderr)
 │   ├── buffer.hpp              # Low-allocation auto-compacting byte buffer
+│   ├── ringQueue.hpp           # Zero-allocation fixed-capacity circular ring queue
 │   ├── objectPool.hpp          # Fixed-capacity stable-pointer object pool
 │   ├── timer.hpp               # Lazy-cancellation binary min-heap timer queue
 │   ├── loop.hpp                # epoll EventLoop with eventfd wakeups
 │   ├── event.hpp               # Socket & SSL listener abstractions
 │   ├── connection.hpp          # Unified TCP/TLS connection engine with write queue
 │   ├── datagram.hpp            # Datagram transport abstraction (UDP)
-│   ├── handler.hpp             # HandlerBase and HandlerHttp implementations
-│   ├── frame.hpp               # HTTP/2 wire-compatible framing codec
-│   ├── multiplexer.hpp         # HTTP/2 credit-based stream multiplexer
+│   ├── handler.hpp             # HandlerBase and HandlerDatagramEcho base handlers
+│   ├── http/                   # HTTP protocol implementations
+│   │   ├── v1/
+│   │   │   └── handler.hpp     # HTTP/1.x protocol handler (HandlerHttp)
+│   │   └── v2/
+│   │       ├── frame.hpp       # HTTP/2 wire-compatible framing codec
+│   │       ├── streamTable.hpp # Open-addressing zero-allocation stream hash table
+│   │       ├── multiplexer.hpp # HTTP/2 credit-based stream multiplexer
+│   │       └── handler.hpp     # HTTP/2 protocol handler entry (HandlerHttp2)
 │   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine
 │   ├── proactor.hpp            # io_uring-based completion Proactor engine
 │   └── client.hpp              # Pipeline client abstraction (stdin/stdout bridge)
 │
-├── samples/                    # Ready-to-run Executable Samples
+├── examples/                   # Ready-to-run Executable Samples
 │   ├── reactor_tcp.cpp         # Reactor TCP echo server
 │   ├── reactor_ssl.cpp         # Reactor TLS server
 │   ├── reactor_udp.cpp         # Reactor UDP echo server
+│   ├── reactor_multiplex.cpp   # Reactor stream multiplexer server
 │   ├── proactor_tcp.cpp        # Proactor TCP server with buffer ring
 │   ├── proactor_ssl.cpp        # Proactor TLS server (poll-driven)
 │   ├── proactor_udp.cpp        # Proactor UDP server
-│   ├── multiplex_tcp.cpp       # Reactor stream multiplexer server
 │   ├── proactor_multiplex.cpp  # Proactor stream multiplexer server
 │   ├── client_tcp.cpp          # Stdin/stdout TCP client
 │   ├── client_ssl.cpp          # Stdin/stdout TLS client
@@ -406,11 +416,11 @@ mynet/
 │   └── test_timer.cpp
 │
 ├── bench/                      # Micro-benchmark Suite
-│   └── bench_core.cpp          # Throughput and latency micro-benchmarks
+│   └── bench.cpp               # Throughput and latency micro-benchmarks
 │
 ├── certs/                      # Development self-signed certificates and keys
 ├── scripts/                    # Maintenance & formatting scripts
-└── third_party/                # External Git Submodules (mylog)
+└── thirdparty/                 # External Git Submodules (mylog)
 ```
 
 ---

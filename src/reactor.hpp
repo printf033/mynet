@@ -2,7 +2,7 @@
 
 /**
  * @file reactor.hpp
- * @brief High-performance epoll-based reactor event demultiplexer and server loop.
+ * @brief 基于 epoll 的高性能反应器（Reactor）事件解复用器与服务器事件循环。
  */
 
 #include "concepts.hpp"
@@ -29,11 +29,11 @@ namespace mynet
 
     /**
      * @class Reactor
-     * @brief Single-threaded epoll reactor managing socket lifecycles and I/O dispatch.
+     * @brief 基于单线程 epoll 的反应器引擎，管理套接字生命周期与 I/O 事件分发。
      *
-     * Drives incoming connections, SSL handshakes, and UDP datagrams through edge-triggered epoll.
+     * 采用边沿触发（EPOLLET）模式驱动新连接接入、SSL 握手与 UDP 数据报收发。
      *
-     * @tparam Event Socket event wrapper type satisfying DerivedFromEventBase and Resettable.
+     * @tparam Event 满足 DerivedFromEventBase 与 Resettable 约束的套接字事件包装类型。
      */
     template <typename Event>
         requires DerivedFromEventBase<Event> && Resettable<Event> &&
@@ -48,40 +48,40 @@ namespace mynet
 
         ~Reactor() noexcept { reset(); }
 
-        Reactor(const Reactor &) = delete ("a reactor owns the epoll registration of every live connection");
-        Reactor &operator=(const Reactor &) = delete ("a reactor owns the epoll registration of every live connection");
+        Reactor(const Reactor &) = delete("a reactor owns the epoll registration of every live connection");
+        Reactor &operator=(const Reactor &) = delete("a reactor owns the epoll registration of every live connection");
 
         /**
-         * @brief Access the underlying event loop.
+         * @brief 获取底层的事件循环引用。
          */
         [[nodiscard]] inline EventLoop &loop() noexcept { return loop_; }
 
         /**
-         * @brief Number of currently active connections.
+         * @brief 当前活跃的连接数量。
          */
         [[nodiscard]] inline size_t connections() const noexcept { return index_.size(); }
 
         /**
-         * @brief Total capacity of pre-allocated connection pool.
+         * @brief 预分配连接池的总容量。
          */
         [[nodiscard]] inline size_t connectionPoolCapacity() const noexcept { return connPool_.capacity(); }
 
         /**
-         * @brief Request the event loop to stop cleanly.
+         * @brief 请求事件循环安全退出。
          */
         inline void stop() noexcept { loop_.quit(); }
 
         inline void quit() noexcept { loop_.quit(); }
 
         /**
-         * @brief Run TCP server on specified IP and port until stopped.
-         * @param ip Listening IPv4 address literal.
-         * @param port Listening port.
-         * @param backlog Listen backlog queue length.
-         * @param connectionPoolSize Initial capacity for pooled connections.
-         * @param maxEvents Max epoll events returned per wait turn.
-         * @param idleTimeoutSecs Inactivity timeout in seconds (0 = disabled).
-         * @return nullopt on normal stop, or error code on startup failure.
+         * @brief 在指定 IP 和端口上运行 TCP 服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param backlog 监听全连接队列长度。
+         * @param connectionPoolSize 预分配连接池容量。
+         * @param maxEvents 每次 epoll_wait 最大返回事件数。
+         * @param idleTimeoutSecs 空闲连接超时时间（秒，0 表示禁用）。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runTcp(const char *ip, int port, int backlog = 511, size_t connectionPoolSize = 1 << 10,
                                       int maxEvents = 1 << 10, int idleTimeoutSecs = 0)
@@ -97,16 +97,16 @@ namespace mynet
         }
 
         /**
-         * @brief Run TLS/SSL server on specified IP and port until stopped.
-         * @param ip Listening IPv4 address literal.
-         * @param port Listening port.
-         * @param crt PEM certificate filepath.
-         * @param key PEM private key filepath.
-         * @param backlog Listen backlog queue length.
-         * @param connectionPoolSize Initial capacity for pooled connections.
-         * @param maxEvents Max epoll events returned per wait turn.
-         * @param idleTimeoutSecs Inactivity timeout in seconds (0 = disabled).
-         * @return nullopt on normal stop, or error code on startup failure.
+         * @brief 在指定 IP 和端口上运行 TLS/SSL 服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param crt PEM 格式证书文件路径。
+         * @param key PEM 格式私钥文件路径。
+         * @param backlog 监听全连接队列长度。
+         * @param connectionPoolSize 预分配连接池容量。
+         * @param maxEvents 每次 epoll_wait 最大返回事件数。
+         * @param idleTimeoutSecs 空闲连接超时时间（秒，0 表示禁用）。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
                                       size_t connectionPoolSize = 1 << 10, int maxEvents = 1 << 10,
@@ -149,12 +149,12 @@ namespace mynet
         }
 
         /**
-         * @brief Run UDP datagram server on specified IP and port until stopped.
-         * @param ip Listening IPv4 address literal.
-         * @param port Listening port.
-         * @param handler Datagram handler reference.
-         * @param maxEvents Max epoll events returned per wait turn.
-         * @return nullopt on normal stop, or error code on startup failure.
+         * @brief 在指定 IP 和端口上运行 UDP 数据报服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param handler 数据报处理器引用。
+         * @param maxEvents 每次 epoll_wait 最大返回事件数。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, int maxEvents = 1 << 10)
             requires DerivedFromDatagramHandler<Handler>
@@ -173,15 +173,15 @@ namespace mynet
         }
 
         /**
-         * @brief Submit a task to be executed on the event loop thread.
-         * @param task Callable task.
+         * @brief 提交任务至事件循环线程异步执行。
+         * @param task 可调用任务对象。
          */
         inline void runInLoop(EventLoop::Task task) { loop_.runInLoop(std::move(task)); }
 
         /**
-         * @brief Execute a task on a specific connection on the event loop thread.
-         * @param fd Connection file descriptor.
-         * @param task Connection task.
+         * @brief 在事件循环线程上针对指定连接执行任务。
+         * @param fd 连接文件描述符。
+         * @param task 连接任务回调。
          */
         inline void runOnConnection(int fd, std::function<void(Conn &)> task)
         {
@@ -204,9 +204,9 @@ namespace mynet
         }
 
         /**
-         * @brief Find an active connection by file descriptor.
-         * @param fd Connection file descriptor.
-         * @return Pointer to connection or nullptr.
+         * @brief 根据文件描述符查找活跃连接。
+         * @param fd 连接文件描述符。
+         * @return 连接指针，若未找到则返回 nullptr。
          */
         [[nodiscard]] inline Conn *find(int fd) noexcept
         {
@@ -215,7 +215,7 @@ namespace mynet
         }
 
         /**
-         * @brief Core serve loop for stream connections.
+         * @brief 面向流式连接的核心事件循环。
          */
         [[nodiscard]] inline Result<> serve(size_t connectionPoolSize, int maxEvents, int idleTimeoutSecs)
         {
@@ -248,7 +248,7 @@ namespace mynet
         }
 
         /**
-         * @brief Core serve loop for datagrams.
+         * @brief 面向数据报的核心事件循环。
          */
         [[nodiscard]] inline Result<> serveDatagram(int maxEvents)
         {
@@ -269,22 +269,22 @@ namespace mynet
         }
 
         /**
-         * @brief Reset reactor state and clean up resources.
+         * @brief 重置反应器状态并清理全部关联资源。
          */
         inline void reset() noexcept
         {
             if (idleTimerId_ != 0)
             {
-                (void)loop_.cancelTimer(idleTimerId_);
+                [[maybe_unused]] auto _ = loop_.cancelTimer(idleTimerId_);
                 idleTimerId_ = 0;
             }
             if (listener_.fd != -1)
             {
-                (void)loop_.delFd(listener_.fd);
+                [[maybe_unused]] auto _ = loop_.delFd(listener_.fd);
             }
             for (auto &entry : index_)
             {
-                (void)loop_.delFd(entry.first);
+                [[maybe_unused]] auto _ = loop_.delFd(entry.first);
                 connPool_.release(entry.second);
             }
             index_.clear();
@@ -537,7 +537,7 @@ namespace mynet
             int fd = conn->fd();
             if (fd != -1)
             {
-                (void)loop_.delFd(fd);
+                [[maybe_unused]] auto _ = loop_.delFd(fd);
                 index_.erase(fd);
             }
             connPool_.release(conn);

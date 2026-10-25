@@ -57,12 +57,12 @@ namespace mynet
         DatagramHandler() noexcept = default;
         virtual ~DatagramHandler() noexcept = default;
 
-        DatagramHandler(const DatagramHandler &) = delete ("a datagram handler owns the reply queue for one socket");
+        DatagramHandler(const DatagramHandler &) = delete("a datagram handler owns the reply queue for one socket");
         DatagramHandler &
-        operator=(const DatagramHandler &) = delete ("a datagram handler owns the reply queue for one socket");
-        DatagramHandler(DatagramHandler &&) = delete ("a datagram handler owns the reply queue for one socket");
+        operator=(const DatagramHandler &) = delete("a datagram handler owns the reply queue for one socket");
+        DatagramHandler(DatagramHandler &&) = delete("a datagram handler owns the reply queue for one socket");
         DatagramHandler &
-        operator=(DatagramHandler &&) = delete ("a datagram handler owns the reply queue for one socket");
+        operator=(DatagramHandler &&) = delete("a datagram handler owns the reply queue for one socket");
 
         /**
          * @brief 单个完整数据报到达回调

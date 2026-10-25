@@ -59,7 +59,7 @@
   - 基于 `llhttp` 的 HTTP/1.x 编解码实现，支持请求流水线（Pipelining）与 Keep-Alive。
 - **完备的系统可观测性与运维友好性**:
   - 强类型枚举错误码 `Err` 与 I/O 状态码 `IoEnd`。
-  - 严格的输出通道隔离：业务数据通过 `stdout` 传输，结构化诊断日志通过 `mynet::log`（封装 `third_party/mylog`）输出至 `stderr`，防止管道重定向数据被污染。
+  - 严格的输出通道隔离：业务数据通过 `stdout` 传输，结构化诊断日志通过 `mynet::log`（封装 `thirdparty/mylog`）输出至 `stderr`，防止管道重定向数据被污染。
 
 ---
 
@@ -125,20 +125,23 @@ flowchart TD
 `Connection<HandlerType>` 统一了套接字描述符、TLS 加密状态、协议处理器与待发送队列：
 
 - **传输对称性**：纯文本 TCP 与 TLS 加密会话复用同一套发送与接收骨干（`doRecv` 与 `doSend`）。TLS 仅作为底层传输属性，对上层协议处理器完全透明。
-- **流水线安全**：发送队列采用 `std::deque<std::string>`，每个响应完整保存在独立字符串中，支持 HTTP/1.1 Pipelining 在单次读取产生多个响应时不会互相破坏缓冲区。
+- **流水线安全**：发送队列采用定容环形队列 `RingQueue<std::string>`，每个响应完整保存在独立字符串中，入队与出队热路径彻底杜绝动态堆分配，支持 HTTP/1.1 Pipelining 在单次读取产生多个响应时不会互相破坏缓冲区。
 - **背压控制（Backpressure）**：内置高水位标记监测，当发送积压超出限额时自动触发 `readCredit()` 暂停接收端读取，避免发送队列无序膨胀引发内存溢出。
 - **Proactor 会话生命周期保护**：在 `Proactor` 引擎中，每个连接被封装于 `Session` 中并严格统计内核在途操作（`inFlight`）。只有在会话被标记为终止且所有在途读写全部完成后，会话才会被安全回收到对象池。
 
 ### 3. 热路径零堆分配内存架构
 
-- **`ObjectPool<Object>`**：预先分配由连续槽位数组 `std::unique_ptr<Slot[]>` 与空闲索引栈构成的池化结构。对象一旦分配，其在内存中的地址终生不变，确保注册在 epoll 凭证或 io_uring 完成事件上下文中的裸指针永不失效，彻底消除频繁创建与销毁连接导致的内存碎片与分配开销。
-- **`Buffer`**：带独立读游标的连续字符串存储。只有当已消费的死数据前缀超过 4 KiB 且达到占用总量一半以上时，才会触发就地数据搬移压缩，有效平摊扩容与压缩成本。
+- **`ObjectPool<Object>`**：预先分配由连续槽位数组 `std::unique_ptr<Slot[]>` 与定容环形索引队列 `RingQueue<size_t>` 构成的池化结构。对象一旦分配，其在内存中的地址终生不变，确保注册在 epoll 凭证或 io_uring 完成事件上下文中的裸指针永不失效，彻底消除频繁创建与销毁连接导致的内存碎片与分配开销。
+- **`Buffer`**：纯自管连续堆内存块（`operator new[](std::nothrow)` 零异常语义），提供真实可写直接窗口（`writableBytes()`、`writableBegin()`、`commitWritten()`、`ensureWritable()`）与零拷贝读视图（`readableView()`）。仅当已消费的死数据前缀超过 4 KiB 且达到占用总量一半以上时，才会在 `retrieve()` 触发就地数据搬移压缩，兼具极致性能与安全内存边界。
+- **`RingQueue<T>`**：定容连续循环环形队列（`src/ringQueue.hpp`），提供 $O(1)$ 零堆分配入队/出队与严格有界内存开销。
+- **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/http/v2/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
 
 ### 4. HTTP/2 帧编解码与流多路复用
 
 - **标准线网帧格式**：`FrameDecoder` 与 `appendFrame` 原生兼容标准 9 字节 HTTP/2 帧头，涵盖 `DATA`、`HEADERS`、`PRIORITY`、`RST_STREAM`、`SETTINGS`、`PUSH_PROMISE`、`PING`、`GOAWAY`、`WINDOW_UPDATE`。
 - **`Multiplexer<StreamHandler>`**：
   - 实现单条物理传输流上承载海量并发逻辑流（Stream）。
+  - 流表采用高性能定容开放寻址流表 `mux::StreamTable<StreamSlot>`，热路径无动态堆分配。
   - 内置连接级与各逻辑流级别的信用窗口流控机制。当可用窗口低于设定阈值时，自动向对端发送 `WINDOW_UPDATE`。
   - 通过 `SETTINGS_MAX_CONCURRENT_STREAMS` 控制并发连接上限，超出容量的并发流自动以 `RST_STREAM` 快速拒绝，保护服务端资源。
   - 每条独立流的协议处理状态直接从轻量 `ObjectPool<StreamHandler>` 获取。
@@ -146,7 +149,7 @@ flowchart TD
 ### 5. UDP 数据报传输系统
 
 - **`DatagramHandler`**：针对 UDP 协议无连接、多对端报文交织的特点，提供专有的报文接收抽象。在收发报文中原样保留发送方地址信息（`sockaddr_in`），构筑 `DatagramReply` 队列。
-- **过载丢包防护**：内置可配置的待发队列上限。当队列发生拥塞积压时，主动丢弃溢出数据报并递增丢包计数器，防止网络波动造成无界内存增长。
+- **过载丢包防护**：底层由定容 `RingQueue<DatagramReply>` 支撑，当队列发生拥塞积压时，主动丢弃溢出数据报并递增丢包计数器，防止网络波动造成无界内存增长。
 
 ### 6. 现代 C++26 语言规范与强类型错误语义
 
@@ -174,20 +177,20 @@ cat payload.bin | ./client_tcp 127.0.0.1 8888 > output.bin
 ```text
 基准测试项 (Benchmark)                        单操作耗时 (ns/op)   数据吞吐量 (Throughput)
 --------------------------------------------------------------------------------------
-Buffer::append+retrieveAll (1KiB)                 11.0 ns/op         92,950.8 MB/s
-Buffer::append (16B) to 1KiB + drain               3.0 ns/op                  --
-Buffer::append+retrieve (16B)                      3.2 ns/op          5,059.1 MB/s
-appendFrame (负载 16B)                             4.7 ns/op          3,430.8 MB/s
-appendFrame (负载 1024B)                          12.7 ns/op         80,516.0 MB/s
-appendFrame (负载 16384B)                        161.1 ns/op        101,672.5 MB/s
-FrameDecoder::next (负载 16B)                     12.8 ns/op          1,249.5 MB/s
-FrameDecoder::next (负载 1024B)                   82.3 ns/op         12,442.8 MB/s
-FrameDecoder::next (负载 16384B)                1135.2 ns/op         14,433.3 MB/s
-read+appendBigEndian32 (网络序处理)                0.6 ns/op                  --
-ObjectPool acquire+release (128个对象)             6.9 ns/op                  --
-HandlerBase::pushResponse+takeResponse (1KiB)     23.2 ns/op         44,127.1 MB/s
-HandlerBase::process echo (1KiB 回显)             33.4 ns/op         30,664.0 MB/s
-Multiplexer open+echo+close (64条流)             590.4 ns/op                  --
+Buffer::append+retrieveAll (1KiB)                 12.7 ns/op         80,477.0 MB/s
+Buffer::append (16B) to 1KiB + drain               2.5 ns/op                  --
+Buffer::append+retrieve (16B)                      4.0 ns/op          4,041.9 MB/s
+appendFrame (负载 16B)                             4.5 ns/op          3,555.4 MB/s
+appendFrame (负载 1024B)                          12.3 ns/op         83,077.8 MB/s
+appendFrame (负载 16384B)                        223.4 ns/op         73,328.8 MB/s
+FrameDecoder::next (负载 16B)                     12.6 ns/op          1,268.1 MB/s
+FrameDecoder::next (负载 1024B)                   77.5 ns/op         13,216.9 MB/s
+FrameDecoder::next (负载 16384B)                1104.7 ns/op         14,831.4 MB/s
+read+appendBigEndian32 (网络序处理)                0.7 ns/op                  --
+ObjectPool acquire+release (128个对象)             3.8 ns/op                  --
+HandlerBase::pushResponse+takeResponse (1KiB)     22.5 ns/op         45,605.2 MB/s
+HandlerBase::process echo (1KiB 回显)             47.1 ns/op         21,760.2 MB/s
+Multiplexer open+echo+close (64条流)             553.4 ns/op                  --
 ```
 
 ---
@@ -242,7 +245,7 @@ make -j$(nproc)
 | :-------------------- | :-------- | :--------------------------------------------------------- |
 | `CMAKE_BUILD_TYPE`  | `Debug` | 编译构建类型（`Debug`, `Release`, `RelWithDebInfo`） |
 | `BUILD_TESTING`     | `ON`    | 是否构建 Google Test 单元测试套件                          |
-| `MYNET_BUILD_BENCH` | `ON`    | 是否构建核心性能微基准测试程序（`bench/bench_core`）     |
+| `MYNET_BUILD_BENCH` | `ON`    | 是否构建核心性能微基准测试程序（`bench/bench`）          |
 
 ### 4. Docker 容器化运行
 
@@ -311,7 +314,7 @@ int main() {
 ```cpp
 #include "error.hpp"
 #include "handler.hpp"
-#include "multiplexer.hpp"
+#include "http/v2/multiplexer.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -377,27 +380,34 @@ mynet/
 │   ├── error.hpp               # 强类型错误码枚举 Err 与 I/O 状态 IoEnd
 │   ├── log.hpp                 # 日志适配门面（封装 mylog 并路由至 stderr）
 │   ├── buffer.hpp              # 滑动窗口自收缩低开销字节缓冲区
+│   ├── ringQueue.hpp           # 零分配定容循环环形队列
 │   ├── objectPool.hpp          # 地址稳定的固定容量对象池
 │   ├── timer.hpp               # 惰性删除的高效二叉最小堆定时器队列
 │   ├── loop.hpp                # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
 │   ├── event.hpp               # 套接字及 SSL 监听通道抽象
 │   ├── connection.hpp          # 统一的 TCP/TLS 传输层核心实现与响应缓冲队列
 │   ├── datagram.hpp            # UDP 数据报传输层抽象
-│   ├── handler.hpp             # 业务处理器抽象（HandlerBase 与 HandlerHttp）
-│   ├── frame.hpp               # HTTP/2 兼容的标准协议帧编解码器
-│   ├── multiplexer.hpp         # 基于信用的流多路复用调度器
+│   ├── handler.hpp             # 基础协议处理器与回显处理器（HandlerBase 与 HandlerDatagramEcho）
+│   ├── http/                   # HTTP 协议族实现
+│   │   ├── v1/
+│   │   │   └── handler.hpp     # 基于 llhttp 的 HTTP/1.x 协议处理器（HandlerHttp）
+│   │   └── v2/
+│   │       ├── frame.hpp       # HTTP/2 兼容的标准二进制协议帧编解码器
+│   │       ├── streamTable.hpp # 开放寻址零分配流哈希表
+│   │       ├── multiplexer.hpp # 基于信用的 HTTP/2 流多路复用调度器
+│   │       └── handler.hpp     # HTTP/2 协议处理器入口（HandlerHttp2）
 │   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎
 │   ├── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎
 │   └── client.hpp              # 管道式双向网络客户端（stdin/stdout 桥接）
 │
-├── samples/                    # 示例程序与可执行文件
+├── examples/                   # 示例程序与可执行文件
 │   ├── reactor_tcp.cpp         # 基于 Reactor 的 TCP 回显服务端
 │   ├── reactor_ssl.cpp         # 基于 Reactor 的 TLS 安全服务端
 │   ├── reactor_udp.cpp         # 基于 Reactor 的 UDP 回显服务端
+│   ├── reactor_multiplex.cpp   # 基于 Reactor 的流多路复用服务端
 │   ├── proactor_tcp.cpp        # 基于 Proactor 与内核缓冲环的 TCP 服务端
 │   ├── proactor_ssl.cpp        # 基于 Proactor 的 TLS 安全服务端（Poll 驱动）
 │   ├── proactor_udp.cpp        # 基于 Proactor 的 UDP 服务端
-│   ├── multiplex_tcp.cpp       # 基于 Reactor 的流多路复用服务端
 │   ├── proactor_multiplex.cpp  # 基于 Proactor 的流多路复用服务端
 │   ├── client_tcp.cpp          # 命令行 TCP 流客户端
 │   ├── client_ssl.cpp          # 命令行 TLS 安全客户端
@@ -414,11 +424,11 @@ mynet/
 │   └── test_timer.cpp          # 定时器精度与取消测试
 │
 ├── bench/                      # 性能基准测试
-│   └── bench_core.cpp          # 核心模块纳秒级延时与吞吐测试
+│   └── bench.cpp               # 核心模块纳秒级延时与吞吐测试
 │
 ├── certs/                      # 本地测试自签名 SSL/TLS 证书及私钥
 ├── scripts/                    # 辅助脚本（代码格式化等）
-└── third_party/                # 外部依赖子模块（mylog）
+└── thirdparty/                 # 外部依赖子模块（mylog）
 ```
 
 ---

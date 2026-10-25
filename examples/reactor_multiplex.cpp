@@ -1,27 +1,23 @@
 #include "error.hpp"
 #include "handler.hpp"
+#include "http/v2/multiplexer.hpp"
 #include "log.hpp"
-#include "multiplexer.hpp"
 #include "reactor.hpp"
 #include <netdb.h>
 
-// A TCP port that speaks framed, multiplexed streams rather than HTTP.
+// 支持分帧与多路复用流（而非普通 HTTP）的 TCP 服务端示例。
 //
-// The point of the sample is where the layer boundary sits: the multiplexer
-// owns framing, stream identifiers, flow control and teardown, and hands each
-// stream a plain byte stream -- here HandlerBase, which writes down whatever
-// its client sent and echoes it back. A stream handler never sees a frame
-// header, and the multiplexer never sees an application message.
+// 本示例的核心在于清晰的分层边界：Multiplexer 负责分帧、流标识符管理、流控与连接拆除，
+// 并为每条流提供透明的纯字节流——此处为 HandlerBase，它记录客户端发送的数据并进行回显。
+// 流处理器完全感知不到帧首部，而 Multiplexer 也无需理解上层应用协议报文。
 //
-// The admission limit is 128 concurrent streams (mux::kDefaultMaxStreams,
-// advertised as SETTINGS_MAX_CONCURRENT_STREAMS and settable through
-// Multiplexer::setMaxConcurrentStreams). A peer that opens past it is refused
-// with RST_STREAM rather than queued, because holding the frames would only
-// move the backlog somewhere less visible.
+// 准入上限为 128 条并发流（mux::kDefaultMaxStreams，通过 SETTINGS_MAX_CONCURRENT_STREAMS
+// 宣告并通过 Multiplexer::setMaxConcurrentStreams 配置）。超出限制的新建流将被发送
+// RST_STREAM 拒绝而非排队缓冲，因为强行缓存帧只会将积压转移到隐蔽位置。
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
     const char *name = "0.0.0.0";
     const char *service = "8888";

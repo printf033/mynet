@@ -19,7 +19,7 @@ namespace mynet
         { obj.reset() } noexcept -> std::same_as<void>;
     };
 
-    // Forward declarations
+    // 前向声明
     class HandlerBase;
     class DatagramHandler;
 

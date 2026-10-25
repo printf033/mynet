@@ -6,4 +6,4 @@ function(mynet_bench name)
     endif()
 endfunction()
 
-mynet_bench(bench_core)
+mynet_bench(bench)

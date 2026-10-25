@@ -209,10 +209,7 @@ namespace mynet
         /**
          * @brief 追加字符视图（兼容 std::string 与字符串字面量）
          */
-        [[nodiscard]] inline Result<> append(std::string_view sv) noexcept
-        {
-            return append(sv.data(), sv.size());
-        }
+        [[nodiscard]] inline Result<> append(std::string_view sv) noexcept { return append(sv.data(), sv.size()); }
 
         /**
          * @brief 追加单个字符

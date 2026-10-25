@@ -2,7 +2,7 @@
 
 /**
  * @file proactor.hpp
- * @brief High-performance Linux io_uring proactor server implementation.
+ * @brief 高性能 Linux io_uring 前摄器（Proactor）服务器实现。
  */
 
 #include "concepts.hpp"
@@ -31,11 +31,11 @@ namespace mynet
 
     /**
      * @class Proactor
-     * @brief io_uring completion-based asynchronous server engine.
+     * @brief 基于 io_uring 完成事件驱动的高性能异步服务器引擎。
      *
-     * Utilizes kernel-managed buffer rings and multishot operations for zero-syscall I/O.
+     * 深度集成内核管理的 Buffer Ring 与 multishot 操作，实现零系统调用开销的极致异步 I/O。
      *
-     * @tparam Event Socket event wrapper type satisfying DerivedFromEventBase and Resettable.
+     * @tparam Event 满足 DerivedFromEventBase 与 Resettable 约束的套接字事件包装类型。
      */
     template <typename Event>
         requires DerivedFromEventBase<Event> && Resettable<Event> &&
@@ -50,27 +50,27 @@ namespace mynet
 
         ~Proactor() noexcept { reset(); }
 
-        Proactor(const Proactor &) = delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
+        Proactor(const Proactor &) = delete("a proactor owns the io_uring ring and the buffers handed to the kernel");
         Proactor &
-        operator=(const Proactor &) = delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
+        operator=(const Proactor &) = delete("a proactor owns the io_uring ring and the buffers handed to the kernel");
         Proactor(Proactor &&) noexcept =
             delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
         Proactor &operator=(Proactor &&) noexcept =
             delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
 
         /**
-         * @brief Run TCP server on specified IP and port until stopped.
-         * @param ip Listening IPv4 address literal.
-         * @param port Listening port.
-         * @param backlog Listen backlog queue length.
-         * @param sqEntries Size of the submission queue.
-         * @param cqEntries Size of the completion queue.
-         * @param maxAcceptEvents Max concurrency for pending accept operations.
-         * @param sessionPoolSize Pre-allocated capacity for sessions.
-         * @param maxBufEntrs Number of buffers in kernel buffer ring.
-         * @param bufSize Size of each buffer in buffer ring.
-         * @param idleTimeoutSecs Inactivity timeout in seconds (0 = disabled).
-         * @return nullopt on normal stop, or error code on startup failure.
+         * @brief 在指定 IP 和端口上运行 TCP 服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param backlog 监听全连接队列长度。
+         * @param sqEntries io_uring 提交队列大小。
+         * @param cqEntries io_uring 完成队列大小。
+         * @param maxAcceptEvents 最大在途 accept 操作并发数。
+         * @param sessionPoolSize 预分配会话对象池容量。
+         * @param maxBufEntrs 内核 Buffer Ring 中的缓冲区条目数。
+         * @param bufSize Buffer Ring 中每个缓冲区的大小。
+         * @param idleTimeoutSecs 空闲连接超时时间（秒，0 表示禁用）。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runTcp(const char *ip, int port, int backlog = 511, unsigned int sqEntries = 512,
                                       unsigned int cqEntries = 1 << 10, int maxAcceptEvents = 256,
@@ -90,7 +90,7 @@ namespace mynet
         }
 
         /**
-         * @brief Run TLS/SSL server on specified IP and port until stopped.
+         * @brief 在指定 IP 和端口上运行 TLS/SSL 服务器，直至被请求停止。
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
                                       unsigned int sqEntries = 512, unsigned int cqEntries = 1 << 10,
@@ -135,7 +135,7 @@ namespace mynet
         }
 
         /**
-         * @brief Run UDP datagram server on specified IP and port until stopped.
+         * @brief 在指定 IP 和端口上运行 UDP 数据报服务器，直至被请求停止。
          */
         [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, unsigned int sqEntries = 512,
                                       unsigned int cqEntries = 1 << 10, size_t sessionPoolSize = 512,
@@ -156,12 +156,12 @@ namespace mynet
         }
 
         /**
-         * @brief Stop the proactor loop gracefully.
+         * @brief 优雅停止 proactor 事件循环。
          */
         inline void stop() const noexcept { stopSource_.request_stop(); }
 
         /**
-         * @brief Core serve loop for io_uring execution.
+         * @brief io_uring 核心事件循环。
          */
         [[nodiscard]] inline Result<> serve(unsigned int sqEntries, unsigned int cqEntries, int maxAcceptEvents,
                                             size_t sessionPoolSize, int maxBufEntrs, int bufSize, int idleTimeoutSecs)
@@ -194,7 +194,8 @@ namespace mynet
             }
             sessions_.reserve(sessionPoolSize > 0 ? sessionPoolSize : 1);
             maxAccepts_ = maxAcceptEvents > 0 ? maxAcceptEvents : 1;
-            maxBufEntrs_ = maxBufEntrs > 0 ? static_cast<int>(std::bit_ceil(static_cast<unsigned int>(maxBufEntrs))) : 0;
+            maxBufEntrs_ =
+                maxBufEntrs > 0 ? static_cast<int>(std::bit_ceil(static_cast<unsigned int>(maxBufEntrs))) : 0;
             bufSize_ = bufSize > 0 ? bufSize : (4 << 10);
             if (maxBufEntrs_ > 0)
             {
@@ -293,7 +294,7 @@ namespace mynet
         }
 
         /**
-         * @brief Reset proactor state and reclaim resources.
+         * @brief 重置 proactor 状态并回收全部关联资源。
          */
         inline void reset() noexcept
         {
@@ -900,7 +901,7 @@ namespace mynet
             }
             else if (cqe->res > 0)
             {
-                (void)session->conn.commitSent(static_cast<size_t>(cqe->res));
+                [[maybe_unused]] auto _ = session->conn.commitSent(static_cast<size_t>(cqe->res));
                 session->conn.touch();
             }
             else [[unlikely]]

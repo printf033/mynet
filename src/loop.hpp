@@ -101,7 +101,7 @@ namespace mynet
         {
             threadId_ = std::this_thread::get_id();
             events_.resize(1 << 10);
-            (void)init();
+            [[maybe_unused]] auto _ = init();
         }
 
         ~EventLoop() noexcept
@@ -351,8 +351,7 @@ namespace mynet
             {
                 return std::numeric_limits<int>::max();
             }
-            return static_cast<int>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(next - now).count());
+            return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(next - now).count());
         }
 
         inline void doPendingTasks()
@@ -382,8 +381,7 @@ namespace mynet
                 return;
             }
             constexpr uint64_t one = 1;
-            const ssize_t ignored = ::write(wakeFd_, &one, sizeof one);
-            (void)ignored;
+            [[maybe_unused]] const ssize_t ignored = ::write(wakeFd_, &one, sizeof one);
         }
 
         inline void drainWakeup() noexcept

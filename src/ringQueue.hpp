@@ -31,10 +31,9 @@ namespace mynet
 
         ~RingQueue() noexcept { destroy(); }
 
-        RingQueue(const RingQueue &) =
-            delete ("a ring queue owns one slot array; a copy would alias the strings");
-        RingQueue &operator=(const RingQueue &) =
-            delete ("a ring queue owns one slot array; a copy would alias the strings");
+        RingQueue(const RingQueue &) = delete("a ring queue owns one slot array; a copy would alias the strings");
+        RingQueue &
+        operator=(const RingQueue &) = delete("a ring queue owns one slot array; a copy would alias the strings");
 
         RingQueue(RingQueue &&other) noexcept
             : slots_(std::exchange(other.slots_, nullptr)),

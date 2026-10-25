@@ -1,26 +1,18 @@
+#include "client.hpp"
 #include "error.hpp"
 #include "handler.hpp"
 #include "log.hpp"
-#include "proactor.hpp"
 #include <netdb.h>
 
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
-    const char *name = "0.0.0.0";
+    const char *name = "127.0.0.1";
     const char *service = "8888";
-    const char *crt = "../certs/ser.crt";
-    const char *key = "../certs/ser.key";
     switch (argc)
     {
-    case 5:
-        key = argv[4];
-        [[fallthrough]];
-    case 4:
-        crt = argv[3];
-        [[fallthrough]];
     case 3:
         service = argv[2];
         [[fallthrough]];
@@ -44,10 +36,8 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    LOG_INFO("listening to {}:{}", ip, port);
-    // Same front end as reactor_ssl: echo, plus what arrived written down --
     using namespace mynet;
-    if (auto res = Proactor<EventSsl<HandlerBase>>().runSsl(ip, port, crt, key); !res)
+    if (auto res = Client<EventSocket<HandlerBase>>().runTcp(ip, port); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

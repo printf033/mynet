@@ -1,25 +1,26 @@
+#include "client.hpp"
 #include "error.hpp"
 #include "handler.hpp"
 #include "log.hpp"
-#include "multiplexer.hpp"
-#include "proactor.hpp"
 #include <netdb.h>
 
-// Same framed, multiplexed stream port as multiplex_tcp, on the io_uring
-// front end instead of epoll.
-//
-// Nothing below the multiplexer changes with the engine: the multiplexer is a
-// HandlerBase, so it is the same layer boundary in both samples, and the
-// read/write path that hands it bytes is the only thing that differs.
 int main(int argc, char *argv[])
 {
-    // Send mylog's output to stderr before anything can log: the data this
-    // program streams over stdout must stay untouched.
+    // 在产生任何日志之前将 mylog 的输出重定向到 stderr：
+    // 本程序在 stdout 上流式传输的数据必须保持纯净且不受污染。
     mynet::log::init();
-    const char *name = "0.0.0.0";
+    const char *name = "127.0.0.1";
     const char *service = "8888";
+    const char *serverName = nullptr;
+    const char *caFile = nullptr;
     switch (argc)
     {
+    case 5:
+        caFile = argv[4];
+        [[fallthrough]];
+    case 4:
+        serverName = argv[3];
+        [[fallthrough]];
     case 3:
         service = argv[2];
         [[fallthrough]];
@@ -43,9 +44,12 @@ int main(int argc, char *argv[])
     inet_ntop(AF_INET, &(addr->sin_addr), ip, INET_ADDRSTRLEN);
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
-    LOG_INFO("listening to {}:{} (multiplexed streams)", ip, port);
+    LOG_INFO("connecting to {}:{}", ip, port);
+    // 客户端自身无需持有证书，因此第 3 个参数为 SNI 中请求的服务器名称，
+    // 第 4 个参数为用于校验服务端证书的 CA 根证书包路径（若不提供则跳过校验）。
     using namespace mynet;
-    if (auto res = Proactor<EventSocket<Multiplexer<HandlerBase>>>().runTcp(ip, port); !res)
+    if (auto res = Client<EventSsl<HandlerBase>>().runSsl(ip, port, serverName != nullptr ? serverName : name, caFile);
+        !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());
