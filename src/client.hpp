@@ -186,18 +186,34 @@ namespace mynet
             SSL_set_connect_state(ssl_);
             if (serverName != nullptr)
             {
-                if (SSL_set_tlsext_host_name(ssl_, serverName) != 1) [[unlikely]]
+                in_addr dummy{};
+                const bool isIp = ::inet_pton(AF_INET, serverName, &dummy) == 1;
+                if (!isIp)
                 {
-                    LOG_ERROR("Client::runSsl: SNI \"{}\" was refused: {}", serverName, log::sslText());
-                    reset();
-                    return std::unexpected(ERR::SSL_SNI_FAILED);
+                    if (SSL_set_tlsext_host_name(ssl_, serverName) != 1) [[unlikely]]
+                    {
+                        LOG_ERROR("Client::runSsl: SNI \"{}\" was refused: {}", serverName, log::sslText());
+                        reset();
+                        return std::unexpected(ERR::SSL_SNI_FAILED);
+                    }
+                    // RFC 6125: 开启服务端证书主机名校验，规避泛 CA 证书中间人劫持 (CWE-297)
+                    if (SSL_set1_host(ssl_, serverName) != 1) [[unlikely]]
+                    {
+                        LOG_ERROR("Client::runSsl: SSL_set1_host(\"{}\") failed: {}", serverName, log::sslText());
+                        reset();
+                        return std::unexpected(ERR::SSL_SNI_FAILED);
+                    }
                 }
-                // RFC 6125: 开启服务端证书主机名校验，规避泛 CA 证书中间人劫持 (CWE-297)
-                if (SSL_set1_host(ssl_, serverName) != 1) [[unlikely]]
+                else
                 {
-                    LOG_ERROR("Client::runSsl: SSL_set1_host(\"{}\") failed: {}", serverName, log::sslText());
-                    reset();
-                    return std::unexpected(ERR::SSL_SNI_FAILED);
+                    // RFC 6066 Section 3: SNI 规范禁止携带 IPv4/IPv6 字面量；此处针对 IP SAN 进行证书校验
+                    if (X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl_), serverName) != 1) [[unlikely]]
+                    {
+                        LOG_ERROR("Client::runSsl: X509_VERIFY_PARAM_set1_ip_asc(\"{}\") failed: {}", serverName,
+                                  log::sslText());
+                        reset();
+                        return std::unexpected(ERR::SSL_SNI_FAILED);
+                    }
                 }
             }
             if (::connect(fd_, reinterpret_cast<const sockaddr *>(&addr_), sizeof(addr_)) < 0 && errno != EINPROGRESS)

@@ -289,6 +289,11 @@ namespace mynet
                     protocolFailure(STREAM_ERROR::PROTOCOL_ERROR, "PRIORITY on the connection stream");
                     break;
                 }
+                if (frame.payload.size() != 5) [[unlikely]]
+                {
+                    sendResetStream(frame.streamId, STREAM_ERROR::FRAME_SIZE_ERROR);
+                    break;
+                }
                 // CVE-2019-9513 Priority Flood 防御
                 ++consecutivePriorityFrames_;
                 if (consecutivePriorityFrames_ > kMaxConsecutivePriorityFrames) [[unlikely]]
@@ -576,6 +581,10 @@ namespace mynet
                 else
                 {
                     sendResetStream(frame.streamId, STREAM_ERROR::PROTOCOL_ERROR);
+                    if (stream(frame.streamId) != nullptr)
+                    {
+                        closeStream(frame.streamId);
+                    }
                 }
                 return;
             }
@@ -604,6 +613,7 @@ namespace mynet
                 [[unlikely]]
             {
                 sendResetStream(frame.streamId, STREAM_ERROR::FLOW_CONTROL_ERROR);
+                closeStream(frame.streamId);
                 return;
             }
             slot->sendWindow += increment;

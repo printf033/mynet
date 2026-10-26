@@ -397,6 +397,56 @@ TEST(Http3Qpack, RejectsHeaderAccordionsOverheadInflation)
     EXPECT_EQ(res.error(), H3_ERROR::H3_EXCESSIVE_LOAD);
 }
 
+TEST(Http3Qpack, PrefixedIntDecodeOverflowRejected)
+{
+    // 构造持续置最高位、数值超出 64 位整数表示上限的前缀整数序列
+    std::string malformed;
+    malformed.push_back(static_cast<char>(0x7f)); // 7-bit prefix all 1s
+    for (int i = 0; i < 11; ++i)
+    {
+        malformed.push_back(static_cast<char>(0xff));
+    }
+    const auto *ptr = reinterpret_cast<const uint8_t *>(malformed.data());
+    size_t rem = malformed.size();
+    auto res = decodePrefixedInt(ptr, rem, 7);
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error(), H3_ERROR::H3_EXCESSIVE_LOAD);
+}
+
+TEST(Http3Qpack, RejectsHuffmanEncodedLiterals)
+{
+    // 构造首部块：前缀 + 字面量首部（H=1 表示 Huffman 编码）
+    std::string block;
+    block.push_back('\0');
+    block.push_back('\0');
+
+    // 模式: 0 0 1 0 N 0 NameLen
+    encodePrefixedInt(block, 3, 0x20, 6);
+    block.append("custom");
+    // 写入一个 H=1 的值字面量: 0x80 | 4
+    block.push_back(static_cast<char>(0x84));
+    block.append("test");
+
+    auto res = decodeHeaders(block);
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error(), H3_ERROR::H3_FRAME_ERROR);
+}
+
+TEST(Http3Qpack, TruncatedLiteralReturnsFrameError)
+{
+    std::string block;
+    block.push_back('\0');
+    block.push_back('\0');
+
+    // 模式: 0 0 1 0 N 0 NameLen (声明 10 字节，实际只给 3 字节)
+    encodePrefixedInt(block, 3, 0x20, 10);
+    block.append("abc"); // 截断
+
+    auto res = decodeHeaders(block);
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error(), H3_ERROR::H3_FRAME_ERROR);
+}
+
 TEST(HandlerHttp3, RejectsServerInitiatedStreamIdFromClient)
 {
     HandlerHttp3 handler;

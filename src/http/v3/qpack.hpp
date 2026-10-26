@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -213,15 +214,25 @@ namespace mynet
             {
                 const uint8_t b = *ptr++;
                 --rem;
-                val += static_cast<uint64_t>(b & 0x7fu) << m;
+                if (m > 62) [[unlikely]]
+                {
+                    return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
+                }
+                const uint64_t chunk = static_cast<uint64_t>(b & 0x7fu);
+                if (m == 63 && chunk > 1) [[unlikely]]
+                {
+                    return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
+                }
+                const uint64_t addend = chunk << m;
+                if (val > (std::numeric_limits<uint64_t>::max)() - addend) [[unlikely]]
+                {
+                    return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
+                }
+                val += addend;
                 m += 7;
                 if ((b & 0x80u) == 0)
                 {
                     return val;
-                }
-                if (m > 62) [[unlikely]]
-                {
-                    return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
                 }
             }
             return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
@@ -250,15 +261,25 @@ namespace mynet
             {
                 return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
             }
+            // RFC 9204 Section 4.1.2: 最高位为 H 标志（Huffman 压缩）
+            if ((*ptr & 0x80u) != 0) [[unlikely]]
+            {
+                // 基线实现不支持 Huffman 压缩字面量，依规以协议帧错误拒绝
+                return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
+            }
             auto lenRes = decodePrefixedInt(ptr, rem, 7);
             if (!lenRes)
             {
                 return std::unexpected(lenRes.error());
             }
             const size_t len = static_cast<size_t>(*lenRes);
-            if (len > kMaxHeaderBlockBytes || rem < len) [[unlikely]]
+            if (len > kMaxHeaderBlockBytes) [[unlikely]]
             {
                 return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
+            }
+            if (rem < len) [[unlikely]]
+            {
+                return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
             }
             std::string s(reinterpret_cast<const char *>(ptr), len);
             ptr += len;
@@ -382,15 +403,25 @@ namespace mynet
                 else if ((b & 0x20u) != 0)
                 {
                     // Literal Without Name Reference (Section 4.5.6)
+                    // 模式: 0 0 1 0 N 0 NameLen (3 位前缀, N=0 -> 0x20)
+                    // 第 3 位 (0x08) 为名称 Huffman 压缩标志 H
+                    if ((b & 0x08u) != 0) [[unlikely]]
+                    {
+                        return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
+                    }
                     auto nameLenRes = decodePrefixedInt(ptr, rem, 3);
                     if (!nameLenRes)
                     {
                         return std::unexpected(nameLenRes.error());
                     }
                     const size_t nameLen = static_cast<size_t>(*nameLenRes);
-                    if (nameLen > kMaxHeaderBlockBytes || rem < nameLen) [[unlikely]]
+                    if (nameLen > kMaxHeaderBlockBytes) [[unlikely]]
                     {
                         return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
+                    }
+                    if (rem < nameLen) [[unlikely]]
+                    {
+                        return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
                     }
                     std::string name(reinterpret_cast<const char *>(ptr), nameLen);
                     ptr += nameLen;

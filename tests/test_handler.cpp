@@ -242,6 +242,23 @@ TEST(HandlerHttp, EmptyHeaderValueIsPreserved)
     EXPECT_TRUE(found);
 }
 
+TEST(HandlerHttp, EmptyHeaderFollowedByAnotherHeaderDoesNotMerge)
+{
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
+    feed(handler, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Empty:\r\nX-Next: foo\r\n\r\n");
+    handler.process();
+    EXPECT_EQ(handler.headerValue("Host"), "localhost");
+    EXPECT_EQ(handler.headerValue("X-Empty"), "");
+    EXPECT_EQ(handler.headerValue("X-Next"), "foo");
+    EXPECT_EQ(handler.headerValue("X-EmptyX-Next"), "");
+    ASSERT_EQ(handler.headers().size(), 3u);
+    EXPECT_EQ(handler.headers()[0].first, "Host");
+    EXPECT_EQ(handler.headers()[1].first, "X-Empty");
+    EXPECT_EQ(handler.headers()[1].second, "");
+    EXPECT_EQ(handler.headers()[2].first, "X-Next");
+    EXPECT_EQ(handler.headers()[2].second, "foo");
+}
+
 TEST(HandlerHttp, UrlTooLongReturns400)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;

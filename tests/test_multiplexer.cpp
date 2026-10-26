@@ -650,6 +650,43 @@ TEST(Multiplexer, WindowUpdateStreamOverflowIsReset)
     EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
     EXPECT_EQ(frames[0].streamId, 1u);
     EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::FLOW_CONTROL_ERROR));
+    EXPECT_EQ(mux.stream(1), nullptr); // 流发生流控错误后必须被关闭回收，防止槽位泄漏
+}
+
+TEST(Multiplexer, StreamWindowUpdateZeroIncrementResetsAndClosesStream)
+{
+    ProbeMux mux;
+    mux.warmUp();
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.takeFrames();
+    ASSERT_NE(mux.stream(1), nullptr);
+
+    std::string zero;
+    frame::appendBigEndian32(zero, 0);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 1, 0, zero));
+
+    const std::vector<Frame> frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
+    EXPECT_EQ(frames[0].streamId, 1u);
+    EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::PROTOCOL_ERROR));
+    EXPECT_EQ(mux.stream(1), nullptr); // 增量为 0 的流控错误同样必须关闭回收流槽位
+}
+
+TEST(Multiplexer, PriorityFrameWrongPayloadLengthSendsFrameSizeError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.takeFrames();
+
+    // PRIORITY 帧载荷必须精确为 5 字节，若不符则应发送 FRAME_SIZE_ERROR 重置流
+    mux.push(makeFrame(FRAME_TYPE::PRIORITY, 1, 0, "1234")); // 4 字节
+    const std::vector<Frame> frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
+    EXPECT_EQ(frames[0].streamId, 1u);
+    EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::FRAME_SIZE_ERROR));
 }
 
 TEST(Multiplexer, RstStreamOnIdleStreamIsProtocolError)

@@ -55,6 +55,7 @@ namespace mynet
                 settings_.on_url = &HandlerHttp::cbUrl;
                 settings_.on_header_field = &HandlerHttp::cbHeaderField;
                 settings_.on_header_value = &HandlerHttp::cbHeaderValue;
+                settings_.on_header_value_complete = &HandlerHttp::cbHeaderValueComplete;
                 settings_.on_headers_complete = &HandlerHttp::cbHeadersComplete;
                 settings_.on_body = &HandlerHttp::cbBody;
                 settings_.on_message_complete = &HandlerHttp::cbMessageComplete;
@@ -70,7 +71,6 @@ namespace mynet
                 body_.clear();
                 currentField_.clear();
                 currentValue_.clear();
-                inValue_ = false;
                 totalHeaderBytes_ = 0;
                 HandlerBase::reset();
             }
@@ -235,7 +235,6 @@ namespace mynet
             std::string currentField_;
             std::string currentValue_;
             size_t totalHeaderBytes_ = 0;
-            bool inValue_ = false;
 
             static constexpr llhttp_type_t parserType() noexcept
             {
@@ -257,7 +256,6 @@ namespace mynet
                 self->currentField_.clear();
                 self->currentValue_.clear();
                 self->totalHeaderBytes_ = 0;
-                self->inValue_ = false;
                 return HPE_OK;
             }
 
@@ -282,22 +280,6 @@ namespace mynet
                 {
                     return HPE_OK;
                 }
-                if (self->inValue_)
-                {
-                    if (self->headers_.size() >= kMaxHeadersCount) [[unlikely]]
-                    {
-                        return HPE_USER;
-                    }
-                    self->totalHeaderBytes_ += self->currentField_.size() + self->currentValue_.size();
-                    if (self->totalHeaderBytes_ > kMaxTotalHeadersLength) [[unlikely]]
-                    {
-                        return HPE_USER;
-                    }
-                    self->headers_.emplace_back(std::move(self->currentField_), std::move(self->currentValue_));
-                    self->currentField_.clear();
-                    self->currentValue_.clear();
-                    self->inValue_ = false;
-                }
                 if (self->currentField_.size() + len > kMaxHeaderFieldLength) [[unlikely]]
                 {
                     return HPE_USER;
@@ -317,8 +299,29 @@ namespace mynet
                 {
                     return HPE_USER;
                 }
-                self->inValue_ = true;
                 self->currentValue_.append(at, len);
+                return HPE_OK;
+            }
+
+            static int cbHeaderValueComplete(llhttp_t *p)
+            {
+                auto *self = static_cast<HandlerHttp *>(p->data);
+                if (self == nullptr) [[unlikely]]
+                {
+                    return HPE_OK;
+                }
+                if (self->headers_.size() >= kMaxHeadersCount) [[unlikely]]
+                {
+                    return HPE_USER;
+                }
+                self->totalHeaderBytes_ += self->currentField_.size() + self->currentValue_.size();
+                if (self->totalHeaderBytes_ > kMaxTotalHeadersLength) [[unlikely]]
+                {
+                    return HPE_USER;
+                }
+                self->headers_.emplace_back(std::move(self->currentField_), std::move(self->currentValue_));
+                self->currentField_.clear();
+                self->currentValue_.clear();
                 return HPE_OK;
             }
 
@@ -329,7 +332,7 @@ namespace mynet
                 {
                     return HPE_OK;
                 }
-                if (self->inValue_ || !self->currentField_.empty())
+                if (!self->currentField_.empty())
                 {
                     if (self->headers_.size() >= kMaxHeadersCount) [[unlikely]]
                     {
@@ -343,7 +346,6 @@ namespace mynet
                     self->headers_.emplace_back(std::move(self->currentField_), std::move(self->currentValue_));
                     self->currentField_.clear();
                     self->currentValue_.clear();
-                    self->inValue_ = false;
                 }
                 return HPE_OK;
             }
