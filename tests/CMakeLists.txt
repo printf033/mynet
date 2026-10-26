@@ -20,6 +20,20 @@ mynet_unit_test(test_concepts)
 mynet_unit_test(test_error)
 mynet_unit_test(test_frame)
 mynet_unit_test(test_handler)
+mynet_unit_test(test_http3)
 mynet_unit_test(test_multiplexer)
 mynet_unit_test(test_object_pool)
 mynet_unit_test(test_timer)
+
+if(MYNET_ENABLE_LUA)
+    add_executable(test_config_lua test_config_lua.cpp)
+    target_link_libraries(test_config_lua PRIVATE
+        mynet::mynet_lua
+        mynet::mynet_sanitized
+        GTest::gtest
+        GTest::gtest_main
+    )
+    add_test(NAME test_config_lua COMMAND test_config_lua)
+    set_tests_properties(test_config_lua PROPERTIES TIMEOUT 120
+        ENVIRONMENT "ASAN_OPTIONS=allocator_may_return_null=1:abort_on_error=0")
+endif()

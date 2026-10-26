@@ -3,6 +3,7 @@ add_library(mynet::mynet ALIAS mynet)
 
 target_include_directories(mynet INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -74,4 +75,21 @@ if(MYNET_SANITIZE)
     target_link_options(mynet_sanitized INTERFACE
         $<$<AND:$<CONFIG:Debug>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-fsanitize=address,undefined>
     )
+endif()
+
+# -----------------------------------------------------------------------------
+# Optional sandboxed Lua hot-configuration support
+# -----------------------------------------------------------------------------
+if(MYNET_ENABLE_LUA)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LUAJIT REQUIRED IMPORTED_TARGET luajit)
+
+    add_library(mynet_lua INTERFACE)
+    add_library(mynet::mynet_lua ALIAS mynet_lua)
+    target_link_libraries(mynet_lua INTERFACE
+        mynet::mynet
+        mylog::mylog_lua
+        PkgConfig::LUAJIT
+    )
+    target_compile_definitions(mynet_lua INTERFACE MYNET_HAVE_LUA=1)
 endif()

@@ -151,15 +151,24 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
+            // 现代 TLS 安全基线：强制启用最低 TLS 1.2 并禁用不安全压缩（抵御 POODLE、BEAST 与 CRIME 攻击）
+            SSL_CTX_set_min_proto_version(protocol_.ctx, TLS1_2_VERSION);
+            SSL_CTX_set_options(protocol_.ctx, SSL_OP_NO_COMPRESSION);
+
+            // 无论自定义 CA 还是系统默认证书库，均显式开启对端证书验证 (CWE-295)
+            SSL_CTX_set_verify(protocol_.ctx, SSL_VERIFY_PEER, nullptr);
             if (caFile != nullptr)
             {
-                SSL_CTX_set_verify(protocol_.ctx, SSL_VERIFY_PEER, nullptr);
                 if (SSL_CTX_load_verify_locations(protocol_.ctx, caFile, nullptr) != 1) [[unlikely]]
                 {
                     LOG_ERROR("Client::runSsl: CA bundle \"{}\" could not be loaded: {}", caFile, log::sslText());
                     reset();
                     return std::unexpected(ERR::SSL_CA_FAILED);
                 }
+            }
+            else
+            {
+                SSL_CTX_set_default_verify_paths(protocol_.ctx);
             }
             ssl_ = SSL_new(protocol_.ctx);
             if (ssl_ == nullptr) [[unlikely]]
@@ -175,11 +184,21 @@ namespace mynet
                 return std::unexpected(ERR::SSL_SET_FD_FAILED);
             }
             SSL_set_connect_state(ssl_);
-            if (serverName != nullptr && SSL_set_tlsext_host_name(ssl_, serverName) != 1) [[unlikely]]
+            if (serverName != nullptr)
             {
-                LOG_ERROR("Client::runSsl: SNI \"{}\" was refused: {}", serverName, log::sslText());
-                reset();
-                return std::unexpected(ERR::SSL_SNI_FAILED);
+                if (SSL_set_tlsext_host_name(ssl_, serverName) != 1) [[unlikely]]
+                {
+                    LOG_ERROR("Client::runSsl: SNI \"{}\" was refused: {}", serverName, log::sslText());
+                    reset();
+                    return std::unexpected(ERR::SSL_SNI_FAILED);
+                }
+                // RFC 6125: 开启服务端证书主机名校验，规避泛 CA 证书中间人劫持 (CWE-297)
+                if (SSL_set1_host(ssl_, serverName) != 1) [[unlikely]]
+                {
+                    LOG_ERROR("Client::runSsl: SSL_set1_host(\"{}\") failed: {}", serverName, log::sslText());
+                    reset();
+                    return std::unexpected(ERR::SSL_SNI_FAILED);
+                }
             }
             if (::connect(fd_, reinterpret_cast<const sockaddr *>(&addr_), sizeof(addr_)) < 0 && errno != EINPROGRESS)
                 [[unlikely]]

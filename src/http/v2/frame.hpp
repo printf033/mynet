@@ -137,9 +137,9 @@ namespace mynet
                 return std::optional<Frame>{};
             }
 
-            const auto *p = reinterpret_cast<const unsigned char *>(in.readableBegin());
-            const uint32_t length =
-                (static_cast<uint32_t>(p[0]) << 16) | (static_cast<uint32_t>(p[1]) << 8) | static_cast<uint32_t>(p[2]);
+            const char *src = in.readableBegin();
+            const uint32_t b0_3 = frame::readBigEndian32(src);
+            const uint32_t length = b0_3 >> 8;
 
             if (length > maxFrameSize_) [[unlikely]]
             {
@@ -149,16 +149,18 @@ namespace mynet
             {
                 return std::optional<Frame>{};
             }
-            if ((p[5] & frame::kStreamIdReservedMask) != 0) [[unlikely]]
+
+            const uint32_t b5_8 = frame::readBigEndian32(src + 5);
+            if ((b5_8 & 0x80000000u) != 0) [[unlikely]]
             {
                 return std::unexpected(FRAME_ERROR::RESERVED_BIT_SET);
             }
 
             Frame frame;
-            frame.streamId = frame::readBigEndian32(reinterpret_cast<const char *>(p + 5)) & frame::kStreamIdMask;
-            frame.type = static_cast<FRAME_TYPE>(p[3]);
-            frame.flags = p[4];
-            frame.payload.assign(in.readableBegin() + frame::kHeaderBytes, length);
+            frame.streamId = b5_8 & frame::kStreamIdMask;
+            frame.type = static_cast<FRAME_TYPE>(b0_3 & 0xffu);
+            frame.flags = static_cast<uint8_t>(src[4]);
+            frame.payload.assign(src + frame::kHeaderBytes, length);
             in.retrieve(frame::kHeaderBytes + static_cast<size_t>(length));
             return std::optional<Frame>{std::move(frame)};
         }
@@ -178,18 +180,17 @@ namespace mynet
         const uint32_t streamId = frame.streamId & frame::kStreamIdMask;
 
         char hdr[frame::kHeaderBytes];
-        hdr[0] = static_cast<char>((length >> 16) & 0xffu);
-        hdr[1] = static_cast<char>((length >> 8) & 0xffu);
-        hdr[2] = static_cast<char>(length & 0xffu);
-        hdr[3] = static_cast<char>(std::to_underlying(frame.type));
+        const uint32_t b0_3 = std::byteswap((length << 8) | static_cast<uint32_t>(std::to_underlying(frame.type)));
+        std::memcpy(hdr, &b0_3, sizeof(b0_3));
         hdr[4] = static_cast<char>(frame.flags);
-
         const uint32_t beStream = std::byteswap(streamId);
         std::memcpy(hdr + 5, &beStream, sizeof(beStream));
 
-        out.reserve(out.size() + frame::kHeaderBytes + frame.payload.size());
         out.append(hdr, frame::kHeaderBytes);
-        out.append(frame.payload);
+        if (!frame.payload.empty())
+        {
+            out.append(frame.payload.data(), frame.payload.size());
+        }
     }
 
 } // namespace mynet

@@ -71,6 +71,7 @@ namespace mynet
                 currentField_.clear();
                 currentValue_.clear();
                 inValue_ = false;
+                totalHeaderBytes_ = 0;
                 HandlerBase::reset();
             }
 
@@ -218,6 +219,13 @@ namespace mynet
             }
 
         private:
+            static constexpr size_t kMaxUrlLength = 8192;
+            static constexpr size_t kMaxHeadersCount = 100;
+            static constexpr size_t kMaxHeaderFieldLength = 4096;
+            static constexpr size_t kMaxHeaderValueLength = 16384;
+            static constexpr size_t kMaxTotalHeadersLength = 65536;    // 64 KiB
+            static constexpr size_t kMaxBodyLength = 16 * 1024 * 1024; // 16 MiB
+
             llhttp_t parser_{};
             llhttp_settings_t settings_{};
 
@@ -226,6 +234,7 @@ namespace mynet
             std::string body_;
             std::string currentField_;
             std::string currentValue_;
+            size_t totalHeaderBytes_ = 0;
             bool inValue_ = false;
 
             static constexpr llhttp_type_t parserType() noexcept
@@ -247,6 +256,7 @@ namespace mynet
                 self->body_.clear();
                 self->currentField_.clear();
                 self->currentValue_.clear();
+                self->totalHeaderBytes_ = 0;
                 self->inValue_ = false;
                 return HPE_OK;
             }
@@ -256,6 +266,10 @@ namespace mynet
                 auto *self = static_cast<HandlerHttp *>(p->data);
                 if (self != nullptr) [[likely]]
                 {
+                    if (self->url_.size() + len > kMaxUrlLength) [[unlikely]]
+                    {
+                        return HPE_USER;
+                    }
                     self->url_.append(at, len);
                 }
                 return HPE_OK;
@@ -270,10 +284,23 @@ namespace mynet
                 }
                 if (self->inValue_)
                 {
+                    if (self->headers_.size() >= kMaxHeadersCount) [[unlikely]]
+                    {
+                        return HPE_USER;
+                    }
+                    self->totalHeaderBytes_ += self->currentField_.size() + self->currentValue_.size();
+                    if (self->totalHeaderBytes_ > kMaxTotalHeadersLength) [[unlikely]]
+                    {
+                        return HPE_USER;
+                    }
                     self->headers_.emplace_back(std::move(self->currentField_), std::move(self->currentValue_));
                     self->currentField_.clear();
                     self->currentValue_.clear();
                     self->inValue_ = false;
+                }
+                if (self->currentField_.size() + len > kMaxHeaderFieldLength) [[unlikely]]
+                {
+                    return HPE_USER;
                 }
                 self->currentField_.append(at, len);
                 return HPE_OK;
@@ -285,6 +312,10 @@ namespace mynet
                 if (self == nullptr) [[unlikely]]
                 {
                     return HPE_OK;
+                }
+                if (self->currentValue_.size() + len > kMaxHeaderValueLength) [[unlikely]]
+                {
+                    return HPE_USER;
                 }
                 self->inValue_ = true;
                 self->currentValue_.append(at, len);
@@ -300,6 +331,15 @@ namespace mynet
                 }
                 if (self->inValue_ || !self->currentField_.empty())
                 {
+                    if (self->headers_.size() >= kMaxHeadersCount) [[unlikely]]
+                    {
+                        return HPE_USER;
+                    }
+                    self->totalHeaderBytes_ += self->currentField_.size() + self->currentValue_.size();
+                    if (self->totalHeaderBytes_ > kMaxTotalHeadersLength) [[unlikely]]
+                    {
+                        return HPE_USER;
+                    }
                     self->headers_.emplace_back(std::move(self->currentField_), std::move(self->currentValue_));
                     self->currentField_.clear();
                     self->currentValue_.clear();
@@ -313,6 +353,10 @@ namespace mynet
                 auto *self = static_cast<HandlerHttp *>(p->data);
                 if (self != nullptr) [[likely]]
                 {
+                    if (self->body_.size() + len > kMaxBodyLength) [[unlikely]]
+                    {
+                        return HPE_USER;
+                    }
                     self->body_.append(at, len);
                 }
                 return HPE_OK;

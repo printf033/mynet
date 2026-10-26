@@ -53,7 +53,9 @@ namespace mynet
         {
             requestBuffer_.reset();
             responseQueue_.clear();
+            spare_.clear();
             closeAfterResponse_ = false;
+            spliceEnabled_ = false;
         }
 
         // ---- 读取侧控制 (Read Side) ----
@@ -77,6 +79,33 @@ namespace mynet
             }
             return {};
         }
+
+        /**
+         * @brief 确保请求解析缓冲区至少拥有 minBytes 的可直写连续空间（零拷贝直接读取）
+         *
+         * @param minBytes 期望的最小写窗口字节数（默认 4096）
+         * @return 成功返回可直写的内存首地址指针；扩容失败返回错误码
+         */
+        [[nodiscard]] inline std::expected<char *, ERR> prepareRequestWritable(size_t minBytes = 4 << 10) noexcept
+        {
+            if (auto res = requestBuffer_.ensureWritable(minBytes); !res) [[unlikely]]
+            {
+                return std::unexpected(res.error());
+            }
+            return requestBuffer_.writableBegin();
+        }
+
+        /**
+         * @brief 当前请求缓冲区可直接写入的连续窗口大小
+         */
+        [[nodiscard]] inline size_t requestWritableBytes() const noexcept { return requestBuffer_.writableBytes(); }
+
+        /**
+         * @brief 提交直写到请求解析缓冲区的实际字节数
+         *
+         * @param n 实际写入字节数（不得超过 requestWritableBytes()）
+         */
+        inline void commitRequest(size_t n) noexcept { requestBuffer_.commitWritten(n); }
 
         [[nodiscard]] inline bool requestOverLimit() const noexcept
         {
@@ -115,14 +144,41 @@ namespace mynet
                 return std::string();
             }
             std::string out = std::move(responseQueue_.front());
+            if (spare_.capacity() > 0)
+            {
+                responseQueue_.front() = std::move(spare_);
+            }
             responseQueue_.pop();
             return out;
         }
 
         /**
-         * @brief 推入一条完整响应（定容队列，满队显式拒绝）
+         * @brief 回收已发送完毕的空闲响应缓冲区（零堆重分配复用）
          */
-        [[nodiscard]] inline Result<> pushResponse(std::string s) noexcept { return responseQueue_.push(std::move(s)); }
+        inline void recycleSpare(std::string &&s) noexcept
+        {
+            if (s.capacity() > spare_.capacity())
+            {
+                s.clear();
+                spare_ = std::move(s);
+            }
+        }
+
+        /**
+         * @brief 推入一条完整响应（移动语义）
+         */
+        [[nodiscard]] inline Result<> pushResponse(std::string &&s) noexcept
+        {
+            return responseQueue_.push(std::move(s));
+        }
+
+        /**
+         * @brief 推入一条完整响应（左值引用，转为视图原地复用槽位容量）
+         */
+        [[nodiscard]] inline Result<> pushResponse(const std::string &s) noexcept
+        {
+            return pushResponse(std::string_view(s));
+        }
 
         /**
          * @brief 推入一段视图响应（零拷贝适配 string_view 与连续字节）
@@ -165,6 +221,10 @@ namespace mynet
 
         inline void setCloseAfterResponse(bool v) noexcept { closeAfterResponse_ = v; }
 
+        [[nodiscard]] inline bool spliceEnabled() const noexcept { return spliceEnabled_; }
+
+        inline void setSpliceEnabled(bool v) noexcept { spliceEnabled_ = v; }
+
         // ---- 业务扩展虚钩子 (Business Hooks) ----
 
         virtual void onMessageComplete() noexcept {}
@@ -190,43 +250,70 @@ namespace mynet
     protected:
         Buffer requestBuffer_;
         RingQueue responseQueue_;
+        std::string spare_{};
         size_t maxRequestBytes_ = 4 << 20;
         bool closeAfterResponse_ = false;
+        bool spliceEnabled_ = false;
     };
 
     /**
-     * @class HandlerDatagramEcho
-     * @brief UDP 数据报标准回显协议处理器
+     * @class HandlerEcho
+     * @brief 通用回显协议处理器，同时支持流式传输 (TCP/TLS) 与数据报传输 (UDP)。
      *
-     * 具备 HandlerBase（满足 EventSocket / Proactor 容器生命周期契约）与
-     * DatagramHandler（提供无连接数据报发送与接收管理）双重特性，
-     * 收到对端数据报后原样回显给发送端。
+     * 具备 HandlerBase（满足流式会话生命周期与字节流处理）与
+     * DatagramHandler（提供无连接数据报收发与回复队列管理）双重特性：
+     * 1. 流式连接（TCP/TLS）：在明文 TCP 下支持 Linux splice(2) 内核零拷贝直接环回；
+     *    在 TLS 或禁用 splice 场景下退化至 process() 请求-响应队列流转；
+     * 2. 数据报通信（UDP）：通过 onDatagram() 将接收到的数据报原样回显给对端。
      */
-    class HandlerDatagramEcho : public HandlerBase, public DatagramHandler
+    class HandlerEcho : public HandlerBase, public DatagramHandler
     {
     public:
-        HandlerDatagramEcho() noexcept = default;
-        ~HandlerDatagramEcho() noexcept override = default;
+        /// 开启 Linux splice 内核零拷贝回显（TCP 纯明文连接自动启用）
+        static constexpr bool kEnableSplice = true;
 
-        HandlerDatagramEcho(const HandlerDatagramEcho &) = delete("a datagram echo handler owns socket reply state");
-        HandlerDatagramEcho &
-        operator=(const HandlerDatagramEcho &) = delete("a datagram echo handler owns socket reply state");
-        HandlerDatagramEcho(HandlerDatagramEcho &&) = delete("a datagram echo handler owns socket reply state");
-        HandlerDatagramEcho &
-        operator=(HandlerDatagramEcho &&) = delete("a datagram echo handler owns socket reply state");
+        explicit HandlerEcho(size_t responseCapacity = 64) noexcept
+            : HandlerBase(responseCapacity)
+        {
+            spliceEnabled_ = true;
+        }
 
-        // 此套接字上无流式数据，无需流式解析
-        void process() noexcept {}
+        ~HandlerEcho() noexcept override = default;
+
+        HandlerEcho(const HandlerEcho &) = delete("an echo handler owns socket and parser state");
+        HandlerEcho &operator=(const HandlerEcho &) = delete("an echo handler owns socket and parser state");
+        HandlerEcho(HandlerEcho &&) = delete("an echo handler owns socket and parser state");
+        HandlerEcho &operator=(HandlerEcho &&) = delete("an echo handler owns socket and parser state");
 
         void reset() noexcept override
         {
             HandlerBase::reset();
             DatagramHandler::reset();
+            spliceEnabled_ = true;
         }
 
+        /**
+         * @brief 流式传输回显逻辑 (TCP / TLS)
+         */
+        void process()
+        {
+            if (requestBuffer_.empty()) [[unlikely]]
+            {
+                return;
+            }
+            if (!pushResponse(requestBuffer_.readableView())) [[unlikely]]
+            {
+                LOG_WARN("HandlerEcho::process: response queue full, echoing dropped");
+            }
+            requestBuffer_.retrieveAll();
+        }
+
+        /**
+         * @brief 数据报传输回显逻辑 (UDP)
+         */
         void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
-            LOG_INFO("HandlerDatagramEcho: {} sent {} byte(s)", datagramPeerText(peer), n);
+            LOG_INFO("HandlerEcho: {} sent {} byte(s)", datagramPeerText(peer), n);
             pushReply(peer, data, n);
         }
     };

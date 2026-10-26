@@ -110,6 +110,9 @@ namespace
         std::optional<STREAM_ERROR> error;
         std::string why;
 
+        using Multiplexer<HandlerBase>::connRecvWindow_;
+        using Multiplexer<HandlerBase>::stream;
+
         void onStreamOpen(uint32_t id) noexcept override { opens.push_back(id); }
         void onStreamClose(uint32_t id) noexcept override { closes.push_back(id); }
         void onStreamHeaders(uint32_t id, std::string_view block) noexcept override
@@ -277,7 +280,7 @@ TEST(Multiplexer, EndStreamAfterTheEchoClosesTheStream)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kEndStream, "bye"));
 
@@ -376,7 +379,7 @@ TEST(Multiplexer, AnEvenStreamIdIsAProtocolError)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 2, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 2, FrameFlags::kEndHeaders, "h"));
     EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
     EXPECT_FALSE(mux.goawayReceived());
@@ -402,7 +405,7 @@ TEST(Multiplexer, ResetOnAFinishedStreamIsOnlyAReset)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndStream, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders | FrameFlags::kEndStream, "h"));
     mux.takeFrames(); // 流 1 已关闭，且编号小于等于 lastPeerStreamId_
     ASSERT_EQ(mux.openStreams(), 0u);
 
@@ -423,7 +426,7 @@ TEST(Multiplexer, DataBiggerThanTheReceiveWindowIsAFlowControlError)
     // 首先调高帧大小上限，否则解码器在流控检查之前就会直接拒绝该字节流。
     mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mux::kSettingMaxFrameSize, 1 << 20)));
     mux.takeFrames();
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
 
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(mux::kInitialWindowSize + 1, 'x')));
@@ -482,7 +485,7 @@ TEST(Multiplexer, GoawayFromThePeerRefusesNewStreams)
     EXPECT_TRUE(mux.goawayReceived());
     EXPECT_TRUE(mux.takeFrames().empty());
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 3, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 3, FrameFlags::kEndHeaders, "h"));
     EXPECT_EQ(mux.openStreams(), 0u);
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
@@ -507,12 +510,12 @@ TEST(Multiplexer, MaxConcurrentStreamsBoundsTheStreamTable)
     EXPECT_EQ(mux.maxConcurrentStreams(), 2u);
     mux.warmUp();
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 3, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 3, FrameFlags::kEndHeaders, "h"));
     EXPECT_EQ(mux.openStreams(), 2u);
     mux.takeFrames();
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 5, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 5, FrameFlags::kEndHeaders, "h"));
     EXPECT_EQ(mux.openStreams(), 2u);
     EXPECT_FALSE(mux.error.has_value()); // 仅拒绝该流，不破坏连接
     const std::vector<Frame> frames = mux.takeFrames();
@@ -569,7 +572,7 @@ TEST(Multiplexer, ResetReturnsTheConnectionToAFreshState)
 {
     ProbeMux mux;
     mux.warmUp();
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
     ASSERT_EQ(mux.openStreams(), 1u);
 
@@ -589,7 +592,7 @@ TEST(Multiplexer, PaddedDataHasItsPaddingRemovedBeforeTheHandlerSeesIt)
 {
     ProbeMux mux;
     mux.warmUp();
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
 
     std::string payload;
@@ -609,7 +612,7 @@ TEST(Multiplexer, PaddingLongerThanThePayloadIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
 
     std::string payload;
@@ -635,7 +638,7 @@ TEST(Multiplexer, WindowUpdateStreamOverflowIsReset)
 {
     ProbeMux mux;
     mux.warmUp();
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
 
     std::string increment;
@@ -730,7 +733,7 @@ TEST(Multiplexer, InitialWindowReductionPausesStreamUntilWindowUpdate)
     mux.warmUp();
 
     // 发送 HEADERS 开启流 1
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     mux.takeFrames();
 
     // 将初始流控窗口大小缩小至 0
@@ -758,7 +761,7 @@ TEST(Multiplexer, StreamWithMultipleResponsesSendsAllPartsBeforeEndStream)
     TwoPartMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "headers"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "headers"));
     [[maybe_unused]] auto _ = mux.takeFrames();
 
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kEndStream, "ping"));
@@ -784,7 +787,7 @@ TEST(Multiplexer, SettingsInitialWindowDeltaOverflowIsFlowControlError)
     ProbeMux mux;
     mux.warmUp();
 
-    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
     [[maybe_unused]] auto _ = mux.takeFrames();
 
     std::string increment;
@@ -795,4 +798,172 @@ TEST(Multiplexer, SettingsInitialWindowDeltaOverflowIsFlowControlError)
 
     EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
     EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, RapidResetFloodTriggersEnhanceYourCalm)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    std::string resetPayload;
+    frame::appendBigEndian32(resetPayload, std::to_underlying(STREAM_ERROR::CANCEL));
+
+    for (uint32_t i = 1; i <= 205; i += 2)
+    {
+        mux.push(makeFrame(FRAME_TYPE::HEADERS, i, FrameFlags::kEndHeaders, "h"));
+        mux.push(makeFrame(FRAME_TYPE::RESET, i, 0, resetPayload));
+        if (mux.error.has_value())
+            break;
+    }
+
+    EXPECT_EQ(mux.error, STREAM_ERROR::ENHANCE_YOUR_CALM);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, PingFloodTriggersEnhanceYourCalm)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    for (int i = 0; i < 70; ++i)
+    {
+        mux.push(makeFrame(FRAME_TYPE::PING, 0, 0, "12345678"));
+        if (mux.error.has_value())
+            break;
+    }
+
+    EXPECT_EQ(mux.error, STREAM_ERROR::ENHANCE_YOUR_CALM);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, HeadersMissingEndHeadersFlagIsProtocolError)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    // CVE-2024-27983 Continuation Flood 防御验证：缺少 END_HEADERS 标志直接按协议错误拒绝
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, 0, "h"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, SettingsFloodTriggersEnhanceYourCalm)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    // CVE-2019-9515 Settings Flood 防御验证：连续未确认的 SETTINGS 帧触发限流
+    for (int i = 0; i < 20; ++i)
+    {
+        mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, {}));
+        if (mux.error.has_value())
+            break;
+    }
+
+    EXPECT_EQ(mux.error, STREAM_ERROR::ENHANCE_YOUR_CALM);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, EmptyFrameFloodTriggersEnhanceYourCalm)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.takeFrames();
+
+    // CVE-2019-9518 Empty Frame Flood 防御验证：连续空 DATA 帧触发限流
+    for (int i = 0; i < 40; ++i)
+    {
+        mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, ""));
+        if (mux.error.has_value())
+            break;
+    }
+
+    EXPECT_EQ(mux.error, STREAM_ERROR::ENHANCE_YOUR_CALM);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, WindowUpdateFloodTriggersEnhanceYourCalm)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    std::string increment;
+    frame::appendBigEndian32(increment, 1);
+
+    // CVE-2019-9511 / CVE-2019-9513 Window Update Flood 防御验证
+    for (int i = 0; i < 110; ++i)
+    {
+        mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 0, 0, increment));
+        if (mux.error.has_value())
+            break;
+    }
+
+    EXPECT_EQ(mux.error, STREAM_ERROR::ENHANCE_YOUR_CALM);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, PriorityFloodTriggersEnhanceYourCalm)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    // CVE-2019-9513 Priority Flood 防御验证
+    for (int i = 0; i < 70; ++i)
+    {
+        mux.push(makeFrame(FRAME_TYPE::PRIORITY, 1, 0, std::string(5, '\0')));
+        if (mux.error.has_value())
+            break;
+    }
+
+    EXPECT_EQ(mux.error, STREAM_ERROR::ENHANCE_YOUR_CALM);
+    EXPECT_TRUE(mux.closeAfterResponse());
+}
+
+TEST(Multiplexer, PaddedDataDeductsEntirePayloadFromWindow)
+{
+    ProbeMux mux;
+    mux.warmUp();
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.takeFrames();
+
+    const uint32_t connWinBefore = mux.connRecvWindow_;
+    const uint32_t streamWinBefore = mux.stream(1)->recvWindow;
+
+    // 载荷构成: 1 字节 padlen(=10) + 4 字节数据("data") + 10 字节填充 = 15 字节
+    std::string payload;
+    payload.push_back('\x0a'); // 10 字节填充
+    payload += "data";
+    payload.append(10, '\0');
+
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, FrameFlags::kPadded, payload));
+
+    // RFC 7540 §6.1 要求扣减全部 15 字节，而非剥离后的 4 字节
+    EXPECT_EQ(connWinBefore - mux.connRecvWindow_, 15u);
+    EXPECT_EQ(streamWinBefore - mux.stream(1)->recvWindow, 15u);
+}
+
+TEST(Multiplexer, GoawayClosesStreamsAboveLastStreamId)
+{
+    ProbeMux mux;
+    mux.warmUp();
+
+    // 开启流 1 和流 3
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h1"));
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 3, FrameFlags::kEndHeaders, "h3"));
+    mux.takeFrames();
+
+    EXPECT_EQ(mux.openStreams(), 2u);
+
+    // 对端发送 GOAWAY，lastStreamId = 1
+    std::string goawayPayload;
+    frame::appendBigEndian32(goawayPayload, 1); // lastStreamId = 1
+    frame::appendBigEndian32(goawayPayload, std::to_underlying(STREAM_ERROR::NO_ERROR));
+    mux.push(makeFrame(FRAME_TYPE::GOAWAY, 0, 0, goawayPayload));
+
+    // RFC 7540 §6.8: 流 3 (> lastStreamId) 必须已被关闭
+    EXPECT_NE(mux.stream(1), nullptr);
+    EXPECT_EQ(mux.stream(3), nullptr);
+    EXPECT_EQ(mux.openStreams(), 1u);
 }

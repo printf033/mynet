@@ -109,6 +109,9 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
+            // 现代 TLS 安全基线：强制启用最低 TLS 1.2 并禁用不安全压缩与客户端弱密码套件偏好
+            SSL_CTX_set_min_proto_version(protocol_.ctx, TLS1_2_VERSION);
+            SSL_CTX_set_options(protocol_.ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_COMPRESSION);
             if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
                 LOG_ERROR("Proactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, log::sslText());
@@ -652,8 +655,9 @@ namespace mynet
         [[nodiscard]] inline IO_STATUS postRecv(Session *session)
         {
             // kTLS RX offload 生效的 TLS 会话：内核已解密，recv 直接吐明文，
-            // 可复用 multishot + buffer ring 快路径；其余 TLS 会话仍走 poll→同步 SSL_read
-            if (session->conn.ssl() != nullptr && !session->conn.ktlsRxActive())
+            // 可复用 multishot + buffer ring 快路径；其余 TLS 会话仍走 poll→同步 SSL_read；
+            // 启用 splice 零拷贝的会话走 poll→handleRead(handleSplice)
+            if ((session->conn.ssl() != nullptr && !session->conn.ktlsRxActive()) || session->conn.isSpliceEnabled())
             {
                 return postPoll(session);
             }
@@ -723,10 +727,11 @@ namespace mynet
                         Handler &handler = session->conn.handler();
                         if (!handler.appendRequest(buf, static_cast<ssize_t>(cqe->res))) [[unlikely]]
                         {
-                            // 解析缓冲扩容失败：请求流断裂，降级关闭会话；本次读缓冲已回收
+                            // 解析缓冲扩容失败：请求流断裂，降级关闭会话；本次读缓冲已回收，避免泄漏 fd 与会话槽
                             LOG_ERROR("Proactor: appendRequest failed (allocation), fd {} closing", session->conn.fd());
-                            session->dead = true;
                             recycleBuffer(bid);
+                            closeSession(session);
+                            settleSession(session);
                             return;
                         }
                         if (handler.requestOverLimit()) [[unlikely]]

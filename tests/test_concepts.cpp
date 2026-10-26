@@ -124,15 +124,17 @@ TEST(Concepts, ProtocolHandlerContractEnforcement)
 TEST(Concepts, DerivedFromDatagramHandlerConstraints)
 {
     static_assert(DerivedFromDatagramHandler<DatagramHandler>);
-    static_assert(DerivedFromDatagramHandler<HandlerDatagramEcho>);
-    static_assert(DerivedFromHandlerBase<HandlerDatagramEcho>);
-    static_assert(Resettable<HandlerDatagramEcho>);
+    static_assert(DerivedFromDatagramHandler<HandlerEcho>);
+    static_assert(DerivedFromHandlerBase<HandlerEcho>);
+    static_assert(ProtocolHandler<HandlerEcho>);
+    static_assert(Resettable<HandlerEcho>);
     static_assert(!DerivedFromDatagramHandler<HandlerBase>);
     static_assert(!DerivedFromDatagramHandler<NonDerivedHandler>);
 
     EXPECT_TRUE(DerivedFromDatagramHandler<DatagramHandler>);
-    EXPECT_TRUE(DerivedFromDatagramHandler<HandlerDatagramEcho>);
-    EXPECT_TRUE(DerivedFromHandlerBase<HandlerDatagramEcho>);
+    EXPECT_TRUE(DerivedFromDatagramHandler<HandlerEcho>);
+    EXPECT_TRUE(DerivedFromHandlerBase<HandlerEcho>);
+    EXPECT_TRUE(ProtocolHandler<HandlerEcho>);
     EXPECT_FALSE(DerivedFromDatagramHandler<HandlerBase>);
 }
 

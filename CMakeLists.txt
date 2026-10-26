@@ -46,6 +46,7 @@ endif()
 option(MYNET_BUILD_EXAMPLES "Build example applications" ${MYNET_IS_TOP_LEVEL})
 option(MYNET_BUILD_TESTS   "Build tests"               ${MYNET_IS_TOP_LEVEL})
 option(MYNET_BUILD_BENCH   "Build benchmarks"          ${MYNET_IS_TOP_LEVEL})
+option(MYNET_ENABLE_LUA    "Enable sandboxed Lua hot-configuration support (requires LuaJIT)" ON)
 
 # -----------------------------------------------------------------------------
 # Subprojects & Dependencies

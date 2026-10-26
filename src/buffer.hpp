@@ -131,7 +131,7 @@ namespace mynet
          */
         inline void retrieve(size_t n) noexcept
         {
-            if (n >= readableBytes()) [[unlikely]]
+            if (n >= readableBytes())
             {
                 retrieveAll();
                 return;
@@ -181,7 +181,8 @@ namespace mynet
         inline void commitWritten(size_t n) noexcept
         {
             contract_assert(n <= writableBytes());
-            writeIndex_ += n;
+            const size_t actual = (n > writableBytes()) ? writableBytes() : n;
+            writeIndex_ += actual;
         }
 
         /**
@@ -197,11 +198,14 @@ namespace mynet
             {
                 return {};
             }
-            if (auto res = ensureWritable(n); !res) [[unlikely]]
+            if (capacity_ - writeIndex_ < n) [[unlikely]]
             {
-                return res;
+                if (auto res = ensureWritable(n); !res) [[unlikely]]
+                {
+                    return res;
+                }
             }
-            std::memcpy(writableBegin(), buf, n);
+            std::memcpy(data_ + writeIndex_, buf, n);
             writeIndex_ += n;
             return {};
         }

@@ -1,6 +1,10 @@
 #pragma once
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "concepts.hpp"
+#include "configHolder.hpp"
 #include "error.hpp"
 #include "handler.hpp"
 #include "log.hpp"
@@ -10,12 +14,15 @@
 #include <cstring>
 #include <deque>
 #include <expected>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <optional>
 #include <string>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 namespace mynet
@@ -92,6 +99,17 @@ namespace mynet
                 ::close(fd_);
                 fd_ = -1;
             }
+            if (pipeFd_[0] != -1)
+            {
+                ::close(pipeFd_[0]);
+                pipeFd_[0] = -1;
+            }
+            if (pipeFd_[1] != -1)
+            {
+                ::close(pipeFd_[1]);
+                pipeFd_[1] = -1;
+            }
+            pipePending_ = 0;
             addr_ = {};
             handshakeDone_ = false;
             writeQueue_.clear();
@@ -106,11 +124,26 @@ namespace mynet
             timerId_ = 0;
             lastActive_ = std::chrono::steady_clock::time_point{};
             events_ = 0;
+            writeHighWaterMark_ = getNetConfig().server.writeHighWaterMark;
             handler_.reset();
+            handler_.setMaxRequestBytes(getNetConfig().server.maxRequestBytes);
         }
 
         [[nodiscard]] inline int fd() const noexcept { return fd_; }
-        inline void setFd(int fd) noexcept { fd_ = fd; }
+        inline void setFd(int fd) noexcept
+        {
+            fd_ = fd;
+            if (fd_ >= 0)
+            {
+                if (getNetConfig().server.tcpNoDelay)
+                {
+                    constexpr int one = 1;
+                    [[maybe_unused]] auto _ = ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+                }
+                writeHighWaterMark_ = getNetConfig().server.writeHighWaterMark;
+                handler_.setMaxRequestBytes(getNetConfig().server.maxRequestBytes);
+            }
+        }
         [[nodiscard]] inline const sockaddr_in &addr() const noexcept { return addr_; }
         [[nodiscard]] inline sockaddr_in &addr() noexcept { return addr_; }
         [[nodiscard]] inline HandlerType &handler() noexcept { return handler_; }
@@ -120,6 +153,24 @@ namespace mynet
         [[nodiscard]] inline uint32_t events() const noexcept { return events_; }
         inline void setEvents(uint32_t events) noexcept { events_ = events; }
 
+        [[nodiscard]] inline bool isSpliceEnabled() const noexcept
+        {
+            if (ssl_ != nullptr || !getNetConfig().server.enableSplice)
+            {
+                return false;
+            }
+            if constexpr (requires {
+                              { HandlerType::kEnableSplice } -> std::convertible_to<bool>;
+                          })
+            {
+                if constexpr (HandlerType::kEnableSplice)
+                {
+                    return handler_.spliceEnabled();
+                }
+            }
+            return false;
+        }
+
         [[nodiscard]] inline bool wantRead() const noexcept
         {
             return !readPaused_ && !peerGone_ && state_ != CONN_STATE::CLOSED;
@@ -127,21 +178,22 @@ namespace mynet
 
         [[nodiscard]] inline bool wantWrite() const noexcept
         {
-            return pendingBytes_ > 0 || wantWrite_ || closeAfterWrite_ || state_ == CONN_STATE::HANDSHAKE ||
-                   handler_.hasResponse();
+            return pendingBytes_ > 0 || pipePending_ > 0 || wantWrite_ || closeAfterWrite_ ||
+                   state_ == CONN_STATE::HANDSHAKE || handler_.hasResponse();
         }
 
         [[nodiscard]] inline bool writeBlocked() const noexcept
         {
-            return pendingBytes_ > 0 || wantWrite_ || closeAfterWrite_ || handler_.hasResponse();
+            return pendingBytes_ > 0 || pipePending_ > 0 || wantWrite_ || closeAfterWrite_ || handler_.hasResponse();
         }
 
         [[nodiscard]] inline bool hasPendingWrite() const noexcept
         {
-            return pendingBytes_ > 0 || handler_.hasResponse();
+            return pendingBytes_ > 0 || pipePending_ > 0 || handler_.hasResponse();
         }
 
-        [[nodiscard]] inline size_t pendingBytes() const noexcept { return pendingBytes_; }
+        [[nodiscard]] inline size_t pendingBytes() const noexcept { return pendingBytes_ + pipePending_; }
+        [[nodiscard]] inline size_t pipePending() const noexcept { return pipePending_; }
         [[nodiscard]] inline size_t writeHighWaterMark() const noexcept { return writeHighWaterMark_; }
         inline void setWriteHighWaterMark(size_t n) noexcept { writeHighWaterMark_ = n; }
         [[nodiscard]] inline bool closeAfterWrite() const noexcept { return closeAfterWrite_; }
@@ -244,6 +296,160 @@ namespace mynet
 
         // ---- 读取主流程 (Read Path) ----
 
+        [[nodiscard]] inline bool ensurePipe() noexcept
+        {
+            if (pipeFd_[0] >= 0) [[likely]]
+            {
+                return true;
+            }
+            if (::pipe2(pipeFd_, O_NONBLOCK | O_CLOEXEC) < 0) [[unlikely]]
+            {
+                LOG_WARN("Connection::ensurePipe: fd {}: pipe2 failed: {}", fd_, log::errnoText(errno));
+                pipeFd_[0] = -1;
+                pipeFd_[1] = -1;
+                return false;
+            }
+            return true;
+        }
+
+        [[nodiscard]] IO_STATUS handleSplice() noexcept
+        {
+            constexpr size_t kSpliceChunk = 64 << 10;
+
+            // 1. 如果此前管道中尚有未排空的残留数据（对端 TCP 接收窗口满），先尝试刷出
+            while (pipePending_ > 0)
+            {
+                const ssize_t sOut =
+                    ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sOut > 0) [[likely]]
+                {
+                    pipePending_ -= static_cast<size_t>(sOut);
+                    touch();
+                    continue;
+                }
+                if (sOut < 0)
+                {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        wantWrite_ = true;
+                        readPaused_ = true;
+                        return IO_STATUS::KEEP;
+                    }
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    if (errno == ECONNRESET || errno == EPIPE)
+                    {
+                        peerGone_ = true;
+                        return IO_STATUS::CLOSE;
+                    }
+                    LOG_WARN("Connection::handleSplice: fd {}: splice pipe->socket failed: {}", fd_,
+                             log::errnoText(errno));
+                    peerGone_ = true;
+                    return IO_STATUS::CLOSE;
+                }
+                break;
+            }
+
+            if (pipePending_ > 0)
+            {
+                wantWrite_ = true;
+                readPaused_ = true;
+                return IO_STATUS::KEEP;
+            }
+
+            // 2. 管道已空，持续从对端 socket 读取数据移入管道，并直接环回写出（内核零拷贝）
+            while (!readPaused_)
+            {
+                const ssize_t sIn =
+                    ::splice(fd_, nullptr, pipeFd_[1], nullptr, kSpliceChunk, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sIn > 0) [[likely]]
+                {
+                    touch();
+                    pipePending_ += static_cast<size_t>(sIn);
+
+                    // 立即将摄入管道的数据原样零拷贝回显写入对端 socket
+                    while (pipePending_ > 0)
+                    {
+                        const ssize_t sOut = ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_,
+                                                      SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                        if (sOut > 0) [[likely]]
+                        {
+                            pipePending_ -= static_cast<size_t>(sOut);
+                            continue;
+                        }
+                        if (sOut < 0)
+                        {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            {
+                                wantWrite_ = true;
+                                readPaused_ = true;
+                                return IO_STATUS::KEEP;
+                            }
+                            if (errno == EINTR)
+                            {
+                                continue;
+                            }
+                            if (errno == ECONNRESET || errno == EPIPE)
+                            {
+                                peerGone_ = true;
+                                return IO_STATUS::CLOSE;
+                            }
+                            LOG_WARN("Connection::handleSplice: fd {}: splice pipe->socket failed: {}", fd_,
+                                     log::errnoText(errno));
+                            peerGone_ = true;
+                            return IO_STATUS::CLOSE;
+                        }
+                        break;
+                    }
+
+                    if (pipePending_ > 0)
+                    {
+                        wantWrite_ = true;
+                        readPaused_ = true;
+                        return IO_STATUS::KEEP;
+                    }
+                    continue;
+                }
+                if (sIn == 0)
+                {
+                    // 对端关闭写入端（EOF）
+                    peerGone_ = true;
+                    closeAfterWrite_ = true;
+                    if (pipePending_ > 0)
+                    {
+                        wantWrite_ = true;
+                        return IO_STATUS::KEEP;
+                    }
+                    return finishClose() ? IO_STATUS::CLOSE : IO_STATUS::KEEP;
+                }
+                // sIn < 0
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    break;
+                }
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                if (errno == ECONNRESET || errno == EPIPE)
+                {
+                    peerGone_ = true;
+                    return IO_STATUS::CLOSE;
+                }
+                LOG_WARN("Connection::handleSplice: fd {}: splice socket->pipe failed: {}", fd_, log::errnoText(errno));
+                peerGone_ = true;
+                return IO_STATUS::CLOSE;
+            }
+
+            if (peerGone_ && pipePending_ == 0 && pendingBytes_ == 0)
+            {
+                return finishClose() ? IO_STATUS::CLOSE : IO_STATUS::KEEP;
+            }
+            return IO_STATUS::KEEP;
+        }
+
         [[nodiscard]] IO_STATUS handleRead()
         {
             if (state_ == CONN_STATE::HANDSHAKE)
@@ -260,10 +466,37 @@ namespace mynet
                 state_ = CONN_STATE::OPEN;
             }
 
-            char buf[4 << 10];
+            if (isSpliceEnabled())
+            {
+                if (ensurePipe())
+                {
+                    return handleSplice();
+                }
+            }
+
             while (!readPaused_)
             {
-                std::expected<size_t, IO_END> rn = doRecv(buf, sizeof(buf));
+                const size_t credit = handler_.readCredit();
+                if (credit == 0) [[unlikely]]
+                {
+                    readPaused_ = true;
+                    break;
+                }
+
+                // 零拷贝直写：直接向 handler_ 的请求缓冲区发起底层接收，彻底消除栈临时缓冲与中间 memcpy
+                const size_t want = std::min(size_t{4 << 10}, credit);
+                auto prepRes = handler_.prepareRequestWritable(want);
+                if (!prepRes) [[unlikely]]
+                {
+                    LOG_ERROR("Connection: prepareRequestWritable failed (allocation), fd {} closing", fd_);
+                    peerGone_ = true;
+                    return IO_STATUS::CLOSE;
+                }
+
+                char *target = *prepRes;
+                const size_t maxLen = std::min(handler_.requestWritableBytes(), credit);
+
+                std::expected<size_t, IO_END> rn = doRecv(target, maxLen);
                 if (!rn)
                 {
                     if (rn.error() == IO_END::INTERRUPTED)
@@ -288,13 +521,7 @@ namespace mynet
                     break;
                 }
 
-                if (!handler_.appendRequest(buf, static_cast<ssize_t>(*rn))) [[unlikely]]
-                {
-                    // 解析缓冲扩容失败：请求流断裂，已收字节不可复用，连接降级关闭
-                    LOG_ERROR("Connection: appendRequest failed (allocation), fd {} closing", fd_);
-                    peerGone_ = true;
-                    return IO_STATUS::CLOSE;
-                }
+                handler_.commitRequest(*rn);
                 touch();
                 if (handler_.requestOverLimit()) [[unlikely]]
                 {
@@ -360,6 +587,49 @@ namespace mynet
                 state_ = CONN_STATE::OPEN;
             }
 
+            // 若存在内核 splice 管道残留数据，先冲刷管道
+            if (pipePending_ > 0)
+            {
+                while (pipePending_ > 0)
+                {
+                    const ssize_t sOut =
+                        ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                    if (sOut > 0) [[likely]]
+                    {
+                        pipePending_ -= static_cast<size_t>(sOut);
+                        touch();
+                        continue;
+                    }
+                    if (sOut < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            wantWrite_ = true;
+                            return IO_STATUS::KEEP;
+                        }
+                        if (errno == EINTR)
+                        {
+                            continue;
+                        }
+                        if (errno == ECONNRESET || errno == EPIPE)
+                        {
+                            peerGone_ = true;
+                            return IO_STATUS::CLOSE;
+                        }
+                        LOG_WARN("Connection::handleWrite: fd {}: splice pipe->socket failed: {}", fd_,
+                                 log::errnoText(errno));
+                        peerGone_ = true;
+                        return IO_STATUS::CLOSE;
+                    }
+                    break;
+                }
+                if (pipePending_ == 0)
+                {
+                    wantWrite_ = false;
+                    readPaused_ = false;
+                }
+            }
+
             collectResponses();
             const std::optional<IO_END> r = flush();
             if (r)
@@ -370,11 +640,11 @@ namespace mynet
                 }
                 return IO_STATUS::KEEP;
             }
-            if (closeAfterWrite_)
+            if (closeAfterWrite_ && pipePending_ == 0 && writeQueue_.empty())
             {
                 return finishClose() ? IO_STATUS::CLOSE : IO_STATUS::KEEP;
             }
-            if (!peerGone_ && handler_.readCredit() > 0 && pendingBytes_ <= writeHighWaterMark_)
+            if (!peerGone_ && pipePending_ == 0 && handler_.readCredit() > 0 && pendingBytes_ <= writeHighWaterMark_)
             {
                 readPaused_ = false;
             }
@@ -390,9 +660,82 @@ namespace mynet
                     writeOffset_ = 0;
                     return std::nullopt;
                 }
+
+                // 明文多条响应积压路径：利用向量化 I/O (writev) 聚合至多 16 个分片单次系统调用冲刷
+                if (ssl_ == nullptr && writeQueue_.size() > 1)
+                {
+                    constexpr size_t kMaxIov = 16;
+                    iovec iov[kMaxIov];
+                    size_t count = 0;
+                    for (auto it = writeQueue_.begin(); it != writeQueue_.end() && count < kMaxIov; ++it)
+                    {
+                        const size_t offset = (count == 0) ? writeOffset_ : 0;
+                        if (it->size() > offset)
+                        {
+                            iov[count].iov_base = const_cast<char *>(it->data() + offset);
+                            iov[count].iov_len = it->size() - offset;
+                            ++count;
+                        }
+                    }
+
+                    if (count > 0)
+                    {
+                        msghdr msg{};
+                        msg.msg_iov = iov;
+                        msg.msg_iovlen = count;
+                        const ssize_t sn = ::sendmsg(fd_, &msg, MSG_NOSIGNAL);
+                        if (sn > 0) [[likely]]
+                        {
+                            size_t remaining = static_cast<size_t>(sn);
+                            pendingBytes_ -= remaining;
+                            while (remaining > 0 && !writeQueue_.empty())
+                            {
+                                const size_t avail = writeQueue_.front().size() - writeOffset_;
+                                if (remaining >= avail)
+                                {
+                                    remaining -= avail;
+                                    if constexpr (requires { handler_.recycleSpare(std::move(writeQueue_.front())); })
+                                    {
+                                        handler_.recycleSpare(std::move(writeQueue_.front()));
+                                    }
+                                    writeQueue_.pop_front();
+                                    writeOffset_ = 0;
+                                }
+                                else
+                                {
+                                    writeOffset_ += remaining;
+                                    remaining = 0;
+                                }
+                            }
+                            continue;
+                        }
+                        if (sn < 0)
+                        {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            {
+                                return IO_END::WOULDBLOCK;
+                            }
+                            if (errno == EINTR)
+                            {
+                                continue;
+                            }
+                            if (errno == ECONNRESET || errno == EPIPE)
+                            {
+                                return IO_END::EOF_REACHED;
+                            }
+                            LOG_WARN("Connection::flush: fd {}: writev() failed: {}", fd_, log::errnoText(errno));
+                            return IO_END::FATAL;
+                        }
+                    }
+                }
+
                 std::string &front = writeQueue_.front();
                 if (writeOffset_ >= front.size())
                 {
+                    if constexpr (requires { handler_.recycleSpare(std::move(front)); })
+                    {
+                        handler_.recycleSpare(std::move(front));
+                    }
                     writeQueue_.pop_front();
                     writeOffset_ = 0;
                     continue;
@@ -465,6 +808,10 @@ namespace mynet
                 n -= step;
                 if (writeOffset_ >= front.size())
                 {
+                    if constexpr (requires { handler_.recycleSpare(std::move(front)); })
+                    {
+                        handler_.recycleSpare(std::move(front));
+                    }
                     writeQueue_.pop_front();
                     writeOffset_ = 0;
                 }
@@ -489,7 +836,10 @@ namespace mynet
         std::deque<std::string> writeQueue_;
         size_t writeOffset_ = 0;
         size_t pendingBytes_ = 0;
-        size_t writeHighWaterMark_ = 4 << 20;
+        size_t writeHighWaterMark_ = getNetConfig().server.writeHighWaterMark;
+
+        int pipeFd_[2] = {-1, -1};
+        size_t pipePending_ = 0;
 
         CONN_STATE state_ = CONN_STATE::OPEN;
         bool readPaused_ = false;

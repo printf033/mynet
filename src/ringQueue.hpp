@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstring>
 #include <expected>
+#include <limits>
 #include <new>
 #include <string>
 #include <utility>
@@ -66,6 +67,11 @@ namespace mynet
         {
             destroy();
             const size_t n = capacity == 0 ? 1 : capacity;
+            if (n > std::numeric_limits<size_t>::max() / sizeof(std::string)) [[unlikely]]
+            {
+                capacity_ = 0;
+                return std::unexpected(ERR::POOL_ALLOC_FAILED);
+            }
             slots_ = static_cast<std::string *>(::operator new[](n * sizeof(std::string), std::nothrow));
             if (slots_ == nullptr) [[unlikely]]
             {
@@ -97,7 +103,23 @@ namespace mynet
             {
                 return std::unexpected(ERR::QUEUE_FULL);
             }
-            slots_[(head_ + size_) % capacity_] = std::move(s);
+            const size_t tail = (head_ + size_ >= capacity_) ? (head_ + size_ - capacity_) : (head_ + size_);
+            slots_[tail] = std::move(s);
+            ++size_;
+            return {};
+        }
+
+        /**
+         * @brief 队尾推入一个字符串（左值引用拷贝）
+         */
+        [[nodiscard]] inline Result<> push(const std::string &s) noexcept
+        {
+            if (size_ >= capacity_) [[unlikely]]
+            {
+                return std::unexpected(ERR::QUEUE_FULL);
+            }
+            const size_t tail = (head_ + size_ >= capacity_) ? (head_ + size_ - capacity_) : (head_ + size_);
+            slots_[tail] = s;
             ++size_;
             return {};
         }
@@ -111,7 +133,8 @@ namespace mynet
             {
                 return std::unexpected(ERR::QUEUE_FULL);
             }
-            std::string &slot = slots_[(head_ + size_) % capacity_];
+            const size_t tail = (head_ + size_ >= capacity_) ? (head_ + size_ - capacity_) : (head_ + size_);
+            std::string &slot = slots_[tail];
             slot.clear();
             const Result<> r = appendTo(slot, sv);
             if (!r) [[unlikely]]
@@ -147,7 +170,7 @@ namespace mynet
                 // 归还字符串持有的堆块代价高于清空指针：直接 clear 保留容量复用
                 slot.clear();
             }
-            head_ = (head_ + 1) % capacity_;
+            head_ = (head_ + 1 >= capacity_) ? 0 : (head_ + 1);
             --size_;
         }
 
@@ -156,11 +179,13 @@ namespace mynet
          */
         inline void clear() noexcept
         {
-            while (size_ > 0)
+            for (size_t i = 0; i < size_; ++i)
             {
-                pop();
+                const size_t idx = (head_ + i >= capacity_) ? (head_ + i - capacity_) : (head_ + i);
+                slots_[idx].clear();
             }
             head_ = 0;
+            size_ = 0;
         }
 
         [[nodiscard]] inline bool empty() const noexcept { return size_ == 0; }
@@ -181,9 +206,7 @@ namespace mynet
             {
                 return {};
             }
-            const size_t base = dst.size();
-            dst.resize(base + sv.size());
-            std::memcpy(dst.data() + base, sv.data(), sv.size());
+            dst.append(sv.data(), sv.size());
             return {};
         }
 

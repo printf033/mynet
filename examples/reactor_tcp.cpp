@@ -37,10 +37,9 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     LOG_INFO("listening to {}:{}", ip, port);
-    // HandlerBase 实现回显并同时记录原始报文字节，
-    // 因此即使 TLS 客户端意外连接到此明文端口，也能在日志中看到其（加密的）ClientHello 而非完全无响应。
+    // HandlerEcho 实现通用回显：明文 TCP 传输下自动启用 Linux splice 内核零拷贝环回通道。
     using namespace mynet;
-    if (auto res = Reactor<EventSocket<HandlerBase>>().runTcp(ip, port); !res)
+    if (auto res = Reactor<EventSocket<HandlerEcho>>().runTcp(ip, port); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

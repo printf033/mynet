@@ -2,6 +2,7 @@
 
 #include "error.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -85,6 +86,7 @@ namespace mynet
             timer.repeat_ = interval.count() > 0;
             const uint64_t id = timer.id_;
             timers_.insert(id);
+            activeCount_.fetch_add(1, std::memory_order_release);
             heap_.push_back(std::move(timer));
             std::push_heap(heap_.begin(), heap_.end(), needSwap);
             return id;
@@ -105,6 +107,7 @@ namespace mynet
                 return std::unexpected(ERR::TIMER_NOT_FOUND);
             }
             timers_.erase(it);
+            activeCount_.fetch_sub(1, std::memory_order_release);
             return {};
         }
 
@@ -179,6 +182,7 @@ namespace mynet
                     else
                     {
                         timers_.erase(it);
+                        activeCount_.fetch_sub(1, std::memory_order_release);
                     }
                 }
             }
@@ -190,6 +194,11 @@ namespace mynet
 
             return callbacks.size();
         }
+
+        /**
+         * @brief 判定当前定时器队列是否为空（无活跃定时器，无锁快速路径）
+         */
+        [[nodiscard]] inline bool empty() const noexcept { return activeCount_.load(std::memory_order_relaxed) == 0; }
 
         /**
          * @brief 当前有效存活的定时器注册总数
@@ -218,6 +227,7 @@ namespace mynet
 
         std::vector<Timer> heap_;
         std::unordered_set<uint64_t> timers_;
+        std::atomic<size_t> activeCount_{0};
         uint64_t nextId_ = 1;
         std::mutex mutex_;
     };

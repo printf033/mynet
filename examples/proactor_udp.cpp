@@ -40,8 +40,8 @@ int main(int argc, char *argv[])
     // 每次仅下发单个 recvmsg 操作，因为发送端地址是消息的一部分且不存在连接来关联会话级缓冲区；
     // 每次接收完成处理完毕后立即重新装填读取操作。
     using namespace mynet;
-    HandlerDatagramEcho handler;
-    if (auto res = Proactor<EventSocket<HandlerDatagramEcho>>().runUdp(ip, port, handler); !res)
+    HandlerEcho handler;
+    if (auto res = Proactor<EventSocket<HandlerEcho>>().runUdp(ip, port, handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

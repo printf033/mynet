@@ -216,15 +216,15 @@ namespace mynet
                 return false;
             }
 
-            // 2. 对齐校验：地址必须严格与槽位起始点对齐
+            // 2. 对齐与索引映射：复用除法结果进行乘法回算对齐检验，消弭第二重整数取模除法
             const size_t offset = static_cast<size_t>(raw - base);
-            if (offset % stride != 0) [[unlikely]]
+            const size_t index = offset / stride;
+            if (offset != index * stride) [[unlikely]]
             {
                 return false;
             }
 
-            // 3. 映射到具体槽位
-            const size_t index = offset / stride;
+            // 3. 定位槽位
             Slot &slot = slots_[index];
 
             // 4. 重复释放校验：已被归还的槽位不可再次归还

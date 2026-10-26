@@ -5,6 +5,7 @@
 #include "handler.hpp"
 #include "log.hpp"
 #include <arpa/inet.h>
+#include <csignal>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
@@ -80,6 +81,7 @@ namespace mynet
             contract_assert(ip != nullptr);
             contract_assert(port >= 0 && port <= ((1 << 16) - 1));
             reset();
+            ::signal(SIGPIPE, SIG_IGN);
 
             addr.sin_family = AF_INET;
             if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]
@@ -135,6 +137,7 @@ namespace mynet
             contract_assert(ip != nullptr);
             contract_assert(port >= 0 && port <= ((1 << 16) - 1));
             reset();
+            ::signal(SIGPIPE, SIG_IGN);
 
             addr.sin_family = AF_INET;
             if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]

@@ -37,10 +37,9 @@ int main(int argc, char *argv[])
     int port = ntohs(addr->sin_port);
     freeaddrinfo(res);
     LOG_INFO("listening to {}:{}", ip, port);
-    // 与 reactor_tcp 相同的前端实现：回显并在日志中记录原始报文字节，
-    // 以便加密客户端连接时可被观察到而非保持沉默。
+    // 与 reactor_tcp 相同：采用 HandlerEcho 启用 Linux splice 内核零拷贝回显。
     using namespace mynet;
-    if (auto res = Proactor<EventSocket<HandlerBase>>().runTcp(ip, port); !res)
+    if (auto res = Proactor<EventSocket<HandlerEcho>>().runTcp(ip, port); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

@@ -41,8 +41,8 @@ int main(int argc, char *argv[])
     // 整个套接字共享一个处理器：数据报套接字是所有对端共享的单一端点，
     // 无需池化连接级状态，处理器的生命周期贯穿所有消息，而非随单个套接字连接回收。
     using namespace mynet;
-    HandlerDatagramEcho handler;
-    if (auto res = Reactor<EventSocket<HandlerDatagramEcho>>().runUdp(ip, port, handler); !res)
+    HandlerEcho handler;
+    if (auto res = Reactor<EventSocket<HandlerEcho>>().runUdp(ip, port, handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

@@ -1,10 +1,13 @@
 // HandlerBase 与 HandlerHttp：协议前端对驱动它的连接所承担的契约——
 // 读取数据的请求缓冲区、消费输出的响应队列，以及介于两者之间的背压信用额度。
+#include "connection.hpp"
 #include "datagram.hpp"
 #include "handler.hpp"
 #include "http/v1/handler.hpp"
 #include <gtest/gtest.h>
 #include <string>
+#include <sys/socket.h>
+#include <unistd.h>
 
 using namespace mynet;
 
@@ -66,6 +69,25 @@ TEST(HandlerBase, RequestLimitDrivesReadCredit)
     EXPECT_EQ(handler.requestBytes(), size_t{9});
     EXPECT_TRUE(handler.requestOverLimit());
     EXPECT_EQ(handler.readCredit(), size_t{0}); // 超出上限时不发放信用，永不下溢
+}
+
+TEST(HandlerBase, DirectWritableZeroCopyIngress)
+{
+    HandlerBase handler;
+    auto prepRes = handler.prepareRequestWritable(128);
+    ASSERT_TRUE(prepRes.has_value());
+    char *target = *prepRes;
+    ASSERT_NE(target, nullptr);
+    EXPECT_GE(handler.requestWritableBytes(), 128u);
+
+    std::memcpy(target, "direct-zero-copy", 16);
+    handler.commitRequest(16);
+
+    EXPECT_EQ(handler.requestBytes(), 16u);
+    handler.process();
+    ASSERT_TRUE(handler.hasResponse());
+    EXPECT_EQ(handler.takeResponse(), "direct-zero-copy");
+    EXPECT_EQ(handler.requestBytes(), 0u);
 }
 
 TEST(HandlerBase, RequestConsumeAndClearMoveTheCursor)
@@ -220,9 +242,63 @@ TEST(HandlerHttp, EmptyHeaderValueIsPreserved)
     EXPECT_TRUE(found);
 }
 
-TEST(HandlerDatagramEcho, EchoesDatagramToPeer)
+TEST(HandlerHttp, UrlTooLongReturns400)
 {
-    HandlerDatagramEcho handler;
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
+    std::string longUrl = "GET /" + std::string(9000, 'a') + " HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    feed(handler, longUrl);
+    handler.process();
+    ASSERT_TRUE(handler.hasResponse());
+    EXPECT_NE(handler.takeResponse().find("400 Bad Request"), std::string::npos);
+    EXPECT_TRUE(handler.closeAfterResponse());
+}
+
+TEST(HandlerHttp, TooManyHeadersReturns400)
+{
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
+    std::string req = "GET / HTTP/1.1\r\nHost: localhost\r\n";
+    for (int i = 0; i < 110; ++i)
+    {
+        req += "X-H-" + std::to_string(i) + ": val\r\n";
+    }
+    req += "\r\n";
+    feed(handler, req);
+    handler.process();
+    ASSERT_TRUE(handler.hasResponse());
+    EXPECT_NE(handler.takeResponse().find("400 Bad Request"), std::string::npos);
+    EXPECT_TRUE(handler.closeAfterResponse());
+}
+
+TEST(HandlerHttp, TotalHeadersTooLongReturns400)
+{
+    HandlerHttp<HTTP_MODE::REQUEST> handler;
+    std::string req = "GET / HTTP/1.1\r\nHost: localhost\r\n";
+    for (int i = 0; i < 10; ++i)
+    {
+        req += "X-Large-" + std::to_string(i) + ": " + std::string(8000, 'v') + "\r\n";
+    }
+    req += "\r\n";
+    feed(handler, req);
+    handler.process();
+    ASSERT_TRUE(handler.hasResponse());
+    EXPECT_NE(handler.takeResponse().find("400 Bad Request"), std::string::npos);
+    EXPECT_TRUE(handler.closeAfterResponse());
+}
+
+TEST(HandlerEcho, EchoesStreamToResponseQueue)
+{
+    HandlerEcho handler;
+    feed(handler, "stream_ping");
+    EXPECT_FALSE(handler.hasResponse());
+    handler.process();
+    ASSERT_TRUE(handler.hasResponse());
+    EXPECT_EQ(handler.takeResponse(), "stream_ping");
+    EXPECT_EQ(handler.requestBytes(), size_t{0});
+}
+
+TEST(HandlerEcho, EchoesDatagramToPeer)
+{
+    HandlerEcho handler;
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
     peer.sin_port = htons(12345);
@@ -238,9 +314,84 @@ TEST(HandlerDatagramEcho, EchoesDatagramToPeer)
     EXPECT_EQ(reply.peer.sin_port, htons(12345));
     EXPECT_FALSE(handler.hasReply());
 
-    // 验证 reset 正常清理
+    // 验证 reset 正常清理流式与数据报状态
+    feed(handler, "stream_data");
     handler.onDatagram(peer, "after_reset", 11);
     EXPECT_TRUE(handler.hasReply());
+    EXPECT_GT(handler.requestBytes(), 0u);
     handler.reset();
     EXPECT_FALSE(handler.hasReply());
+    EXPECT_EQ(handler.requestBytes(), 0u);
+}
+
+TEST(Connection, SpliceZeroCopyEcho)
+{
+    int sp[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
+
+    Connection<HandlerEcho> conn;
+    conn.setFd(sp[1]);
+    EXPECT_TRUE(conn.isSpliceEnabled());
+
+    const std::string msg = "kernel_splice_zero_copy_payload";
+    ssize_t wn = ::write(sp[0], msg.data(), msg.size());
+    ASSERT_EQ(wn, static_cast<ssize_t>(msg.size()));
+
+    // 执行 handleRead：通过 splice 内核通道直接环回
+    IO_STATUS status = conn.handleRead();
+    EXPECT_EQ(status, IO_STATUS::KEEP);
+
+    // 零拷贝核心断言：数据未进入用户态请求缓冲区
+    EXPECT_EQ(conn.handler().requestBytes(), 0u);
+    EXPECT_FALSE(conn.handler().hasResponse());
+
+    // 从对端套接字读出回显数据
+    char buf[128] = {};
+    ssize_t rn = ::read(sp[0], buf, sizeof(buf));
+    ASSERT_EQ(rn, static_cast<ssize_t>(msg.size()));
+    EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), msg);
+
+    // 验证 EOF 场景
+    ::close(sp[0]);
+    status = conn.handleRead();
+    EXPECT_EQ(status, IO_STATUS::CLOSE);
+}
+
+TEST(Connection, SpliceDisabledFallback)
+{
+    int sp[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
+
+    Connection<HandlerEcho> conn;
+    conn.setFd(sp[1]);
+    conn.handler().setSpliceEnabled(false);
+    EXPECT_FALSE(conn.isSpliceEnabled());
+
+    const std::string msg = "user_space_fallback_payload";
+    ssize_t wn = ::write(sp[0], msg.data(), msg.size());
+    ASSERT_EQ(wn, static_cast<ssize_t>(msg.size()));
+
+    // 执行 handleRead：降级进入用户态直写并 process()
+    IO_STATUS status = conn.handleRead();
+    EXPECT_EQ(status, IO_STATUS::KEEP);
+    EXPECT_TRUE(conn.hasPendingWrite());
+
+    // 发送回写
+    status = conn.handleWrite();
+    EXPECT_EQ(status, IO_STATUS::KEEP);
+
+    char buf[128] = {};
+    ssize_t rn = ::read(sp[0], buf, sizeof(buf));
+    ASSERT_EQ(rn, static_cast<ssize_t>(msg.size()));
+    EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), msg);
+
+    ::close(sp[0]);
+}
+
+TEST(RingQueue, InitCapacityOverflowReturnsError)
+{
+    RingQueue queue;
+    auto res = queue.init(std::numeric_limits<size_t>::max());
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error(), ERR::POOL_ALLOC_FAILED);
 }

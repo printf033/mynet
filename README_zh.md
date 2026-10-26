@@ -50,6 +50,10 @@
 - **热路径零动态堆内存分配**:
   - 地址稳定的固定容量对象池 `ObjectPool<T>`，内部使用连续槽位数组 `std::unique_ptr<Slot[]>` 与索引栈，彻底避免内存扩容重分配造成的指针失效与抖动。
   - 滑动窗口自收缩字节缓冲区 `Buffer`，针对长连接读取优化，有效平摊与消除内存重新分配。
+- **统一连接抽象与极端零拷贝传输**:
+  - `HandlerEcho` 通用回显处理器在明文 TCP 下自动启用 Linux `splice(2)` 内核零拷贝环回通道（`socket -> pipe -> socket`），真正达成 0 用户态内存拷贝与 0 内核内存拷贝。
+  - 用户态直写摄入架构（Direct Writable Ingress）：传输层通过 `prepareRequestWritable` 直接向 `Buffer` 底层内存发起 `recv()`，彻底消除临时栈缓冲与中间 `memcpy`。
+  - 向量化批量发送：明文连接支持通过 `writev(2)` 单次系统调用原子合并聚合冲刷至多 16 个响应切片，大幅降低系统调用开销。
 - **透明统一的安全传输层**:
   - 一等公民级 OpenSSL 3.x 集成，明文 TCP 与加密 TLS 复用同一套数据收发主干逻辑。
   - 原生支持 ALPN 协议协商、SNI 域名匹配、异步握手流控制与平滑双向 TLS 关闭（`SSL_shutdown`）。
@@ -60,6 +64,7 @@
 - **完备的系统可观测性与运维友好性**:
   - 强类型枚举错误码 `Err` 与 I/O 状态码 `IoEnd`。
   - 严格的输出通道隔离：业务数据通过 `stdout` 传输，结构化诊断日志通过 `mynet::log`（封装 `thirdparty/mylog`）输出至 `stderr`，防止管道重定向数据被污染。
+  - **沙箱化 Lua 配置热重载与无锁代次快照**：支持 `mynet::reloadConfig("config.lua")`，在裸 `lua_State` 中执行（禁用 `os`/`io`/`package` 等库防命令执行），5000 万指令配额防死循环，支持数值边界安全钳位与全量事务级校验（All-or-Nothing）；配合 `ConfigHolder`/`ConfigSnapshot` 实现读路径零锁、零拷贝快照访问，并自动联合同步热重载 `mylog` 日志配置。
 
 ---
 
@@ -375,8 +380,10 @@ mynet/
 ├── README_zh.md                # 中文说明文档
 │
 ├── src/                        # 核心头文件库实现
-│   ├── CMakeLists.txt          # 纯头文件 Interface 接口库定义（INTERFACE mynet）
+│   ├── CMakeLists.txt          # 纯头文件 Interface 接口库定义（INTERFACE mynet 与 mynet_lua）
 │   ├── concepts.hpp            # C++20/C++26 Concept 概念定义与类型约束
+│   ├── configHolder.hpp        # 统一网络配置结构体与代次快照（NetConfig / ConfigHolder / ConfigSnapshot）
+│   ├── configer_lua.hpp        # 沙箱化 Lua 配置热重载引擎（reloadConfig，集成 mylog 配置热重载）
 │   ├── error.hpp               # 强类型错误码枚举 Err 与 I/O 状态 IoEnd
 │   ├── log.hpp                 # 日志适配门面（封装 mylog 并路由至 stderr）
 │   ├── buffer.hpp              # 滑动窗口自收缩低开销字节缓冲区
@@ -387,23 +394,32 @@ mynet/
 │   ├── event.hpp               # 套接字及 SSL 监听通道抽象
 │   ├── connection.hpp          # 统一的 TCP/TLS 传输层核心实现与响应缓冲队列
 │   ├── datagram.hpp            # UDP 数据报传输层抽象
-│   ├── handler.hpp             # 基础协议处理器与回显处理器（HandlerBase 与 HandlerDatagramEcho）
+│   ├── handler.hpp             # 基础协议处理器与通用回显处理器（HandlerBase 与 HandlerEcho）
 │   ├── http/                   # HTTP 协议族实现
 │   │   ├── v1/
 │   │   │   └── handler.hpp     # 基于 llhttp 的 HTTP/1.x 协议处理器（HandlerHttp）
-│   │   └── v2/
-│   │       ├── frame.hpp       # HTTP/2 兼容的标准二进制协议帧编解码器
-│   │       ├── streamTable.hpp # 开放寻址零分配流哈希表
-│   │       ├── multiplexer.hpp # 基于信用的 HTTP/2 流多路复用调度器
-│   │       └── handler.hpp     # HTTP/2 协议处理器入口（HandlerHttp2）
+│   │   ├── v2/
+│   │   │   ├── frame.hpp       # HTTP/2 兼容的标准二进制协议帧编解码器
+│   │   │   ├── streamTable.hpp # 开放寻址零分配流哈希表
+│   │   │   ├── multiplexer.hpp # 基于信用的 HTTP/2 流多路复用调度器
+│   │   │   └── handler.hpp     # HTTP/2 协议处理器入口（HandlerHttp2）
+│   │   └── v3/
+│   │       ├── varint.hpp      # RFC 9000 QUIC/HTTP/3 变长整数编解码器
+│   │       ├── frame.hpp       # RFC 9114 HTTP/3 协议分帧、设置与错误码
+│   │       ├── qpack.hpp       # RFC 9204 QPACK 静态表与首部编解码器
+│   │       ├── quic.hpp        # RFC 9000 QUIC 1-RTT 短首部报文与 STREAM 传输帧
+│   │       ├── streamTable.hpp # HTTP/3 逻辑流表与状态跟踪
+│   │       └── handler.hpp     # 统一 HTTP/3 协议处理器（HandlerHttp3）
 │   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎
 │   ├── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎
 │   └── client.hpp              # 管道式双向网络客户端（stdin/stdout 桥接）
 │
 ├── examples/                   # 示例程序与可执行文件
+│   ├── config.lua              # 包含完整中英文注释的沙箱化 Lua 配置样例
 │   ├── reactor_tcp.cpp         # 基于 Reactor 的 TCP 回显服务端
 │   ├── reactor_ssl.cpp         # 基于 Reactor 的 TLS 安全服务端
 │   ├── reactor_udp.cpp         # 基于 Reactor 的 UDP 回显服务端
+│   ├── reactor_http3.cpp       # 基于 Reactor 的 HTTP/3 服务端（QUIC/UDP）
 │   ├── reactor_multiplex.cpp   # 基于 Reactor 的流多路复用服务端
 │   ├── proactor_tcp.cpp        # 基于 Proactor 与内核缓冲环的 TCP 服务端
 │   ├── proactor_ssl.cpp        # 基于 Proactor 的 TLS 安全服务端（Poll 驱动）
@@ -415,10 +431,12 @@ mynet/
 │
 ├── tests/                      # 单元测试工程（Google Test + ASan 内存安全检查）
 │   ├── test_buffer.cpp         # 缓冲区边界与压缩测试
+│   ├── test_config_lua.cpp     # 沙箱化 Lua 配置热重载与边界钳位测试
 │   ├── test_concepts.cpp       # 概念约束与可重置性测试
 │   ├── test_error.cpp          # 错误码一致性测试
 │   ├── test_frame.cpp          # 协议帧拆装包测试
 │   ├── test_handler.cpp        # 处理器状态流转测试
+│   ├── test_http3.cpp          # HTTP/3 变长整数、分帧、QPACK 与 QUIC 报文测试
 │   ├── test_multiplexer.cpp    # 流多路复用状态机与流控测试
 │   ├── test_object_pool.cpp    # 对象池生命周期与指针稳定性测试
 │   └── test_timer.cpp          # 定时器精度与取消测试

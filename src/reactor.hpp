@@ -124,6 +124,9 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
+            // 现代 TLS 安全基线：强制启用最低 TLS 1.2 并禁用不安全压缩与客户端弱密码套件偏好
+            SSL_CTX_set_min_proto_version(protocol_.ctx, TLS1_2_VERSION);
+            SSL_CTX_set_options(protocol_.ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_COMPRESSION);
             if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
                 LOG_ERROR("Reactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, log::sslText());

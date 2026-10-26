@@ -1,3 +1,4 @@
+#include "loop.hpp"
 #include "timer.hpp"
 #include <atomic>
 #include <chrono>
@@ -269,4 +270,18 @@ TEST(TimerQueue, MixedBatchReschedulesRepeatingTimerWithoutStarvation)
     EXPECT_TRUE(q.cancelTimer(repeatId).has_value());
     EXPECT_EQ(q.size(), 0u);
     EXPECT_EQ(q.nextExpire(), TimerQueue::Time::max());
+}
+
+TEST(EventLoop, ReentrantRunReturnsAlreadyRunning)
+{
+    EventLoop loop;
+    Result<> innerRes = {};
+    loop.queueInLoop([&] {
+        innerRes = loop.run();
+        loop.quit();
+    });
+    auto res = loop.run();
+    EXPECT_TRUE(res.has_value());
+    EXPECT_FALSE(innerRes.has_value());
+    EXPECT_EQ(innerRes.error(), ERR::LOOP_ALREADY_RUNNING);
 }

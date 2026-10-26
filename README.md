@@ -50,6 +50,10 @@
 - **Zero-Allocation Hot Paths**:
   - Address-stable fixed-capacity `ObjectPool<T>` preventing memory reallocation and pointer invalidation during event dispatch.
   - Sliding-window auto-compacting `Buffer` designed for long-lived connections.
+- **Extreme Zero-Copy Data Pipelines**:
+  - Linux `splice(2)` kernel-level zero-copy looping: `HandlerEcho` automatically activates an in-kernel non-blocking pipe buffer (`socket -> pipe -> socket`) for plain TCP, delivering 0 user-space copies and 0 kernel memory copies.
+  - Direct writable ingress: connections read directly into pre-allocated `Buffer` write windows via `prepareRequestWritable`, eliminating stack scratch buffers and intermediary `memcpy`.
+  - Vectorized scatter-gather I/O: plain connections aggregate up to 16 response segments per single `writev(2)` syscall.
 - **Transparent Security**:
   - First-class OpenSSL 3.x integration with zero code duplication between plain TCP and TLS pipelines.
   - Full support for ALPN negotiation, SNI host matching, and asynchronous TLS handshakes.
@@ -60,6 +64,7 @@
 - **Observability & Operability**:
   - Exhaustive enum class error codes (`Err` and `IoEnd`).
   - Clean separation: data flows over stdout, structured diagnostic logging routes to `stderr` via `mynet::log` (wrapping submodule `mylog`), preventing stream pipeline corruption.
+  - **Sandboxed Lua Hot-Configuration & Lockless Snapshots**: `mynet::reloadConfig("config.lua")` executes in a bare `lua_State` (no standard libraries like `os`/`io` to prevent code injection) with an instruction budget limit of 50M steps; supports transactional validation (All-or-Nothing) and value clamping. Backed by `ConfigHolder` and `ConfigSnapshot` for lock-free read-paths, and seamlessly synchronizes with `mylog`'s logging configuration in a unified config file.
 
 ---
 
@@ -367,8 +372,10 @@ mynet/
 ├── README_zh.md                # Chinese Documentation
 │
 ├── src/                        # Core Header-Only Implementation
-│   ├── CMakeLists.txt          # Header-only interface library definition (INTERFACE mynet)
+│   ├── CMakeLists.txt          # Header-only interface library definition (INTERFACE mynet & mynet_lua)
 │   ├── concepts.hpp            # C++20/C++26 Concept constraints
+│   ├── configHolder.hpp        # Global network configuration & generation snapshots (NetConfig / ConfigHolder)
+│   ├── configer_lua.hpp        # Sandboxed Lua hot-reload engine (reloadConfig, integrated with mylog reload)
 │   ├── error.hpp               # Strongly-typed Err & IoEnd definitions
 │   ├── log.hpp                 # Logging facade (mylog -> stderr)
 │   ├── buffer.hpp              # Low-allocation auto-compacting byte buffer
@@ -379,23 +386,32 @@ mynet/
 │   ├── event.hpp               # Socket & SSL listener abstractions
 │   ├── connection.hpp          # Unified TCP/TLS connection engine with write queue
 │   ├── datagram.hpp            # Datagram transport abstraction (UDP)
-│   ├── handler.hpp             # HandlerBase and HandlerDatagramEcho base handlers
+│   ├── handler.hpp             # HandlerBase and HandlerEcho handlers
 │   ├── http/                   # HTTP protocol implementations
 │   │   ├── v1/
 │   │   │   └── handler.hpp     # HTTP/1.x protocol handler (HandlerHttp)
-│   │   └── v2/
-│   │       ├── frame.hpp       # HTTP/2 wire-compatible framing codec
-│   │       ├── streamTable.hpp # Open-addressing zero-allocation stream hash table
-│   │       ├── multiplexer.hpp # HTTP/2 credit-based stream multiplexer
-│   │       └── handler.hpp     # HTTP/2 protocol handler entry (HandlerHttp2)
+│   │   ├── v2/
+│   │   │   ├── frame.hpp       # HTTP/2 wire-compatible framing codec
+│   │   │   ├── streamTable.hpp # Open-addressing zero-allocation stream hash table
+│   │   │   ├── multiplexer.hpp # HTTP/2 credit-based stream multiplexer
+│   │   │   └── handler.hpp     # HTTP/2 protocol handler entry (HandlerHttp2)
+│   │   └── v3/
+│   │       ├── varint.hpp      # RFC 9000 QUIC/HTTP/3 variable-length integer codec
+│   │       ├── frame.hpp       # RFC 9114 HTTP/3 framing, settings and error codes
+│   │       ├── qpack.hpp       # RFC 9204 QPACK static table and header field codec
+│   │       ├── quic.hpp        # RFC 9000 QUIC short-header packet & STREAM frames
+│   │       ├── streamTable.hpp # HTTP/3 logical stream table and state tracker
+│   │       └── handler.hpp     # Unified HTTP/3 protocol handler (HandlerHttp3)
 │   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine
 │   ├── proactor.hpp            # io_uring-based completion Proactor engine
 │   └── client.hpp              # Pipeline client abstraction (stdin/stdout bridge)
 │
 ├── examples/                   # Ready-to-run Executable Samples
+│   ├── config.lua              # Documented sandboxed Lua configuration example
 │   ├── reactor_tcp.cpp         # Reactor TCP echo server
 │   ├── reactor_ssl.cpp         # Reactor TLS server
 │   ├── reactor_udp.cpp         # Reactor UDP echo server
+│   ├── reactor_http3.cpp       # Reactor HTTP/3 server over QUIC/UDP
 │   ├── reactor_multiplex.cpp   # Reactor stream multiplexer server
 │   ├── proactor_tcp.cpp        # Proactor TCP server with buffer ring
 │   ├── proactor_ssl.cpp        # Proactor TLS server (poll-driven)
@@ -408,9 +424,11 @@ mynet/
 ├── tests/                      # Unit Test Suite (Google Test + ASan)
 │   ├── test_buffer.cpp
 │   ├── test_concepts.cpp
+│   ├── test_config_lua.cpp     # Sandboxed Lua configuration hot-reloading tests
 │   ├── test_error.cpp
 │   ├── test_frame.cpp
 │   ├── test_handler.cpp
+│   ├── test_http3.cpp
 │   ├── test_multiplexer.cpp
 │   ├── test_object_pool.cpp
 │   └── test_timer.cpp

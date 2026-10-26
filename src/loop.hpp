@@ -101,7 +101,10 @@ namespace mynet
         {
             threadId_ = std::this_thread::get_id();
             events_.resize(1 << 10);
-            [[maybe_unused]] auto _ = init();
+            if (auto res = init(); !res) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop: constructor init failed: {}", toString(res.error()));
+            }
         }
 
         ~EventLoop() noexcept
@@ -211,9 +214,14 @@ namespace mynet
                 LOG_ERROR("EventLoop::run: no epoll descriptor -- init() never succeeded");
                 return std::unexpected(ERR::NOT_INITIALISED);
             }
+            bool expected = false;
+            if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::run: loop is already running");
+                return std::unexpected(ERR::LOOP_ALREADY_RUNNING);
+            }
             threadId_ = std::this_thread::get_id();
             quit_.store(false, std::memory_order_relaxed);
-            running_.store(true, std::memory_order_release);
             while (!quit_.load(std::memory_order_acquire))
             {
                 const int timeout = nextTimeout();
@@ -233,9 +241,15 @@ namespace mynet
                     events_.resize(events_.size() * 2);
                 }
 
-                const Time now = Clock::now();
-                timerQueue_.handleExpired(now);
-                doPendingTasks();
+                if (!timerQueue_.empty()) [[unlikely]]
+                {
+                    const Time now = Clock::now();
+                    timerQueue_.handleExpired(now);
+                }
+                if (hasPending_.load(std::memory_order_acquire)) [[unlikely]]
+                {
+                    doPendingTasks();
+                }
 
                 for (int i = 0; i < n; ++i)
                 {
@@ -300,6 +314,7 @@ namespace mynet
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 pending_.push_back(std::move(task));
+                hasPending_.store(true, std::memory_order_release);
             }
             wakeup();
         }
@@ -335,6 +350,10 @@ namespace mynet
     private:
         inline int nextTimeout()
         {
+            if (timerQueue_.empty()) [[likely]]
+            {
+                return -1;
+            }
             const Time next = timerQueue_.nextExpire();
             if (next == Time::max())
             {
@@ -356,14 +375,20 @@ namespace mynet
 
         inline void doPendingTasks()
         {
+            if (!hasPending_.load(std::memory_order_acquire)) [[likely]]
+            {
+                return;
+            }
             std::deque<Task> tasks;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (pending_.empty())
                 {
+                    hasPending_.store(false, std::memory_order_release);
                     return;
                 }
                 tasks.swap(pending_);
+                hasPending_.store(false, std::memory_order_release);
             }
             for (Task &task : tasks)
             {
@@ -403,6 +428,7 @@ namespace mynet
         std::vector<struct epoll_event> events_;
         EventCallback eventCallback_{};
         TimerQueue timerQueue_{};
+        std::atomic<bool> hasPending_{false};
         std::mutex mutex_{};
         std::deque<Task> pending_{};
     };

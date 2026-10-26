@@ -54,7 +54,8 @@ namespace mynet
         STREAM_CLOSED = 0x5,
         FRAME_SIZE_ERROR = 0x6,
         REFUSED_STREAM = 0x7,
-        CANCEL = 0x8
+        CANCEL = 0x8,
+        ENHANCE_YOUR_CALM = 0xb
     };
 
     /**
@@ -138,6 +139,12 @@ namespace mynet
             connSendWindow_ = mux::kInitialWindowSize;
             connRecvWindow_ = mux::kInitialWindowSize;
             lastPeerStreamId_ = 0;
+            consecutiveResets_ = 0;
+            unackedPings_ = 0;
+            unackedSettings_ = 0;
+            consecutiveEmptyFrames_ = 0;
+            consecutiveWindowUpdates_ = 0;
+            consecutivePriorityFrames_ = 0;
             settingsSent_ = false;
             goawayReceived_ = false;
             outScratch_.clear();
@@ -210,7 +217,7 @@ namespace mynet
             }
         }
 
-    private:
+    protected:
         inline void ensureStreamPool()
         {
             if (streamPool_.capacity() == 0 || !streams_.ready()) [[unlikely]]
@@ -280,6 +287,14 @@ namespace mynet
                 if (frame.streamId == 0) [[unlikely]]
                 {
                     protocolFailure(STREAM_ERROR::PROTOCOL_ERROR, "PRIORITY on the connection stream");
+                    break;
+                }
+                // CVE-2019-9513 Priority Flood 防御
+                ++consecutivePriorityFrames_;
+                if (consecutivePriorityFrames_ > kMaxConsecutivePriorityFrames) [[unlikely]]
+                {
+                    protocolFailure(STREAM_ERROR::ENHANCE_YOUR_CALM, "excessive PRIORITY frames (priority flood)");
+                    break;
                 }
                 break;
             case FRAME_TYPE::PUSH_PROMISE:
@@ -295,6 +310,13 @@ namespace mynet
         {
             if (!canOpenStream(frame.streamId, "HEADERS")) [[unlikely]]
             {
+                return;
+            }
+            // CVE-2024-27983 Continuation Flood 防御：
+            // 在不支持多帧首部分片的轻量多路复用器中，首部必须在单帧内完整终结 (END_HEADERS)
+            if (!frame.hasFlag(FrameFlags::kEndHeaders)) [[unlikely]]
+            {
+                protocolFailure(STREAM_ERROR::PROTOCOL_ERROR, "HEADERS frame missing END_HEADERS flag");
                 return;
             }
             StreamSlot *slot = stream(frame.streamId);
@@ -366,14 +388,38 @@ namespace mynet
             {
                 return;
             }
-            if (bytes.size() > connRecvWindow_ || bytes.size() > slot->recvWindow) [[unlikely]]
+            if (bytes.empty() && !frame.hasFlag(FrameFlags::kEndStream))
+            {
+                // CVE-2019-9518 Empty Frame Flood 防御：连续空 DATA 帧攻击
+                ++consecutiveEmptyFrames_;
+                if (consecutiveEmptyFrames_ > kMaxConsecutiveEmptyFrames) [[unlikely]]
+                {
+                    protocolFailure(STREAM_ERROR::ENHANCE_YOUR_CALM,
+                                    "excessive empty non-terminal frames (empty frame flood)");
+                    return;
+                }
+            }
+            else
+            {
+                consecutiveEmptyFrames_ = 0;
+                consecutiveResets_ = 0;
+                unackedPings_ = 0;
+                unackedSettings_ = 0;
+                consecutiveWindowUpdates_ = 0;
+                consecutivePriorityFrames_ = 0;
+            }
+
+            // RFC 7540 Section 6.1: 无论是否包含填充，整个 DATA 帧载荷长度（含 pad length 与 padding）
+            // 均计入连接级与流级流量控制窗口扣减
+            const size_t flowControlBytes = frame.payload.size();
+            if (flowControlBytes > connRecvWindow_ || flowControlBytes > slot->recvWindow) [[unlikely]]
             {
                 protocolFailure(STREAM_ERROR::FLOW_CONTROL_ERROR,
                                 "a DATA frame larger than the receive window it counts against");
                 return;
             }
-            connRecvWindow_ -= static_cast<uint32_t>(bytes.size());
-            slot->recvWindow -= static_cast<uint32_t>(bytes.size());
+            connRecvWindow_ -= static_cast<uint32_t>(flowControlBytes);
+            slot->recvWindow -= static_cast<uint32_t>(flowControlBytes);
 
             onStreamData(frame.streamId, bytes);
             if (auto res = slot->handler->appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size())); !res)
@@ -408,6 +454,18 @@ namespace mynet
                 {
                     protocolFailure(STREAM_ERROR::PROTOCOL_ERROR, "SETTINGS ACK with a payload");
                 }
+                if (unackedSettings_ > 0)
+                {
+                    --unackedSettings_;
+                }
+                return;
+            }
+            // CVE-2019-9515 Settings Flood 防御：限制对端连续未确认 SETTINGS 激增
+            ++unackedSettings_;
+            if (unackedSettings_ > kMaxUnackedSettings) [[unlikely]]
+            {
+                protocolFailure(STREAM_ERROR::ENHANCE_YOUR_CALM,
+                                "excessive SETTINGS frames without peer activity (settings flood)");
                 return;
             }
             if (frame.payload.size() % 6 != 0) [[unlikely]]
@@ -470,6 +528,18 @@ namespace mynet
             }
             if (frame.hasFlag(FrameFlags::kAck))
             {
+                if (unackedPings_ > 0)
+                {
+                    --unackedPings_;
+                }
+                return;
+            }
+            // CVE-2019-9512 Ping Flood 防御：单连接连续未排空 PING 突发上限
+            ++unackedPings_;
+            if (unackedPings_ > kMaxUnackedPings) [[unlikely]]
+            {
+                protocolFailure(STREAM_ERROR::ENHANCE_YOUR_CALM,
+                                "excessive PING frames without peer activity (ping flood)");
                 return;
             }
             Frame ack;
@@ -485,6 +555,15 @@ namespace mynet
             if (frame.payload.size() != 4) [[unlikely]]
             {
                 protocolFailure(STREAM_ERROR::PROTOCOL_ERROR, "WINDOW_UPDATE payload is not 4 bytes");
+                return;
+            }
+            // CVE-2019-9511 / CVE-2019-9513 Window Update Flood 防御：
+            // 检测连续快速 WINDOW_UPDATE 风暴，防止频繁重排与迭代开销
+            ++consecutiveWindowUpdates_;
+            if (consecutiveWindowUpdates_ > kMaxConsecutiveWindowUpdates) [[unlikely]]
+            {
+                protocolFailure(STREAM_ERROR::ENHANCE_YOUR_CALM,
+                                "excessive WINDOW_UPDATE frames (window update flood)");
                 return;
             }
             const uint32_t increment = frame::readBigEndian32(frame.payload.data()) & frame::kStreamIdMask;
@@ -548,6 +627,14 @@ namespace mynet
                 protocolFailure(STREAM_ERROR::PROTOCOL_ERROR, "RST_STREAM on an idle stream");
                 return;
             }
+            // CVE-2023-44487 Rapid Reset 防御：
+            // 检测连续快速重置风暴（客户端开流后立即发 RST_STREAM），防止 CPU 与对象池耗尽
+            ++consecutiveResets_;
+            if (consecutiveResets_ > kMaxConsecutiveResets) [[unlikely]]
+            {
+                protocolFailure(STREAM_ERROR::ENHANCE_YOUR_CALM, "excessive RST_STREAM frames (rapid reset attack)");
+                return;
+            }
             closeStream(frame.streamId);
         }
 
@@ -567,6 +654,26 @@ namespace mynet
             const uint32_t lastId = frame::readBigEndian32(frame.payload.data()) & frame::kStreamIdMask;
             const auto code = static_cast<STREAM_ERROR>(frame::readBigEndian32(frame.payload.data() + 4));
             LOG_INFO("Multiplexer: peer sent GOAWAY (last stream {}, code {})", lastId, std::to_underlying(code));
+
+            // RFC 7540 Section 6.8:
+            // 收到 GOAWAY 后，任何 streamId > lastId 的活跃流均视为未被对端处理，
+            // 按照 REFUSED_STREAM 语义关闭并回收流槽位。
+            if (streams_.ready())
+            {
+                std::vector<uint32_t> toClose;
+                for (size_t i = 0; i < streams_.capacity(); ++i)
+                {
+                    const uint32_t id = streams_.keyAt(i);
+                    if (id != 0 && id > lastId)
+                    {
+                        toClose.push_back(id);
+                    }
+                }
+                for (uint32_t id : toClose)
+                {
+                    closeStream(id);
+                }
+            }
         }
 
         // ---- 流生命周期管理 ----
@@ -901,6 +1008,13 @@ namespace mynet
             return true;
         }
 
+        static constexpr size_t kMaxConsecutiveResets = 100;
+        static constexpr size_t kMaxUnackedPings = 64;
+        static constexpr size_t kMaxUnackedSettings = 16;
+        static constexpr size_t kMaxConsecutiveEmptyFrames = 32;
+        static constexpr size_t kMaxConsecutiveWindowUpdates = 100;
+        static constexpr size_t kMaxConsecutivePriorityFrames = 64;
+
         ObjectPool<StreamHandler> streamPool_{};
         mux::StreamTable<StreamSlot> streams_{};
         FrameDecoder decoder_{};
@@ -910,6 +1024,12 @@ namespace mynet
         uint32_t connRecvWindow_ = mux::kInitialWindowSize;
         uint32_t initialSendWindow_ = mux::kInitialWindowSize;
         uint32_t lastPeerStreamId_ = 0;
+        size_t consecutiveResets_ = 0;
+        size_t unackedPings_ = 0;
+        size_t unackedSettings_ = 0;
+        size_t consecutiveEmptyFrames_ = 0;
+        size_t consecutiveWindowUpdates_ = 0;
+        size_t consecutivePriorityFrames_ = 0;
         bool settingsSent_ = false;
         bool goawayReceived_ = false;
     };
