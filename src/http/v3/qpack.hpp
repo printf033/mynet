@@ -214,15 +214,14 @@ namespace mynet
             {
                 const uint8_t b = *ptr++;
                 --rem;
+                // m 以 7 递增，仅取 0,7,...,56,63：m <= 56 时 chunk << m 必小于 2^63 无截断，
+                // m == 63 一刀切拒绝（保守于 RFC 上限，防止整数展开）。契约由
+                // PrefixedIntDecodeRejectsAtLimit 测试锁定。
                 if (m > 62) [[unlikely]]
                 {
                     return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
                 }
                 const uint64_t chunk = static_cast<uint64_t>(b & 0x7fu);
-                if (m == 63 && chunk > 1) [[unlikely]]
-                {
-                    return std::unexpected(H3_ERROR::H3_EXCESSIVE_LOAD);
-                }
                 const uint64_t addend = chunk << m;
                 if (val > (std::numeric_limits<uint64_t>::max)() - addend) [[unlikely]]
                 {

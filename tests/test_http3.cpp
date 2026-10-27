@@ -413,6 +413,24 @@ TEST(Http3Qpack, PrefixedIntDecodeOverflowRejected)
     EXPECT_EQ(res.error(), H3_ERROR::H3_EXCESSIVE_LOAD);
 }
 
+TEST(Http3Qpack, PrefixedIntDecodeRejectsAtLimit)
+{
+    // 首字节 0x7f 后跟 9 个 0xff：m 恰好走到 63，下一轮迭代触发 m > 62 拒绝。
+    // 锁定"m == 63 一刀切拒绝"的边界契约，防止未来把溢出检查放宽或挪位。
+    std::string malformed;
+    malformed.push_back(static_cast<char>(0x7f));
+    for (int i = 0; i < 9; ++i)
+    {
+        malformed.push_back(static_cast<char>(0xff));
+    }
+    malformed.push_back(static_cast<char>(0x00)); // 第 10 个字节，进入 m == 63 分支
+    const auto *ptr = reinterpret_cast<const uint8_t *>(malformed.data());
+    size_t rem = malformed.size();
+    auto res = decodePrefixedInt(ptr, rem, 7);
+    EXPECT_FALSE(res.has_value());
+    EXPECT_EQ(res.error(), H3_ERROR::H3_EXCESSIVE_LOAD);
+}
+
 TEST(Http3Qpack, RejectsHuffmanEncodedLiterals)
 {
     // 构造首部块：前缀 + 字面量首部（H=1 表示 Huffman 编码）
