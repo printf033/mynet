@@ -1004,3 +1004,170 @@ TEST(Multiplexer, GoawayClosesStreamsAboveLastStreamId)
     EXPECT_EQ(mux.stream(3), nullptr);
     EXPECT_EQ(mux.openStreams(), 1u);
 }
+
+// ---- 慢读背压（readPaused）：出站响应未排空时暂停流级窗口信用恢复 ----
+
+// process() 一次性产出 128KiB 响应：超出对端默认发送窗口（65535），
+// 迫使出站数据驻留在流槽位（pending / handler 队列）中，模拟慢读对端。
+class BigReplyHandler : public HandlerBase
+{
+public:
+    void process()
+    {
+        if (requestBytes() > 0)
+        {
+            requestClear();
+            [[maybe_unused]] auto _ = pushResponse(std::string(69632, 'r')); // 65535+4097：必驻留且一轮可排空
+        }
+    }
+};
+
+class BigReplyMux : public Multiplexer<BigReplyHandler>
+{
+public:
+    using Multiplexer<BigReplyHandler>::connRecvWindow_;
+    using Multiplexer<BigReplyHandler>::stream;
+
+    std::optional<STREAM_ERROR> error;
+    std::string why;
+
+    void onProtocolError(STREAM_ERROR code, std::string_view reason) noexcept override
+    {
+        error = code;
+        why.assign(reason);
+    }
+
+    void push(const Frame &frame)
+    {
+        std::string bytes;
+        appendFrame(bytes, frame);
+        [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
+        process();
+    }
+
+    std::vector<Frame> takeFrames()
+    {
+        std::string bytes;
+        while (hasResponse())
+            bytes += takeResponse();
+        std::vector<Frame> frames;
+        Buffer in;
+        if (!bytes.empty())
+        {
+            [[maybe_unused]] auto _ = in.append(bytes);
+        }
+        // 本地解码上限对齐测试注入的 SETTINGS_MAX_FRAME_SIZE（1MiB）：
+        // mux 按协商上限发送大 DATA 帧（65535/69632 字节），默认 16KiB 解码上限会误判 FRAME_TOO_LARGE。
+        FrameDecoder decoder;
+        decoder.setMaxFrameSize(1u << 20);
+        while (in.readableBytes() > 0)
+        {
+            auto parsed = decoder.next(in);
+            if (!parsed || !parsed->has_value())
+                break;
+            frames.push_back(std::move(parsed->value()));
+        }
+        return frames;
+    }
+
+    void warmUp()
+    {
+        process();
+        [[maybe_unused]] auto _ = takeFrames();
+        push(makeFrame(FRAME_TYPE::SETTINGS, 0, FrameFlags::kAck, {}));
+    }
+};
+
+TEST(Multiplexer, SlowReaderPausesStreamLevelWindowCredit)
+{
+    BigReplyMux mux;
+    mux.warmUp();
+
+    // 调高帧大小上限；InitialWindowSize 保持默认 65535。
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mux::kSettingMaxFrameSize, 1 << 20)));
+    mux.takeFrames();
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.takeFrames();
+
+    auto countStreamWindowUpdates = [&mux] {
+        size_t n = 0;
+        for (const Frame &f : mux.takeFrames())
+        {
+            if (f.type == FRAME_TYPE::WINDOW_UPDATE && f.streamId == 1u)
+                ++n;
+        }
+        return n;
+    };
+
+    // 第一轮注入：响应 69632 > 对端发送窗口 65535，出站驻留 → 置 readPaused。
+    // 本轮窗口信用照常恢复（对已收数据负责），流级 WINDOW_UPDATE 正常发出。
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(40u * 1024u, 'a')));
+    ASSERT_NE(mux.stream(1), nullptr);
+    EXPECT_EQ(mux.stream(1)->recvWindow, mux::kInitialWindowSize);
+    EXPECT_EQ(countStreamWindowUpdates(), 1u);
+
+    // 第二轮注入（readPaused 生效）：窗口跌破阈值但不再恢复、不发流级 WINDOW_UPDATE。
+    // 修复前此处会恢复到 65535 并发 WINDOW_UPDATE —— 慢读放大正是从这一步开始。
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(40u * 1024u, 'b')));
+    ASSERT_NE(mux.stream(1), nullptr);
+    EXPECT_EQ(mux.stream(1)->recvWindow, mux::kInitialWindowSize - 40u * 1024u);
+    EXPECT_EQ(countStreamWindowUpdates(), 0u);
+
+    // 榨干剩余流级窗口（24575）：窗口归零且依然不被恢复。
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(24575u, 'c')));
+    ASSERT_NE(mux.stream(1), nullptr);
+    EXPECT_EQ(mux.stream(1)->recvWindow, 0u);
+    EXPECT_EQ(countStreamWindowUpdates(), 0u);
+
+    // 窗口为 0 后再注入即触发流控错误：对端被真正阻断，放大链路被切断。
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "x"));
+    EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
+}
+
+TEST(Multiplexer, DrainingOutboundRestoresPausedStreamWindow)
+{
+    BigReplyMux mux;
+    mux.warmUp();
+
+    mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mux::kSettingMaxFrameSize, 1 << 20)));
+    mux.takeFrames();
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.takeFrames();
+
+    // 第一轮注入：出站驻留 4097 字节，readPaused 置位，流级窗口恢复到 65535。
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(40u * 1024u, 'a')));
+    ASSERT_NE(mux.stream(1), nullptr);
+    ASSERT_EQ(mux.stream(1)->recvWindow, mux::kInitialWindowSize);
+    mux.takeFrames();
+
+    // 第二轮注入：readPaused 生效，流级窗口停在 24575。
+    mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(40u * 1024u, 'b')));
+    ASSERT_NE(mux.stream(1), nullptr);
+    ASSERT_EQ(mux.stream(1)->recvWindow, mux::kInitialWindowSize - 40u * 1024u);
+    mux.takeFrames();
+
+    // 对端补发送侧信用（连接级先恢复 pumpAll 的推进条件，流级随后真正推进发送），
+    // 多路复用器把驻留响应（4097 + 69632）全部排空。
+    std::string connInc;
+    frame::appendBigEndian32(connInc, 1u << 20);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 0, 0, connInc));
+    std::string streamInc;
+    frame::appendBigEndian32(streamInc, 1u << 20);
+    mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 1, 0, streamInc));
+
+    // 出站排空后补发流级窗口恢复：increment = 65535 - 24575 = 40960。
+    const std::vector<Frame> frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 3u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::DATA);
+    EXPECT_EQ(frames[0].payload.size(), 4097u);
+    EXPECT_EQ(frames[1].type, FRAME_TYPE::DATA);
+    EXPECT_EQ(frames[1].payload.size(), 69632u);
+    EXPECT_EQ(frames[2].type, FRAME_TYPE::WINDOW_UPDATE);
+    EXPECT_EQ(frames[2].streamId, 1u);
+    const auto *p = reinterpret_cast<const unsigned char *>(frames[2].payload.data());
+    const uint32_t increment = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+                               (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+    EXPECT_EQ(increment, 40u * 1024u);
+    ASSERT_NE(mux.stream(1), nullptr);
+    EXPECT_EQ(mux.stream(1)->recvWindow, mux::kInitialWindowSize);
+}

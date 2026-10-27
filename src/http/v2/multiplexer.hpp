@@ -251,6 +251,7 @@ namespace mynet
             uint32_t pendingOffset = 0; ///< 在途 chunk 已发出的字节数（partial 发送游标）
             bool remoteEnded = false;
             bool finalSent = false;
+            bool readPaused = false; ///< 出站响应未排空：暂缓恢复本流接收窗口，阻断慢读对端继续注入
             std::string pending{}; ///< 在途响应块（collectResponses 阶段只保留一个，发送不完驻留）
         };
 
@@ -820,6 +821,18 @@ namespace mynet
             {
                 return;
             }
+            // 出站已排空：若此前因慢读背压暂停了本流接收窗口，在此补发信用恢复。
+            // 对端窗口已被本轮注入扣减至低位，需要一次完整增量才能继续发送。
+            if (slot.readPaused)
+            {
+                slot.readPaused = false;
+                if (slot.recvWindow < mux::kWindowUpdateThreshold)
+                {
+                    const uint32_t increment = mux::kInitialWindowSize - slot.recvWindow;
+                    slot.recvWindow += increment;
+                    sendWindowUpdate(id, increment);
+                }
+            }
             if (!slot.remoteEnded || slot.finalSent)
             {
                 return;
@@ -862,11 +875,26 @@ namespace mynet
 
         inline void creditReceiveWindow(uint32_t id, StreamSlot &slot)
         {
-            if (slot.recvWindow < mux::kWindowUpdateThreshold)
+            // 慢读背压（对齐 connection.hpp v1/v2 修复模式）：
+            // 若该流的出站响应尚未排空（pending 或 handler 队列仍有数据），
+            // 暂缓恢复流级接收窗口 —— 对端因窗口耗尽无法继续注入 DATA，
+            // 阻止 "零窗口读 + 无限注入" 的响应驻留放大（每流可达
+            // responseCapacity × maxRequestBytes，128 流叠加可 OOM）。
+            // 连接级窗口始终照常恢复：阻塞它会影响其他健康流。
+            // 恢复点在 pumpStream：出站排空后补发 WINDOW_UPDATE。
+            if (!slot.readPaused)
             {
-                const uint32_t increment = mux::kInitialWindowSize - slot.recvWindow;
-                slot.recvWindow += increment;
-                sendWindowUpdate(id, increment);
+                if (slot.recvWindow < mux::kWindowUpdateThreshold)
+                {
+                    const uint32_t increment = mux::kInitialWindowSize - slot.recvWindow;
+                    slot.recvWindow += increment;
+                    sendWindowUpdate(id, increment);
+                }
+                if (slot.pendingOffset < slot.pending.size() ||
+                    (slot.handler != nullptr && slot.handler->hasResponse()))
+                {
+                    slot.readPaused = true; // 本轮恢复后立刻又积压了出站：下一轮起暂停信用恢复
+                }
             }
             if (connRecvWindow_ < mux::kWindowUpdateThreshold)
             {
