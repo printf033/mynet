@@ -6,6 +6,7 @@
 #include "http/v1/handler.hpp"
 #include <gtest/gtest.h>
 #include <string>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -403,6 +404,93 @@ TEST(Connection, SpliceDisabledFallback)
     EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), msg);
 
     ::close(sp[0]);
+}
+
+TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
+{
+    // 慢读放大回归：对端不读（套接字缓冲满）时反复收割大响应，
+    // pendingBytes_ 超过 2×高水位必须停止搬运并标记发完即关。
+    int sp[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
+
+    Connection<HandlerEcho> conn;
+    conn.setFd(sp[1]);
+    conn.handler().setSpliceEnabled(false);
+
+    // 把发送端塞满，模拟对端零窗口。socketpair 保持非阻塞，
+    // 写到 EAGAIN/EWOULDBLOCK 即说明内核缓冲已满，绝不能阻塞。
+    std::string filler(65536, 'x');
+    while (true)
+    {
+        ssize_t wn = ::write(sp[1], filler.data(), filler.size());
+        if (wn < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            break;
+        }
+        ASSERT_GE(wn, 0);
+    }
+
+    // pump = collectResponses；每次注入一条 1MiB echo 响应
+    const std::string bigRequest(1 << 20, 'a');
+    for (int i = 0; i < 64; ++i)
+    {
+        ASSERT_TRUE(conn.handler().pushResponse(bigRequest));
+        conn.pump();
+        if (conn.closeAfterWrite())
+        {
+            break;
+        }
+    }
+
+    // 1MiB × 8 = 8MiB = 2×高水位(4MiB)，第 9 条起必须被硬顶拒绝
+    EXPECT_TRUE(conn.closeAfterWrite());
+
+    // 队列中至多 8MiB（硬顶前已入队的部分），全部消费后队列为空。
+    // 注意：硬顶 break 发生在 takeResponse 之前，handler 里残留一条未取走的
+    // 响应，hasPendingWrite() 因此恒真 —— 只能按 pendingSize() 逐条排水。
+    size_t sent = 0;
+    while (conn.hasPendingWrite())
+    {
+        const size_t n = conn.pendingSize();
+        if (n == 0)
+        {
+            break; // 写队列已空，剩余的是 handler 内不再取出的残留响应
+        }
+        sent += n;
+        [[maybe_unused]] bool drained = conn.commitSent(n);
+    }
+    EXPECT_GE(sent, 4u << 20);
+    EXPECT_LE(sent, 2 * (4u << 20));
+
+    ::close(sp[0]);
+    ::close(sp[1]);
+}
+
+TEST(Connection, CommitSentRestoresReadPause)
+{
+    // Proactor 纯 io_uring 路径回归：onSendDone 仅经 commitSent 递减积压，
+    // 积压落回高水位以内且存在读信用时必须恢复 readPaused_（原先永不恢复）。
+    int sp[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
+
+    Connection<HandlerEcho> conn;
+    conn.setFd(sp[1]);
+    conn.handler().setSpliceEnabled(false);
+
+    const std::string bigRequest(3u << 20, 'a');
+    ASSERT_TRUE(conn.handler().pushResponse(bigRequest));
+    ASSERT_TRUE(conn.handler().pushResponse(bigRequest));
+    conn.pump();
+    // 高水位 4MiB < 积压 6MiB：collectResponses 尾部应触发读暂停
+    EXPECT_FALSE(conn.wantRead());
+
+    // 全部发送完毕：积压清零，commitSent 必须恢复读背压
+    //（Proactor onSendDone 只经此路径递减积压）
+    EXPECT_TRUE(conn.commitSent(2 * (3u << 20)));
+    EXPECT_TRUE(conn.wantRead());
+
+    ::close(sp[0]);
+    ::close(sp[1]);
 }
 
 TEST(RingQueue, InitCapacityOverflowReturnsError)

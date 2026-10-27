@@ -820,6 +820,13 @@ namespace mynet
                     break;
                 }
             }
+            // Proactor 纯 io_uring 路径没有等价于 handleWrite 末尾的恢复点：
+            // onSendDone 只调 commitSent。在此统一恢复读背压，与 handleWrite
+            // 的恢复条件保持一致（流控 credit 存在且积压落回高水位以内）。
+            if (readPaused_ && pendingBytes_ <= writeHighWaterMark_ && handler_.readCredit() > 0)
+            {
+                readPaused_ = false;
+            }
             return writeQueue_.empty();
         }
 
@@ -1004,6 +1011,16 @@ namespace mynet
         {
             while (handler_.hasResponse())
             {
+                // 慢读放大硬顶：对端零窗口时 send 停滞，若继续收割响应，writeQueue_
+                // 可积压至响应槽数(64) × 单请求上限(4MiB) = 256MiB/连接，多连接叠加导致 OOM。
+                // 超过 2×高水位即停止搬运并标记发完即关，把单连接写队列压在 8MiB 以内。
+                if (pendingBytes_ >= 2 * writeHighWaterMark_) [[unlikely]]
+                {
+                    LOG_WARN("Connection: fd {}: write backlog {} exceeds hard cap, closing after flush", fd_,
+                             pendingBytes_);
+                    closeAfterWrite_ = true;
+                    break;
+                }
                 std::string response = handler_.takeResponse();
                 if (response.empty()) [[unlikely]]
                 {
