@@ -2,8 +2,11 @@
 
 #include "reflection.hpp"
 #include <array>
+#include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <expected>
+#include <openssl/err.h>
 #include <string_view>
 #include <utility>
 
@@ -185,6 +188,45 @@ namespace mynet
             return detail::kIoEndDescriptions[idx];
         }
         return "unknown io outcome";
+    }
+
+    /**
+     * @brief 获取 errno 的可读字符串描述
+     *
+     * 与 toString(ERR) / toString(IO_END) 并列：前者把库级错误枚举转成文本，
+     * 本函数把系统调用失败后的 errno 转成文本，两者常在同一条日志里并用。
+     *
+     * @param err errno 值
+     * @return 描述该错误的字符串视图，生命周期至本线程下次调用本函数为止
+     */
+    [[nodiscard]] inline std::string_view errnoText(int err) noexcept
+    {
+        // strerror 非线程安全（POSIX 已弃用），改用 strerror_r；
+        // Linux 下 _GNU_SOURCE 恒定义，GNU 版直接返回指向 buf 的指针；
+        // 缓冲必须 thread_local，否则返回的 string_view 指向已析构的栈帧
+        thread_local char buf[256];
+        const char *text = ::strerror_r(err, buf, sizeof(buf));
+        return text != nullptr ? std::string_view{text} : std::string_view{"unknown error"};
+    }
+
+    /**
+     * @brief 取出最早的排队 OpenSSL 错误字符串
+     *
+     * 每次调用消费一条 OpenSSL 错误队列条目，因此适合在 SSL 调用失败后立即取用。
+     *
+     * @return 描述该 SSL 错误的字符串视图，生命周期至本线程下次调用本函数为止
+     */
+    [[nodiscard]] inline std::string_view sslText() noexcept
+    {
+        thread_local char buf[256];
+        const unsigned long code = ::ERR_get_error();
+        if (code == 0)
+        {
+            return std::string_view{"no queued OpenSSL error"};
+        }
+        ::ERR_error_string_n(code, buf, sizeof(buf));
+        ::ERR_clear_error();
+        return std::string_view{buf};
     }
 
     inline constexpr int kGenericExitCode = 1;

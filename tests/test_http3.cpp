@@ -235,14 +235,14 @@ TEST(Http3Quic, ShortHeaderPacketRoundtrip)
 
 TEST(HandlerHttp3, ConceptConformance)
 {
-    static_assert(ProtocolHandler<HandlerHttp3>);
-    static_assert(DerivedFromHandlerBase<HandlerHttp3>);
-    static_assert(DerivedFromDatagramHandler<HandlerHttp3>);
+    static_assert(MandatoryMethodConnection<HandlerHttp3>);
+    static_assert(HandlerConstraint<HandlerHttp3>);
+    static_assert(DerivedFromHandlerDatagram<HandlerHttp3>);
     static_assert(Resettable<HandlerHttp3>);
 
-    EXPECT_TRUE(ProtocolHandler<HandlerHttp3>);
-    EXPECT_TRUE(DerivedFromHandlerBase<HandlerHttp3>);
-    EXPECT_TRUE(DerivedFromDatagramHandler<HandlerHttp3>);
+    EXPECT_TRUE(MandatoryMethodConnection<HandlerHttp3>);
+    EXPECT_TRUE(HandlerConstraint<HandlerHttp3>);
+    EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerHttp3>);
     EXPECT_TRUE(Resettable<HandlerHttp3>);
 }
 
@@ -587,4 +587,30 @@ TEST(HandlerHttp3, PerConnectionSessionIsolationPreventsCrosstalk)
 
     // 验证客户端 A 的流不受客户端 B 影响
     EXPECT_FALSE(handler.hasReply());
+}
+
+TEST(HandlerHttp3, DualBaseLifecycleHooksAreUnambiguous)
+{
+    // HandlerHttp3 同时继承 HandlerConnection 与 HandlerDatagram，两个并列基类各自
+    // 提供 reset / onMessageComplete / onParseError。HandlerHttp3 显式覆盖三者以消除
+    // 二义；这里既验证调用无歧义，也验证 reset 会逐层清理两个基类的状态。
+    HandlerHttp3 handler;
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(5300);
+    inet_pton(AF_INET, "192.0.2.9", &peer.sin_addr);
+
+    handler.pushReply(peer, "stale", 5);
+    ASSERT_TRUE(handler.hasReply());
+
+    // 通过两个基类静态类型分别调用钩子：两个子对象互不遮蔽，转发实现可达
+    static_cast<HandlerConnection &>(handler).onParseError("conn-side");
+    static_cast<HandlerDatagram &>(handler).onParseError("dgram-side");
+    static_cast<HandlerConnection &>(handler).onMessageComplete();
+    static_cast<HandlerDatagram &>(handler).onMessageComplete();
+
+    handler.reset();
+    EXPECT_FALSE(handler.hasReply());      // HandlerDatagram::reset()
+    EXPECT_FALSE(handler.hasResponse());   // HandlerConnection::reset()
+    EXPECT_EQ(handler.activeStreams(), size_t{0});
 }

@@ -5,11 +5,11 @@
  * @brief 基于 epoll 的高性能反应器（Reactor）事件解复用器与服务器事件循环。
  */
 
-#include "concepts.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
+#include "error.hpp"
 #include "event.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "loop.hpp"
 #include "objectPool.hpp"
 #include <cerrno>
@@ -37,12 +37,22 @@ namespace mynet
      */
     template <typename Event>
         requires DerivedFromEventBase<Event> && Resettable<Event> &&
-                 (ProtocolHandler<typename Event::Handler> || DerivedFromDatagramHandler<typename Event::Handler>)
+                 (MandatoryMethodConnection<typename Event::Handler> ||
+                  MandatoryMethodDatagram<typename Event::Handler>)
     class Reactor
     {
     public:
         using Handler = typename Event::Handler;
-        using Conn = Connection<Handler>;
+        using Conn = typename ConnectionSlot<Handler>::Type;
+
+        ///
+        /// 该处理器是否由 Connection 承载会话（即满足流式契约）。
+        ///
+        /// 为 false 时（纯数据报处理器）Conn 退化为 NoConnection，会话对象不携带
+        /// 任何流式状态；runTcp / runSsl 另以 kStreaming 约束自身，因此纯报文
+        /// 处理器只暴露 runUdp，不会把 Connection<H> 拉进编译。
+        ///
+        static constexpr bool kStreaming = MandatoryMethodConnection<Handler>;
 
         Reactor() = default;
 
@@ -85,6 +95,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runTcp(const char *ip, int port, int backlog = 511, size_t connectionPoolSize = 1 << 10,
                                       int maxEvents = 1 << 10, int idleTimeoutSecs = 0)
+            requires kStreaming
         {
             if (auto err = listener_.listenTcp(ip, port, backlog); !err) [[unlikely]]
             {
@@ -111,7 +122,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
                                       size_t connectionPoolSize = 1 << 10, int maxEvents = 1 << 10,
                                       int idleTimeoutSecs = 0)
-            requires SslEvent<Event>
+            requires SslEvent<Event> && kStreaming
         {
             if (auto err = listener_.listenTcp(ip, port, backlog); !err) [[unlikely]]
             {
@@ -120,7 +131,7 @@ namespace mynet
             }
             if ((protocol_.ctx = SSL_CTX_new(TLS_server_method())) == nullptr) [[unlikely]]
             {
-                LOG_ERROR("Reactor::runSsl: SSL_CTX_new() failed: {}", log::sslText());
+                LOG_ERROR("Reactor::runSsl: SSL_CTX_new() failed: {}", sslText());
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
@@ -129,20 +140,20 @@ namespace mynet
             SSL_CTX_set_options(protocol_.ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_COMPRESSION);
             if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
-                LOG_ERROR("Reactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, log::sslText());
+                LOG_ERROR("Reactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, sslText());
                 reset();
                 return std::unexpected(ERR::SSL_CERT_FAILED);
             }
             if (SSL_CTX_use_PrivateKey_file(protocol_.ctx, key, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
-                LOG_ERROR("Reactor::runSsl: private key file \"{}\" could not be loaded: {}", key, log::sslText());
+                LOG_ERROR("Reactor::runSsl: private key file \"{}\" could not be loaded: {}", key, sslText());
                 reset();
                 return std::unexpected(ERR::SSL_KEY_FAILED);
             }
             if (SSL_CTX_check_private_key(protocol_.ctx) <= 0) [[unlikely]]
             {
                 LOG_ERROR("Reactor::runSsl: private key \"{}\" does not match certificate \"{}\": {}", key, crt,
-                          log::sslText());
+                          sslText());
                 reset();
                 return std::unexpected(ERR::SSL_KEY_MISMATCH);
             }
@@ -160,7 +171,7 @@ namespace mynet
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, int maxEvents = 1 << 10)
-            requires DerivedFromDatagramHandler<Handler>
+            requires MandatoryMethodDatagram<Handler>
         {
             if (auto err = listener_.listenUdp(ip, port); !err) [[unlikely]]
             {
@@ -168,8 +179,7 @@ namespace mynet
                 return err;
             }
             handler.reset();
-            datagram_ = &handler;
-            udpIn_.resize(handler.maxDatagramBytes() + 1);
+            datagram_.bind(handler);
             Result<> rc = serveDatagram(maxEvents);
             reset();
             return rc;
@@ -187,6 +197,7 @@ namespace mynet
          * @param task 连接任务回调。
          */
         inline void runOnConnection(int fd, std::function<void(Conn &)> task)
+            requires kStreaming
         {
             loop_.runInLoop(
                 [this, fd, task = std::move(task)]
@@ -212,6 +223,7 @@ namespace mynet
          * @return 连接指针，若未找到则返回 nullptr。
          */
         [[nodiscard]] inline Conn *find(int fd) noexcept
+            requires kStreaming
         {
             auto it = index_.find(fd);
             return it == index_.end() ? nullptr : it->second;
@@ -221,6 +233,7 @@ namespace mynet
          * @brief 面向流式连接的核心事件循环。
          */
         [[nodiscard]] inline Result<> serve(size_t connectionPoolSize, int maxEvents, int idleTimeoutSecs)
+            requires kStreaming
         {
             if (loop_.epollFd() < 0) [[unlikely]]
             {
@@ -239,7 +252,7 @@ namespace mynet
             if (auto res = loop_.addFd(listener_.fd, EPOLLIN | EPOLLET, &listener_); !res) [[unlikely]]
             {
                 LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", listener_.fd,
-                          log::errnoText(errno));
+                          errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
             if (idleTimeoutSecs > 0)
@@ -265,7 +278,7 @@ namespace mynet
             if (auto res = loop_.addFd(listener_.fd, EPOLLIN | EPOLLET, &listener_); !res) [[unlikely]]
             {
                 LOG_ERROR("Reactor::serveDatagram: adding datagram fd {} to loop failed: {}", listener_.fd,
-                          log::errnoText(errno));
+                          errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
             return loop_.run();
@@ -302,8 +315,7 @@ namespace mynet
                 }
             }
             listener_.reset();
-            datagram_ = nullptr;
-            udpIn_.clear();
+            datagram_.reset();
             idleTimeout_ = std::chrono::seconds(0);
         }
 
@@ -316,7 +328,7 @@ namespace mynet
             }
             if (ptr == &listener_)
             {
-                if (datagram_ != nullptr)
+                if (datagram_.bound())
                 {
                     if (events & EPOLLIN)
                     {
@@ -326,17 +338,25 @@ namespace mynet
                 }
                 if (events & EPOLLIN)
                 {
-                    if (auto err = acceptAll(); !err) [[unlikely]]
+                    if constexpr (kStreaming)
                     {
-                        LOG_DEBUG("Reactor::onEvent: draining accept backlog ended with {}", toString(err.error()));
+                        if (auto err = acceptAll(); !err) [[unlikely]]
+                        {
+                            LOG_DEBUG("Reactor::onEvent: draining accept backlog ended with {}",
+                                      toString(err.error()));
+                        }
                     }
                 }
                 return;
             }
-            onConnection(static_cast<Conn *>(ptr), events);
+            if constexpr (kStreaming)
+            {
+                onConnection(static_cast<Conn *>(ptr), events);
+            }
         }
 
         inline void onConnection(Conn *conn, uint32_t events)
+            requires kStreaming
         {
             // 陈旧事件守卫：同一轮 epoll_wait 里回调可能已关闭本连接，
             // 对象回池后 fd 被重置为 -1；后续到达的残留事件直接丢弃，
@@ -386,6 +406,7 @@ namespace mynet
          * @return 期望兴趣集（恒含 EPOLLET），无任何兴趣时为 0。
          */
         [[nodiscard]] inline uint32_t computeInterest(const Conn *conn) const noexcept
+            requires kStreaming
         {
             uint32_t wanted = EPOLLET;
             if (conn->wantRead())
@@ -406,6 +427,7 @@ namespace mynet
          * @return true=内核已同步；false=epoll_ctl 失败，调用方应关闭连接。
          */
         inline bool applyInterest(Conn *conn, uint32_t wanted)
+            requires kStreaming
         {
             if (wanted == conn->events())
             {
@@ -426,6 +448,7 @@ namespace mynet
          * @return KEEP=继续维持连接；CLOSE=连接需关闭。
          */
         [[nodiscard]] inline IO_STATUS rearmRead(Conn *conn)
+            requires kStreaming
         {
             if (conn->handleRead() == IO_STATUS::CLOSE) [[unlikely]]
             {
@@ -449,6 +472,7 @@ namespace mynet
          * @return KEEP=继续维持连接；CLOSE=连接需关闭。
          */
         [[nodiscard]] inline IO_STATUS updateInterest(Conn *conn)
+            requires kStreaming
         {
             const uint32_t wanted = computeInterest(conn);
             if ((wanted & ~static_cast<uint32_t>(EPOLLET)) == 0)
@@ -470,6 +494,7 @@ namespace mynet
         }
 
         [[nodiscard]] inline Result<> acceptAll()
+            requires kStreaming
         {
             while (true)
             {
@@ -491,7 +516,7 @@ namespace mynet
                     {
                         return {};
                     }
-                    LOG_ERROR("Reactor::acceptAll: accept4() on fd {} failed: {}", listener_.fd, log::errnoText(errno));
+                    LOG_ERROR("Reactor::acceptAll: accept4() on fd {} failed: {}", listener_.fd, errnoText(errno));
                     return std::unexpected(ERR::ACCEPT_FAILED);
                 }
                 onNewConnection(fd, addr);
@@ -499,6 +524,7 @@ namespace mynet
         }
 
         inline void onNewConnection(int fd, const sockaddr_in &addr)
+            requires kStreaming
         {
             Conn *conn = connPool_.acquire();
             if (conn == nullptr) [[unlikely]]
@@ -514,7 +540,7 @@ namespace mynet
             {
                 if (protocol_.ctx != nullptr && !conn->startTLS(protocol_.ctx)) [[unlikely]]
                 {
-                    LOG_WARN("Reactor::onNewConnection: TLS setup for fd {} failed: {}", fd, log::sslText());
+                    LOG_WARN("Reactor::onNewConnection: TLS setup for fd {} failed: {}", fd, sslText());
                     connPool_.release(conn);
                     return;
                 }
@@ -527,7 +553,7 @@ namespace mynet
             }
             if (!loop_.addFd(fd, events, conn)) [[unlikely]]
             {
-                LOG_WARN("Reactor::onNewConnection: adding fd {} to loop failed: {}", fd, log::errnoText(errno));
+                LOG_WARN("Reactor::onNewConnection: adding fd {} to loop failed: {}", fd, errnoText(errno));
                 index_.erase(fd);
                 connPool_.release(conn);
                 return;
@@ -536,6 +562,7 @@ namespace mynet
         }
 
         inline void closeConn(Conn *conn)
+            requires kStreaming
         {
             int fd = conn->fd();
             if (fd != -1)
@@ -548,13 +575,15 @@ namespace mynet
 
         inline void drainDatagrams()
         {
-            const size_t cap = datagram_->maxDatagramBytes();
+            // 接收窗口与截断判定都由 Datagram 持有，引擎只负责把内核数据搬进窗口。
+            char *window = datagram_.recvBuffer();
+            const size_t windowBytes = datagram_.recvCapacity();
             for (;;)
             {
                 sockaddr_in peer{};
                 socklen_t peerLen = static_cast<socklen_t>(sizeof(sockaddr_in));
-                ssize_t n = ::recvfrom(listener_.fd, udpIn_.data(), static_cast<size_t>(udpIn_.size()), 0,
-                                       reinterpret_cast<sockaddr *>(&peer), &peerLen);
+                ssize_t n = ::recvfrom(listener_.fd, window, windowBytes, 0, reinterpret_cast<sockaddr *>(&peer),
+                                       &peerLen);
                 if (n < 0)
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -566,46 +595,16 @@ namespace mynet
                         continue;
                     }
                     LOG_WARN("Reactor::drainDatagrams: recvfrom on fd {} failed: {}", listener_.fd,
-                             log::errnoText(errno));
+                             errnoText(errno));
                     break;
                 }
-                size_t got = static_cast<size_t>(n);
-                if (got > cap) [[unlikely]]
-                {
-                    LOG_WARN("Reactor::drainDatagrams: {} bytes from {} exceeds {} limit, truncated", got,
-                             datagramPeerText(peer), cap);
-                    got = cap;
-                }
-                datagram_->onDatagram(peer, udpIn_.data(), got);
+                datagram_.receiveFrom(peer, window, static_cast<size_t>(n));
             }
-            flushDatagrams();
-        }
-
-        inline void flushDatagrams()
-        {
-            while (datagram_->hasReply())
-            {
-                DatagramReply reply = datagram_->takeReply();
-                while (true)
-                {
-                    ssize_t sent = ::sendto(listener_.fd, reply.bytes.data(), reply.bytes.size(), 0,
-                                            reinterpret_cast<const sockaddr *>(&reply.peer),
-                                            static_cast<socklen_t>(sizeof(sockaddr_in)));
-                    if (sent < 0) [[unlikely]]
-                    {
-                        if (errno == EINTR)
-                        {
-                            continue;
-                        }
-                        LOG_WARN("Reactor::flushDatagrams: sendto to {} failed: {}", datagramPeerText(reply.peer),
-                                 log::errnoText(errno));
-                    }
-                    break;
-                }
-            }
+            datagram_.flushTo(listener_.fd);
         }
 
         inline void sweepIdle()
+            requires kStreaming
         {
             if (idleTimeout_.count() <= 0)
             {
@@ -632,8 +631,7 @@ namespace mynet
         ObjectPool<Conn> connPool_{};
         std::unordered_map<int, Conn *> index_{};
         std::vector<Conn *> sweepScratch_{};
-        DatagramHandler *datagram_ = nullptr;
-        std::vector<char> udpIn_{};
+        typename DatagramSlot<Handler>::Type datagram_{};
         std::chrono::seconds idleTimeout_{0};
         uint64_t idleTimerId_ = 0;
     };

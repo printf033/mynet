@@ -1,10 +1,10 @@
 #pragma once
 
-#include "concepts.hpp"
+#include "constraints.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include <arpa/inet.h>
+#include <concepts>
 #include <csignal>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -19,10 +19,12 @@ namespace mynet
     /**
      * @brief 监听通道抽象基类
      *
-     * 绑定基础文件描述符与协议处理器类型。
+     * 绑定基础文件描述符与处理器类型。处理器只需满足 HandlerConstraint：
+     * 删除公共根类 HandlerBase 之后，流式处理器（HandlerConnection）与报文处理器
+     * （HandlerDatagram）是两个并列的独立层次，事件层不应反向依赖其中任何一方。
      */
     template <typename HandlerType>
-        requires DerivedFromHandlerBase<HandlerType> && Resettable<HandlerType>
+        requires HandlerConstraint<HandlerType>
     struct EventBase
     {
     public:
@@ -54,7 +56,7 @@ namespace mynet
      * @brief TCP / UDP 套接字监听通道
      */
     template <typename HandlerType>
-        requires DerivedFromHandlerBase<HandlerType> && Resettable<HandlerType>
+        requires HandlerConstraint<HandlerType>
     struct EventSocket : public EventBase<HandlerType>
     {
     public:
@@ -95,7 +97,7 @@ namespace mynet
             EventBase<HandlerType>::fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
             if (EventBase<HandlerType>::fd < 0) [[unlikely]]
             {
-                LOG_ERROR("listenTcp {}:{}: socket() failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenTcp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
@@ -103,26 +105,26 @@ namespace mynet
             constexpr int opt = 1;
             if (::setsockopt(EventBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
-                LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
             if (::setsockopt(EventBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
-                LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
             if (::bind(EventBase<HandlerType>::fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0)
                 [[unlikely]]
             {
-                LOG_ERROR("listenTcp {}:{}: bind() failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenTcp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::BIND_FAILED);
             }
             if (::listen(EventBase<HandlerType>::fd, backlog) < 0) [[unlikely]]
             {
-                LOG_ERROR("listenTcp {}:{}: listen(backlog={}) failed: {}", ip, port, backlog, log::errnoText(errno));
+                LOG_ERROR("listenTcp {}:{}: listen(backlog={}) failed: {}", ip, port, backlog, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::LISTEN_FAILED);
             }
@@ -151,7 +153,7 @@ namespace mynet
             EventBase<HandlerType>::fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
             if (EventBase<HandlerType>::fd < 0) [[unlikely]]
             {
-                LOG_ERROR("listenUdp {}:{}: socket() failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenUdp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
@@ -159,26 +161,26 @@ namespace mynet
             constexpr int opt = 1;
             if (::setsockopt(EventBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
-                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
             if (::setsockopt(EventBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
-                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
             if (::setsockopt(EventBase<HandlerType>::fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
-                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_BROADCAST) failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_BROADCAST) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
             if (::bind(EventBase<HandlerType>::fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0)
                 [[unlikely]]
             {
-                LOG_ERROR("listenUdp {}:{}: bind() failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("listenUdp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::BIND_FAILED);
             }
@@ -196,7 +198,7 @@ namespace mynet
      * @brief SSL / TLS 传输层监听标签特化类型
      */
     template <typename HandlerType>
-        requires DerivedFromHandlerBase<HandlerType> && Resettable<HandlerType>
+        requires HandlerConstraint<HandlerType>
     struct EventSsl : public EventSocket<HandlerType>
     {
     };

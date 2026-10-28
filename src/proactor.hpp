@@ -5,11 +5,11 @@
  * @brief 高性能 Linux io_uring 前摄器（Proactor）服务器实现。
  */
 
-#include "concepts.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
+#include "error.hpp"
 #include "event.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "objectPool.hpp"
 #include <bit>
 #include <cerrno>
@@ -39,12 +39,22 @@ namespace mynet
      */
     template <typename Event>
         requires DerivedFromEventBase<Event> && Resettable<Event> &&
-                 (ProtocolHandler<typename Event::Handler> || DerivedFromDatagramHandler<typename Event::Handler>)
+                 (MandatoryMethodConnection<typename Event::Handler> ||
+                  MandatoryMethodDatagram<typename Event::Handler>)
     class Proactor
     {
     public:
         using Handler = typename Event::Handler;
-        using Conn = Connection<Handler>;
+        using Conn = typename ConnectionSlot<Handler>::Type;
+
+        ///
+        /// 该处理器是否由 Connection 承载会话（即满足流式契约）。
+        ///
+        /// 为 false 时（纯数据报处理器）Conn 退化为 NoConnection，会话对象不再
+        /// 携带流式状态；流式专用成员函数另以 kStreaming 约束自身，因此
+        /// runUdp 不会被实例化到任何 Connection 代码。
+        ///
+        static constexpr bool kStreaming = MandatoryMethodConnection<Handler>;
 
         Proactor() noexcept = default;
 
@@ -76,7 +86,7 @@ namespace mynet
                                       unsigned int cqEntries = 1 << 10, int maxAcceptEvents = 256,
                                       size_t sessionPoolSize = 512, int maxBufEntrs = 1 << 10, int bufSize = 4 << 10,
                                       int idleTimeoutSecs = 0)
-            requires SocketEvent<Event>
+            requires SocketEvent<Event> && kStreaming
         {
             if (auto err = acceptor_.listenTcp(ip, port, backlog); !err) [[unlikely]]
             {
@@ -96,7 +106,7 @@ namespace mynet
                                       unsigned int sqEntries = 512, unsigned int cqEntries = 1 << 10,
                                       int maxAcceptEvents = 256, size_t sessionPoolSize = 512,
                                       int maxBufEntrs = 1 << 10, int bufSize = 4 << 10, int idleTimeoutSecs = 0)
-            requires SslEvent<Event>
+            requires SslEvent<Event> && kStreaming
         {
             if (auto err = acceptor_.listenTcp(ip, port, backlog); !err) [[unlikely]]
             {
@@ -105,7 +115,7 @@ namespace mynet
             }
             if ((protocol_.ctx = SSL_CTX_new(TLS_server_method())) == nullptr) [[unlikely]]
             {
-                LOG_ERROR("Proactor::runSsl: SSL_CTX_new() failed: {}", log::sslText());
+                LOG_ERROR("Proactor::runSsl: SSL_CTX_new() failed: {}", sslText());
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
@@ -114,20 +124,20 @@ namespace mynet
             SSL_CTX_set_options(protocol_.ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_COMPRESSION);
             if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
-                LOG_ERROR("Proactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, log::sslText());
+                LOG_ERROR("Proactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, sslText());
                 reset();
                 return std::unexpected(ERR::SSL_CERT_FAILED);
             }
             if (SSL_CTX_use_PrivateKey_file(protocol_.ctx, key, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
-                LOG_ERROR("Proactor::runSsl: private key file \"{}\" could not be loaded: {}", key, log::sslText());
+                LOG_ERROR("Proactor::runSsl: private key file \"{}\" could not be loaded: {}", key, sslText());
                 reset();
                 return std::unexpected(ERR::SSL_KEY_FAILED);
             }
             if (SSL_CTX_check_private_key(protocol_.ctx) <= 0) [[unlikely]]
             {
                 LOG_ERROR("Proactor::runSsl: private key \"{}\" does not match certificate \"{}\": {}", key, crt,
-                          log::sslText());
+                          sslText());
                 reset();
                 return std::unexpected(ERR::SSL_KEY_MISMATCH);
             }
@@ -139,11 +149,22 @@ namespace mynet
 
         /**
          * @brief 在指定 IP 和端口上运行 UDP 数据报服务器，直至被请求停止。
+         *
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param handler 数据报处理器引用。
+         * @param sqEntries io_uring 提交队列大小。
+         * @param cqEntries io_uring 完成队列大小。
+         * @param sessionPoolSize 预分配会话对象池容量（UDP 路径实际只用 1 个）。
+         * @param bufSize 接收窗口的下限字节数——UDP 路径不建立内核 Buffer Ring，
+         *                真正的接收上界由处理器的 maxDatagramBytes() 决定。
+         * @param idleTimeoutSecs 空闲超时（UDP 路径不使用）。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, unsigned int sqEntries = 512,
                                       unsigned int cqEntries = 1 << 10, size_t sessionPoolSize = 512,
                                       int bufSize = 64 << 10, int idleTimeoutSecs = 0)
-            requires DerivedFromDatagramHandler<Handler>
+            requires MandatoryMethodDatagram<Handler>
         {
             if (auto err = acceptor_.listenUdp(ip, port); !err) [[unlikely]]
             {
@@ -151,8 +172,12 @@ namespace mynet
                 return err;
             }
             handler.reset();
-            datagram_ = &handler;
-            datagramIn_.resize(static_cast<size_t>(bufSize > 0 ? bufSize : (64 << 10)));
+            // UDP 路径不建立内核 Buffer Ring（runUdp 以 maxBufEntrs=0 调 serve，
+            // io_uring_setup_buf_ring 不会被执行），bufSize 在这里只表示**接收窗口
+            // 下限**。Datagram::bind 会把它与处理器声明的报文上界取较大者，并额外
+            // 留出 1 字节用于超界判定；因此两个引擎交付给处理器的报文长度上界一致。
+            const size_t windowFloor = static_cast<size_t>(bufSize > 0 ? bufSize : (64 << 10));
+            datagram_.bind(handler, windowFloor);
             Result<> rc = serve(sqEntries, cqEntries, 0, sessionPoolSize, 0, bufSize, idleTimeoutSecs);
             reset();
             return rc;
@@ -176,12 +201,12 @@ namespace mynet
             if (qi < 0) [[unlikely]]
             {
                 LOG_ERROR("Proactor::serve: io_uring_queue_init_params({} sq entries) failed: {}", sqEntries,
-                          log::errnoText(-qi));
+                          errnoText(-qi));
                 reset();
                 return std::unexpected(ERR::URING_QUEUE_FAILED);
             }
             uringInited_ = true;
-            const size_t sessionSlots = datagram_ != nullptr ? 1 : (sessionPoolSize > 0 ? sessionPoolSize : 1);
+            const size_t sessionSlots = datagram_.bound() ? 1 : (sessionPoolSize > 0 ? sessionPoolSize : 1);
             if (auto poolRes = sessionPool_.init(sessionSlots); !poolRes) [[unlikely]]
             {
                 LOG_ERROR("Proactor::serve: initialising session pool ({} slots) failed", sessionSlots);
@@ -207,7 +232,7 @@ namespace mynet
                 if (ma != 0) [[unlikely]]
                 {
                     LOG_ERROR("Proactor::serve: posix_memalign for {} buffers of {} bytes failed: {}", maxBufEntrs_,
-                              bufSize_, log::errnoText(ma));
+                              bufSize_, errnoText(ma));
                     bufBase_ = nullptr;
                     reset();
                     return std::unexpected(ERR::URING_MEMALIGN_FAILED);
@@ -217,7 +242,7 @@ namespace mynet
                 if (bufRing_ == nullptr) [[unlikely]]
                 {
                     LOG_ERROR("Proactor::serve: io_uring_setup_buf_ring({} buffers, bgid {}) failed: {}", maxBufEntrs_,
-                              bgid_, log::errnoText(ringErr));
+                              bgid_, errnoText(ringErr));
                     reset();
                     return std::unexpected(ERR::URING_BUF_RING_FAILED);
                 }
@@ -232,7 +257,15 @@ namespace mynet
                 io_uring_buf_ring_advance(bufRing_, maxBufEntrs_);
             }
             idleTimeout_ = std::chrono::seconds(idleTimeoutSecs > 0 ? idleTimeoutSecs : 0);
-            Result<> armed = datagram_ != nullptr ? postDatagramRecv() : postAccepts(maxAccepts_);
+            Result<> armed = {};
+            if constexpr (kStreaming)
+            {
+                armed = datagram_.bound() ? postDatagramRecv() : postAccepts(maxAccepts_);
+            }
+            else
+            {
+                armed = postDatagramRecv();
+            }
             if (!armed) [[unlikely]]
             {
                 reset();
@@ -241,7 +274,7 @@ namespace mynet
             int si = io_uring_submit(&uring_);
             if (si < 0) [[unlikely]]
             {
-                LOG_ERROR("Proactor::serve: submitting initial accepts failed: {}", log::errnoText(-si));
+                LOG_ERROR("Proactor::serve: submitting initial accepts failed: {}", errnoText(-si));
                 reset();
                 return std::unexpected(ERR::URING_SUBMIT_FAILED);
             }
@@ -252,18 +285,21 @@ namespace mynet
                 int e = io_uring_wait_cqe_timeout(&uring_, &cqe, &ts);
                 if (e == -ETIME || e == -EINTR)
                 {
-                    sweepIdle();
-                    postCancels();
+                    if constexpr (kStreaming)
+                    {
+                        sweepIdle();
+                        postCancels();
+                    }
                     int subRet = io_uring_submit(&uring_);
                     if (subRet < 0) [[unlikely]]
                     {
-                        LOG_ERROR("Proactor::serve: submitting cancel batch failed: {}", log::errnoText(-subRet));
+                        LOG_ERROR("Proactor::serve: submitting cancel batch failed: {}", errnoText(-subRet));
                     }
                     continue;
                 }
                 if (e < 0) [[unlikely]]
                 {
-                    LOG_ERROR("Proactor::serve: io_uring_wait_cqe_timeout() failed: {}", log::errnoText(-e));
+                    LOG_ERROR("Proactor::serve: io_uring_wait_cqe_timeout() failed: {}", errnoText(-e));
                     reset();
                     return std::unexpected(ERR::URING_WAIT_FAILED);
                 }
@@ -275,22 +311,31 @@ namespace mynet
                     handleCqe(cqe);
                 }
                 io_uring_cq_advance(&uring_, count);
-                while (datagram_ == nullptr && acceptOutstanding_ < maxAccepts_)
+                if constexpr (kStreaming)
                 {
-                    if (!postOneAccept())
+                    while (!datagram_.bound() && acceptOutstanding_ < maxAccepts_)
                     {
-                        break;
+                        if (!postOneAccept())
+                        {
+                            break;
+                        }
                     }
                 }
-                postCancels();
+                if constexpr (kStreaming)
+                {
+                    postCancels();
+                }
                 int subRet = io_uring_submit(&uring_);
                 if (subRet < 0) [[unlikely]]
                 {
-                    LOG_ERROR("Proactor::serve: submitting completion batch failed: {}", log::errnoText(-subRet));
+                    LOG_ERROR("Proactor::serve: submitting completion batch failed: {}", errnoText(-subRet));
                     reset();
                     return std::unexpected(ERR::URING_SUBMIT_FAILED);
                 }
-                sweepIdle();
+                if constexpr (kStreaming)
+                {
+                    sweepIdle();
+                }
             }
             reset();
             return {};
@@ -327,8 +372,7 @@ namespace mynet
                 uringInited_ = false;
             }
             acceptor_.reset();
-            datagram_ = nullptr;
-            datagramIn_.clear();
+            datagram_.reset();
             cancelScratch_.clear();
             if constexpr (SslEvent<Event>)
             {
@@ -426,16 +470,28 @@ namespace mynet
             switch (base->kind)
             {
             case OP_KIND::ACCEPT:
-                onAcceptDone(cqe, static_cast<AcceptOp *>(base));
+                if constexpr (kStreaming)
+                {
+                    onAcceptDone(cqe, static_cast<AcceptOp *>(base));
+                }
                 break;
             case OP_KIND::RECV:
-                onRecvDone(cqe, base->session);
+                if constexpr (kStreaming)
+                {
+                    onRecvDone(cqe, base->session);
+                }
                 break;
             case OP_KIND::SEND:
-                onSendDone(cqe, base->session);
+                if constexpr (kStreaming)
+                {
+                    onSendDone(cqe, base->session);
+                }
                 break;
             case OP_KIND::POLL:
-                onPollDone(cqe, base->session);
+                if constexpr (kStreaming)
+                {
+                    onPollDone(cqe, base->session);
+                }
                 break;
             case OP_KIND::DATAGRAM:
                 onDatagramDone(cqe);
@@ -448,55 +504,27 @@ namespace mynet
             if (cqe->res < 0) [[unlikely]]
             {
                 LOG_WARN("Proactor::onDatagramDone: recvmsg on fd {} failed: {}", acceptor_.fd,
-                         log::errnoText(-cqe->res));
+                         errnoText(-cqe->res));
             }
             else if (cqe->res > 0)
             {
-                const size_t asked = datagram_->maxDatagramBytes();
-                size_t got = static_cast<size_t>(cqe->res);
-                if (got > asked) [[unlikely]]
-                {
-                    LOG_WARN("Proactor::onDatagramDone: {} bytes from {} exceeds {} limit, truncated", got,
-                             datagramPeerText(datagramOp_.peer), asked);
-                    got = asked;
-                }
+                // 内核侧 MSG_TRUNC 只是冗余的双保险：Datagram::bind 保证窗口 ≥
+                // 上界+1，所以任何超出上界的报文都一定会在 receiveFrom 的
+                // n > cap 判定里被抓到。这里保留它，是因为它反映的是内核视角
+                // （报文被 socket 缓冲区截断），与本库的上界判定不是同一件事。
                 if ((datagramOp_.msg.msg_flags & MSG_TRUNC) != 0) [[unlikely]]
                 {
                     LOG_WARN("Proactor::onDatagramDone: datagram from {} was truncated",
                              datagramPeerText(datagramOp_.peer));
                 }
-                datagram_->onDatagram(datagramOp_.peer, datagramIn_.data(), got);
-                flushDatagrams();
+                datagram_.receiveFrom(datagramOp_.peer, datagram_.recvBuffer(), static_cast<size_t>(cqe->res));
+                datagram_.flushTo(acceptor_.fd);
             }
             if (!stopSource_.stop_requested())
             {
                 if (auto rc = postDatagramRecv(); !rc) [[unlikely]]
                 {
                     LOG_ERROR("Proactor::onDatagramDone: re-arming datagram read failed: {}", toString(rc.error()));
-                }
-            }
-        }
-
-        inline void flushDatagrams()
-        {
-            while (datagram_->hasReply())
-            {
-                DatagramReply reply = datagram_->takeReply();
-                while (true)
-                {
-                    ssize_t sent = ::sendto(acceptor_.fd, reply.bytes.data(), reply.bytes.size(), 0,
-                                            reinterpret_cast<const sockaddr *>(&reply.peer),
-                                            static_cast<socklen_t>(sizeof(sockaddr_in)));
-                    if (sent < 0) [[unlikely]]
-                    {
-                        if (errno == EINTR)
-                        {
-                            continue;
-                        }
-                        LOG_WARN("Proactor::flushDatagrams: sendto to {} failed: {}", datagramPeerText(reply.peer),
-                                 log::errnoText(errno));
-                    }
-                    break;
                 }
             }
         }
@@ -509,8 +537,8 @@ namespace mynet
                 return std::unexpected(ERR::URING_SQE_FAILED);
             }
             datagramOp_.peer = {};
-            datagramOp_.iov.iov_base = datagramIn_.data();
-            datagramOp_.iov.iov_len = datagramIn_.size();
+            datagramOp_.iov.iov_base = datagram_.recvBuffer();
+            datagramOp_.iov.iov_len = datagram_.recvCapacity();
             datagramOp_.msg = {};
             datagramOp_.msg.msg_name = &datagramOp_.peer;
             datagramOp_.msg.msg_namelen = static_cast<socklen_t>(sizeof(sockaddr_in));
@@ -522,6 +550,7 @@ namespace mynet
         }
 
         [[nodiscard]] inline Result<> postAccepts(int count)
+            requires kStreaming
         {
             for (int i = 0; i < count; ++i)
             {
@@ -543,13 +572,14 @@ namespace mynet
             int si = io_uring_submit(&uring_);
             if (si < 0) [[unlikely]]
             {
-                LOG_ERROR("Proactor::getSqe: flushing full submission queue failed: {}", log::errnoText(-si));
+                LOG_ERROR("Proactor::getSqe: flushing full submission queue failed: {}", errnoText(-si));
                 return nullptr;
             }
             return io_uring_get_sqe(&uring_);
         }
 
         [[nodiscard]] inline Result<> postOneAccept()
+            requires kStreaming
         {
             AcceptOp *op = acceptPool_.acquire();
             if (op == nullptr) [[unlikely]]
@@ -573,6 +603,7 @@ namespace mynet
         }
 
         inline void onAcceptDone(io_uring_cqe *cqe, AcceptOp *op)
+            requires kStreaming
         {
             --acceptOutstanding_;
             if (cqe->res >= 0)
@@ -581,7 +612,7 @@ namespace mynet
             }
             else
             {
-                LOG_DEBUG("Proactor::onAcceptDone: accept() failed: {}", log::errnoText(-cqe->res));
+                LOG_DEBUG("Proactor::onAcceptDone: accept() failed: {}", errnoText(-cqe->res));
             }
             acceptPool_.release(op);
         }
@@ -610,7 +641,7 @@ namespace mynet
             {
                 if (protocol_.ctx == nullptr || !session->conn.startTLS(protocol_.ctx)) [[unlikely]]
                 {
-                    LOG_WARN("Proactor::onNewConnection: TLS setup for fd {} failed: {}", fd, log::sslText());
+                    LOG_WARN("Proactor::onNewConnection: TLS setup for fd {} failed: {}", fd, sslText());
                     sessionPool_.release(session);
                     return;
                 }
@@ -624,6 +655,7 @@ namespace mynet
         }
 
         [[nodiscard]] inline IO_STATUS postPoll(Session *session)
+            requires kStreaming
         {
             Conn &conn = session->conn;
             unsigned int mask = 0;
@@ -653,6 +685,7 @@ namespace mynet
         }
 
         [[nodiscard]] inline IO_STATUS postRecv(Session *session)
+            requires kStreaming
         {
             // kTLS RX offload 生效的 TLS 会话：内核已解密，recv 直接吐明文，
             // 可复用 multishot + buffer ring 快路径；其余 TLS 会话仍走 poll→同步 SSL_read；
@@ -677,6 +710,7 @@ namespace mynet
         }
 
         inline void onRecvDone(io_uring_cqe *cqe, Session *session)
+            requires kStreaming
         {
             if (session->conn.ssl() != nullptr && !session->conn.ktlsRxActive())
             {
@@ -711,7 +745,7 @@ namespace mynet
                 }
                 else
                 {
-                    LOG_WARN("Proactor::onRecvDone: fd {}: recv() failed: {}", session->conn.fd(), log::errnoText(err));
+                    LOG_WARN("Proactor::onRecvDone: fd {}: recv() failed: {}", session->conn.fd(), errnoText(err));
                     fatal = true;
                 }
             }
@@ -786,6 +820,7 @@ namespace mynet
         }
 
         inline void onPollDone(io_uring_cqe *cqe, Session *session)
+            requires kStreaming
         {
             if (!session->pollPosted && !session->pollRetired) [[unlikely]]
             {
@@ -806,7 +841,7 @@ namespace mynet
                 int err = -cqe->res;
                 if (err != EAGAIN && err != EWOULDBLOCK && err != EINTR)
                 {
-                    LOG_WARN("Proactor::onPollDone: fd {}: poll() failed: {}", conn.fd(), log::errnoText(err));
+                    LOG_WARN("Proactor::onPollDone: fd {}: poll() failed: {}", conn.fd(), errnoText(err));
                     conn.onFatal();
                     closeSession(session);
                 }
@@ -884,6 +919,7 @@ namespace mynet
         }
 
         inline void onSendDone(io_uring_cqe *cqe, Session *session)
+            requires kStreaming
         {
             --session->inFlight;
             session->sendPosted = false;
@@ -897,7 +933,7 @@ namespace mynet
                 }
                 if (err != EAGAIN && err != EWOULDBLOCK && err != EINTR)
                 {
-                    LOG_WARN("Proactor::onSendDone: fd {}: send() failed: {}", session->conn.fd(), log::errnoText(err));
+                    LOG_WARN("Proactor::onSendDone: fd {}: send() failed: {}", session->conn.fd(), errnoText(err));
                     session->conn.onFatal();
                     closeSession(session);
                     settleSession(session);
@@ -933,6 +969,7 @@ namespace mynet
         }
 
         inline void closeSession(Session *session)
+            requires kStreaming
         {
             if (session->dead)
             {
@@ -958,6 +995,7 @@ namespace mynet
         }
 
         inline void postCancels()
+            requires kStreaming
         {
             size_t done = 0;
             for (Session *session : cancelScratch_)
@@ -1025,6 +1063,7 @@ namespace mynet
         }
 
         inline void settleSession(Session *session)
+            requires kStreaming
         {
             if (session->dead && session->inFlight == 0 && !session->inCancelQueue)
             {
@@ -1063,6 +1102,7 @@ namespace mynet
         }
 
         inline void sweepIdle()
+            requires kStreaming
         {
             if (idleTimeout_.count() <= 0)
             {
@@ -1099,9 +1139,8 @@ namespace mynet
         std::vector<Session *> cancelScratch_{};
         int acceptOutstanding_ = 0;
         int maxAccepts_ = 0;
-        DatagramHandler *datagram_ = nullptr;
+        typename DatagramSlot<Handler>::Type datagram_{};
         DatagramOp datagramOp_{};
-        std::vector<char> datagramIn_{};
         std::chrono::seconds idleTimeout_{0};
         std::stop_source stopSource_{};
     };

@@ -5,11 +5,10 @@
  * @brief 高性能客户端双向数据管道，连接标准输入/输出与网络套接字。
  */
 
-#include "concepts.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
 #include "event.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "loop.hpp"
 #include <cerrno>
 #include <chrono>
@@ -88,7 +87,7 @@ namespace mynet
             if (::connect(fd_, reinterpret_cast<const sockaddr *>(&addr_), sizeof(addr_)) < 0 && errno != EINPROGRESS)
                 [[unlikely]]
             {
-                LOG_ERROR("Client::runTcp: connect() to {}:{} failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("Client::runTcp: connect() to {}:{} failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
@@ -116,7 +115,7 @@ namespace mynet
             }
             if (::connect(fd_, reinterpret_cast<const sockaddr *>(&addr_), sizeof(addr_)) < 0) [[unlikely]]
             {
-                LOG_ERROR("Client::runUdp: connect() to {}:{} failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("Client::runUdp: connect() to {}:{} failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
@@ -147,7 +146,7 @@ namespace mynet
             protocol_.ctx = SSL_CTX_new(TLS_client_method());
             if (protocol_.ctx == nullptr) [[unlikely]]
             {
-                LOG_ERROR("Client::runSsl: SSL_CTX_new() failed: {}", log::sslText());
+                LOG_ERROR("Client::runSsl: SSL_CTX_new() failed: {}", sslText());
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
@@ -161,7 +160,7 @@ namespace mynet
             {
                 if (SSL_CTX_load_verify_locations(protocol_.ctx, caFile, nullptr) != 1) [[unlikely]]
                 {
-                    LOG_ERROR("Client::runSsl: CA bundle \"{}\" could not be loaded: {}", caFile, log::sslText());
+                    LOG_ERROR("Client::runSsl: CA bundle \"{}\" could not be loaded: {}", caFile, sslText());
                     reset();
                     return std::unexpected(ERR::SSL_CA_FAILED);
                 }
@@ -173,13 +172,13 @@ namespace mynet
             ssl_ = SSL_new(protocol_.ctx);
             if (ssl_ == nullptr) [[unlikely]]
             {
-                LOG_ERROR("Client::runSsl: SSL_new() failed: {}", log::sslText());
+                LOG_ERROR("Client::runSsl: SSL_new() failed: {}", sslText());
                 reset();
                 return std::unexpected(ERR::SSL_NEW_FAILED);
             }
             if (SSL_set_fd(ssl_, fd_) != 1) [[unlikely]]
             {
-                LOG_ERROR("Client::runSsl: SSL_set_fd({}) failed: {}", fd_, log::sslText());
+                LOG_ERROR("Client::runSsl: SSL_set_fd({}) failed: {}", fd_, sslText());
                 reset();
                 return std::unexpected(ERR::SSL_SET_FD_FAILED);
             }
@@ -192,14 +191,14 @@ namespace mynet
                 {
                     if (SSL_set_tlsext_host_name(ssl_, serverName) != 1) [[unlikely]]
                     {
-                        LOG_ERROR("Client::runSsl: SNI \"{}\" was refused: {}", serverName, log::sslText());
+                        LOG_ERROR("Client::runSsl: SNI \"{}\" was refused: {}", serverName, sslText());
                         reset();
                         return std::unexpected(ERR::SSL_SNI_FAILED);
                     }
                     // RFC 6125: 开启服务端证书主机名校验，规避泛 CA 证书中间人劫持 (CWE-297)
                     if (SSL_set1_host(ssl_, serverName) != 1) [[unlikely]]
                     {
-                        LOG_ERROR("Client::runSsl: SSL_set1_host(\"{}\") failed: {}", serverName, log::sslText());
+                        LOG_ERROR("Client::runSsl: SSL_set1_host(\"{}\") failed: {}", serverName, sslText());
                         reset();
                         return std::unexpected(ERR::SSL_SNI_FAILED);
                     }
@@ -210,7 +209,7 @@ namespace mynet
                     if (X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl_), serverName) != 1) [[unlikely]]
                     {
                         LOG_ERROR("Client::runSsl: X509_VERIFY_PARAM_set1_ip_asc(\"{}\") failed: {}", serverName,
-                                  log::sslText());
+                                  sslText());
                         reset();
                         return std::unexpected(ERR::SSL_SNI_FAILED);
                     }
@@ -219,7 +218,7 @@ namespace mynet
             if (::connect(fd_, reinterpret_cast<const sockaddr *>(&addr_), sizeof(addr_)) < 0 && errno != EINPROGRESS)
                 [[unlikely]]
             {
-                LOG_ERROR("Client::runSsl: connect() to {}:{} failed: {}", ip, port, log::errnoText(errno));
+                LOG_ERROR("Client::runSsl: connect() to {}:{} failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
@@ -309,13 +308,13 @@ namespace mynet
             fd_ = ::socket(AF_INET, type | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
             if (fd_ < 0) [[unlikely]]
             {
-                LOG_ERROR("Client::setup: socket() failed: {}", log::errnoText(errno));
+                LOG_ERROR("Client::setup: socket() failed: {}", errnoText(errno));
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
             int opt = 1;
             if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
-                LOG_ERROR("Client::setup: setsockopt(SO_REUSEADDR) failed: {}", log::errnoText(errno));
+                LOG_ERROR("Client::setup: setsockopt(SO_REUSEADDR) failed: {}", errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
@@ -496,7 +495,7 @@ namespace mynet
                 if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &soError, &len) < 0 || soError != 0) [[unlikely]]
                 {
                     LOG_ERROR("Client::handshakeOrConnect: connect to {} failed: {}", datagramPeerText(addr_),
-                              soError != 0 ? log::errnoText(soError) : log::errnoText(errno));
+                              soError != 0 ? errnoText(soError) : errnoText(errno));
                     fatal_ = true;
                     failReason_ = ERR::CONNECT_FAILED;
                     peerEof_ = true;
@@ -517,7 +516,7 @@ namespace mynet
                     if (reason != SSL_ERROR_WANT_READ && reason != SSL_ERROR_WANT_WRITE) [[unlikely]]
                     {
                         LOG_ERROR("Client::handshakeOrConnect: TLS handshake with {} failed: {}",
-                                  datagramPeerText(addr_), log::sslText());
+                                  datagramPeerText(addr_), sslText());
                         fatal_ = true;
                         failReason_ = ERR::CONNECT_FAILED;
                         peerEof_ = true;
@@ -648,7 +647,7 @@ namespace mynet
                 }
                 if (n < 0) [[unlikely]]
                 {
-                    LOG_ERROR("Client: writing to stdout failed: {}", log::errnoText(errno));
+                    LOG_ERROR("Client: writing to stdout failed: {}", errnoText(errno));
                     fatal_ = true;
                     failReason_ = ERR::STDOUT_FAILED;
                     peerEof_ = true;
@@ -750,7 +749,7 @@ namespace mynet
                     {
                         return std::unexpected(IO_END::WOULDBLOCK);
                     }
-                    LOG_DEBUG("Client::readSome: fd {}: TLS stream ended: {}", fd_, log::sslText());
+                    LOG_DEBUG("Client::readSome: fd {}: TLS stream ended: {}", fd_, sslText());
                     return std::unexpected(IO_END::EOF_REACHED);
                 }
                 ssize_t n = ::recv(fd_, p, cap, 0);
@@ -777,10 +776,10 @@ namespace mynet
                     // ① 给出可定位的诊断日志（UDP 不可达，而非笼统 recv failed）；
                     // ② 记录 failReason_，否则 runUdp 会静默返回成功
                     failReason_ = ERR::UDP_UNREACHABLE;
-                    LOG_WARN("Client::readSome: fd {}: UDP peer unreachable: {}", fd_, log::errnoText(errno));
+                    LOG_WARN("Client::readSome: fd {}: UDP peer unreachable: {}", fd_, errnoText(errno));
                     return std::unexpected(IO_END::FATAL);
                 }
-                LOG_WARN("Client::readSome: fd {}: recv() failed: {}", fd_, log::errnoText(errno));
+                LOG_WARN("Client::readSome: fd {}: recv() failed: {}", fd_, errnoText(errno));
                 return std::unexpected(IO_END::FATAL);
             }
         }
@@ -805,7 +804,7 @@ namespace mynet
                     {
                         return std::unexpected(IO_END::EOF_REACHED);
                     }
-                    LOG_WARN("Client::writeSome: fd {}: SSL_write() failed: {}", fd_, log::sslText());
+                    LOG_WARN("Client::writeSome: fd {}: SSL_write() failed: {}", fd_, sslText());
                     return std::unexpected(IO_END::FATAL);
                 }
                 ssize_t r = ::send(fd_, p, n, MSG_NOSIGNAL);
@@ -834,10 +833,10 @@ namespace mynet
                     // 同 readSome：结果与通用路径一致（FATAL），特判用于
                     // 可定位的 UDP 不可达诊断日志 + 记录 failReason_
                     failReason_ = ERR::UDP_UNREACHABLE;
-                    LOG_WARN("Client::writeSome: fd {}: UDP peer unreachable: {}", fd_, log::errnoText(errno));
+                    LOG_WARN("Client::writeSome: fd {}: UDP peer unreachable: {}", fd_, errnoText(errno));
                     return std::unexpected(IO_END::FATAL);
                 }
-                LOG_WARN("Client::writeSome: fd {}: send() failed: {}", fd_, log::errnoText(errno));
+                LOG_WARN("Client::writeSome: fd {}: send() failed: {}", fd_, errnoText(errno));
                 return std::unexpected(IO_END::FATAL);
             }
         }

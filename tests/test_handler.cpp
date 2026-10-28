@@ -1,8 +1,7 @@
-// HandlerBase 与 HandlerHttp：协议前端对驱动它的连接所承担的契约——
+// HandlerConnection 与 HandlerHttp：协议前端对驱动它的连接所承担的契约——
 // 读取数据的请求缓冲区、消费输出的响应队列，以及介于两者之间的背压信用额度。
 #include "connection.hpp"
 #include "datagram.hpp"
-#include "handler.hpp"
 #include "http/v1/handler.hpp"
 #include <gtest/gtest.h>
 #include <string>
@@ -14,15 +13,78 @@ using namespace mynet;
 
 namespace
 {
-    void feed(HandlerBase &handler, const std::string &bytes)
+    void feed(HandlerConnection &handler, const std::string &bytes)
     {
         [[maybe_unused]] auto _ = handler.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
     }
+
+    /**
+     * @brief 测试夹具：开启 splice 内核零拷贝的流式回显处理器
+     *
+     * splice 路由由具体处理器类型选择：Connection::isSpliceEnabled() 要求
+     * HandlerType::kEnableSplice 为真且运行期 spliceEnabled() 为真。
+     * 回显逻辑本身来自 HandlerConnection::process()，无需重写。
+     */
+    class SpliceEchoHandler : public HandlerConnection
+    {
+    public:
+        static constexpr bool kEnableSplice = true;
+
+        SpliceEchoHandler() noexcept { setSpliceEnabled(true); }
+
+        void reset() noexcept override
+        {
+            HandlerConnection::reset();
+            setSpliceEnabled(true);
+        }
+    };
+
+    /**
+     * @brief 测试夹具：同时组合流式与报文两种基类的回显处理器
+     *
+     * 两个处理器基类并列独立（无共同祖先、无虚继承），各自提供 reset /
+     * onMessageComplete / onParseError。多重继承时这三个同名钩子必须由派生类
+     * 显式覆盖，否则调用点二义、HandlerConstraint 不成立——本夹具即正确范式：
+     * 覆盖并逐层转发，再叠加自己的数据报回显。
+     * 纯报文处理器无需如此（引擎已支持只派生 HandlerDatagram）。
+     */
+    class CombinedEchoHandler : public HandlerConnection, public HandlerDatagram
+    {
+    public:
+        void reset() noexcept override
+        {
+            HandlerConnection::reset();
+            HandlerDatagram::reset();
+        }
+
+        void onMessageComplete() noexcept override
+        {
+            HandlerConnection::onMessageComplete();
+            HandlerDatagram::onMessageComplete();
+        }
+
+        void onParseError(const char *reason) noexcept override
+        {
+            HandlerConnection::onParseError(reason);
+            HandlerDatagram::onParseError(reason);
+        }
+
+        void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
+        {
+            pushReply(peer, data, n);
+        }
+    };
+
+    // 双基类夹具必须真正满足生命周期契约（钩子无二义），否则它既进不了事件槽位，
+    // 也会被后来者当成可复制的错误范式。
+    static_assert(HandlerConstraint<CombinedEchoHandler>);
+    static_assert(MandatoryMethodConnection<CombinedEchoHandler>);
+    static_assert(MandatoryMethodDatagram<CombinedEchoHandler>);
 } // namespace
 
-TEST(HandlerBase, ProcessEchoesWhateverWasAppended)
+TEST(HandlerConnection, ProcessEchoesWhateverWasAppended)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     feed(handler, "hello");
     EXPECT_FALSE(handler.hasResponse());
     handler.process();
@@ -31,16 +93,16 @@ TEST(HandlerBase, ProcessEchoesWhateverWasAppended)
     EXPECT_EQ(handler.requestBytes(), size_t{0}); // 回显操作已完整消费请求
 }
 
-TEST(HandlerBase, ProcessOnAnEmptyBufferProducesNothing)
+TEST(HandlerConnection, ProcessOnAnEmptyBufferProducesNothing)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     handler.process();
     EXPECT_FALSE(handler.hasResponse());
 }
 
-TEST(HandlerBase, ResponseQueueIsFifo)
+TEST(HandlerConnection, ResponseQueueIsFifo)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     [[maybe_unused]] auto _1 = handler.pushResponse("first");
     [[maybe_unused]] auto _2 = handler.pushResponse(std::string("second"));
     EXPECT_EQ(handler.responseCount(), size_t{2});
@@ -50,17 +112,17 @@ TEST(HandlerBase, ResponseQueueIsFifo)
     EXPECT_FALSE(handler.hasResponse());
 }
 
-TEST(HandlerBase, PushResponseFromABufferCopiesTheBytes)
+TEST(HandlerConnection, PushResponseFromABufferCopiesTheBytes)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     const std::string bytes = "abcdef";
     [[maybe_unused]] auto _ = handler.pushResponse(std::string_view(bytes.data(), 3));
     EXPECT_EQ(handler.takeResponse(), "abc");
 }
 
-TEST(HandlerBase, RequestLimitDrivesReadCredit)
+TEST(HandlerConnection, RequestLimitDrivesReadCredit)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     handler.setMaxRequestBytes(8);
     EXPECT_EQ(handler.readCredit(), size_t{8});
     feed(handler, "abc");
@@ -72,9 +134,9 @@ TEST(HandlerBase, RequestLimitDrivesReadCredit)
     EXPECT_EQ(handler.readCredit(), size_t{0}); // 超出上限时不发放信用，永不下溢
 }
 
-TEST(HandlerBase, DirectWritableZeroCopyIngress)
+TEST(HandlerConnection, DirectWritableZeroCopyIngress)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     auto prepRes = handler.prepareRequestWritable(128);
     ASSERT_TRUE(prepRes.has_value());
     char *target = *prepRes;
@@ -91,9 +153,9 @@ TEST(HandlerBase, DirectWritableZeroCopyIngress)
     EXPECT_EQ(handler.requestBytes(), 0u);
 }
 
-TEST(HandlerBase, RequestConsumeAndClearMoveTheCursor)
+TEST(HandlerConnection, RequestConsumeAndClearMoveTheCursor)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     feed(handler, "abcdef");
     handler.requestConsume(2);
     EXPECT_EQ(handler.requestBytes(), size_t{4});
@@ -102,17 +164,17 @@ TEST(HandlerBase, RequestConsumeAndClearMoveTheCursor)
     EXPECT_EQ(handler.requestBytes(), size_t{0});
 }
 
-TEST(HandlerBase, CloseAfterResponseDefaultsOffAndIsSettable)
+TEST(HandlerConnection, CloseAfterResponseDefaultsOffAndIsSettable)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     EXPECT_FALSE(handler.closeAfterResponse());
     handler.setCloseAfterResponse(true);
     EXPECT_TRUE(handler.closeAfterResponse());
 }
 
-TEST(HandlerBase, ResetClearsRequestsResponsesAndTheCloseFlag)
+TEST(HandlerConnection, ResetClearsRequestsResponsesAndTheCloseFlag)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     feed(handler, "request");
     [[maybe_unused]] auto _ = handler.pushResponse("response");
     handler.setCloseAfterResponse(true);
@@ -215,9 +277,9 @@ TEST(HandlerHttp, NullHeaderNameDoesNotCrash)
     EXPECT_TRUE(handler.headerValue(nullptr).empty());
 }
 
-TEST(HandlerBase, NullPushResponseDoesNotCrash)
+TEST(HandlerConnection, NullPushResponseDoesNotCrash)
 {
-    HandlerBase handler;
+    HandlerConnection handler;
     [[maybe_unused]] auto _1 = handler.pushResponse(std::string_view{});
     [[maybe_unused]] auto _2 = handler.pushResponse(std::string_view(nullptr, 0));
     EXPECT_FALSE(handler.hasResponse());
@@ -303,20 +365,49 @@ TEST(HandlerHttp, TotalHeadersTooLongReturns400)
     EXPECT_TRUE(handler.closeAfterResponse());
 }
 
-TEST(HandlerEcho, EchoesStreamToResponseQueue)
+TEST(HandlerDatagram, StandsAloneWithoutTheStreamFacilities)
 {
-    HandlerEcho handler;
-    feed(handler, "stream_ping");
-    EXPECT_FALSE(handler.hasResponse());
-    handler.process();
-    ASSERT_TRUE(handler.hasResponse());
-    EXPECT_EQ(handler.takeResponse(), "stream_ping");
-    EXPECT_EQ(handler.requestBytes(), size_t{0});
+    // 偏报文特化可独立实例化：无请求缓冲与响应队列，只有对端标签化的回复队列。
+    // 引擎的 UDP 入口正是以这种纯报文形态使用它。
+    struct ReplyOnce : HandlerDatagram
+    {
+        void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
+        {
+            pushReply(peer, data, n);
+        }
+    };
+
+    ReplyOnce handler;
+    static_assert(DerivedFromHandlerDatagram<ReplyOnce>);
+    static_assert(HandlerConstraint<ReplyOnce>);
+    static_assert(!MandatoryMethodConnection<ReplyOnce>); // 纯报文：未派生 HandlerConnection
+
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(5353);
+    inet_pton(AF_INET, "192.0.2.7", &peer.sin_addr);
+
+    handler.onDatagram(peer, "dgram", 5);
+    ASSERT_EQ(handler.replyCount(), size_t{1});
+    auto reply = handler.takeReply();
+    EXPECT_EQ(reply.bytes, "dgram");
+    EXPECT_EQ(reply.peer.sin_port, htons(5353));
+
+    // 队列上界由 setMaxPendingReplies 控制，溢出只丢弃并计数，不抛异常
+    handler.setMaxPendingReplies(1);
+    handler.onDatagram(peer, "a", 1);
+    handler.onDatagram(peer, "b", 1);
+    EXPECT_EQ(handler.replyCount(), size_t{1});
+    EXPECT_EQ(handler.droppedReplies(), size_t{1});
+
+    handler.reset();
+    EXPECT_FALSE(handler.hasReply());
+    EXPECT_EQ(handler.droppedReplies(), size_t{0});
 }
 
-TEST(HandlerEcho, EchoesDatagramToPeer)
+TEST(HandlerDatagram, CombinedHandlerResetsBothSides)
 {
-    HandlerEcho handler;
+    CombinedEchoHandler handler;
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
     peer.sin_port = htons(12345);
@@ -347,7 +438,7 @@ TEST(Connection, SpliceZeroCopyEcho)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<HandlerEcho> conn;
+    Connection<SpliceEchoHandler> conn;
     conn.setFd(sp[1]);
     EXPECT_TRUE(conn.isSpliceEnabled());
 
@@ -380,7 +471,7 @@ TEST(Connection, SpliceDisabledFallback)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<HandlerEcho> conn;
+    Connection<SpliceEchoHandler> conn;
     conn.setFd(sp[1]);
     conn.handler().setSpliceEnabled(false);
     EXPECT_FALSE(conn.isSpliceEnabled());
@@ -413,7 +504,7 @@ TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<HandlerEcho> conn;
+    Connection<HandlerConnection> conn;
     conn.setFd(sp[1]);
     conn.handler().setSpliceEnabled(false);
 
@@ -473,7 +564,7 @@ TEST(Connection, CommitSentRestoresReadPause)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<HandlerEcho> conn;
+    Connection<HandlerConnection> conn;
     conn.setFd(sp[1]);
     conn.handler().setSpliceEnabled(false);
 

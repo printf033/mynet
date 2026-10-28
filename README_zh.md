@@ -7,7 +7,7 @@
 [![Engines](<https://img.shields.io/badge/I%2FO%20Engine-epoll%20%7C%20io__uring-brightgreen.svg>)](#系统架构)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-`mynet` 是专为 Linux 平台打造的超高性能现代 C++26 异步网络框架与协议工具库。项目从底层设计出发，追求微秒级低延迟、热路径零分配（Zero-Allocation）以及严谨的现代 C++ 工程规范。`mynet` 提供了双 I/O 驱动引擎（基于边缘触发 `epoll` 的 **Reactor** 引擎与基于 `io_uring` 内核缓冲环的 **Proactor** 引擎）、统一的流与数据报传输抽象（TCP、TLS、UDP）、HTTP/2 线网兼容的多路复用器（Multiplexer）以及强类型无魔数的错误处理机制。
+`mynet` 是专为 Linux 平台打造的超高性能现代 C++26 异步网络框架与协议工具库。项目从底层设计出发，追求微秒级低延迟、热路径零分配（Zero-Allocation）以及严谨的现代 C++ 工程规范。`mynet` 提供了双 I/O 驱动引擎（基于边缘触发 `epoll` 的 **Reactor** 引擎与基于 `io_uring` 内核缓冲环的 **Proactor** 引擎）、统一的流与数据报传输抽象（TCP、TLS、UDP）、HTTP/2 线网兼容的多路复用处理器（HandlerHttp2）以及强类型无魔数的错误处理机制。
 
 ---
 
@@ -29,7 +29,7 @@
 - [快速上手指南](#快速上手指南)
   - [1. 基于 epoll 的 TCP Echo 服务端（Reactor）](#1-基于-epoll-的-tcp-echo-服务端reactor)
   - [2. 基于 io_uring 与内核缓冲环的 TCP 服务端（Proactor）](#2-基于-io_uring-与内核缓冲环的-tcp-服务端proactor)
-  - [3. 帧多路复用流服务端（Multiplexer）](#3-帧多路复用流服务端multiplexer)
+  - [3. 帧多路复用流服务端（HandlerHttp2）](#3-帧多路复用流服务端handlerhttp2)
   - [4. Unix 管道风格双向流客户端（Client）](#4-unix-管道风格双向流客户端client)
 - [工程代码目录结构](#工程代码目录结构)
 - [单元测试与质量保证](#单元测试与质量保证)
@@ -51,7 +51,7 @@
   - 地址稳定的固定容量对象池 `ObjectPool<T>`，内部使用连续槽位数组 `std::unique_ptr<Slot[]>` 与索引栈，彻底避免内存扩容重分配造成的指针失效与抖动。
   - 滑动窗口自收缩字节缓冲区 `Buffer`，针对长连接读取优化，有效平摊与消除内存重新分配。
 - **统一连接抽象与极端零拷贝传输**:
-  - `HandlerEcho` 通用回显处理器在明文 TCP 下自动启用 Linux `splice(2)` 内核零拷贝环回通道（`socket -> pipe -> socket`），真正达成 0 用户态内存拷贝与 0 内核内存拷贝。
+  - 声明 `kEnableSplice = true` 的处理器在明文 TCP 下自动启用 Linux `splice(2)` 内核零拷贝环回通道（`socket -> pipe -> socket`），达成 0 用户态内存拷贝与 0 内核内存拷贝（开启方式见 `examples/common/handlers.hpp` 的 `SpliceEchoHandler`）。
   - 用户态直写摄入架构（Direct Writable Ingress）：传输层通过 `prepareRequestWritable` 直接向 `Buffer` 底层内存发起 `recv()`，彻底消除临时栈缓冲与中间 `memcpy`。
   - 向量化批量发送：明文连接支持通过 `writev(2)` 单次系统调用原子合并聚合冲刷至多 16 个响应切片，大幅降低系统调用开销。
 - **透明统一的安全传输层**:
@@ -59,12 +59,12 @@
   - 原生支持 ALPN 协议协商、SNI 域名匹配、异步握手流控制与平滑双向 TLS 关闭（`SSL_shutdown`）。
 - **线网级协议解析与多路复用**:
   - HTTP/2 线网兼容的 9 字节标准帧编解码器（`Length:24`, `Type:8`, `Flags:8`, `StreamID:31`）。
-  - 通用型流多路复用器 `Multiplexer<StreamHandler>`，实现单 TCP 连接承载多逻辑流，具备连接级与流级信用流控（`WINDOW_UPDATE`）、并发流数量上限控制与优雅 `GOAWAY` 下线。
+  - 通用型流多路复用处理器 `HandlerHttp2<StreamHandler>`，实现单 TCP 连接承载多逻辑流，具备连接级与流级信用流控（`WINDOW_UPDATE`）、并发流数量上限控制与优雅 `GOAWAY` 下线。
   - 基于 `llhttp` 的 HTTP/1.x 编解码实现，支持请求流水线（Pipelining）与 Keep-Alive。
 - **完备的系统可观测性与运维友好性**:
   - 强类型枚举错误码 `Err` 与 I/O 状态码 `IoEnd`。
   - 严格的输出通道隔离：业务数据通过 `stdout` 传输，结构化诊断日志通过 `mynet::log`（封装 `thirdparty/mylog`）输出至 `stderr`，防止管道重定向数据被污染。
-  - **沙箱化 Lua 配置热重载与无锁代次快照**：支持 `mynet::reloadConfig("config.lua")`，在裸 `lua_State` 中执行（禁用 `os`/`io`/`package` 等库防命令执行），5000 万指令配额防死循环，支持数值边界安全钳位与全量事务级校验（All-or-Nothing）；配合 `ConfigHolder`/`ConfigSnapshot` 实现读路径零锁、零拷贝快照访问，并自动联合同步热重载 `mylog` 日志配置。
+  - **沙箱化 Lua 配置热重载与无锁代次快照**：支持 `mynet::reloadConfig("config/config.lua")`，在裸 `lua_State` 中执行（禁用 `os`/`io`/`package` 等库防命令执行），5000 万指令配额防死循环，支持数值边界安全钳位与全量事务级校验（All-or-Nothing）；配合 `ConfigHolder`/`ConfigSnapshot` 实现读路径零锁、零拷贝快照访问，并自动联合同步热重载 `mylog` 日志配置。
 
 ---
 
@@ -76,15 +76,16 @@
 flowchart TD
     subgraph App ["业务与协议处理层 (Application & Handlers)"]
         direction LR
-        HandlerEcho["HandlerBase (基础回显)"]
+        ConnHandler["HandlerConnection (流式会话)"]
         HandlerHttp["HandlerHttp (HTTP/1.x 编解码)"]
-        Mux["Multiplexer<StreamHandler> (HTTP/2 多路复用)"]
-        UdpEcho["DatagramHandler (UDP 数据报处理)"]
+        Mux["HandlerHttp2<StreamHandler> (HTTP/2 多路复用)"]
+        DatagramHandler["HandlerDatagram (数据报会话)"]
     end
 
     subgraph Core ["连接与传输抽象层 (Connection & Transport)"]
         direction LR
         Conn["Connection<Handler>"]
+        Dgram["Datagram<Handler>"]
         Session["Proactor::Session"]
         PeerCl["Client<Event> (双向管道客户端)"]
         Datagram["DatagramReply"]
@@ -100,7 +101,7 @@ flowchart TD
         direction LR
         Pool["ObjectPool<T>"]
         Buf["Buffer"]
-        Concepts["concepts"]
+        Constraints["constraints"]
         Err["Err & IoEnd"]
         Log["mynet::log (mylog -> stderr)"]
     end
@@ -133,6 +134,7 @@ flowchart TD
 - **流水线安全**：发送队列采用定容环形队列 `RingQueue<std::string>`，每个响应完整保存在独立字符串中，入队与出队热路径彻底杜绝动态堆分配，支持 HTTP/1.1 Pipelining 在单次读取产生多个响应时不会互相破坏缓冲区。
 - **背压控制（Backpressure）**：内置高水位标记监测，当发送积压超出限额时自动触发 `readCredit()` 暂停接收端读取，避免发送队列无序膨胀引发内存溢出。
 - **Proactor 会话生命周期保护**：在 `Proactor` 引擎中，每个连接被封装于 `Session` 中并严格统计内核在途操作（`inFlight`）。只有在会话被标记为终止且所有在途读写全部完成后，会话才会被安全回收到对象池。
+- **处理器分层**：`HandlerConnection`（`connection.hpp`）与 `HandlerDatagram`（`datagram.hpp`）是两个并列的处理器基类，彼此没有共同祖先：前者持有流式会话的请求缓冲、响应队列与读信用背压，后者持有无连接数据报的对端回复队列。协议处理器（`HandlerHttp`、`HandlerHttp2`、`HandlerHttp3`）继承对应基类；需要双传输的处理器（`HandlerHttp3`）同时继承两者，由于两个基类都不是虚基类，成员访问是直接偏移，不存在虚基类间接寻址与共享子对象记账。原公共根类的基础契约（`reset`、`onMessageComplete`、`onParseError`）分别落在两个基类上，并以传输无关的方式表达为 `HandlerConstraint` 概念（`constraints.hpp`）——事件槽位只依赖这一份最小契约（对象池只需要其中的 `Resettable`）。两个引擎契约为各自的传输通道命名，含义就是「该通道真正会调用的必需方法集合」：`MandatoryMethodConnection`（`connection.hpp`）与 `MandatoryMethodDatagram`（`datagram.hpp`）。二者各自紧邻其基类定义，使 `std::derived_from` 始终看到完整类型；同时都要求派生并逐项校验引擎经处理器类型本身调用的签名。纯报文处理器只需派生 `HandlerDatagram`：引擎把非流式处理器映射到无状态的 `NoConnection` 槽位（`ConnectionSlot`），把纯流式处理器映射到 `NoDatagram` 槽位（`DatagramSlot`），两条路径都不会实例化对方的传输设施。
 
 ### 3. 热路径零堆分配内存架构
 
@@ -144,7 +146,7 @@ flowchart TD
 ### 4. HTTP/2 帧编解码与流多路复用
 
 - **标准线网帧格式**：`FrameDecoder` 与 `appendFrame` 原生兼容标准 9 字节 HTTP/2 帧头，涵盖 `DATA`、`HEADERS`、`PRIORITY`、`RST_STREAM`、`SETTINGS`、`PUSH_PROMISE`、`PING`、`GOAWAY`、`WINDOW_UPDATE`。
-- **`Multiplexer<StreamHandler>`**：
+- **`HandlerHttp2<StreamHandler>`**：
   - 实现单条物理传输流上承载海量并发逻辑流（Stream）。
   - 流表采用高性能定容开放寻址流表 `mux::StreamTable<StreamSlot>`，热路径无动态堆分配。
   - 内置连接级与各逻辑流级别的信用窗口流控机制。当可用窗口低于设定阈值时，自动向对端发送 `WINDOW_UPDATE`。
@@ -153,8 +155,9 @@ flowchart TD
 
 ### 5. UDP 数据报传输系统
 
-- **`DatagramHandler`**：针对 UDP 协议无连接、多对端报文交织的特点，提供专有的报文接收抽象。在收发报文中原样保留发送方地址信息（`sockaddr_in`），构筑 `DatagramReply` 队列。
-- **过载丢包防护**：底层由定容 `RingQueue<DatagramReply>` 支撑，当队列发生拥塞积压时，主动丢弃溢出数据报并递增丢包计数器，防止网络波动造成无界内存增长。
+- **`HandlerDatagram`**：针对 UDP 协议无连接、多对端报文交织的特点，提供专有的报文接收抽象。在收发报文中原样保留发送方地址信息（`sockaddr_in`），构筑 `DatagramReply` 队列。它是协议侧根类，只决定「回什么」。
+- **`Datagram<Handler>`**：UDP 路径上 `Connection<Handler>` 的传输侧对等物（`datagram.hpp`）。它把一个处理器绑定到一条套接字，持有定容接收窗口与收发计数；超界截断与回复排空都在这里完成，两个引擎因此退化为事件分发（recvfrom 写入 `recvBuffer()`，交给 `receiveFrom()`，再用 `flushTo()` 排空）。它刻意不持有 fd、对端地址与写队列——UDP 无连接，这些属于逐报文状态而非逐会话状态。收发计数是给单元测试用的诊断设施而非生产指标：`runUdp` 返回前会 `reset()` 清零，引擎也没有暴露该会话对象的访问器，因此运行中的服务读不到这些值。`DatagramSlot<H>` 在编译期选择 `Datagram<H>` 或空壳 `NoDatagram`，与流式一侧的 `ConnectionSlot` 互为镜像。
+- **过载丢包防护**：回复队列由 `maxPendingReplies` 限定容量，队列满时主动丢弃溢出数据报并递增丢包计数器，防止网络波动造成无界内存增长。
 
 ### 6. 现代 C++26 语言规范与强类型错误语义
 
@@ -168,7 +171,7 @@ flowchart TD
 `Client<Event>` 遵循 Unix 哲学，作为独立高效的命令行数据泵将标准输入（stdin）与套接字全双工桥接至标准输出（stdout）：
 
 ```bash
-cat payload.bin | ./client_tcp 127.0.0.1 8888 > output.bin
+cat payload.bin | ./build/cli_tcp 127.0.0.1:8888 > output.bin
 ```
 
 内置标准输入高低水位回压调节、平滑半关闭握手（TCP `FIN` 或 TLS `close_notify`）、`SIGPIPE` 信号阻断与还原，支持管道、终端与常规文件重定向。
@@ -193,9 +196,9 @@ FrameDecoder::next (负载 1024B)                   77.5 ns/op         13,216.9 
 FrameDecoder::next (负载 16384B)                1104.7 ns/op         14,831.4 MB/s
 read+appendBigEndian32 (网络序处理)                0.7 ns/op                  --
 ObjectPool acquire+release (128个对象)             3.8 ns/op                  --
-HandlerBase::pushResponse+takeResponse (1KiB)     22.5 ns/op         45,605.2 MB/s
-HandlerBase::process echo (1KiB 回显)             47.1 ns/op         21,760.2 MB/s
-Multiplexer open+echo+close (64条流)             553.4 ns/op                  --
+HandlerConnection::pushResponse+takeResponse (1KiB)     22.5 ns/op         45,605.2 MB/s
+HandlerConnection::process echo (1KiB 回显)             47.1 ns/op         21,760.2 MB/s
+HandlerHttp2 open+echo+close (64条流)                   553.4 ns/op                  --
 ```
 
 ---
@@ -268,9 +271,9 @@ docker run --rm -it -p 8888:8888 mynet:latest
 ### 1. 基于 epoll 的 TCP Echo 服务端（Reactor）
 
 ```cpp
+#include "connection.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -279,7 +282,7 @@ int main() {
     mynet::log::init(); // 初始化日志并重定向至 stderr
 
     // 创建普通 TCP 套接字与 Echo 回显处理器的 Reactor 实例
-    Reactor<EventSocket<HandlerBase>> server;
+    Reactor<EventSocket<HandlerConnection>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("服务端启动失败: {}", toString(res.error()));
@@ -292,9 +295,9 @@ int main() {
 ### 2. 基于 io_uring 与内核缓冲环的 TCP 服务端（Proactor）
 
 ```cpp
+#include "connection.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "proactor.hpp"
 
 using namespace mynet;
@@ -303,7 +306,7 @@ int main() {
     mynet::log::init();
 
     // 创建基于 io_uring 的 Proactor 前摄器服务端
-    Proactor<EventSocket<HandlerBase>> server;
+    Proactor<EventSocket<HandlerConnection>> server;
 
     // 参数：IP, 端口, backlog, SQ队列长度, CQ队列长度, 最大并发Accept, 会话池大小, 缓冲环单元数, 单缓冲区大小
     if (auto res = server.runTcp("0.0.0.0", 8888, 511, 512, 1024, 256, 512, 1024, 4096); !res) {
@@ -314,12 +317,12 @@ int main() {
 }
 ```
 
-### 3. 帧多路复用流服务端（Multiplexer）
+### 3. 帧多路复用流服务端（HandlerHttp2）
 
 ```cpp
+#include "connection.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "http/v2/multiplexer.hpp"
+#include "http/v2/handler.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -327,11 +330,11 @@ using namespace mynet;
 int main() {
     mynet::log::init();
 
-    // 组合调用栈：Reactor -> Socket -> Multiplexer (HTTP/2 协议帧多路复用) -> Trace 调试回显
-    Reactor<EventSocket<Multiplexer<HandlerBase>>> server;
+    // 组合调用栈：Reactor -> Socket -> HandlerHttp2 (HTTP/2 协议帧多路复用) -> 每条流的处理器
+    Reactor<EventSocket<HandlerHttp2<HandlerConnection>>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
-        LOG_ERROR("多路复用服务端启动失败: {}", toString(res.error()));
+        LOG_ERROR("HTTP/2 服务端启动失败: {}", toString(res.error()));
         return toExitCode(res.error());
     }
     return 0;
@@ -341,15 +344,15 @@ int main() {
 ### 4. Unix 管道风格双向流客户端（Client）
 
 ```cpp
+#include "connection.hpp"
 #include "error.hpp"
-#include "handler.hpp"
 #include "client.hpp"
 
 using namespace mynet;
 
 int main(int argc, char* argv[]) {
     mynet::log::init();
-    Client<EventSocket<HandlerBase>> client;
+    Client<EventSocket<HandlerConnection>> client;
 
     // 建立连接并将标准输入流入网络，将对端返回输出至标准输出
     if (auto res = client.runTcp("127.0.0.1", 8888); !res) {
@@ -360,12 +363,19 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-命令行快速测试：
+全部示例都接受单个 `<host>:<port>` 参数，省略时使用各自的默认端点：
 
 ```bash
-# 发送 HTTP 请求并实时查看回包
-printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/client_tcp 127.0.0.1 8888
+# 客户端：把 stdin 流向服务端，并把回包打印到 stdout
+printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/cli_tcp 127.0.0.1:8888
+
+# 服务端：端点可任意指定（默认 0.0.0.0:8888，HTTP/3 为 4433）
+./build/reactor_http1 127.0.0.1:9000
+curl -X POST --data-binary 'hello' http://127.0.0.1:9000/
 ```
+
+完整矩阵为：客户端 `cli_{tcp,ssl,udp}`，服务端
+`{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}`。
 
 ---
 
@@ -381,28 +391,26 @@ mynet/
 │
 ├── src/                        # 核心头文件库实现
 │   ├── CMakeLists.txt          # 纯头文件 Interface 接口库定义（INTERFACE mynet 与 mynet_lua）
-│   ├── concepts.hpp            # C++20/C++26 Concept 概念定义与类型约束
+│   ├── constraints.hpp         # 通用约束（Resettable / HandlerConstraint）
 │   ├── configHolder.hpp        # 统一网络配置结构体与代次快照（NetConfig / ConfigHolder / ConfigSnapshot）
-│   ├── configer_lua.hpp        # 沙箱化 Lua 配置热重载引擎（reloadConfig，集成 mylog 配置热重载）
-│   ├── error.hpp               # 强类型错误码枚举 Err 与 I/O 状态 IoEnd
-│   ├── log.hpp                 # 日志适配门面（封装 mylog 并路由至 stderr）
+│   ├── lua_config.hpp          # 沙箱化 Lua 配置加载与热重载（reloadConfig）
+│   ├── error.hpp               # 强类型错误码枚举 Err、IoEnd 与 errno/OpenSSL 错误文本
+│   ├── log_config.hpp          # 日志输出配置（mylog 输出至 stderr）
 │   ├── buffer.hpp              # 滑动窗口自收缩低开销字节缓冲区
 │   ├── ringQueue.hpp           # 零分配定容循环环形队列
 │   ├── objectPool.hpp          # 地址稳定的固定容量对象池
 │   ├── timer.hpp               # 惰性删除的高效二叉最小堆定时器队列
 │   ├── loop.hpp                # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
-│   ├── event.hpp               # 套接字及 SSL 监听通道抽象
-│   ├── connection.hpp          # 统一的 TCP/TLS 传输层核心实现与响应缓冲队列
-│   ├── datagram.hpp            # UDP 数据报传输层抽象
-│   ├── handler.hpp             # 基础协议处理器与通用回显处理器（HandlerBase 与 HandlerEcho）
+│   ├── event.hpp               # 监听通道根类 EventBase + 套接字及 SSL 通道
+│   ├── connection.hpp          # TCP/TLS 传输层核心 + 连接处理器特化（HandlerConnection）
+│   ├── datagram.hpp            # UDP 传输层 Datagram<H> + 报文处理器基类 HandlerDatagram
 │   ├── http/                   # HTTP 协议族实现
 │   │   ├── v1/
 │   │   │   └── handler.hpp     # 基于 llhttp 的 HTTP/1.x 协议处理器（HandlerHttp）
 │   │   ├── v2/
 │   │   │   ├── frame.hpp       # HTTP/2 兼容的标准二进制协议帧编解码器
 │   │   │   ├── streamTable.hpp # 开放寻址零分配流哈希表
-│   │   │   ├── multiplexer.hpp # 基于信用的 HTTP/2 流多路复用调度器
-│   │   │   └── handler.hpp     # HTTP/2 协议处理器入口（HandlerHttp2）
+│   │   │   └── handler.hpp     # HTTP/2 处理器：分帧、流表与信用流多路复用
 │   │   └── v3/
 │   │       ├── varint.hpp      # RFC 9000 QUIC/HTTP/3 变长整数编解码器
 │   │       ├── frame.hpp       # RFC 9114 HTTP/3 协议分帧、设置与错误码
@@ -414,25 +422,37 @@ mynet/
 │   ├── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎
 │   └── client.hpp              # 管道式双向网络客户端（stdin/stdout 桥接）
 │
+├── config/                     # 运行时配置
+│   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）
+│
 ├── examples/                   # 示例程序与可执行文件
-│   ├── config.lua              # 包含完整中英文注释的沙箱化 Lua 配置样例
-│   ├── reactor_tcp.cpp         # 基于 Reactor 的 TCP 回显服务端
-│   ├── reactor_ssl.cpp         # 基于 Reactor 的 TLS 安全服务端
-│   ├── reactor_udp.cpp         # 基于 Reactor 的 UDP 回显服务端
-│   ├── reactor_http3.cpp       # 基于 Reactor 的 HTTP/3 服务端（QUIC/UDP）
-│   ├── reactor_multiplex.cpp   # 基于 Reactor 的流多路复用服务端
-│   ├── proactor_tcp.cpp        # 基于 Proactor 与内核缓冲环的 TCP 服务端
-│   ├── proactor_ssl.cpp        # 基于 Proactor 的 TLS 安全服务端（Poll 驱动）
-│   ├── proactor_udp.cpp        # 基于 Proactor 的 UDP 服务端
-│   ├── proactor_multiplex.cpp  # 基于 Proactor 的流多路复用服务端
-│   ├── client_tcp.cpp          # 命令行 TCP 流客户端
-│   ├── client_ssl.cpp          # 命令行 TLS 安全客户端
-│   └── client_udp.cpp          # 命令行 UDP 客户端
+│   ├── common/
+│   │   ├── endpoint.hpp        # 全部示例共用的 "<host>:<port>" 解析
+│   │   └── handlers.hpp        # 两个引擎共用的 SpliceEchoHandler / UdpEchoHandler
+│   ├── cli/                    # Client 客户端（传输级，不解析应用协议）
+│   │   ├── tcp.cpp             # 命令行 TCP 流客户端（cli_tcp）
+│   │   ├── ssl.cpp             # 命令行 TLS 安全客户端（cli_ssl）
+│   │   └── udp.cpp             # 命令行 UDP 客户端（cli_udp）
+│   ├── reactor/                # epoll 边沿触发 Reactor 服务端
+│   │   ├── tcp.cpp             # reactor_tcp   TCP 回显（splice 零拷贝）
+│   │   ├── ssl.cpp             # reactor_ssl   TLS 回显
+│   │   ├── udp.cpp             # reactor_udp   UDP 数据报回显
+│   │   ├── http1.cpp           # reactor_http1 基于 llhttp 的 HTTP/1.x
+│   │   ├── http2.cpp           # reactor_http2 HTTP/2 流多路复用
+│   │   └── http3.cpp           # reactor_http3 HTTP/3（QUIC/UDP）
+│   └── proactor/               # io_uring 完成事件 Proactor 服务端
+│       ├── tcp.cpp             # proactor_tcp   TCP 回显（multishot accept + 缓冲环）
+│       ├── ssl.cpp             # proactor_ssl   TLS 回显（Poll 驱动握手）
+│       ├── udp.cpp             # proactor_udp   UDP 数据报回显
+│       ├── http1.cpp           # proactor_http1 基于 llhttp 的 HTTP/1.x
+│       ├── http2.cpp           # proactor_http2 HTTP/2 流多路复用
+│       └── http3.cpp           # proactor_http3 HTTP/3（QUIC/UDP）
 │
 ├── tests/                      # 单元测试工程（Google Test + ASan 内存安全检查）
 │   ├── test_buffer.cpp         # 缓冲区边界与压缩测试
 │   ├── test_config_lua.cpp     # 沙箱化 Lua 配置热重载与边界钳位测试
-│   ├── test_concepts.cpp       # 概念约束与可重置性测试
+│   ├── test_constraints.cpp    # 约束概念与可重置性测试
+│   ├── test_datagram.cpp       # UDP 传输会话的窗口定容、截断与排空测试
 │   ├── test_error.cpp          # 错误码一致性测试
 │   ├── test_frame.cpp          # 协议帧拆装包测试
 │   ├── test_handler.cpp        # 处理器状态流转测试
@@ -464,24 +484,30 @@ ctest --output-on-failure
 
 ```text
 Test project /home/aaa/code/mynet/build
-    Start 1: test_buffer
-1/8 Test #1: test_buffer ......................   Passed    0.01 sec
-    Start 2: test_concepts
-2/8 Test #2: test_concepts ....................   Passed    0.01 sec
-    Start 3: test_error
-3/8 Test #3: test_error .......................   Passed    0.01 sec
-    Start 4: test_frame
-4/8 Test #4: test_frame .......................   Passed    0.01 sec
-    Start 5: test_handler
-5/8 Test #5: test_handler .....................   Passed    0.01 sec
-    Start 6: test_multiplexer
-6/8 Test #6: test_multiplexer .................   Passed    0.02 sec
-    Start 7: test_object_pool
-7/8 Test #7: test_object_pool .................   Passed    0.01 sec
-    Start 8: test_timer
-8/8 Test #8: test_timer .......................   Passed    0.02 sec
+    Start  1: test_buffer
+ 1/11 Test  #1: test_buffer ......................   Passed    0.01 sec
+    Start  2: test_constraints
+ 2/11 Test  #2: test_constraints .................   Passed    0.01 sec
+    Start  3: test_datagram
+ 3/11 Test  #3: test_datagram ....................   Passed    0.02 sec
+    Start  4: test_error
+ 4/11 Test  #4: test_error .......................   Passed    0.01 sec
+    Start  5: test_frame
+ 5/11 Test  #5: test_frame .......................   Passed    0.01 sec
+    Start  6: test_handler
+ 6/11 Test  #6: test_handler .....................   Passed    0.03 sec
+    Start  7: test_http3
+ 7/11 Test  #7: test_http3 .......................   Passed    0.02 sec
+    Start  8: test_multiplexer
+ 8/11 Test  #8: test_multiplexer .................   Passed    0.09 sec
+    Start  9: test_object_pool
+ 9/11 Test  #9: test_object_pool .................   Passed    0.02 sec
+    Start 10: test_timer
+10/11 Test #10: test_timer .......................   Passed    0.03 sec
+    Start 11: test_config_lua
+11/11 Test #11: test_config_lua ..................   Passed    0.02 sec
 
-100% tests passed out of 8
+100% tests passed, 0 tests failed out of 11
 ```
 
 ---

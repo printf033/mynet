@@ -1,9 +1,9 @@
-// Multiplexer<HandlerBase>：在单条物理字节流上承载多个独立的流式交互。
+// HandlerHttp2<HandlerConnection>：在单条物理字节流上承载多个独立的流式交互。
 // 这些测试模拟网络连接的行为驱动它——将完整的帧追加到请求缓冲区，
 // 并从响应队列中读回其回复，这是上层唯一实际依赖的接口。
-#include "handler.hpp"
+#include "connection.hpp"
 #include "http/v2/frame.hpp"
-#include "http/v2/multiplexer.hpp"
+#include "http/v2/handler.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -14,6 +14,10 @@
 #include <vector>
 
 using namespace mynet;
+
+// 入口头文件的转发必须与实现指向同一实体，且默认模板实参可用（HandlerHttp2<>）。
+static_assert(std::same_as<mynet::HandlerHttp2<HandlerConnection>, mynet::http::v2::HandlerHttp2<HandlerConnection>>);
+static_assert(std::same_as<HandlerHttp2<>, HandlerHttp2<HandlerConnection>>);
 
 namespace
 {
@@ -45,7 +49,7 @@ namespace
 
     // 记录上层协议前端可重写的钩子函数，
     // 以便测试能针对通知上层的事件进行断言，而非侵入内部实现。
-    class TwoPartHandler : public HandlerBase
+    class TwoPartHandler : public HandlerConnection
     {
     public:
         void process()
@@ -59,7 +63,7 @@ namespace
         }
     };
 
-    class TwoPartMux : public Multiplexer<TwoPartHandler>
+    class TwoPartMux : public HandlerHttp2<TwoPartHandler>
     {
     public:
         void push(const Frame &frame)
@@ -100,7 +104,7 @@ namespace
         }
     };
 
-    class ProbeMux : public Multiplexer<HandlerBase>
+    class ProbeMux : public HandlerHttp2<HandlerConnection>
     {
     public:
         std::vector<uint32_t> opens;
@@ -110,8 +114,8 @@ namespace
         std::optional<STREAM_ERROR> error;
         std::string why;
 
-        using Multiplexer<HandlerBase>::connRecvWindow_;
-        using Multiplexer<HandlerBase>::stream;
+        using HandlerHttp2<HandlerConnection>::connRecvWindow_;
+        using HandlerHttp2<HandlerConnection>::stream;
 
         void onStreamOpen(uint32_t id) noexcept override { opens.push_back(id); }
         void onStreamClose(uint32_t id) noexcept override { closes.push_back(id); }
@@ -177,7 +181,7 @@ namespace
     }
 } // namespace
 
-TEST(Multiplexer, FirstProcessAnnouncesSettings)
+TEST(HandlerHttp2, FirstProcessAnnouncesSettings)
 {
     ProbeMux mux;
     mux.process();
@@ -220,7 +224,7 @@ TEST(Multiplexer, FirstProcessAnnouncesSettings)
     EXPECT_FALSE(mux.hasResponse());
 }
 
-TEST(Multiplexer, SettingsFromThePeerIsAcknowledgedAndNothingElseIsSent)
+TEST(HandlerHttp2, SettingsFromThePeerIsAcknowledgedAndNothingElseIsSent)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -233,7 +237,7 @@ TEST(Multiplexer, SettingsFromThePeerIsAcknowledgedAndNothingElseIsSent)
     EXPECT_TRUE(frames[0].payload.empty());
 }
 
-TEST(Multiplexer, SettingsAckWithAPayloadIsAProtocolError)
+TEST(HandlerHttp2, SettingsAckWithAPayloadIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -244,7 +248,7 @@ TEST(Multiplexer, SettingsAckWithAPayloadIsAProtocolError)
     EXPECT_EQ(countOfType(mux.takeFrames(), FRAME_TYPE::GOAWAY), 1u);
 }
 
-TEST(Multiplexer, HeadersOpenAStreamAndItsDataEchoesBack)
+TEST(HandlerHttp2, HeadersOpenAStreamAndItsDataEchoesBack)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -275,7 +279,7 @@ TEST(Multiplexer, HeadersOpenAStreamAndItsDataEchoesBack)
     EXPECT_TRUE(mux.closes.empty());
 }
 
-TEST(Multiplexer, EndStreamAfterTheEchoClosesTheStream)
+TEST(HandlerHttp2, EndStreamAfterTheEchoClosesTheStream)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -296,7 +300,7 @@ TEST(Multiplexer, EndStreamAfterTheEchoClosesTheStream)
     EXPECT_EQ(mux.closes[0], 1u);
 }
 
-TEST(Multiplexer, HeadersWithEndStreamCloseAnIdleStream)
+TEST(HandlerHttp2, HeadersWithEndStreamCloseAnIdleStream)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -311,7 +315,7 @@ TEST(Multiplexer, HeadersWithEndStreamCloseAnIdleStream)
     EXPECT_EQ(mux.openStreams(), 0u);
 }
 
-TEST(Multiplexer, AReusedTombstoneSlotStartsWithCleanStreamFlags)
+TEST(HandlerHttp2, AReusedTombstoneSlotStartsWithCleanStreamFlags)
 {
     ProbeMux mux;
     mux.setMaxConcurrentStreams(1);
@@ -347,7 +351,7 @@ TEST(Multiplexer, AReusedTombstoneSlotStartsWithCleanStreamFlags)
     EXPECT_EQ(mux.closes[1], 17u);
 }
 
-TEST(Multiplexer, PingIsAcknowledgedWithTheSamePayload)
+TEST(HandlerHttp2, PingIsAcknowledgedWithTheSamePayload)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -365,7 +369,7 @@ TEST(Multiplexer, PingIsAcknowledgedWithTheSamePayload)
     EXPECT_TRUE(mux.takeFrames().empty());
 }
 
-TEST(Multiplexer, PingWithTheWrongPayloadLengthIsAProtocolError)
+TEST(HandlerHttp2, PingWithTheWrongPayloadLengthIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -374,7 +378,7 @@ TEST(Multiplexer, PingWithTheWrongPayloadLengthIsAProtocolError)
     EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
 }
 
-TEST(Multiplexer, AnEvenStreamIdIsAProtocolError)
+TEST(HandlerHttp2, AnEvenStreamIdIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -390,7 +394,7 @@ TEST(Multiplexer, AnEvenStreamIdIsAProtocolError)
     EXPECT_TRUE(mux.opens.empty());
 }
 
-TEST(Multiplexer, DataOnAStreamThatWasNeverOpenedIsAProtocolError)
+TEST(HandlerHttp2, DataOnAStreamThatWasNeverOpenedIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -400,7 +404,7 @@ TEST(Multiplexer, DataOnAStreamThatWasNeverOpenedIsAProtocolError)
     EXPECT_EQ(countOfType(mux.takeFrames(), FRAME_TYPE::GOAWAY), 1u);
 }
 
-TEST(Multiplexer, ResetOnAFinishedStreamIsOnlyAReset)
+TEST(HandlerHttp2, ResetOnAFinishedStreamIsOnlyAReset)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -418,7 +422,7 @@ TEST(Multiplexer, ResetOnAFinishedStreamIsOnlyAReset)
     EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::STREAM_CLOSED));
 }
 
-TEST(Multiplexer, DataBiggerThanTheReceiveWindowIsAFlowControlError)
+TEST(HandlerHttp2, DataBiggerThanTheReceiveWindowIsAFlowControlError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -435,7 +439,7 @@ TEST(Multiplexer, DataBiggerThanTheReceiveWindowIsAFlowControlError)
     EXPECT_EQ(countOfType(mux.takeFrames(), FRAME_TYPE::GOAWAY), 1u);
 }
 
-TEST(Multiplexer, WindowUpdateForTheConnectionGrowsTheSendWindow)
+TEST(HandlerHttp2, WindowUpdateForTheConnectionGrowsTheSendWindow)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -451,7 +455,7 @@ TEST(Multiplexer, WindowUpdateForTheConnectionGrowsTheSendWindow)
     EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
 }
 
-TEST(Multiplexer, PushPromiseIsAProtocolErrorOnAServer)
+TEST(HandlerHttp2, PushPromiseIsAProtocolErrorOnAServer)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -461,7 +465,7 @@ TEST(Multiplexer, PushPromiseIsAProtocolErrorOnAServer)
     EXPECT_NE(mux.why.find("PUSH_PROMISE"), std::string::npos);
 }
 
-TEST(Multiplexer, PriorityIsIgnoredAndLeavesTheConnectionAlone)
+TEST(HandlerHttp2, PriorityIsIgnoredAndLeavesTheConnectionAlone)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -473,7 +477,7 @@ TEST(Multiplexer, PriorityIsIgnoredAndLeavesTheConnectionAlone)
     EXPECT_TRUE(mux.opens.empty()); // 优先级提示帧不构成新流
 }
 
-TEST(Multiplexer, GoawayFromThePeerRefusesNewStreams)
+TEST(HandlerHttp2, GoawayFromThePeerRefusesNewStreams)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -494,7 +498,7 @@ TEST(Multiplexer, GoawayFromThePeerRefusesNewStreams)
     EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::REFUSED_STREAM));
 }
 
-TEST(Multiplexer, ShortGoawayPayloadIsAProtocolError)
+TEST(HandlerHttp2, ShortGoawayPayloadIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -503,7 +507,7 @@ TEST(Multiplexer, ShortGoawayPayloadIsAProtocolError)
     EXPECT_EQ(mux.error, STREAM_ERROR::PROTOCOL_ERROR);
 }
 
-TEST(Multiplexer, MaxConcurrentStreamsBoundsTheStreamTable)
+TEST(HandlerHttp2, MaxConcurrentStreamsBoundsTheStreamTable)
 {
     ProbeMux mux;
     mux.setMaxConcurrentStreams(2);
@@ -526,7 +530,7 @@ TEST(Multiplexer, MaxConcurrentStreamsBoundsTheStreamTable)
     ASSERT_EQ(mux.opens.size(), 2u);
 }
 
-TEST(Multiplexer, AZeroStreamLimitIsClampedToOne)
+TEST(HandlerHttp2, AZeroStreamLimitIsClampedToOne)
 {
     ProbeMux mux;
     mux.setMaxConcurrentStreams(0);
@@ -534,7 +538,7 @@ TEST(Multiplexer, AZeroStreamLimitIsClampedToOne)
     EXPECT_EQ(mux.streamPoolCapacity(), 1u);
 }
 
-TEST(Multiplexer, AFrameSplitAcrossAppendsIsBufferedUntilWhole)
+TEST(HandlerHttp2, AFrameSplitAcrossAppendsIsBufferedUntilWhole)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -555,7 +559,7 @@ TEST(Multiplexer, AFrameSplitAcrossAppendsIsBufferedUntilWhole)
     EXPECT_EQ(mux.headers[0].second, "hello");
 }
 
-TEST(Multiplexer, AFrameLongerThanTheCeilingEndsTheConnection)
+TEST(HandlerHttp2, AFrameLongerThanTheCeilingEndsTheConnection)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -568,7 +572,7 @@ TEST(Multiplexer, AFrameLongerThanTheCeilingEndsTheConnection)
     ASSERT_EQ(countOfType(frames, FRAME_TYPE::GOAWAY), 1u);
 }
 
-TEST(Multiplexer, ResetReturnsTheConnectionToAFreshState)
+TEST(HandlerHttp2, ResetReturnsTheConnectionToAFreshState)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -588,7 +592,7 @@ TEST(Multiplexer, ResetReturnsTheConnectionToAFreshState)
     EXPECT_EQ(frames[0].type, FRAME_TYPE::SETTINGS);
 }
 
-TEST(Multiplexer, PaddedDataHasItsPaddingRemovedBeforeTheHandlerSeesIt)
+TEST(HandlerHttp2, PaddedDataHasItsPaddingRemovedBeforeTheHandlerSeesIt)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -608,7 +612,7 @@ TEST(Multiplexer, PaddedDataHasItsPaddingRemovedBeforeTheHandlerSeesIt)
     EXPECT_EQ(frames[0].payload, "body");
 }
 
-TEST(Multiplexer, PaddingLongerThanThePayloadIsAProtocolError)
+TEST(HandlerHttp2, PaddingLongerThanThePayloadIsAProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -622,7 +626,7 @@ TEST(Multiplexer, PaddingLongerThanThePayloadIsAProtocolError)
     EXPECT_NE(mux.why.find("padding"), std::string::npos);
 }
 
-TEST(Multiplexer, WindowUpdateConnectionOverflowIsFlowControlError)
+TEST(HandlerHttp2, WindowUpdateConnectionOverflowIsFlowControlError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -634,7 +638,7 @@ TEST(Multiplexer, WindowUpdateConnectionOverflowIsFlowControlError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, WindowUpdateStreamOverflowIsReset)
+TEST(HandlerHttp2, WindowUpdateStreamOverflowIsReset)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -653,7 +657,7 @@ TEST(Multiplexer, WindowUpdateStreamOverflowIsReset)
     EXPECT_EQ(mux.stream(1), nullptr); // 流发生流控错误后必须被关闭回收，防止槽位泄漏
 }
 
-TEST(Multiplexer, StreamWindowUpdateZeroIncrementResetsAndClosesStream)
+TEST(HandlerHttp2, StreamWindowUpdateZeroIncrementResetsAndClosesStream)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -673,7 +677,7 @@ TEST(Multiplexer, StreamWindowUpdateZeroIncrementResetsAndClosesStream)
     EXPECT_EQ(mux.stream(1), nullptr); // 增量为 0 的流控错误同样必须关闭回收流槽位
 }
 
-TEST(Multiplexer, PriorityFrameWrongPayloadLengthSendsFrameSizeError)
+TEST(HandlerHttp2, PriorityFrameWrongPayloadLengthSendsFrameSizeError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -689,7 +693,7 @@ TEST(Multiplexer, PriorityFrameWrongPayloadLengthSendsFrameSizeError)
     EXPECT_EQ(frame::readBigEndian32(frames[0].payload.data()), std::to_underlying(STREAM_ERROR::FRAME_SIZE_ERROR));
 }
 
-TEST(Multiplexer, RstStreamOnIdleStreamIsProtocolError)
+TEST(HandlerHttp2, RstStreamOnIdleStreamIsProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -701,7 +705,7 @@ TEST(Multiplexer, RstStreamOnIdleStreamIsProtocolError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, SettingsInitialWindowSizeOverflowIsFlowControlError)
+TEST(HandlerHttp2, SettingsInitialWindowSizeOverflowIsFlowControlError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -711,7 +715,7 @@ TEST(Multiplexer, SettingsInitialWindowSizeOverflowIsFlowControlError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, SettingsInvalidMaxFrameSizeIsProtocolError)
+TEST(HandlerHttp2, SettingsInvalidMaxFrameSizeIsProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -722,7 +726,7 @@ TEST(Multiplexer, SettingsInvalidMaxFrameSizeIsProtocolError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, DataOnConnectionStreamIsProtocolError)
+TEST(HandlerHttp2, DataOnConnectionStreamIsProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -732,7 +736,7 @@ TEST(Multiplexer, DataOnConnectionStreamIsProtocolError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, PriorityOnConnectionStreamIsProtocolError)
+TEST(HandlerHttp2, PriorityOnConnectionStreamIsProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -742,7 +746,7 @@ TEST(Multiplexer, PriorityOnConnectionStreamIsProtocolError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, WindowUpdateOnIdleStreamIsProtocolError)
+TEST(HandlerHttp2, WindowUpdateOnIdleStreamIsProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -754,7 +758,7 @@ TEST(Multiplexer, WindowUpdateOnIdleStreamIsProtocolError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, UnexpectedContinuationFrameIsProtocolError)
+TEST(HandlerHttp2, UnexpectedContinuationFrameIsProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -764,7 +768,7 @@ TEST(Multiplexer, UnexpectedContinuationFrameIsProtocolError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, InitialWindowReductionPausesStreamUntilWindowUpdate)
+TEST(HandlerHttp2, InitialWindowReductionPausesStreamUntilWindowUpdate)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -793,7 +797,7 @@ TEST(Multiplexer, InitialWindowReductionPausesStreamUntilWindowUpdate)
     EXPECT_EQ(frames[0].payload, "hello");
 }
 
-TEST(Multiplexer, StreamWithMultipleResponsesSendsAllPartsBeforeEndStream)
+TEST(HandlerHttp2, StreamWithMultipleResponsesSendsAllPartsBeforeEndStream)
 {
     TwoPartMux mux;
     mux.warmUp();
@@ -819,7 +823,7 @@ TEST(Multiplexer, StreamWithMultipleResponsesSendsAllPartsBeforeEndStream)
     EXPECT_TRUE(frames[2].payload.empty());
 }
 
-TEST(Multiplexer, SettingsInitialWindowDeltaOverflowIsFlowControlError)
+TEST(HandlerHttp2, SettingsInitialWindowDeltaOverflowIsFlowControlError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -837,7 +841,7 @@ TEST(Multiplexer, SettingsInitialWindowDeltaOverflowIsFlowControlError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, RapidResetFloodTriggersEnhanceYourCalm)
+TEST(HandlerHttp2, RapidResetFloodTriggersEnhanceYourCalm)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -857,7 +861,7 @@ TEST(Multiplexer, RapidResetFloodTriggersEnhanceYourCalm)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, PingFloodTriggersEnhanceYourCalm)
+TEST(HandlerHttp2, PingFloodTriggersEnhanceYourCalm)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -873,7 +877,7 @@ TEST(Multiplexer, PingFloodTriggersEnhanceYourCalm)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, HeadersMissingEndHeadersFlagIsProtocolError)
+TEST(HandlerHttp2, HeadersMissingEndHeadersFlagIsProtocolError)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -884,7 +888,7 @@ TEST(Multiplexer, HeadersMissingEndHeadersFlagIsProtocolError)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, SettingsFloodTriggersEnhanceYourCalm)
+TEST(HandlerHttp2, SettingsFloodTriggersEnhanceYourCalm)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -901,7 +905,7 @@ TEST(Multiplexer, SettingsFloodTriggersEnhanceYourCalm)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, EmptyFrameFloodTriggersEnhanceYourCalm)
+TEST(HandlerHttp2, EmptyFrameFloodTriggersEnhanceYourCalm)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -921,7 +925,7 @@ TEST(Multiplexer, EmptyFrameFloodTriggersEnhanceYourCalm)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, WindowUpdateFloodTriggersEnhanceYourCalm)
+TEST(HandlerHttp2, WindowUpdateFloodTriggersEnhanceYourCalm)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -941,7 +945,7 @@ TEST(Multiplexer, WindowUpdateFloodTriggersEnhanceYourCalm)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, PriorityFloodTriggersEnhanceYourCalm)
+TEST(HandlerHttp2, PriorityFloodTriggersEnhanceYourCalm)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -958,7 +962,7 @@ TEST(Multiplexer, PriorityFloodTriggersEnhanceYourCalm)
     EXPECT_TRUE(mux.closeAfterResponse());
 }
 
-TEST(Multiplexer, PaddedDataDeductsEntirePayloadFromWindow)
+TEST(HandlerHttp2, PaddedDataDeductsEntirePayloadFromWindow)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -981,7 +985,7 @@ TEST(Multiplexer, PaddedDataDeductsEntirePayloadFromWindow)
     EXPECT_EQ(streamWinBefore - mux.stream(1)->recvWindow, 15u);
 }
 
-TEST(Multiplexer, GoawayClosesStreamsAboveLastStreamId)
+TEST(HandlerHttp2, GoawayClosesStreamsAboveLastStreamId)
 {
     ProbeMux mux;
     mux.warmUp();
@@ -1009,7 +1013,7 @@ TEST(Multiplexer, GoawayClosesStreamsAboveLastStreamId)
 
 // process() 一次性产出 128KiB 响应：超出对端默认发送窗口（65535），
 // 迫使出站数据驻留在流槽位（pending / handler 队列）中，模拟慢读对端。
-class BigReplyHandler : public HandlerBase
+class BigReplyHandler : public HandlerConnection
 {
 public:
     void process()
@@ -1022,11 +1026,11 @@ public:
     }
 };
 
-class BigReplyMux : public Multiplexer<BigReplyHandler>
+class BigReplyMux : public HandlerHttp2<BigReplyHandler>
 {
 public:
-    using Multiplexer<BigReplyHandler>::connRecvWindow_;
-    using Multiplexer<BigReplyHandler>::stream;
+    using HandlerHttp2<BigReplyHandler>::connRecvWindow_;
+    using HandlerHttp2<BigReplyHandler>::stream;
 
     std::optional<STREAM_ERROR> error;
     std::string why;
@@ -1078,7 +1082,7 @@ public:
     }
 };
 
-TEST(Multiplexer, SlowReaderPausesStreamLevelWindowCredit)
+TEST(HandlerHttp2, SlowReaderPausesStreamLevelWindowCredit)
 {
     BigReplyMux mux;
     mux.warmUp();
@@ -1124,7 +1128,7 @@ TEST(Multiplexer, SlowReaderPausesStreamLevelWindowCredit)
     EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
 }
 
-TEST(Multiplexer, DrainingOutboundRestoresPausedStreamWindow)
+TEST(HandlerHttp2, DrainingOutboundRestoresPausedStreamWindow)
 {
     BigReplyMux mux;
     mux.warmUp();

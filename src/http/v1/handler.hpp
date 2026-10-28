@@ -5,8 +5,8 @@
  * @brief HTTP/1.x 协议处理器实现，基于 llhttp 状态机进行文本报文流解析。
  */
 
-#include "../../handler.hpp"
-#include "log.hpp"
+#include "../../connection.hpp"
+#include "log_config.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -35,7 +35,7 @@ namespace mynet
          * 支持完整的 HTTP 请求与响应解析、Keep-Alive 自动推断、流水线边界识别与自动 400 Bad Request 错误自愈。
          */
         template <HTTP_MODE Mode>
-        class HandlerHttp : public HandlerBase
+        class HandlerHttp : public HandlerConnection
         {
         public:
             HandlerHttp() noexcept { init(); }
@@ -72,7 +72,7 @@ namespace mynet
                 currentField_.clear();
                 currentValue_.clear();
                 totalHeaderBytes_ = 0;
-                HandlerBase::reset();
+                HandlerConnection::reset();
             }
 
             // ---- 解析元数据快速提取 ----

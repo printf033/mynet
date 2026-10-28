@@ -1,4 +1,4 @@
-#include "configer_lua.hpp"
+#include "lua_config.hpp"
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>

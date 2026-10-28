@@ -1,7 +1,16 @@
 #pragma once
 
+/**
+ * @file lua_config.hpp
+ * @brief 沙箱化 Lua 配置加载与热重载引擎（loadServerSection / reloadConfig）。
+ *
+ * 把 config.lua 中的 server / proactor / multiplexer / security 各段解析进
+ * configHolder.hpp 定义的配置结构体，并提供 reloadConfig() 在信号或 mylog
+ * 热重载时重新装载。
+ */
+
 #include "configHolder.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -9,8 +18,14 @@
 #include <string>
 #include <utility>
 
-#if __has_include("thirdparty/mylog/src/configer_lua.hpp")
-#include "thirdparty/mylog/src/configer_lua.hpp"
+// 第三方 mylog 子模块的 Lua 配置头。探测成功时把 mylog 自身的日志/文件管理
+// 热重载钩子一并联入，失败则退化为只重载 mynet 配置（MYNET_HAS_MYLOG_LUA=0）。
+//
+// 路径必须与子模块当前的布局保持一致：mylog 曾把它命名为 configer_lua.hpp，
+// 后重命名为 lua_config.hpp。探测的是被包含文件而非本文件，因此与本库同名的
+// src/lua_config.hpp 不冲突——包含解析先看各自目录，两个文件互不遮蔽。
+#if __has_include("thirdparty/mylog/src/lua_config.hpp")
+#include "thirdparty/mylog/src/lua_config.hpp"
 #define MYNET_HAS_MYLOG_LUA 1
 #else
 #define MYNET_HAS_MYLOG_LUA 0

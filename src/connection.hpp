@@ -3,11 +3,12 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include "concepts.hpp"
+#include "buffer.hpp"
+#include "constraints.hpp"
 #include "configHolder.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
+#include "ringQueue.hpp"
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -27,6 +28,321 @@
 
 namespace mynet
 {
+
+    /**
+     * @brief 偏连接的流式协议处理器基类
+     *
+     * 本类是流式传输层次的根：不继承任何处理器基类，独立提供流式会话所需的全部
+     * 传输状态：
+     * - 请求解析缓冲区与零拷贝直写入口（prepareRequestWritable / commitRequest）；
+     * - 响应队列（FIFO，可流水线化）与空闲缓冲复用（recycleSpare）；
+     * - 读信用背压（readCredit / requestOverLimit）与单请求上限；
+     * - 连接关闭语义（closeAfterResponse）与 splice 零拷贝环回开关；
+     * - 与传输无关的生命周期钩子（reset / onMessageComplete / onParseError）。
+     *
+     * 协议处理器（HTTP/1.x、HTTP/2、Echo 等）继承本类并叠加自己的解析状态机；
+     * 双传输处理器（如 HTTP/3）另行同时继承 HandlerDatagram。两者是并列的独立
+     * 基类：成员访问是编译期确定的直接偏移，既不经过虚基类间接寻址，也不需要
+     * 为共享子对象付出构造/销毁与去重记账。
+     */
+    class HandlerConnection
+    {
+    public:
+        /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝环回（派生类按协议特性开启）
+        static constexpr bool kEnableSplice = false;
+
+        /**
+         * @brief 构造时一次性定容响应队列
+         *
+         * 默认 64 槽对齐流水线深度：开箱即可用，后续连接层可在建连时调用
+         * reserveResponses() 按协议需求重新定容（init 幂等）。
+         */
+        explicit HandlerConnection(size_t responseCapacity = 64) noexcept
+        {
+            [[maybe_unused]] auto _ =
+                responseQueue_.init(responseCapacity); // 槽位分配失败降级为容量 0 拒收，不折损零异常构造
+        }
+
+        virtual ~HandlerConnection() noexcept = default;
+
+        HandlerConnection(const HandlerConnection &) =
+            delete("a connection handler holds parser state bound to one connection");
+        HandlerConnection &
+        operator=(const HandlerConnection &) =
+            delete("a connection handler holds parser state bound to one connection");
+        HandlerConnection(HandlerConnection &&) =
+            delete("a connection handler holds parser state bound to one connection");
+        HandlerConnection &
+        operator=(HandlerConnection &&) =
+            delete("a connection handler holds parser state bound to one connection");
+
+        /**
+         * @brief 重置处理器状态（派生类重置专属解析器后应调用本实现）
+         */
+        virtual void reset() noexcept
+        {
+            requestBuffer_.reset();
+            responseQueue_.clear();
+            spare_.clear();
+            closeAfterResponse_ = false;
+            spliceEnabled_ = false;
+        }
+
+        // ---- 读取侧控制 (Read Side) ----
+
+        /**
+         * @brief 追加一段对端请求字节到解析缓冲（零异常，失败显式错误码）
+         *
+         * Buffer::append() 为 nothrow 接口：堆扩容失败以 ERR::BUF_ALLOC_FAILED
+         * 交付，缓冲区保持原样，调用方据此可安全丢弃本次读到的字节（对端重传
+         * 或连接关闭兜底）。
+         *
+         * @param buf 对端字节首地址（允许为 nullptr，此时为无操作）
+         * @param rn 本次读取的字节数（须非负）
+         * @return 成功 {}；解析缓冲扩容失败 std::unexpected(ERR::BUF_ALLOC_FAILED)
+         */
+        [[nodiscard]] inline Result<> appendRequest(const char *buf, ssize_t rn) noexcept
+        {
+            if (buf != nullptr && rn > 0) [[likely]]
+            {
+                return requestBuffer_.append(buf, static_cast<size_t>(rn));
+            }
+            return {};
+        }
+
+        /**
+         * @brief 确保请求解析缓冲区至少拥有 minBytes 的可直写连续空间（零拷贝直接读取）
+         *
+         * @param minBytes 期望的最小写窗口字节数（默认 4096）
+         * @return 成功返回可直写的内存首地址指针；扩容失败返回错误码
+         */
+        [[nodiscard]] inline std::expected<char *, ERR> prepareRequestWritable(size_t minBytes = 4 << 10) noexcept
+        {
+            if (auto res = requestBuffer_.ensureWritable(minBytes); !res) [[unlikely]]
+            {
+                return std::unexpected(res.error());
+            }
+            return requestBuffer_.writableBegin();
+        }
+
+        /**
+         * @brief 当前请求缓冲区可直接写入的连续窗口大小
+         */
+        [[nodiscard]] inline size_t requestWritableBytes() const noexcept { return requestBuffer_.writableBytes(); }
+
+        /**
+         * @brief 提交直写到请求解析缓冲区的实际字节数
+         *
+         * @param n 实际写入字节数（不得超过 requestWritableBytes()）
+         */
+        inline void commitRequest(size_t n) noexcept { requestBuffer_.commitWritten(n); }
+
+        [[nodiscard]] inline bool requestOverLimit() const noexcept
+        {
+            return requestBuffer_.readableBytes() > maxRequestBytes_;
+        }
+
+        [[nodiscard]] inline size_t requestBytes() const noexcept { return requestBuffer_.readableBytes(); }
+
+        [[nodiscard]] inline const char *requestBegin() const noexcept { return requestBuffer_.readableBegin(); }
+
+        inline void requestConsume(size_t n) noexcept { requestBuffer_.retrieve(n); }
+
+        inline void requestClear() noexcept { requestBuffer_.retrieveAll(); }
+
+        /**
+         * @brief 剩余信用窗口（为 0 时事件循环将暂停接收读取，实施背压保护）
+         */
+        [[nodiscard]] inline size_t readCredit() const noexcept
+        {
+            const size_t used = requestBuffer_.readableBytes();
+            return used >= maxRequestBytes_ ? 0 : maxRequestBytes_ - used;
+        }
+
+        inline void setMaxRequestBytes(size_t n) noexcept { maxRequestBytes_ = n; }
+
+        // ---- 发送响应侧控制 (Write Side) ----
+
+        [[nodiscard]] inline bool hasResponse() const noexcept { return !responseQueue_.empty(); }
+
+        [[nodiscard]] inline size_t responseCount() const noexcept { return responseQueue_.size(); }
+
+        [[nodiscard]] inline std::string takeResponse()
+        {
+            if (responseQueue_.empty()) [[unlikely]]
+            {
+                return std::string();
+            }
+            std::string out = std::move(responseQueue_.front());
+            if (spare_.capacity() > 0)
+            {
+                responseQueue_.front() = std::move(spare_);
+            }
+            responseQueue_.pop();
+            return out;
+        }
+
+        /**
+         * @brief 回收已发送完毕的空闲响应缓冲区（零堆重分配复用）
+         */
+        inline void recycleSpare(std::string &&s) noexcept
+        {
+            if (s.capacity() > spare_.capacity())
+            {
+                s.clear();
+                spare_ = std::move(s);
+            }
+        }
+
+        /**
+         * @brief 推入一条完整响应（移动语义）
+         */
+        [[nodiscard]] inline Result<> pushResponse(std::string &&s) noexcept
+        {
+            return responseQueue_.push(std::move(s));
+        }
+
+        /**
+         * @brief 推入一条完整响应（左值引用，转为视图原地复用槽位容量）
+         */
+        [[nodiscard]] inline Result<> pushResponse(const std::string &s) noexcept
+        {
+            return pushResponse(std::string_view(s));
+        }
+
+        /**
+         * @brief 推入一段视图响应（零拷贝适配 string_view 与连续字节）
+         */
+        [[nodiscard]] inline Result<> pushResponse(std::string_view sv) noexcept
+        {
+            if (sv.data() == nullptr || sv.empty())
+            {
+                return {};
+            }
+            return responseQueue_.emplace(sv);
+        }
+
+        /**
+         * @brief 推入以空终止的字符串字面量（重载消歧义，内部转为 string_view）
+         */
+        [[nodiscard]] inline Result<> pushResponse(const char *s) noexcept
+        {
+            if (s == nullptr) [[unlikely]]
+            {
+                return {};
+            }
+            return pushResponse(std::string_view(s));
+        }
+
+        /**
+         * @brief 预分配响应队列槽位（连接建立时调用一次）
+         *
+         * @param capacity 槽位数量（允许流水线化的最大响应条数）
+         * @return 成功 {}；槽位分配失败 std::unexpected(ERR::POOL_ALLOC_FAILED)
+         */
+        [[nodiscard]] inline Result<> reserveResponses(size_t capacity) noexcept
+        {
+            return responseQueue_.init(capacity);
+        }
+
+        // ---- 生命周期管理 (Lifecycle) ----
+
+        [[nodiscard]] inline bool closeAfterResponse() const noexcept { return closeAfterResponse_; }
+
+        inline void setCloseAfterResponse(bool v) noexcept { closeAfterResponse_ = v; }
+
+        [[nodiscard]] inline bool spliceEnabled() const noexcept { return spliceEnabled_; }
+
+        inline void setSpliceEnabled(bool v) noexcept { spliceEnabled_ = v; }
+
+        /**
+         * @brief 协议升级钩子（如 HTTP/1.1 Upgrade，连接语义由此移交上层）
+         */
+        virtual void onUpgrade() noexcept {}
+
+        /**
+         * @brief 一条协议消息处理完成（流式消息）
+         */
+        virtual void onMessageComplete() noexcept {}
+
+        /**
+         * @brief 协议解析失败
+         *
+         * @param reason 人类可读的失败原因，允许为空指针
+         */
+        virtual void onParseError([[maybe_unused]] const char *reason) noexcept {}
+
+        /**
+         * @brief 默认执行逻辑：标准 Echo 协议回显
+         */
+        void process()
+        {
+            if (requestBuffer_.empty()) [[unlikely]]
+            {
+                return;
+            }
+            if (!pushResponse(requestBuffer_.readableView())) [[unlikely]]
+            {
+                LOG_WARN("HandlerConnection::process: response queue full, echoing dropped");
+            }
+            requestBuffer_.retrieveAll();
+        }
+
+    protected:
+        Buffer requestBuffer_;
+        RingQueue responseQueue_;
+        std::string spare_{};
+        size_t maxRequestBytes_ = 4 << 20;
+        bool closeAfterResponse_ = false;
+        bool spliceEnabled_ = false;
+    };
+
+    /**
+     * @brief 偏连接的流式处理器派生约束
+     *
+     * 要求派生自 HandlerConnection，而非仅仅方法上凑齐同名成员。
+     * 这条约束才是连接层真正依赖的不变量：请求缓冲区、响应队列、读信用与
+     * 关闭语义必须来自同一个已在构造时定容的基类子对象。
+     */
+    template <typename H>
+    concept DerivedFromHandlerConnection = std::derived_from<H, HandlerConnection>;
+
+    /**
+     * @brief 流式会话处理器的必需方法集合
+     *
+     * 名字直指含义：这是 Connection<H> 在热路径上真正会调用的方法清单，
+     * 缺一不可。两层保证：
+     * 1. 派生约束：必须继承 HandlerConnection，从而持有真实的请求/响应/背压状态；
+     * 2. 方法约束：逐个校验签名与 noexcept，防止派生类用 = delete 或改签名
+     *    让某个调用点失效。
+     *
+     * 仅靠方法约束会让一个手写同名成员但未继承 HandlerConnection 的类型通过，
+     * 而 Connection<H> 仍能在其上编译——这类处理器没有共享的基类状态，
+     * 语义上不可信，因此本概念显式要求派生关系。
+     */
+    template <typename H>
+    concept MandatoryMethodConnection =
+        DerivedFromHandlerConnection<H> && Resettable<H> &&
+        requires(H &h, const char *buf, ssize_t rn, size_t n) {
+            // 零异常纪律：摄入路径 noexcept，扩容失败经错误码交付
+            { h.appendRequest(buf, rn) } noexcept -> std::same_as<Result<>>;
+            { h.hasResponse() } noexcept -> std::same_as<bool>;
+            { h.takeResponse() } -> std::same_as<std::string>;
+            { h.requestOverLimit() } noexcept -> std::same_as<bool>;
+            h.process();
+            // 下面这些同样被连接层直接调用，无 requires 保护，必须由概念兜底：
+            // 零拷贝直写窗口、读信用背压、请求上限与关闭/错误钩子
+            { h.prepareRequestWritable(n) } noexcept;
+            { h.requestWritableBytes() } noexcept -> std::same_as<size_t>;
+            { h.commitRequest(n) } noexcept;
+            { h.readCredit() } noexcept -> std::same_as<size_t>;
+            { h.setMaxRequestBytes(n) } noexcept;
+            { h.onParseError(buf) } noexcept;
+            { h.closeAfterResponse() } noexcept -> std::same_as<bool>;
+            // Connection::isSpliceEnabled() 在 kEnableSplice 为 true 时直接调用本方法，
+            // 故它同样属于「热路径真正会调用的清单」。
+            { h.spliceEnabled() } noexcept -> std::same_as<bool>;
+        };
 
     /**
      * @brief I/O 处理后套接字保留决策
@@ -58,7 +374,7 @@ namespace mynet
      * 4. 完备的背压挂钩：结合 writeHighWaterMark_ 与 readPaused_ 防止内存无界暴涨。
      */
     template <typename HandlerType>
-        requires ProtocolHandler<HandlerType>
+        requires MandatoryMethodConnection<HandlerType>
     class Connection
     {
     public:
@@ -215,7 +531,7 @@ namespace mynet
             ssl_ = SSL_new(ctx);
             if (ssl_ == nullptr) [[unlikely]]
             {
-                LOG_ERROR("Connection::startTLS: SSL_new() failed on fd {}: {}", fd_, log::sslText());
+                LOG_ERROR("Connection::startTLS: SSL_new() failed on fd {}: {}", fd_, sslText());
                 return std::unexpected(ERR::SSL_NEW_FAILED);
             }
 #ifdef MYNET_HAVE_KTLS
@@ -225,7 +541,7 @@ namespace mynet
 #endif
             if (SSL_set_fd(ssl_, fd_) != 1) [[unlikely]]
             {
-                LOG_ERROR("Connection::startTLS: SSL_set_fd({}) failed: {}", fd_, log::sslText());
+                LOG_ERROR("Connection::startTLS: SSL_set_fd({}) failed: {}", fd_, sslText());
                 SSL_free(ssl_);
                 ssl_ = nullptr;
                 return std::unexpected(ERR::SSL_SET_FD_FAILED);
@@ -266,7 +582,7 @@ namespace mynet
                 wantWrite_ = true;
                 return HANDSHAKE_STATUS::IN_PROGRESS;
             default:
-                LOG_WARN("Connection::doHandshake: fd {}: {}", fd_, log::sslText());
+                LOG_WARN("Connection::doHandshake: fd {}: {}", fd_, sslText());
                 return HANDSHAKE_STATUS::FAILED;
             }
         }
@@ -304,7 +620,7 @@ namespace mynet
             }
             if (::pipe2(pipeFd_, O_NONBLOCK | O_CLOEXEC) < 0) [[unlikely]]
             {
-                LOG_WARN("Connection::ensurePipe: fd {}: pipe2 failed: {}", fd_, log::errnoText(errno));
+                LOG_WARN("Connection::ensurePipe: fd {}: pipe2 failed: {}", fd_, errnoText(errno));
                 pipeFd_[0] = -1;
                 pipeFd_[1] = -1;
                 return false;
@@ -345,7 +661,7 @@ namespace mynet
                         return IO_STATUS::CLOSE;
                     }
                     LOG_WARN("Connection::handleSplice: fd {}: splice pipe->socket failed: {}", fd_,
-                             log::errnoText(errno));
+                             errnoText(errno));
                     peerGone_ = true;
                     return IO_STATUS::CLOSE;
                 }
@@ -397,7 +713,7 @@ namespace mynet
                                 return IO_STATUS::CLOSE;
                             }
                             LOG_WARN("Connection::handleSplice: fd {}: splice pipe->socket failed: {}", fd_,
-                                     log::errnoText(errno));
+                                     errnoText(errno));
                             peerGone_ = true;
                             return IO_STATUS::CLOSE;
                         }
@@ -438,7 +754,7 @@ namespace mynet
                     peerGone_ = true;
                     return IO_STATUS::CLOSE;
                 }
-                LOG_WARN("Connection::handleSplice: fd {}: splice socket->pipe failed: {}", fd_, log::errnoText(errno));
+                LOG_WARN("Connection::handleSplice: fd {}: splice socket->pipe failed: {}", fd_, errnoText(errno));
                 peerGone_ = true;
                 return IO_STATUS::CLOSE;
             }
@@ -617,7 +933,7 @@ namespace mynet
                             return IO_STATUS::CLOSE;
                         }
                         LOG_WARN("Connection::handleWrite: fd {}: splice pipe->socket failed: {}", fd_,
-                                 log::errnoText(errno));
+                                 errnoText(errno));
                         peerGone_ = true;
                         return IO_STATUS::CLOSE;
                     }
@@ -723,7 +1039,7 @@ namespace mynet
                             {
                                 return IO_END::EOF_REACHED;
                             }
-                            LOG_WARN("Connection::flush: fd {}: writev() failed: {}", fd_, log::errnoText(errno));
+                            LOG_WARN("Connection::flush: fd {}: writev() failed: {}", fd_, errnoText(errno));
                             return IO_END::FATAL;
                         }
                     }
@@ -906,17 +1222,17 @@ namespace mynet
                     {
                         return std::unexpected(IO_END::EOF_REACHED);
                     }
-                    LOG_WARN("Connection::doRecv: fd {}: SSL_read() failed: {}", fd_, log::errnoText(errno));
+                    LOG_WARN("Connection::doRecv: fd {}: SSL_read() failed: {}", fd_, errnoText(errno));
                     return std::unexpected(IO_END::FATAL);
                 case SSL_ERROR_SSL:
                     if (unexpectedEof())
                     {
                         return std::unexpected(IO_END::EOF_REACHED);
                     }
-                    LOG_WARN("Connection::doRecv: fd {}: SSL_read() failed: {}", fd_, log::sslText());
+                    LOG_WARN("Connection::doRecv: fd {}: SSL_read() failed: {}", fd_, sslText());
                     return std::unexpected(IO_END::FATAL);
                 default:
-                    LOG_WARN("Connection::doRecv: fd {}: SSL_read() failed: {}", fd_, log::sslText());
+                    LOG_WARN("Connection::doRecv: fd {}: SSL_read() failed: {}", fd_, sslText());
                     return std::unexpected(IO_END::FATAL);
                 }
             }
@@ -942,7 +1258,7 @@ namespace mynet
             {
                 return std::unexpected(IO_END::EOF_REACHED);
             }
-            LOG_WARN("Connection::doRecv: fd {}: recv() failed: {}", fd_, log::errnoText(errno));
+            LOG_WARN("Connection::doRecv: fd {}: recv() failed: {}", fd_, errnoText(errno));
             return std::unexpected(IO_END::FATAL);
         }
 
@@ -977,10 +1293,10 @@ namespace mynet
                     {
                         return std::unexpected(IO_END::EOF_REACHED);
                     }
-                    LOG_WARN("Connection::doSend: fd {}: SSL_write() failed: {}", fd_, log::errnoText(errno));
+                    LOG_WARN("Connection::doSend: fd {}: SSL_write() failed: {}", fd_, errnoText(errno));
                     return std::unexpected(IO_END::FATAL);
                 default:
-                    LOG_WARN("Connection::doSend: fd {}: SSL_write() failed: {}", fd_, log::sslText());
+                    LOG_WARN("Connection::doSend: fd {}: SSL_write() failed: {}", fd_, sslText());
                     return std::unexpected(IO_END::FATAL);
                 }
             }
@@ -1003,7 +1319,7 @@ namespace mynet
             {
                 return std::unexpected(IO_END::EOF_REACHED);
             }
-            LOG_WARN("Connection::doSend: fd {}: send() failed: {}", fd_, log::errnoText(errno));
+            LOG_WARN("Connection::doSend: fd {}: send() failed: {}", fd_, errnoText(errno));
             return std::unexpected(IO_END::FATAL);
         }
 
@@ -1038,6 +1354,39 @@ namespace mynet
                 readPaused_ = true;
             }
         }
+    };
+
+    /**
+     * @brief 非流式处理器使用的占位会话对象
+     *
+     * 纯数据报处理器不需要 Connection 承载会话，但引擎的成员声明（连接池、
+     * 会话索引等）必须在类作用域里写一个具体类型。本类型只提供 ObjectPool
+     * 所需的 Resettable 契约，不携带任何流式状态。
+     */
+    struct NoConnection
+    {
+        void reset() noexcept {}
+    };
+
+    /**
+     * @brief 会话对象槽位的编译期选择器
+     *
+     * 满足 MandatoryMethodConnection 的处理器映射到 Connection<H>；否则映射到 NoConnection。
+     *
+     * 为什么不用 std::conditional_t：`Connection<H>` 是受约束模板，一旦在类作用域
+     * 里形成一个违约束的 template-id（即使是未选中的分支）就是硬错误。偏特化的
+     * 匹配发生在约束求解阶段，不满足时直接退回主模板，因此不会触及 Connection。
+     */
+    template <typename H>
+    struct ConnectionSlot
+    {
+        using Type = NoConnection;
+    };
+
+    template <MandatoryMethodConnection H>
+    struct ConnectionSlot<H>
+    {
+        using Type = Connection<H>;
     };
 
 } // namespace mynet

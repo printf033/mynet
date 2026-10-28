@@ -1,5 +1,5 @@
 // 字节传输核心基准测试：涵盖 Buffer 缓冲区、帧编解码器、
-// Handler 响应队列、ObjectPool 对象池与 Multiplexer 多路复用器。
+// Handler 响应队列、ObjectPool 对象池与 HandlerHttp2 多路复用器。
 //
 // 测试框架设计刻意保持极简。Google Benchmark 非常优秀，但在一个已依赖
 // 4 个系统包的库中引入它来测试几个循环，其依赖体量反而超过了被测代码本身。
@@ -14,10 +14,10 @@
 //
 // 运行命令：./bench 2>/dev/null （日志行输出至 stderr）
 #include "buffer.hpp"
-#include "handler.hpp"
+#include "connection.hpp"
 #include "http/v2/frame.hpp"
-#include "http/v2/multiplexer.hpp"
-#include "log.hpp"
+#include "http/v2/handler.hpp"
+#include "log_config.hpp"
 #include "objectPool.hpp"
 #include <algorithm>
 #include <chrono>
@@ -234,13 +234,13 @@ namespace
     void benchObjectPool()
     {
         constexpr size_t kSlots = 128;
-        ObjectPool<HandlerBase> pool;
+        ObjectPool<HandlerConnection> pool;
         if (!pool.init(kSlots))
         {
             std::fprintf(stderr, "bench: pool init failed\n");
             std::exit(1);
         }
-        std::vector<HandlerBase *> held(kSlots, nullptr);
+        std::vector<HandlerConnection *> held(kSlots, nullptr);
         const Sample sample = run(
             [&](size_t iterations)
             {
@@ -265,7 +265,7 @@ namespace
 
     void benchHandlerQueue()
     {
-        HandlerBase handler;
+        HandlerConnection handler;
         const std::string body(1 << 10, 'x');
         const Sample pushTake = run(
             [&](size_t iterations)
@@ -278,7 +278,7 @@ namespace
                 }
                 g_sink += sink;
             });
-        report("HandlerBase::pushResponse+takeResponse (1KiB)", pushTake, static_cast<double>(1 << 10));
+        report("HandlerConnection::pushResponse+takeResponse (1KiB)", pushTake, static_cast<double>(1 << 10));
 
         const Sample echo = run(
             [&](size_t iterations)
@@ -292,14 +292,14 @@ namespace
                 }
                 g_sink += sink;
             });
-        report("HandlerBase::process echo (1KiB)", echo, static_cast<double>(1 << 10));
+        report("HandlerConnection::process echo (1KiB)", echo, static_cast<double>(1 << 10));
     }
 
-    // ---- 多路复用器 (Multiplexer) 基准测试 ----
+    // ---- HTTP/2 多路复用器 (HandlerHttp2) 基准测试 ----
 
     void benchMultiplexerRoundTrip()
     {
-        class NoopMux : public Multiplexer<HandlerBase>
+        class NoopMux : public HandlerHttp2<HandlerConnection>
         {
         };
         constexpr size_t kStreams = 64;
@@ -340,7 +340,7 @@ namespace
                 g_sink += sink;
             },
             kStreams);
-        report("Multiplexer open+echo+close (64 streams)", sample);
+        report("HandlerHttp2 open+echo+close (64 streams)", sample);
     }
 } // namespace
 

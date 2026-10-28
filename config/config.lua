@@ -28,10 +28,10 @@ server = {
     keepAliveTimeout_ms = 60000, -- 60 秒
 
     -- 单个连接发送缓冲区写高水位线（字节，触发背压暂停对端读取）
-    writeHighWaterMark = 4 << 20, -- 4 MiB
+    writeHighWaterMark = 4 * 1024 * 1024, -- 4 MiB（LuaJIT 2.1 无 << 运算符，用等值乘法）
 
     -- 单个连接最大允许累积未消费的请求数据量（字节，超额触发解析错误并关闭）
-    maxRequestBytes = 4 << 20, -- 4 MiB
+    maxRequestBytes = 4 * 1024 * 1024, -- 4 MiB（同上：Lua 5.1 语义无位移运算符）
 
     -- 是否开启 TCP_NODELAY 禁用 Nagle 算法（减少小包延迟）
     tcpNoDelay = true,

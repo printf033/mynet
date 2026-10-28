@@ -1,7 +1,7 @@
 #pragma once
 
 #include "error.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "timer.hpp"
 #include <atomic>
 #include <cerrno>
@@ -70,13 +70,13 @@ namespace mynet
             epollFd_ = ::epoll_create1(EPOLL_CLOEXEC);
             if (epollFd_ < 0) [[unlikely]]
             {
-                LOG_ERROR("EventLoop::init: epoll_create1() failed: {}", log::errnoText(errno));
+                LOG_ERROR("EventLoop::init: epoll_create1() failed: {}", errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CREATE_FAILED);
             }
             wakeFd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
             if (wakeFd_ < 0) [[unlikely]]
             {
-                LOG_ERROR("EventLoop::init: eventfd() failed: {}", log::errnoText(errno));
+                LOG_ERROR("EventLoop::init: eventfd() failed: {}", errnoText(errno));
                 ::close(epollFd_);
                 epollFd_ = -1;
                 return std::unexpected(ERR::EVENTFD_FAILED);
@@ -87,7 +87,7 @@ namespace mynet
             event.data.u64 = kWakeToken;
             if (::epoll_ctl(epollFd_, EPOLL_CTL_ADD, wakeFd_, &event) < 0) [[unlikely]]
             {
-                LOG_ERROR("EventLoop::init: epoll_ctl(ADD, wakeup fd {}) failed: {}", wakeFd_, log::errnoText(errno));
+                LOG_ERROR("EventLoop::init: epoll_ctl(ADD, wakeup fd {}) failed: {}", wakeFd_, errnoText(errno));
                 ::close(wakeFd_);
                 wakeFd_ = -1;
                 ::close(epollFd_);
@@ -155,7 +155,7 @@ namespace mynet
             if (::epoll_ctl(epollFd_, EPOLL_CTL_ADD, fd, &event) < 0) [[unlikely]]
             {
                 LOG_ERROR("EventLoop::addFd: epoll_ctl(ADD, fd {}, events {:#x}) failed: {}", fd, events,
-                          log::errnoText(errno));
+                          errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
             return {};
@@ -178,7 +178,7 @@ namespace mynet
             if (::epoll_ctl(epollFd_, EPOLL_CTL_MOD, fd, &event) < 0) [[unlikely]]
             {
                 LOG_ERROR("EventLoop::modFd: epoll_ctl(MOD, fd {}, events {:#x}) failed: {}", fd, events,
-                          log::errnoText(errno));
+                          errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
             return {};
@@ -196,7 +196,7 @@ namespace mynet
             }
             if (::epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr) < 0) [[unlikely]]
             {
-                LOG_WARN("EventLoop::delFd: epoll_ctl(DEL, fd {}) failed: {}", fd, log::errnoText(errno));
+                LOG_WARN("EventLoop::delFd: epoll_ctl(DEL, fd {}) failed: {}", fd, errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
             return {};
@@ -232,7 +232,7 @@ namespace mynet
                     {
                         continue;
                     }
-                    LOG_ERROR("EventLoop::run: epoll_wait() failed: {}", log::errnoText(errno));
+                    LOG_ERROR("EventLoop::run: epoll_wait() failed: {}", errnoText(errno));
                     running_.store(false, std::memory_order_release);
                     return std::unexpected(ERR::EPOLL_WAIT_FAILED);
                 }

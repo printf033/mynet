@@ -5,7 +5,8 @@
  * @brief RFC 9114 HTTP/3 统一协议处理器实现（支持 QUIC/UDP 数据报与流式传输）。
  */
 
-#include "../../handler.hpp"
+#include "../../connection.hpp"
+#include "../../datagram.hpp"
 #include "frame.hpp"
 #include "qpack.hpp"
 #include "quic.hpp"
@@ -28,13 +29,13 @@ namespace mynet
          * @brief RFC 9114 HTTP/3 极速编解码与多路复用协议处理器
          *
          * 架构特性：
-         * 1. 传输层双重绑定：具备 HandlerBase（流式/单连接会话生命周期）与 DatagramHandler（UDP
+         * 1. 传输层双重绑定：具备 HandlerConnection（流式/单连接会话生命周期）与 HandlerDatagram（UDP
          * 无连接数据报）双重能力；
          * 2. QUIC 原生支持：内置 RFC 9000 1-RTT 短首部报文解析、STREAM 传输帧打包与连接关闭通知；
          * 3. QPACK 压缩与解压：支持静态表快速索引与字面量编码；
          * 4. 逻辑流多路复用：跟踪控制流与客户端双向请求流状态，支持流水线化应答。
          */
-        class HandlerHttp3 : public HandlerBase, public DatagramHandler
+        class HandlerHttp3 : public HandlerConnection, public HandlerDatagram
         {
         public:
             struct SessionKey
@@ -80,7 +81,7 @@ namespace mynet
             };
 
             explicit HandlerHttp3(size_t responseCapacity = 64, size_t maxStreams = 128) noexcept
-                : HandlerBase(responseCapacity),
+                : HandlerConnection(responseCapacity),
                   maxStreams_(maxStreams),
                   streamTable_(maxStreams)
             {
@@ -97,13 +98,27 @@ namespace mynet
 
             void reset() noexcept override
             {
-                HandlerBase::reset();
-                DatagramHandler::reset();
+                HandlerConnection::reset();
+                HandlerDatagram::reset();
                 streamTable_.reset();
                 sessions_.clear();
                 nextPacketNumber_ = 1;
                 controlStreamSent_ = false;
                 peerSettings_ = Settings{};
+            }
+
+            /// 两个传输基类各自提供同名生命周期钩子，此处显式覆盖以消除二义，
+            /// 并逐层转发，保留任一层将来加入行为时的语义。
+            void onMessageComplete() noexcept override
+            {
+                HandlerConnection::onMessageComplete();
+                HandlerDatagram::onMessageComplete();
+            }
+
+            void onParseError(const char *reason) noexcept override
+            {
+                HandlerConnection::onParseError(reason);
+                HandlerDatagram::onParseError(reason);
             }
 
             [[nodiscard]] const Settings &localSettings() const noexcept { return localSettings_; }

@@ -51,7 +51,7 @@
   - Address-stable fixed-capacity `ObjectPool<T>` preventing memory reallocation and pointer invalidation during event dispatch.
   - Sliding-window auto-compacting `Buffer` designed for long-lived connections.
 - **Extreme Zero-Copy Data Pipelines**:
-  - Linux `splice(2)` kernel-level zero-copy looping: `HandlerEcho` automatically activates an in-kernel non-blocking pipe buffer (`socket -> pipe -> socket`) for plain TCP, delivering 0 user-space copies and 0 kernel memory copies.
+  - Linux `splice(2)` kernel-level zero-copy looping: a handler that declares `kEnableSplice = true` gets an in-kernel non-blocking pipe buffer (`socket -> pipe -> socket`) on plain TCP, delivering 0 user-space copies and 0 kernel memory copies (`SpliceEchoHandler` in `examples/common/handlers.hpp` shows the opt-in).
   - Direct writable ingress: connections read directly into pre-allocated `Buffer` write windows via `prepareRequestWritable`, eliminating stack scratch buffers and intermediary `memcpy`.
   - Vectorized scatter-gather I/O: plain connections aggregate up to 16 response segments per single `writev(2)` syscall.
 - **Transparent Security**:
@@ -59,12 +59,12 @@
   - Full support for ALPN negotiation, SNI host matching, and asynchronous TLS handshakes.
 - **Protocol Engineering & Framing**:
   - HTTP/2 wire-compatible 9-byte frame codec (`Length:24`, `Type:8`, `Flags:8`, `StreamID:31`).
-  - Generalized `Multiplexer<StreamHandler>` supporting concurrent stream management, priority, ping, reset, connection/stream-level flow control (`WINDOW_UPDATE`), and graceful `GOAWAY` teardown.
+  - Generalized `HandlerHttp2<StreamHandler>` supporting concurrent stream management, priority, ping, reset, connection/stream-level flow control (`WINDOW_UPDATE`), and graceful `GOAWAY` teardown.
   - HTTP/1.x codec powered by `llhttp` supporting pipelining and keep-alive.
 - **Observability & Operability**:
   - Exhaustive enum class error codes (`Err` and `IoEnd`).
   - Clean separation: data flows over stdout, structured diagnostic logging routes to `stderr` via `mynet::log` (wrapping submodule `mylog`), preventing stream pipeline corruption.
-  - **Sandboxed Lua Hot-Configuration & Lockless Snapshots**: `mynet::reloadConfig("config.lua")` executes in a bare `lua_State` (no standard libraries like `os`/`io` to prevent code injection) with an instruction budget limit of 50M steps; supports transactional validation (All-or-Nothing) and value clamping. Backed by `ConfigHolder` and `ConfigSnapshot` for lock-free read-paths, and seamlessly synchronizes with `mylog`'s logging configuration in a unified config file.
+  - **Sandboxed Lua Hot-Configuration & Lockless Snapshots**: `mynet::reloadConfig("config/config.lua")` executes in a bare `lua_State` (no standard libraries like `os`/`io` to prevent code injection) with an instruction budget limit of 50M steps; supports transactional validation (All-or-Nothing) and value clamping. Backed by `ConfigHolder` and `ConfigSnapshot` for lock-free read-paths, and seamlessly synchronizes with `mylog`'s logging configuration in a unified config file.
 
 ---
 
@@ -76,15 +76,16 @@ The following diagram illustrates the layered architecture of `mynet`:
 flowchart TD
     subgraph App ["Application & Protocol Handlers"]
         direction LR
-        HandlerEcho["HandlerBase (Echo)"]
+        ConnHandler["HandlerConnection (stream sessions)"]
         HandlerHttp["HandlerHttp (HTTP/1.x)"]
-        Mux["Multiplexer<StreamHandler> (HTTP/2 Framing)"]
-        UdpEcho["DatagramHandler (UDP Echo)"]
+        Mux["HandlerHttp2<StreamHandler> (HTTP/2)"]
+        DatagramHandler["HandlerDatagram (datagram sessions)"]
     end
 
     subgraph Core ["Connection & Transport Abstractions"]
         direction LR
         Conn["Connection<Handler>"]
+        Dgram["Datagram<Handler>"]
         Session["Proactor::Session"]
         PeerCl["Client<Event> (Client)"]
         Datagram["DatagramReply"]
@@ -100,7 +101,7 @@ flowchart TD
         direction LR
         Pool["ObjectPool<T>"]
         Buf["Buffer"]
-        Concepts["concepts"]
+        Constraints["constraints"]
         Err["Err & IoEnd"]
         Log["mynet::log (mylog -> stderr)"]
     end
@@ -132,6 +133,7 @@ flowchart TD
 - **Pipelining Safety**: Responses reside in an internal fixed-capacity `RingQueue<std::string>` write queue by value. Multiple responses generated from a single batch read are guaranteed to arrive in-order without dynamic allocations during enqueuing or overwriting shared buffers.
 - **Backpressure**: Integrated high-watermark inspection and `readCredit()` hooks pause reads when downstream consumer queues become saturated.
 - **Reference-Counted Lifetime in Proactor**: In `Proactor`, connections are wrapped inside `Session` structs tracking `inFlight` ring operations. Connections are never returned to the pool while the kernel has outstanding writes or reads.
+- **Handler Layering**: `HandlerConnection` (`connection.hpp`) and `HandlerDatagram` (`datagram.hpp`) are two peer base classes with no shared ancestor: the former owns the request buffer, response queue and read-credit backpressure for stream sessions, the latter the peer-tagged reply queue for connectionless datagrams. Protocol handlers (`HandlerHttp`, `HandlerHttp2`, `HandlerHttp3`) derive from these; a handler that needs both transports (`HandlerHttp3`) inherits both, and since neither base is virtual there is no virtual-base indirection or shared subobject bookkeeping on member access. The contract that used to sit in a common root — `reset`, `onMessageComplete`, `onParseError` — now lives on each base class and, transport-agnostically, in the `HandlerConstraint` concept (`constraints.hpp`), which is all the event slots require (the object pool needs only `Resettable`). The two engine contracts are named for what they are — the mandatory method set each transport actually calls: `MandatoryMethodConnection` (`connection.hpp`) and `MandatoryMethodDatagram` (`datagram.hpp`). Each lives beside its own base class so `std::derived_from` always sees a complete type, and each requires derivation plus validates the signatures the engine calls through the handler type itself. A datagram-only handler needs `HandlerDatagram` alone: the engines map non-streaming handlers to a stateless `NoConnection` slot (`ConnectionSlot`) and stream-only handlers to a `NoDatagram` slot (`DatagramSlot`), so neither path instantiates the other transport's machinery.
 
 ### 3. Zero-Allocation Memory Architecture
 
@@ -143,7 +145,7 @@ flowchart TD
 ### 4. HTTP/2 Framing & Stream Multiplexer
 
 - **Wire Compatibility**: `FrameDecoder` and `appendFrame` parse and construct 9-byte HTTP/2 standard frames (`DATA`, `HEADERS`, `PRIORITY`, `RST_STREAM`, `SETTINGS`, `PUSH_PROMISE`, `PING`, `GOAWAY`, `WINDOW_UPDATE`).
-- **`Multiplexer<StreamHandler>`**: Enables many independent logical request/response streams over a single byte stream.
+- **`HandlerHttp2<StreamHandler>`**: Enables many independent logical request/response streams over a single byte stream.
   - Implements credit-based flow control at both connection and stream levels.
   - Utilizes `mux::StreamTable<StreamSlot>` for zero-allocation stream lookups and lifecycles.
   - Automatically sends `WINDOW_UPDATE` frames when window thresholds drop below half.
@@ -152,8 +154,9 @@ flowchart TD
 
 ### 5. Datagram Transport (UDP)
 
-- **`DatagramHandler`**: Unlike connected stream sockets, UDP sockets are connectionless and must handle interleaved peers on a single file descriptor. `DatagramHandler` associates peer addresses (`sockaddr_in`) directly with message buffers (`DatagramReply`).
-- **Overload Handling**: Backed by a fixed-capacity `RingQueue<DatagramReply>`, dropping overflow datagrams with explicit metrics logging, preventing unbounded memory growth under sudden traffic spikes.
+- **`HandlerDatagram`**: Unlike connected stream sockets, UDP sockets are connectionless and must handle interleaved peers on a single file descriptor. `HandlerDatagram` associates peer addresses (`sockaddr_in`) directly with message buffers (`DatagramReply`). It is the protocol-side root: it only decides *what* to reply.
+- **`Datagram<Handler>`**: The transport-side counterpart of `Connection<Handler>` on the UDP path (`datagram.hpp`). It binds one handler to one socket and owns the fixed-capacity receive window plus the send/receive counters; truncation against `maxDatagramBytes()` and reply draining live here, so both engines shrink to event dispatch (recvfrom into `recvBuffer()`, hand it to `receiveFrom()`, drain with `flushTo()`). It deliberately carries no fd, no peer address and no write queue — UDP is connectionless, so those would be per-datagram state, not per-session state. Its receive/send counters are diagnostic scaffolding for unit tests, not production metrics: `runUdp` calls `reset()` before returning and no accessor exposes the session, so they are not observable from a running server. `DatagramSlot<H>` picks `Datagram<H>` or the inert `NoDatagram` at compile time, mirroring `ConnectionSlot` on the stream side.
+- **Overload Handling**: Bounded by `maxPendingReplies`; once the reply queue is full, further datagrams are dropped with explicit metrics logging, preventing unbounded memory growth under sudden traffic spikes.
 
 ### 6. Modern C++26 & Strongly-Typed Error Semantics
 
@@ -166,7 +169,7 @@ flowchart TD
 
 `Client<Event>` is an idiomatic Unix-style pipeline client bridging stdin/stdout and network sockets:
 ```bash
-cat request.bin | ./client_tcp 127.0.0.1 8888 > response.bin
+cat request.bin | ./build/cli_tcp 127.0.0.1:8888 > response.bin
 ```
 Features watermark-based backpressure for stdin, graceful TCP/TLS half-close forwarding (`close_notify` / `SHUT_WR`), signal-safe blocking of `SIGPIPE`, and detection of regular file vs interactive terminal descriptors.
 
@@ -190,9 +193,9 @@ FrameDecoder::next (payload 1024B)             77.5 ns/op    13,216.9 MB/s
 FrameDecoder::next (payload 16384B)          1104.7 ns/op    14,831.4 MB/s
 read+appendBigEndian32                          0.7 ns/op             --
 ObjectPool acquire+release (128)                3.8 ns/op             --
-HandlerBase::pushResponse+takeResponse (1KiB)  22.5 ns/op    45,605.2 MB/s
-HandlerBase::process echo (1KiB)               47.1 ns/op    21,760.2 MB/s
-Multiplexer open+echo+close (64 streams)      553.4 ns/op             --
+HandlerConnection::pushResponse+takeResponse (1KiB)  22.5 ns/op    45,605.2 MB/s
+HandlerConnection::process echo (1KiB)               47.1 ns/op    21,760.2 MB/s
+HandlerHttp2 open+echo+close (64 streams)            553.4 ns/op             --
 ```
 
 ---
@@ -261,9 +264,9 @@ docker run --rm -it -p 8888:8888 mynet:latest
 ### 1. Epoll-Based TCP Echo Server (Reactor)
 
 ```cpp
+#include "connection.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -272,7 +275,7 @@ int main() {
     mynet::log::init(); // Directs logs to stderr
 
     // Instantiate a Reactor with plain socket events and an echo handler
-    Reactor<EventSocket<HandlerBase>> server;
+    Reactor<EventSocket<HandlerConnection>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("Server failed: {}", toString(res.error()));
@@ -285,9 +288,9 @@ int main() {
 ### 2. io_uring TCP Server with Kernel Buffer Ring (Proactor)
 
 ```cpp
+#include "connection.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "log.hpp"
+#include "log_config.hpp"
 #include "proactor.hpp"
 
 using namespace mynet;
@@ -296,7 +299,7 @@ int main() {
     mynet::log::init();
 
     // Instantiate a Proactor using io_uring multishot accept & multishot recv
-    Proactor<EventSocket<HandlerBase>> server;
+    Proactor<EventSocket<HandlerConnection>> server;
 
     // Parameters: IP, Port, backlog, SQ entries, CQ entries, max accept ops, session pool, buf ring count, buf size
     if (auto res = server.runTcp("0.0.0.0", 8888, 511, 512, 1024, 256, 512, 1024, 4096); !res) {
@@ -307,12 +310,12 @@ int main() {
 }
 ```
 
-### 3. Multiplexed Stream Server
+### 3. HTTP/2 Stream Multiplexer
 
 ```cpp
+#include "connection.hpp"
 #include "error.hpp"
-#include "handler.hpp"
-#include "http/v2/multiplexer.hpp"
+#include "http/v2/handler.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -320,11 +323,11 @@ using namespace mynet;
 int main() {
     mynet::log::init();
 
-    // Stack: Reactor -> Socket -> Multiplexer (HTTP/2 framing) -> Trace Echo Handler
-    Reactor<EventSocket<Multiplexer<HandlerBase>>> server;
+    // Stack: Reactor -> Socket -> HandlerHttp2 (framing + flow control) -> per-stream handler
+    Reactor<EventSocket<HandlerHttp2<HandlerConnection>>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
-        LOG_ERROR("Multiplexer server failed: {}", toString(res.error()));
+        LOG_ERROR("HTTP/2 server failed: {}", toString(res.error()));
         return toExitCode(res.error());
     }
     return 0;
@@ -334,15 +337,16 @@ int main() {
 ### 4. Unix-Philosophy Stdin/Stdout Client (Client)
 
 ```cpp
-#include "error.hpp"
-#include "handler.hpp"
 #include "client.hpp"
+#include "connection.hpp"
+#include "error.hpp"
+#include "log_config.hpp"
 
 using namespace mynet;
 
 int main(int argc, char* argv[]) {
     mynet::log::init();
-    Client<EventSocket<HandlerBase>> client;
+    Client<EventSocket<HandlerConnection>> client;
 
     // Connects to target server, streams stdin -> server and server -> stdout
     if (auto res = client.runTcp("127.0.0.1", 8888); !res) {
@@ -353,11 +357,19 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-Usage with standard Linux utilities:
+Every sample takes a single `<host>:<port>` argument and falls back to its own default:
+
 ```bash
-# Send an HTTP request and inspect output
-printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/client_tcp 127.0.0.1 8888
+# Client: stream stdin to the server, print whatever comes back
+printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/cli_tcp 127.0.0.1:8888
+
+# Server: pick any endpoint you like (defaults to 0.0.0.0:8888, HTTP/3 uses 4433)
+./build/reactor_http1 127.0.0.1:9000
+curl -X POST --data-binary 'hello' http://127.0.0.1:9000/
 ```
+
+The full matrix is `cli_{tcp,ssl,udp}` for the client and
+`{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}` for the servers.
 
 ---
 
@@ -373,28 +385,26 @@ mynet/
 │
 ├── src/                        # Core Header-Only Implementation
 │   ├── CMakeLists.txt          # Header-only interface library definition (INTERFACE mynet & mynet_lua)
-│   ├── concepts.hpp            # C++20/C++26 Concept constraints
+│   ├── constraints.hpp         # Generic constraints (Resettable / HandlerConstraint)
 │   ├── configHolder.hpp        # Global network configuration & generation snapshots (NetConfig / ConfigHolder)
-│   ├── configer_lua.hpp        # Sandboxed Lua hot-reload engine (reloadConfig, integrated with mylog reload)
-│   ├── error.hpp               # Strongly-typed Err & IoEnd definitions
-│   ├── log.hpp                 # Logging facade (mylog -> stderr)
+│   ├── lua_config.hpp          # Sandboxed Lua config loader & hot reload (reloadConfig)
+│   ├── error.hpp               # Strongly-typed Err & IoEnd + errno/OpenSSL text helpers
+│   ├── log_config.hpp          # Logging setup (mylog -> stderr)
 │   ├── buffer.hpp              # Low-allocation auto-compacting byte buffer
 │   ├── ringQueue.hpp           # Zero-allocation fixed-capacity circular ring queue
 │   ├── objectPool.hpp          # Fixed-capacity stable-pointer object pool
 │   ├── timer.hpp               # Lazy-cancellation binary min-heap timer queue
 │   ├── loop.hpp                # epoll EventLoop with eventfd wakeups
-│   ├── event.hpp               # Socket & SSL listener abstractions
-│   ├── connection.hpp          # Unified TCP/TLS connection engine with write queue
-│   ├── datagram.hpp            # Datagram transport abstraction (UDP)
-│   ├── handler.hpp             # HandlerBase and HandlerEcho handlers
+│   ├── event.hpp               # Listener root (EventBase) + socket & SSL channels
+│   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection
+│   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram
 │   ├── http/                   # HTTP protocol implementations
 │   │   ├── v1/
 │   │   │   └── handler.hpp     # HTTP/1.x protocol handler (HandlerHttp)
 │   │   ├── v2/
 │   │   │   ├── frame.hpp       # HTTP/2 wire-compatible framing codec
 │   │   │   ├── streamTable.hpp # Open-addressing zero-allocation stream hash table
-│   │   │   ├── multiplexer.hpp # HTTP/2 credit-based stream multiplexer
-│   │   │   └── handler.hpp     # HTTP/2 protocol handler entry (HandlerHttp2)
+│   │   │   └── handler.hpp     # HTTP/2 handler: framing, stream table, credit multiplexer
 │   │   └── v3/
 │   │       ├── varint.hpp      # RFC 9000 QUIC/HTTP/3 variable-length integer codec
 │   │       ├── frame.hpp       # RFC 9114 HTTP/3 framing, settings and error codes
@@ -406,25 +416,37 @@ mynet/
 │   ├── proactor.hpp            # io_uring-based completion Proactor engine
 │   └── client.hpp              # Pipeline client abstraction (stdin/stdout bridge)
 │
+├── config/                     # Runtime configuration
+│   └── config.lua              # Documented sandboxed Lua configuration (all sections)
+│
 ├── examples/                   # Ready-to-run Executable Samples
-│   ├── config.lua              # Documented sandboxed Lua configuration example
-│   ├── reactor_tcp.cpp         # Reactor TCP echo server
-│   ├── reactor_ssl.cpp         # Reactor TLS server
-│   ├── reactor_udp.cpp         # Reactor UDP echo server
-│   ├── reactor_http3.cpp       # Reactor HTTP/3 server over QUIC/UDP
-│   ├── reactor_multiplex.cpp   # Reactor stream multiplexer server
-│   ├── proactor_tcp.cpp        # Proactor TCP server with buffer ring
-│   ├── proactor_ssl.cpp        # Proactor TLS server (poll-driven)
-│   ├── proactor_udp.cpp        # Proactor UDP server
-│   ├── proactor_multiplex.cpp  # Proactor stream multiplexer server
-│   ├── client_tcp.cpp          # Stdin/stdout TCP client
-│   ├── client_ssl.cpp          # Stdin/stdout TLS client
-│   └── client_udp.cpp          # Stdin/stdout UDP client
+│   ├── common/
+│   │   ├── endpoint.hpp        # "<host>:<port>" parser shared by every sample
+│   │   └── handlers.hpp        # SpliceEchoHandler / UdpEchoHandler shared by both engines
+│   ├── cli/                    # Client (transport-level, protocol-agnostic)
+│   │   ├── tcp.cpp             # Stdin/stdout TCP client (cli_tcp)
+│   │   ├── ssl.cpp             # Stdin/stdout TLS client (cli_ssl)
+│   │   └── udp.cpp             # Stdin/stdout UDP client (cli_udp)
+│   ├── reactor/                # epoll Edge-Triggered Reactor servers
+│   │   ├── tcp.cpp             # reactor_tcp    TCP echo (splice zero-copy)
+│   │   ├── ssl.cpp             # reactor_ssl    TLS echo
+│   │   ├── udp.cpp             # reactor_udp    UDP datagram echo
+│   │   ├── http1.cpp           # reactor_http1  HTTP/1.x via llhttp
+│   │   ├── http2.cpp           # reactor_http2  HTTP/2 stream multiplexer
+│   │   └── http3.cpp           # reactor_http3  HTTP/3 over QUIC/UDP
+│   └── proactor/               # io_uring Proactor servers
+│       ├── tcp.cpp             # proactor_tcp   TCP echo (multishot accept + buf ring)
+│       ├── ssl.cpp             # proactor_ssl   TLS echo (poll-driven handshake)
+│       ├── udp.cpp             # proactor_udp   UDP datagram echo
+│       ├── http1.cpp           # proactor_http1 HTTP/1.x via llhttp
+│       ├── http2.cpp           # proactor_http2 HTTP/2 stream multiplexer
+│       └── http3.cpp           # proactor_http3 HTTP/3 over QUIC/UDP
 │
 ├── tests/                      # Unit Test Suite (Google Test + ASan)
 │   ├── test_buffer.cpp
-│   ├── test_concepts.cpp
 │   ├── test_config_lua.cpp     # Sandboxed Lua configuration hot-reloading tests
+│   ├── test_constraints.cpp
+│   ├── test_datagram.cpp       # UDP transport session tests
 │   ├── test_error.cpp
 │   ├── test_frame.cpp
 │   ├── test_handler.cpp
@@ -455,24 +477,30 @@ ctest --output-on-failure
 Output:
 ```text
 Test project /home/aaa/code/mynet/build
-    Start 1: test_buffer
-1/8 Test #1: test_buffer ......................   Passed    0.01 sec
-    Start 2: test_concepts
-2/8 Test #2: test_concepts ....................   Passed    0.01 sec
-    Start 3: test_error
-3/8 Test #3: test_error .......................   Passed    0.01 sec
-    Start 4: test_frame
-4/8 Test #4: test_frame .......................   Passed    0.01 sec
-    Start 5: test_handler
-5/8 Test #5: test_handler .....................   Passed    0.01 sec
-    Start 6: test_multiplexer
-6/8 Test #6: test_multiplexer .................   Passed    0.02 sec
-    Start 7: test_object_pool
-7/8 Test #7: test_object_pool .................   Passed    0.01 sec
-    Start 8: test_timer
-8/8 Test #8: test_timer .......................   Passed    0.02 sec
+    Start  1: test_buffer
+ 1/11 Test  #1: test_buffer ......................   Passed    0.01 sec
+    Start  2: test_constraints
+ 2/11 Test  #2: test_constraints .................   Passed    0.01 sec
+    Start  3: test_datagram
+ 3/11 Test  #3: test_datagram ....................   Passed    0.02 sec
+    Start  4: test_error
+ 4/11 Test  #4: test_error .......................   Passed    0.01 sec
+    Start  5: test_frame
+ 5/11 Test  #5: test_frame .......................   Passed    0.01 sec
+    Start  6: test_handler
+ 6/11 Test  #6: test_handler .....................   Passed    0.03 sec
+    Start  7: test_http3
+ 7/11 Test  #7: test_http3 .......................   Passed    0.02 sec
+    Start  8: test_multiplexer
+ 8/11 Test  #8: test_multiplexer .................   Passed    0.09 sec
+    Start  9: test_object_pool
+ 9/11 Test  #9: test_object_pool .................   Passed    0.02 sec
+    Start 10: test_timer
+10/11 Test #10: test_timer .......................   Passed    0.03 sec
+    Start 11: test_config_lua
+11/11 Test #11: test_config_lua ..................   Passed    0.02 sec
 
-100% tests passed out of 8
+100% tests passed, 0 tests failed out of 11
 ```
 
 ---
