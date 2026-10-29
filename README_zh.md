@@ -171,7 +171,7 @@ flowchart TD
 `Client<Event>` 遵循 Unix 哲学，作为独立高效的命令行数据泵将标准输入（stdin）与套接字全双工桥接至标准输出（stdout）：
 
 ```bash
-cat payload.bin | ./build/cli_tcp 127.0.0.1:8888 > output.bin
+cat payload.bin | ./build/client_tcp 127.0.0.1:8888 > output.bin
 ```
 
 内置标准输入高低水位回压调节、平滑半关闭握手（TCP `FIN` 或 TLS `close_notify`）、`SIGPIPE` 信号阻断与还原，支持管道、终端与常规文件重定向。
@@ -367,14 +367,14 @@ int main(int argc, char* argv[]) {
 
 ```bash
 # 客户端：把 stdin 流向服务端，并把回包打印到 stdout
-printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/cli_tcp 127.0.0.1:8888
+printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/client_tcp 127.0.0.1:8888
 
 # 服务端：端点可任意指定（默认 0.0.0.0:8888，HTTP/3 为 4433）
 ./build/reactor_http1 127.0.0.1:9000
 curl -X POST --data-binary 'hello' http://127.0.0.1:9000/
 ```
 
-完整矩阵为：客户端 `cli_{tcp,ssl,udp}`，服务端
+完整矩阵为：客户端 `client_{tcp,ssl,udp}`，服务端
 `{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}`。
 
 ---
@@ -429,10 +429,10 @@ mynet/
 │   ├── common/
 │   │   ├── endpoint.hpp        # 全部示例共用的 "<host>:<port>" 解析
 │   │   └── handlers.hpp        # 两个引擎共用的 SpliceEchoHandler / UdpEchoHandler
-│   ├── cli/                    # Client 客户端（传输级，不解析应用协议）
-│   │   ├── tcp.cpp             # 命令行 TCP 流客户端（cli_tcp）
-│   │   ├── ssl.cpp             # 命令行 TLS 安全客户端（cli_ssl）
-│   │   └── udp.cpp             # 命令行 UDP 客户端（cli_udp）
+│   ├── client/                 # Client 客户端（传输级，不解析应用协议）
+│   │   ├── tcp.cpp             # 命令行 TCP 流客户端（client_tcp）
+│   │   ├── ssl.cpp             # 命令行 TLS 安全客户端（client_ssl）
+│   │   └── udp.cpp             # 命令行 UDP 客户端（client_udp）
 │   ├── reactor/                # epoll 边沿触发 Reactor 服务端
 │   │   ├── tcp.cpp             # reactor_tcp   TCP 回显（splice 零拷贝）
 │   │   ├── ssl.cpp             # reactor_ssl   TLS 回显

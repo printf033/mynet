@@ -9,9 +9,9 @@
 // Client 是纯字节管道，不解析任何应用协议——它演示的是"标准流 <-> 套接字"的
 // Unix 管道哲学。用法：
 //
-//     echo "hello" | ./cli_tcp 127.0.0.1:8888
+//     echo "hello" | ./client_tcp 127.0.0.1:8888
 //
-// TLS 与 UDP 变体分别在 cli/ssl.cpp 与 cli/udp.cpp 中。
+// TLS 与 UDP 变体分别在 client/ssl.cpp 与 client/udp.cpp 中。
 
 int main(int argc, char *argv[])
 {

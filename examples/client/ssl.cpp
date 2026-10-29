@@ -6,7 +6,7 @@
 
 // TLS 传输级客户端示例。用法：
 //
-//     echo "hello" | ./cli_ssl 127.0.0.1:8443 localhost ../certs/ser.crt
+//     echo "hello" | ./client_ssl 127.0.0.1:8443 localhost ../certs/ser.crt
 //
 // 位置参数：<host:port> [SNI 服务器名] [CA 根证书]
 // SNI 省略时用 host 部分的原始文本；CA 省略时校验系统默认证书库。

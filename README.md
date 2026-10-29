@@ -169,7 +169,7 @@ flowchart TD
 
 `Client<Event>` is an idiomatic Unix-style pipeline client bridging stdin/stdout and network sockets:
 ```bash
-cat request.bin | ./build/cli_tcp 127.0.0.1:8888 > response.bin
+cat request.bin | ./build/client_tcp 127.0.0.1:8888 > response.bin
 ```
 Features watermark-based backpressure for stdin, graceful TCP/TLS half-close forwarding (`close_notify` / `SHUT_WR`), signal-safe blocking of `SIGPIPE`, and detection of regular file vs interactive terminal descriptors.
 
@@ -361,14 +361,14 @@ Every sample takes a single `<host>:<port>` argument and falls back to its own d
 
 ```bash
 # Client: stream stdin to the server, print whatever comes back
-printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/cli_tcp 127.0.0.1:8888
+printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/client_tcp 127.0.0.1:8888
 
 # Server: pick any endpoint you like (defaults to 0.0.0.0:8888, HTTP/3 uses 4433)
 ./build/reactor_http1 127.0.0.1:9000
 curl -X POST --data-binary 'hello' http://127.0.0.1:9000/
 ```
 
-The full matrix is `cli_{tcp,ssl,udp}` for the client and
+The full matrix is `client_{tcp,ssl,udp}` for the client and
 `{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}` for the servers.
 
 ---
@@ -423,10 +423,10 @@ mynet/
 │   ├── common/
 │   │   ├── endpoint.hpp        # "<host>:<port>" parser shared by every sample
 │   │   └── handlers.hpp        # SpliceEchoHandler / UdpEchoHandler shared by both engines
-│   ├── cli/                    # Client (transport-level, protocol-agnostic)
-│   │   ├── tcp.cpp             # Stdin/stdout TCP client (cli_tcp)
-│   │   ├── ssl.cpp             # Stdin/stdout TLS client (cli_ssl)
-│   │   └── udp.cpp             # Stdin/stdout UDP client (cli_udp)
+│   ├── client/                 # Client (transport-level, protocol-agnostic)
+│   │   ├── tcp.cpp             # Stdin/stdout TCP client (client_tcp)
+│   │   ├── ssl.cpp             # Stdin/stdout TLS client (client_ssl)
+│   │   └── udp.cpp             # Stdin/stdout UDP client (client_udp)
 │   ├── reactor/                # epoll Edge-Triggered Reactor servers
 │   │   ├── tcp.cpp             # reactor_tcp    TCP echo (splice zero-copy)
 │   │   ├── ssl.cpp             # reactor_ssl    TLS echo

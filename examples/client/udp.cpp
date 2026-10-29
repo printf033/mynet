@@ -6,7 +6,7 @@
 
 // UDP 客户端示例。用法：
 //
-//     echo "ping" | ./cli_udp 127.0.0.1:9999
+//     echo "ping" | ./client_udp 127.0.0.1:9999
 //
 // 注意 UDP 下一次性的语义：无连接协议没有 FIN，若 Client 等待回包，单向发送
 // （fire-and-forget、对端宕机或丢包）时会永远挂起。因此 Client 在 UDP 下的完成
