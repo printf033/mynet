@@ -10,6 +10,7 @@
 #include "event.hpp"
 #include "log_config.hpp"
 #include "loop.hpp"
+#include "tls.hpp"
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -133,7 +134,8 @@ namespace mynet
          * @return Result<> 成功返回 {}，失败返回 std::unexpected(ERR::...)
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *serverName = nullptr,
-                                      const char *caFile = nullptr, int bufSize = 16 << 10)
+                                      const char *caFile = nullptr, int bufSize = 16 << 10,
+                                      const TlsOptions &tlsOptions = {})
             requires SslEvent<Event>
         {
             contract_assert(ip != nullptr);
@@ -143,6 +145,7 @@ namespace mynet
             {
                 return err;
             }
+            tlsOptions_ = tlsOptions;
             protocol_.ctx = SSL_CTX_new(TLS_client_method());
             if (protocol_.ctx == nullptr) [[unlikely]]
             {
@@ -150,9 +153,12 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
-            // 现代 TLS 安全基线：强制启用最低 TLS 1.2 并禁用不安全压缩（抵御 POODLE、BEAST 与 CRIME 攻击）
-            SSL_CTX_set_min_proto_version(protocol_.ctx, TLS1_2_VERSION);
-            SSL_CTX_set_options(protocol_.ctx, SSL_OP_NO_COMPRESSION);
+            if (auto err = detail::configureTlsContext(protocol_.ctx, tlsOptions_, false); !err) [[unlikely]]
+            {
+                LOG_ERROR("Client::runSsl: invalid TLS options: {}", sslText());
+                reset();
+                return err;
+            }
 
             // 无论自定义 CA 还是系统默认证书库，均显式开启对端证书验证 (CWE-295)
             SSL_CTX_set_verify(protocol_.ctx, SSL_VERIFY_PEER, nullptr);
@@ -181,6 +187,12 @@ namespace mynet
                 LOG_ERROR("Client::runSsl: SSL_set_fd({}) failed: {}", fd_, sslText());
                 reset();
                 return std::unexpected(ERR::SSL_SET_FD_FAILED);
+            }
+            if (auto err = detail::configureClientAlpn(ssl_, tlsOptions_); !err) [[unlikely]]
+            {
+                LOG_ERROR("Client::runSsl: configuring ALPN failed: {}", sslText());
+                reset();
+                return err;
             }
             SSL_set_connect_state(ssl_);
             if (serverName != nullptr)
@@ -286,6 +298,7 @@ namespace mynet
             failReason_.reset();
             type_ = 0;
             state_ = CLIENT_STATE::CLOSED;
+            tlsOptions_ = {};
         }
 
         [[nodiscard]] inline size_t sent() const noexcept { return sentTotal_; }
@@ -858,6 +871,7 @@ namespace mynet
         int type_ = 0;
         bool fatal_ = false;
         std::optional<ERR> failReason_{};
+        TlsOptions tlsOptions_{};
         CLIENT_STATE state_ = CLIENT_STATE::CLOSED;
         std::string toPeer_{};
         size_t toPeerOffset_ = 0;

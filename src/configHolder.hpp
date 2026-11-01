@@ -147,6 +147,29 @@ namespace mynet
     };
 
     /**
+     * @brief 流式连接与请求响应管道配置
+     */
+    struct ConnectionConfig
+    {
+        size_t responseCapacity = 64;          ///< 默认响应队列初始槽位容量 (条)
+        size_t readChunkSize = 4 << 10;        ///< 单次直写请求接收读取分块大小 (4 KiB)
+        size_t maxRequestBytes = 4 << 20;      ///< 单连接请求解析缓冲上限 (4 MiB)
+        size_t writeHighWaterMark = 4 << 20;   ///< 单连接发送队列高水位线 (4 MiB)
+        size_t writeHardCapFactor = 2;         ///< 发送积压硬顶倍数（>= factor * writeHighWaterMark 时发完即关）
+        size_t spliceChunkSize = 64 << 10;     ///< Linux splice(2) 单次移动分块大小 (64 KiB)
+        size_t maxWriteIov = 16;               ///< 向量化 I/O (writev) 单次聚合发送分片上限 (1~64)
+    };
+
+    /**
+     * @brief UDP 数据报会话与外发队列配置
+     */
+    struct DatagramConfig
+    {
+        size_t maxDatagramBytes = (64 << 10) - 1; ///< 单个 UDP 数据报载荷上限 (65535 字节)
+        size_t maxPendingOutgoing = 1024;         ///< 待发送外发队列槽位上限 (条)
+    };
+
+    /**
      * @brief io_uring Proactor 引擎专用配置
      */
     struct ProactorConfig
@@ -186,6 +209,8 @@ namespace mynet
     struct NetConfig
     {
         ServerConfig server{};
+        ConnectionConfig connection{};
+        DatagramConfig datagram{};
         ProactorConfig proactor{};
         MultiplexerConfig multiplexer{};
         SecurityConfig security{};
@@ -218,11 +243,49 @@ namespace mynet
     }
 
     /**
+     * @brief 获取当前全局连接配置的无锁快照
+     */
+    [[nodiscard]] inline const ConnectionConfig &getConnectionConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().connection;
+    }
+
+    /**
+     * @brief 获取当前全局数据报配置的无锁快照
+     */
+    [[nodiscard]] inline const DatagramConfig &getDatagramConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().datagram;
+    }
+
+    /**
      * @brief 原子发布新的全局网络配置
      */
     inline void publishNetConfig(NetConfig cfg)
     {
         NetConfigHolder::getInstance().publish(std::move(cfg));
+    }
+
+    /**
+     * @brief 原子发布新的连接专属配置
+     */
+    inline void publishConnectionConfig(ConnectionConfig cfg)
+    {
+        auto netCfg = getNetConfig();
+        netCfg.connection = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的数据报专属配置
+     */
+    inline void publishDatagramConfig(DatagramConfig cfg)
+    {
+        auto netCfg = getNetConfig();
+        netCfg.datagram = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
     }
 
 } // namespace mynet

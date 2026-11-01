@@ -35,12 +35,15 @@ namespace
     /// 只具备流式能力、不满足 MandatoryMethodDatagram 的处理器。
     struct StreamOnlyHandler : HandlerConnection
     {
-        void process() {}
+        void echo() {}
     };
 
     /// 同时具备两种传输能力（与 HandlerHttp3 同构）。
     struct DualHandler : HandlerConnection, HandlerDatagram
     {
+        using HandlerConnection::echo;
+        using HandlerDatagram::echo;
+
         void reset() noexcept override
         {
             HandlerConnection::reset();
@@ -272,11 +275,11 @@ TEST(Datagram, FlushToDrainsRepliesOverRealSocket)
     Datagram<RecordingHandler> session;
     session.bind(handler);
 
-    handler.pushReply(pair.rxAddr, "pong", 4);
-    ASSERT_TRUE(handler.hasReply());
+    handler.sendTo(pair.rxAddr, "pong", 4);
+    ASSERT_TRUE(handler.hasOutgoing());
 
     EXPECT_EQ(session.flushTo(pair.tx), size_t{1});
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
     EXPECT_EQ(session.sentDatagrams(), uint64_t{1});
 
     char buf[64] = {};
@@ -304,11 +307,11 @@ TEST(Datagram, FlushToCountsSendFailures)
     Datagram<RecordingHandler> session;
     session.bind(handler);
 
-    handler.pushReply(loopbackPeer(9), "x", 1);
-    // 无效描述符：发送必然失败，回复仍会被取出（丢弃语义与改造前一致）
+    handler.sendTo(loopbackPeer(9), "x", 1);
+    // 无效描述符：发送必然失败，报文仍会被取出
     EXPECT_EQ(session.flushTo(-1), size_t{0});
     EXPECT_EQ(session.sendFailures(), uint64_t{1});
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
 }
 
 TEST(Datagram, ReceiveFromAtExactLimitIsNotTruncation)
@@ -373,17 +376,138 @@ TEST(Datagram, FlushToAccumulatesCountsAcrossReplies)
 
     for (int i = 0; i < 5; ++i)
     {
-        handler.pushReply(pair.rxAddr, "r", 1);
+        handler.sendTo(pair.rxAddr, "r", 1);
     }
-    ASSERT_EQ(handler.replyCount(), size_t{5});
+    ASSERT_EQ(handler.outgoingCount(), size_t{5});
 
     EXPECT_EQ(session.flushTo(pair.tx), size_t{5});
     EXPECT_EQ(session.sentDatagrams(), uint64_t{5});
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
 
     for (int i = 0; i < 5; ++i)
     {
         char buf[8] = {};
-        EXPECT_EQ(::recv(pair.rx, buf, sizeof(buf), 0), ssize_t{1}) << "reply " << i << " missing";
+        EXPECT_EQ(::recv(pair.rx, buf, sizeof(buf), 0), ssize_t{1}) << "packet " << i << " missing";
     }
+}
+
+TEST(Datagram, UdpEchoHandlerEchoWorksInSession)
+{
+    // 回显作为协议级业务处理：由派生回显处理器在 onDatagram 中调用 echo
+    struct TestDatagramEchoHandler : HandlerDatagram
+    {
+        void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
+        {
+            echo(peer, data, n);
+        }
+    };
+
+    TestDatagramEchoHandler echoHandler;
+    Datagram<TestDatagramEchoHandler> session;
+    session.bind(echoHandler);
+
+    sockaddr_in peer = loopbackPeer(23456);
+    const char data[] = "ping-udp-echo";
+    session.receiveFrom(peer, data, sizeof(data) - 1);
+
+    EXPECT_EQ(session.receivedDatagrams(), 1u);
+    EXPECT_EQ(session.receivedBytes(), sizeof(data) - 1);
+    ASSERT_TRUE(echoHandler.hasOutgoing());
+    EXPECT_EQ(echoHandler.outgoingCount(), 1u);
+
+    auto pkt = echoHandler.takeOutgoing();
+    EXPECT_EQ(pkt.bytes, "ping-udp-echo");
+    EXPECT_EQ(pkt.peer.sin_port, peer.sin_port);
+}
+
+TEST(Datagram, BaseHandlerDatagramDoesNotEchoByDefault)
+{
+    // 基类 HandlerDatagram 属于纯协议底座，默认不写死 Echo 回显行为
+    HandlerDatagram baseHandler;
+    Datagram<HandlerDatagram> session;
+    session.bind(baseHandler);
+
+    sockaddr_in peer = loopbackPeer(23456);
+    const char data[] = "no-auto-echo";
+    session.receiveFrom(peer, data, sizeof(data) - 1);
+
+    EXPECT_EQ(session.receivedDatagrams(), 1u);
+    EXPECT_EQ(session.receivedBytes(), sizeof(data) - 1);
+    EXPECT_FALSE(baseHandler.hasOutgoing());
+    EXPECT_EQ(baseHandler.outgoingCount(), 0u);
+}
+
+TEST(Datagram, DecoupledSendForwardBroadcastApis)
+{
+    HandlerDatagram handler;
+    sockaddr_in peer1 = loopbackPeer(10001);
+    sockaddr_in peer2 = loopbackPeer(10002);
+    sockaddr_in peer3 = loopbackPeer(10003);
+
+    // 1. sendTo 字节与 string
+    handler.sendTo(peer1, "pkt1", 4);
+    handler.sendTo(peer2, std::string("pkt2"));
+    EXPECT_TRUE(handler.hasOutgoing());
+    EXPECT_EQ(handler.outgoingCount(), 2u);
+
+    // 2. forwardTo 转发代理
+    handler.forwardTo(peer3, "forward_data", 12);
+    EXPECT_EQ(handler.outgoingCount(), 3u);
+
+    // 3. broadcastTo 广播/多播
+    std::vector<sockaddr_in> targets = {peer1, peer2};
+    handler.broadcastTo(targets, "multicast", 9);
+    EXPECT_EQ(handler.outgoingCount(), 5u);
+
+    // 校验队列出队与 DatagramPacket
+    DatagramPacket p1 = handler.takeOutgoing();
+    EXPECT_EQ(p1.bytes, "pkt1");
+    EXPECT_EQ(p1.peer.sin_port, peer1.sin_port);
+
+    DatagramPacket p2 = handler.takeOutgoing();
+    EXPECT_EQ(p2.bytes, "pkt2");
+    EXPECT_EQ(p2.peer.sin_port, peer2.sin_port);
+
+    DatagramPacket p3 = handler.takeOutgoing();
+    EXPECT_EQ(p3.bytes, "forward_data");
+    EXPECT_EQ(p3.peer.sin_port, peer3.sin_port);
+
+    DatagramPacket p4 = handler.takeOutgoing();
+    EXPECT_EQ(p4.bytes, "multicast");
+    EXPECT_EQ(p4.peer.sin_port, peer1.sin_port);
+
+    DatagramPacket p5 = handler.takeOutgoing();
+    EXPECT_EQ(p5.bytes, "multicast");
+    EXPECT_EQ(p5.peer.sin_port, peer2.sin_port);
+
+    EXPECT_FALSE(handler.hasOutgoing());
+}
+
+TEST(Datagram, SendDirectAndHasPending)
+{
+    UdpPair pair;
+    ASSERT_TRUE(pair.ok());
+
+    RecordingHandler handler;
+    Datagram<RecordingHandler> session;
+    session.bind(handler);
+
+    EXPECT_FALSE(session.hasPending());
+
+    // 使用 sendDirect 直发报文
+    const char msg[] = "direct-udp-packet";
+    ssize_t ret = session.sendDirect(pair.tx, pair.rxAddr, msg, sizeof(msg) - 1);
+    EXPECT_EQ(ret, static_cast<ssize_t>(sizeof(msg) - 1));
+    EXPECT_EQ(session.sentDatagrams(), 1u);
+
+    char recvBuf[64] = {};
+    ssize_t rn = ::recv(pair.rx, recvBuf, sizeof(recvBuf), 0);
+    ASSERT_EQ(rn, static_cast<ssize_t>(sizeof(msg) - 1));
+    EXPECT_EQ(std::string(recvBuf, static_cast<size_t>(rn)), msg);
+
+    // 加入队列后 hasPending 为 true
+    handler.sendTo(pair.rxAddr, "queued", 6);
+    EXPECT_TRUE(session.hasPending());
+    EXPECT_EQ(session.flushTo(pair.tx), 1u);
+    EXPECT_FALSE(session.hasPending());
 }

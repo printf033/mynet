@@ -11,6 +11,7 @@
 #include "event.hpp"
 #include "log_config.hpp"
 #include "objectPool.hpp"
+#include "tls.hpp"
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -105,7 +106,8 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
                                       unsigned int sqEntries = 512, unsigned int cqEntries = 1 << 10,
                                       int maxAcceptEvents = 256, size_t sessionPoolSize = 512,
-                                      int maxBufEntrs = 1 << 10, int bufSize = 4 << 10, int idleTimeoutSecs = 0)
+                                      int maxBufEntrs = 1 << 10, int bufSize = 4 << 10, int idleTimeoutSecs = 0,
+                                      const TlsOptions &tlsOptions = {})
             requires SslEvent<Event> && kStreaming
         {
             if (auto err = acceptor_.listenTcp(ip, port, backlog); !err) [[unlikely]]
@@ -119,9 +121,13 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
-            // 现代 TLS 安全基线：强制启用最低 TLS 1.2 并禁用不安全压缩与客户端弱密码套件偏好
-            SSL_CTX_set_min_proto_version(protocol_.ctx, TLS1_2_VERSION);
-            SSL_CTX_set_options(protocol_.ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_COMPRESSION);
+            tlsOptions_ = tlsOptions;
+            if (auto err = detail::configureTlsContext(protocol_.ctx, tlsOptions_, true); !err) [[unlikely]]
+            {
+                LOG_ERROR("Proactor::runSsl: invalid TLS options: {}", sslText());
+                reset();
+                return err;
+            }
             if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
                 LOG_ERROR("Proactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, sslText());
@@ -382,6 +388,7 @@ namespace mynet
                     protocol_.ctx = nullptr;
                 }
             }
+            tlsOptions_ = {};
         }
 
         [[nodiscard]] inline size_t sessions() const noexcept { return sessions_.size(); }
@@ -775,7 +782,14 @@ namespace mynet
                         }
                         else
                         {
-                            handler.process();
+                            if constexpr (requires { handler.process(); })
+                            {
+                                handler.process();
+                            }
+                            else
+                            {
+                                handler.echo();
+                            }
                         }
                         session->conn.touch();
                         recycleBuffer(bid);
@@ -1140,6 +1154,7 @@ namespace mynet
         int acceptOutstanding_ = 0;
         int maxAccepts_ = 0;
         typename DatagramSlot<Handler>::Type datagram_{};
+        TlsOptions tlsOptions_{};
         DatagramOp datagramOp_{};
         std::chrono::seconds idleTimeout_{0};
         std::stop_source stopSource_{};

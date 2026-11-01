@@ -30,19 +30,19 @@ namespace mynet
      * 系统调用）可零拷贝直写该窗口，写完后 commitWritten(n) 提交。窗口不足时
      * ensureWritable(n) 预扩容，同样以错误码交付。
      */
-    class Buffer
+    class RequestBuffer
     {
     public:
-        Buffer() noexcept = default;
+        RequestBuffer() noexcept = default;
 
-        ~Buffer() noexcept { deallocate(); }
+        ~RequestBuffer() noexcept { deallocate(); }
 
-        Buffer(const Buffer &) =
-            delete ("a buffer owns one heap block sized for its connection; a copy would alias the bytes");
-        Buffer &operator=(const Buffer &) =
-            delete ("a buffer owns one heap block sized for its connection; a copy would alias the bytes");
+        RequestBuffer(const RequestBuffer &) =
+            delete ("a request buffer owns one heap block sized for its connection; a copy would alias the bytes");
+        RequestBuffer &operator=(const RequestBuffer &) =
+            delete ("a request buffer owns one heap block sized for its connection; a copy would alias the bytes");
 
-        Buffer(Buffer &&other) noexcept
+        RequestBuffer(RequestBuffer &&other) noexcept
             : data_(std::exchange(other.data_, nullptr)),
               capacity_(std::exchange(other.capacity_, 0)),
               writeIndex_(std::exchange(other.writeIndex_, 0)),
@@ -51,7 +51,7 @@ namespace mynet
         {
         }
 
-        Buffer &operator=(Buffer &&other) noexcept
+        RequestBuffer &operator=(RequestBuffer &&other) noexcept
         {
             if (this != &other)
             {
@@ -68,7 +68,7 @@ namespace mynet
         /**
          * @brief 交换两个缓冲区的所有权状态
          */
-        inline void swap(Buffer &other) noexcept
+        inline void swap(RequestBuffer &other) noexcept
         {
             std::swap(data_, other.data_);
             std::swap(capacity_, other.capacity_);
@@ -133,7 +133,7 @@ namespace mynet
         {
             if (n >= readableBytes())
             {
-                retrieveAll();
+                reset();
                 return;
             }
             readIndex_ += n;
@@ -148,15 +148,6 @@ namespace mynet
                 readIndex_ = 0;
                 writeIndex_ = live;
             }
-        }
-
-        /**
-         * @brief 消费并清除所有已有数据（游标归零，保留已分配容量）
-         */
-        inline void retrieveAll() noexcept
-        {
-            readIndex_ = 0;
-            writeIndex_ = 0;
         }
 
         // ---- 写入侧接口 (Write Side) ----

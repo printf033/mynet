@@ -20,36 +20,39 @@ namespace mynet::example
     /**
      * @brief 流式回显处理器
      *
-     * HandlerConnection::process() 本身即字节流回显，无需额外代码。
-     * 声明 kEnableSplice 后，明文 TCP 上会走 Linux 内核零拷贝环回
-     * （socket -> pipe -> socket），数据不进入用户态；TLS 下自动退回用户态回显。
+     * HandlerConnection::echo() 本身即字节流回显，无需额外代码。
+     * 声明 kEnableSplice 后，明文 TCP 上由 handler 在 onConnect(fd) 钩子中
+     * 将零拷贝目标设定为对端套接字（socket -> pipe -> socket），数据不进入用户态；
+     * TLS 下自动退回用户态回显。
      */
     class SpliceEchoHandler : public HandlerConnection
     {
     public:
         static constexpr bool kEnableSplice = true;
 
-        SpliceEchoHandler() noexcept { setSpliceEnabled(true); }
+        void onConnect(int fd) noexcept override
+        {
+            setSpliceTarget(fd);
+        }
 
         void reset() noexcept override
         {
             HandlerConnection::reset();
-            setSpliceEnabled(true);
         }
     };
 
     /**
      * @brief 数据报回显处理器
      *
-     * 只需偏报文的 HandlerDatagram：数据报路径不经过 Connection，不要求任何
-     * 流式设施。HandlerDatagram 自带对端地址标签化的回复队列。
+     * 只需偏报文的 HandlerDatagram：基类 HandlerDatagram::echo() 及默认
+     * onDatagram 实现本身即数据报回显，自带对端地址标签化的回复队列。
      */
     class UdpEchoHandler : public HandlerDatagram
     {
     public:
         void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
-            pushReply(peer, data, n);
+            echo(peer, data, n);
         }
     };
 

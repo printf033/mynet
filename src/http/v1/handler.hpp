@@ -72,7 +72,92 @@ namespace mynet
                 currentField_.clear();
                 currentValue_.clear();
                 totalHeaderBytes_ = 0;
+                fd_ = -1;
                 HandlerConnection::reset();
+            }
+
+            void onConnect(int fd) noexcept override
+            {
+                fd_ = fd;
+            }
+
+            [[nodiscard]] inline int fd() const noexcept { return fd_; }
+
+            /**
+             * @brief 开启零拷贝反向代理或升级隧道（直接复用 Connection 零拷贝管道）
+             *
+             * 适用于 HTTP/1.1 Upgrade 协议升级（如 WebSocket 帧通道、CONNECT 正向代理隧道），
+             * 或反向代理网关在解析完首部后将后续负载直接交由内核 splice 传输。
+             *
+             * @param targetFd 目标上游套接字或落盘文件描述符
+             */
+            inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
+            inline void disableSpliceTunnel() noexcept { disableSplice(); }
+            [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
+
+            /**
+             * @brief 向响应队列推入标准格式的 HTTP/1.x 响应报文（直接复用 HandlerConnection::pushResponse）
+             *
+             * @param statusCode HTTP 状态码（如 200, 404, 500）
+             * @param statusText 状态文本（如 "OK", "Not Found"）
+             * @param headers 响应首部列表
+             * @param body 响应体载荷
+             * @return 成功推入响应队列返回 true；队列已满返回 false
+             */
+            [[nodiscard]] inline Result<> sendResponse(int statusCode, std::string_view statusText,
+                                                       const std::vector<std::pair<std::string, std::string>> &headers,
+                                                       std::string_view body)
+            {
+                std::string resp;
+                resp.reserve(128 + body.size());
+                resp.append("HTTP/1.1 ");
+                resp.append(std::to_string(statusCode));
+                resp.push_back(' ');
+                resp.append(statusText.empty() ? "OK" : statusText);
+                resp.append("\r\nContent-Length: ");
+                resp.append(std::to_string(body.size()));
+                resp.append("\r\nConnection: ");
+                resp.append(keepAlive() ? "keep-alive" : "close");
+                for (const auto &[k, v] : headers)
+                {
+                    resp.append("\r\n");
+                    resp.append(k);
+                    resp.append(": ");
+                    resp.append(v);
+                }
+                resp.append("\r\n\r\n");
+                resp.append(body);
+                if (!keepAlive())
+                {
+                    closeAfterResponse_ = true;
+                }
+                return pushResponse(std::move(resp));
+            }
+
+            [[nodiscard]] inline Result<> sendResponse(int statusCode, std::string_view statusText, std::string_view body)
+            {
+                return sendResponse(statusCode, statusText, {}, body);
+            }
+
+            /**
+             * @brief 适配 Connection::echo 契约：将请求体作为 HTTP 200 OK 响应载荷回显
+             */
+            inline void echo() noexcept
+            {
+                if constexpr (Mode == HTTP_MODE::REQUEST)
+                {
+                    if (!body_.empty())
+                    {
+                        std::vector<std::pair<std::string, std::string>> hdrs = {
+                            {"Content-Type", "application/octet-stream"}
+                        };
+                        [[maybe_unused]] auto _ = sendResponse(200, "OK", hdrs, body_);
+                    }
+                }
+                else
+                {
+                    HandlerConnection::echo();
+                }
             }
 
             // ---- 解析元数据快速提取 ----
@@ -136,22 +221,12 @@ namespace mynet
             {
                 if constexpr (Mode == HTTP_MODE::REQUEST)
                 {
-                    std::string resp;
-                    resp.reserve(128 + body_.size());
-                    resp.append("HTTP/1.1 200 OK\r\nContent-Length: ");
-                    resp.append(std::to_string(body_.size()));
-                    resp.append("\r\nContent-Type: application/octet-stream\r\nConnection: ");
-                    // 按 llhttp 解析结论回写连接语义，避免对 Connection: close 的请求错误地续连
-                    resp.append(keepAlive() ? "keep-alive" : "close");
-                    resp.append("\r\n\r\n");
-                    resp.append(body_);
-                    if (!pushResponse(std::move(resp))) [[unlikely]]
+                    std::vector<std::pair<std::string, std::string>> hdrs = {
+                        {"Content-Type", "application/octet-stream"}
+                    };
+                    if (!sendResponse(200, "OK", hdrs, body_)) [[unlikely]]
                     {
                         LOG_WARN("HandlerHttp: response queue full, response dropped");
-                    }
-                    if (!keepAlive())
-                    {
-                        closeAfterResponse_ = true;
                     }
                 }
             }
@@ -193,7 +268,7 @@ namespace mynet
                     switch (err)
                     {
                     case HPE_OK:
-                        requestBuffer_.retrieveAll();
+                        requestBuffer_.reset();
                         return;
                     case HPE_PAUSED:
                         llhttp_resume(&parser_);
@@ -211,7 +286,7 @@ namespace mynet
                         const char *reason = llhttp_get_error_reason(&parser_);
                         LOG_WARN("Handler: HTTP message parse error: {}", reason != nullptr ? reason : "unknown");
                         onParseError(reason);
-                        requestBuffer_.retrieveAll();
+                        requestBuffer_.reset();
                         return;
                     }
                     }
@@ -226,6 +301,7 @@ namespace mynet
             static constexpr size_t kMaxTotalHeadersLength = 65536;    // 64 KiB
             static constexpr size_t kMaxBodyLength = 16 * 1024 * 1024; // 16 MiB
 
+            int fd_ = -1;
             llhttp_t parser_{};
             llhttp_settings_t settings_{};
 

@@ -33,10 +33,10 @@ namespace
     {
     };
 
-    /// 正例：派生自 HandlerConnection，只重写 process() 表达业务定制。
+    /// 正例：派生自 HandlerConnection，只重写 echo() 表达业务定制。
     struct FakeHandler : public HandlerConnection
     {
-        void process() {}
+        void echo() {}
     };
 
     /// 反例：手写齐全部流式成员与生命周期钩子——结构上无懈可击，
@@ -47,7 +47,7 @@ namespace
         bool hasResponse() noexcept { return false; }
         std::string takeResponse() { return ""; }
         bool requestOverLimit() noexcept { return false; }
-        void process() {}
+        void echo() {}
         void reset() noexcept {}
         void onMessageComplete() noexcept {}
         void onParseError(const char *) noexcept {}
@@ -66,7 +66,7 @@ namespace
         bool hasResponse() noexcept { return false; }
         std::string takeResponse() { return ""; }
         bool requestOverLimit() noexcept { return false; }
-        void process() {}
+        void echo() {}
         void reset() noexcept {}
     };
 
@@ -77,9 +77,9 @@ namespace
         void appendRequest(const char *, ssize_t) {}
     };
 
-    struct DeletedProcessHandler : public HandlerConnection
+    struct DeletedEchoHandler : public HandlerConnection
     {
-        void process() = delete;
+        void echo() = delete;
     };
 
     struct DeletedTakeResponseHandler : public HandlerConnection
@@ -90,6 +90,9 @@ namespace
     /// 双特化组合：两个并列的独立基类，成员访问均为直接偏移，不经过虚基类。
     struct CombinedHandler : HandlerConnection, HandlerDatagram
     {
+        using HandlerConnection::echo;
+        using HandlerDatagram::echo;
+
         void reset() noexcept override
         {
             HandlerConnection::reset();
@@ -116,8 +119,8 @@ namespace
 
     /// 反例：已派生报文特化，但引擎经处理器类型直接读取的接收上界缺失。
     ///
-    /// 只有 maxDatagramBytes() 与 onDatagram() 属于约束范围：回复队列的
-    /// hasReply / takeReply 由引擎经 HandlerDatagram* 调用，派生类改不动，
+    /// 只有 maxDatagramBytes() 与 onDatagram() 属于约束范围：外发队列的
+    /// hasOutgoing / takeOutgoing 由引擎经 HandlerDatagram* 调用，派生类改不动，
     /// 写进约束只会误拒合法写法，故不设桩。
     struct MissingMaxDatagramBytesHandler : HandlerDatagram
     {
@@ -130,8 +133,8 @@ namespace
     struct DatagramContractWithoutDerivation
     {
         void onDatagram(const sockaddr_in &, const char *, size_t) noexcept {}
-        bool hasReply() noexcept { return false; }
-        DatagramReply takeReply() { return {}; }
+        bool hasOutgoing() noexcept { return false; }
+        DatagramPacket takeOutgoing() { return {}; }
         size_t maxDatagramBytes() noexcept { return 0; }
         void reset() noexcept {}
         void onMessageComplete() noexcept {}
@@ -154,7 +157,7 @@ namespace
         bool hasResponse() noexcept { return false; }
         std::string takeResponse() { return ""; }
         bool requestOverLimit() noexcept { return false; }
-        void process() {}
+        void echo() {}
         void reset() noexcept {}
     };
 } // namespace
@@ -162,6 +165,8 @@ namespace
 TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
 {
     static_assert(Resettable<ValidResettable>);
+    static_assert(Resettable<RequestBuffer>);
+    static_assert(Resettable<ResponseQueue>);
     static_assert(Resettable<HandlerConnection>);
     static_assert(Resettable<HandlerDatagram>);
     static_assert(Resettable<EventBase<HandlerConnection>>);
@@ -214,7 +219,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     static_assert(MandatoryMethodConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(!MandatoryMethodConnection<ThrowingAppendHandler>); // 旧语义：允许抛出的摄入路径现被约束拒绝
 
-    static_assert(!MandatoryMethodConnection<DeletedProcessHandler>);
+    static_assert(!MandatoryMethodConnection<DeletedEchoHandler>);
     static_assert(!MandatoryMethodConnection<DeletedTakeResponseHandler>);
     static_assert(!MandatoryMethodConnection<NonDerivedHandler>);
     static_assert(!MandatoryMethodConnection<NoReset>);
@@ -224,7 +229,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     EXPECT_FALSE(MandatoryMethodConnection<FullContractWithoutDerivation>);
     EXPECT_FALSE(MandatoryMethodConnection<LegacySixMemberHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<ThrowingAppendHandler>);
-    EXPECT_FALSE(MandatoryMethodConnection<DeletedProcessHandler>);
+    EXPECT_FALSE(MandatoryMethodConnection<DeletedEchoHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedTakeResponseHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<NonDerivedHandler>);
 }

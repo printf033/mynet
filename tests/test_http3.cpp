@@ -46,7 +46,7 @@ TEST(Http3Varint, RoundTripVariousLengths)
 
 TEST(Http3Varint, DecodeVarintFromBuffer)
 {
-    Buffer buf;
+    RequestBuffer buf;
     std::string s;
     appendVarint(s, 15213);
     [[maybe_unused]] auto _ = buf.append(s.data(), s.size());
@@ -60,7 +60,7 @@ TEST(Http3Varint, DecodeVarintFromBuffer)
 
 TEST(Http3Varint, IncompleteBytesReturnsNullopt)
 {
-    Buffer buf;
+    RequestBuffer buf;
     // 写入一个需要 4 字节的数字的前 2 字节
     std::string full;
     appendVarint(full, 100000);
@@ -82,7 +82,7 @@ TEST(Http3Frame, AppendAndDecodeSingleFrame)
     std::string frameBytes;
     appendFrame(frameBytes, std::to_underlying(FRAME_TYPE::DATA), "hello http3 data");
 
-    Buffer buf;
+    RequestBuffer buf;
     [[maybe_unused]] auto _ = buf.append(frameBytes.data(), frameBytes.size());
 
     FrameDecoder decoder;
@@ -111,7 +111,7 @@ TEST(Http3Frame, FrameTooLargeReturnsError)
     std::string frameBytes;
     appendFrame(frameBytes, std::to_underlying(FRAME_TYPE::DATA), "payload");
 
-    Buffer buf;
+    RequestBuffer buf;
     [[maybe_unused]] auto _ = buf.append(frameBytes.data(), frameBytes.size());
 
     FrameDecoder decoder;
@@ -266,7 +266,7 @@ TEST(HandlerHttp3, ProcessStreamFramesGeneratesResponse)
     EXPECT_FALSE(resp.empty());
 
     // 解析响应帧
-    Buffer respBuf;
+    RequestBuffer respBuf;
     [[maybe_unused]] auto _2 = respBuf.append(resp.data(), resp.size());
 
     FrameDecoder decoder;
@@ -322,12 +322,12 @@ TEST(HandlerHttp3, OnDatagramProcessesQuicPacketAndReplies)
     appendShortHeaderPacket(packet, dcid, 1, quicStream);
 
     // 4. 输入给 onDatagram
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
     handler.onDatagram(peer, packet.data(), packet.size());
-    EXPECT_TRUE(handler.hasReply());
+    EXPECT_TRUE(handler.hasOutgoing());
 
     // 5. 校验回复
-    auto reply = handler.takeReply();
+    auto reply = handler.takeOutgoing();
     EXPECT_EQ(reply.peer.sin_port, htons(54321));
 
     // 解析回复的短首部报文
@@ -344,7 +344,7 @@ TEST(HandlerHttp3, OnDatagramProcessesQuicPacketAndReplies)
     EXPECT_TRUE(sfRes->fin);
 
     // 解析内部的 HTTP/3 帧
-    Buffer respBuf;
+    RequestBuffer respBuf;
     [[maybe_unused]] auto _ = respBuf.append(sfRes->data.data(), sfRes->data.size());
     FrameDecoder decoder;
     auto h1Res = decoder.next(respBuf);
@@ -482,7 +482,7 @@ TEST(HandlerHttp3, RejectsServerInitiatedStreamIdFromClient)
 
     handler.onDatagram(peer, pkt.data(), pkt.size());
     EXPECT_EQ(handler.activeStreams(), 0u);
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
 }
 
 class LargeResponseHttp3Handler : public HandlerHttp3
@@ -523,14 +523,14 @@ TEST(HandlerHttp3, AntiAmplificationLimitBlocksReflectedAmplificationUntilValida
 
     // 输入给 onDatagram：触发 onRequest 生成 1000 字节响应，但被 RFC 9000 Section 8.1 抗放大防护阻断
     handler.onDatagram(peer, packet.data(), packet.size());
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
 
     // 对该 peer 实施地址验证后，抗放大限制解除
     handler.validateAddress(peer);
     // 再次发送请求
     handler.onDatagram(peer, packet.data(), packet.size());
-    EXPECT_TRUE(handler.hasReply());
-    auto reply = handler.takeReply();
+    EXPECT_TRUE(handler.hasOutgoing());
+    auto reply = handler.takeOutgoing();
     EXPECT_GT(reply.bytes.size(), 1000u);
 }
 
@@ -562,7 +562,7 @@ TEST(HandlerHttp3, PerConnectionSessionIsolationPreventsCrosstalk)
     appendShortHeaderPacket(pktA, dcidA, 1, qsA);
 
     handler.onDatagram(peerA, pktA.data(), pktA.size());
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
 
     // 客户端 B：发送同 stream 0 的 HEADERS + DATA (fin = true)
     std::vector<Header> headersB = {{":method", "POST"}, {":path", "/bob"}};
@@ -578,15 +578,15 @@ TEST(HandlerHttp3, PerConnectionSessionIsolationPreventsCrosstalk)
 
     handler.onDatagram(peerB, pktB.data(), pktB.size());
     // 客户端 B 收到应答，且应答发往 peerB，携带 dcidB
-    ASSERT_TRUE(handler.hasReply());
-    auto replyB = handler.takeReply();
+    ASSERT_TRUE(handler.hasOutgoing());
+    auto replyB = handler.takeOutgoing();
     EXPECT_EQ(replyB.peer.sin_port, htons(10002));
     auto shpB = parseShortHeaderPacket(replyB.bytes, 8);
     ASSERT_TRUE(shpB.has_value());
     EXPECT_EQ(shpB->dcid, dcidB);
 
     // 验证客户端 A 的流不受客户端 B 影响
-    EXPECT_FALSE(handler.hasReply());
+    EXPECT_FALSE(handler.hasOutgoing());
 }
 
 TEST(HandlerHttp3, DualBaseLifecycleHooksAreUnambiguous)
@@ -600,8 +600,8 @@ TEST(HandlerHttp3, DualBaseLifecycleHooksAreUnambiguous)
     peer.sin_port = htons(5300);
     inet_pton(AF_INET, "192.0.2.9", &peer.sin_addr);
 
-    handler.pushReply(peer, "stale", 5);
-    ASSERT_TRUE(handler.hasReply());
+    handler.sendTo(peer, "stale", 5);
+    ASSERT_TRUE(handler.hasOutgoing());
 
     // 通过两个基类静态类型分别调用钩子：两个子对象互不遮蔽，转发实现可达
     static_cast<HandlerConnection &>(handler).onParseError("conn-side");
@@ -610,7 +610,70 @@ TEST(HandlerHttp3, DualBaseLifecycleHooksAreUnambiguous)
     static_cast<HandlerDatagram &>(handler).onMessageComplete();
 
     handler.reset();
-    EXPECT_FALSE(handler.hasReply());      // HandlerDatagram::reset()
+    EXPECT_FALSE(handler.hasOutgoing());   // HandlerDatagram::reset()
     EXPECT_FALSE(handler.hasResponse());   // HandlerConnection::reset()
     EXPECT_EQ(handler.activeStreams(), size_t{0});
+}
+
+TEST(HandlerHttp3, LifecycleAndFd)
+{
+    HandlerHttp3 handler;
+    EXPECT_EQ(handler.fd(), -1);
+
+    handler.onConnect(99);
+    EXPECT_EQ(handler.fd(), 99);
+
+    handler.reset();
+    EXPECT_EQ(handler.fd(), -1);
+}
+
+TEST(HandlerHttp3, DatagramForwardAndBroadcast)
+{
+    HandlerHttp3 handler;
+
+    sockaddr_in upstream{};
+    upstream.sin_family = AF_INET;
+    upstream.sin_port = htons(9001);
+    inet_pton(AF_INET, "10.1.1.1", &upstream.sin_addr);
+
+    // 1. forwardDatagram 报文转发测试
+    const char msg[] = "masque-udp-packet";
+    handler.forwardDatagram(upstream, msg, sizeof(msg) - 1);
+    ASSERT_TRUE(handler.hasOutgoing());
+    auto out1 = handler.takeOutgoing();
+    EXPECT_EQ(out1.peer.sin_port, htons(9001));
+    EXPECT_EQ(out1.bytes, msg);
+
+    // 2. broadcastDatagram 组播测试
+    sockaddr_in peer1 = upstream;
+    peer1.sin_port = htons(9002);
+    sockaddr_in peer2 = upstream;
+    peer2.sin_port = htons(9003);
+
+    std::vector<sockaddr_in> targets = {peer1, peer2};
+    const char bcastMsg[] = "webtransport-multicast";
+    handler.broadcastDatagram(targets, bcastMsg, sizeof(bcastMsg) - 1);
+
+    EXPECT_EQ(handler.outgoingCount(), 2u);
+    auto b1 = handler.takeOutgoing();
+    auto b2 = handler.takeOutgoing();
+    EXPECT_EQ(b1.peer.sin_port, htons(9002));
+    EXPECT_EQ(b1.bytes, bcastMsg);
+    EXPECT_EQ(b2.peer.sin_port, htons(9003));
+    EXPECT_EQ(b2.bytes, bcastMsg);
+}
+
+TEST(HandlerHttp3, SpliceTunnelApis)
+{
+    HandlerHttp3 handler;
+    EXPECT_FALSE(handler.isSpliceTunnelActive());
+    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
+
+    handler.enableSpliceTunnel(200);
+    EXPECT_TRUE(handler.isSpliceTunnelActive());
+    EXPECT_EQ(handler.spliceTarget(), 200);
+
+    handler.disableSpliceTunnel();
+    EXPECT_FALSE(handler.isSpliceTunnelActive());
+    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
 }

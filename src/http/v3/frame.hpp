@@ -173,7 +173,7 @@ namespace mynet
              * @param in 输入数据缓冲区
              * @return 成功且有完整帧返回 Frame；数据不足返回 nullopt；解析超限或破损返回错误码
              */
-            [[nodiscard]] inline std::expected<std::optional<Frame>, FRAME_DECODE_ERROR> next(Buffer &in) const
+            [[nodiscard]] inline std::expected<std::optional<Frame>, FRAME_DECODE_ERROR> next(RequestBuffer &in) const
             {
                 const size_t available = in.readableBytes();
                 if (available == 0) [[unlikely]]

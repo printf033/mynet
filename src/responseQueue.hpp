@@ -13,7 +13,7 @@ namespace mynet
 {
 
     /**
-     * @brief 定容零异常 FIFO 环形队列
+     * @brief 定容零异常 FIFO 响应队列
      *
      * 面向响应/待发数据这类有界流：init() 一次性分配 capacity 个槽位（每个槽
      * 一个空 std::string），此后 push/pop 全程零堆分配、零异常。满队时 push
@@ -25,18 +25,18 @@ namespace mynet
      * 异常策略：全部操作 noexcept；唯一可失败路径是 init() 的槽位分配，
      * 以 ERR::POOL_ALLOC_FAILED 交付（与对象池同一类失败：一次性预分配失败）。
      */
-    class RingQueue
+    class ResponseQueue
     {
     public:
-        RingQueue() noexcept = default;
+        ResponseQueue() noexcept = default;
 
-        ~RingQueue() noexcept { destroy(); }
+        ~ResponseQueue() noexcept { destroy(); }
 
-        RingQueue(const RingQueue &) = delete("a ring queue owns one slot array; a copy would alias the strings");
-        RingQueue &
-        operator=(const RingQueue &) = delete("a ring queue owns one slot array; a copy would alias the strings");
+        ResponseQueue(const ResponseQueue &) = delete("a response queue owns one slot array; a copy would alias the strings");
+        ResponseQueue &
+        operator=(const ResponseQueue &) = delete("a response queue owns one slot array; a copy would alias the strings");
 
-        RingQueue(RingQueue &&other) noexcept
+        ResponseQueue(ResponseQueue &&other) noexcept
             : slots_(std::exchange(other.slots_, nullptr)),
               capacity_(std::exchange(other.capacity_, 0)),
               head_(std::exchange(other.head_, 0)),
@@ -44,7 +44,7 @@ namespace mynet
         {
         }
 
-        RingQueue &operator=(RingQueue &&other) noexcept
+        ResponseQueue &operator=(ResponseQueue &&other) noexcept
         {
             if (this != &other)
             {
@@ -175,9 +175,9 @@ namespace mynet
         }
 
         /**
-         * @brief 清空全部元素（保留槽位与各字符串容量，复位游标）
+         * @brief 重置全部元素（保留槽位与各字符串容量，复位游标）
          */
-        inline void clear() noexcept
+        inline void reset() noexcept
         {
             for (size_t i = 0; i < size_; ++i)
             {

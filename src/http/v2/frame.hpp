@@ -1,7 +1,7 @@
 #pragma once
 
-#include "buffer.hpp"
 #include "error.hpp"
+#include "requestBuffer.hpp"
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -129,7 +129,7 @@ namespace mynet
          * @return std::expected<std::optional<Frame>, FRAME_ERROR>
          *         nullopt 表示数据尚不足一帧；有值表示解析出的完整帧；unexpected 表示协议契约破损错误。
          */
-        [[nodiscard]] inline std::expected<std::optional<Frame>, FRAME_ERROR> next(Buffer &in) const
+        [[nodiscard]] inline std::expected<std::optional<Frame>, FRAME_ERROR> next(RequestBuffer &in) const
         {
             const size_t available = in.readableBytes();
             if (available < frame::kHeaderBytes) [[unlikely]]

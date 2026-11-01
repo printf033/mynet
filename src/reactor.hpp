@@ -12,6 +12,7 @@
 #include "log_config.hpp"
 #include "loop.hpp"
 #include "objectPool.hpp"
+#include "tls.hpp"
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -121,7 +122,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
                                       size_t connectionPoolSize = 1 << 10, int maxEvents = 1 << 10,
-                                      int idleTimeoutSecs = 0)
+                                      int idleTimeoutSecs = 0, const TlsOptions &tlsOptions = {})
             requires SslEvent<Event> && kStreaming
         {
             if (auto err = listener_.listenTcp(ip, port, backlog); !err) [[unlikely]]
@@ -135,9 +136,13 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
-            // 现代 TLS 安全基线：强制启用最低 TLS 1.2 并禁用不安全压缩与客户端弱密码套件偏好
-            SSL_CTX_set_min_proto_version(protocol_.ctx, TLS1_2_VERSION);
-            SSL_CTX_set_options(protocol_.ctx, SSL_OP_CIPHER_SERVER_PREFERENCE | SSL_OP_NO_COMPRESSION);
+            tlsOptions_ = tlsOptions;
+            if (auto err = detail::configureTlsContext(protocol_.ctx, tlsOptions_, true); !err) [[unlikely]]
+            {
+                LOG_ERROR("Reactor::runSsl: invalid TLS options: {}", sslText());
+                reset();
+                return err;
+            }
             if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
             {
                 LOG_ERROR("Reactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, sslText());
@@ -317,6 +322,7 @@ namespace mynet
             listener_.reset();
             datagram_.reset();
             idleTimeout_ = std::chrono::seconds(0);
+            tlsOptions_ = {};
         }
 
     private:
@@ -632,6 +638,7 @@ namespace mynet
         std::unordered_map<int, Conn *> index_{};
         std::vector<Conn *> sweepScratch_{};
         typename DatagramSlot<Handler>::Type datagram_{};
+        TlsOptions tlsOptions_{};
         std::chrono::seconds idleTimeout_{0};
         uint64_t idleTimerId_ = 0;
     };

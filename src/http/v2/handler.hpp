@@ -10,7 +10,7 @@
  */
 
 #include "../../connection.hpp"
-#include "buffer.hpp"
+#include "requestBuffer.hpp"
 #include "frame.hpp"
 #include "log_config.hpp"
 #include "objectPool.hpp"
@@ -153,6 +153,113 @@ namespace mynet
             settingsSent_ = false;
             goawayReceived_ = false;
             outScratch_.clear();
+            fd_ = -1;
+        }
+
+        void onConnect(int fd) noexcept override
+        {
+            fd_ = fd;
+        }
+
+        [[nodiscard]] inline int fd() const noexcept { return fd_; }
+
+        /**
+         * @brief 适配 Connection::echo 契约：遍历当前活跃流表，驱动每条流上的处理器执行 echo() 并泵送响应
+         */
+        inline void echo() noexcept
+        {
+            if (streams_.ready())
+            {
+                for (size_t i = 0; i < streams_.capacity(); ++i)
+                {
+                    const uint32_t id = streams_.keyAt(i);
+                    if (id != 0)
+                    {
+                        StreamSlot *slot = streams_.find(id);
+                        if (slot != nullptr && slot->handler != nullptr)
+                        {
+                            slot->handler->echo();
+                            pumpStream(id, *slot);
+                        }
+                    }
+                }
+            }
+        }
+
+        /**
+         * @brief 向指定流发送 DATA 数据（复用流处理器的响应队列与连接层写通道）
+         *
+         * @param streamId 目标流 ID
+         * @param data 数据载荷
+         * @param endStream 是否在数据发完后关闭流的输出端
+         * @return 是否成功推入流响应队列
+         */
+        inline bool sendData(uint32_t streamId, std::string_view data, bool endStream = false)
+        {
+            StreamSlot *slot = streams_.find(streamId);
+            if (slot == nullptr || slot->handler == nullptr) [[unlikely]]
+            {
+                return false;
+            }
+            if (!slot->handler->pushResponse(data)) [[unlikely]]
+            {
+                return false;
+            }
+            if (endStream)
+            {
+                slot->remoteEnded = true;
+            }
+            pumpStream(streamId, *slot);
+            return true;
+        }
+
+        /**
+         * @brief 向指定流发送 HEADERS 帧（直接复用 Connection 的响应队列与帧通道）
+         *
+         * @param streamId 目标流 ID
+         * @param headerBlock 编码后的首部块载荷
+         * @param endStream 是否同时终结当前流
+         * @return 是否成功构造并推入帧
+         */
+        inline bool sendHeaders(uint32_t streamId, std::string_view headerBlock, bool endStream = false)
+        {
+            if (stream(streamId) == nullptr) [[unlikely]]
+            {
+                return false;
+            }
+            Frame frame;
+            frame.streamId = streamId;
+            frame.type = FRAME_TYPE::HEADERS;
+            frame.flags = FrameFlags::kEndHeaders;
+            if (endStream)
+            {
+                frame.flags |= FrameFlags::kEndStream;
+            }
+            frame.payload.assign(headerBlock);
+            appendFrame(outScratch_, frame);
+            flushOut();
+            return true;
+        }
+
+        /**
+         * @brief 向指定流发送完整的 HTTP/2 响应（首部与载荷，复用连接层设施）
+         *
+         * @param streamId 目标流 ID
+         * @param headerBlock 编码后的首部块载荷
+         * @param body 数据体
+         * @return 是否成功发送
+         */
+        inline bool sendResponse(uint32_t streamId, std::string_view headerBlock, std::string_view body)
+        {
+            if (!sendHeaders(streamId, headerBlock, body.empty()))
+            {
+                return false;
+            }
+            if (!body.empty())
+            {
+                return sendData(streamId, body, true);
+            }
+            return true;
         }
 
         // ---- 协议前端可重写的钩子函数 ----
@@ -441,7 +548,14 @@ namespace mynet
                 closeStream(frame.streamId);
                 return;
             }
-            slot->handler->process();
+            if constexpr (requires { slot->handler->process(); })
+            {
+                slot->handler->process();
+            }
+            else
+            {
+                slot->handler->echo();
+            }
             collectResponses(frame.streamId, *slot);
 
             if (frame.hasFlag(FrameFlags::kEndStream))
@@ -1058,6 +1172,7 @@ namespace mynet
         static constexpr size_t kMaxConsecutiveWindowUpdates = 100;
         static constexpr size_t kMaxConsecutivePriorityFrames = 64;
 
+        int fd_ = -1;
         ObjectPool<StreamHandler> streamPool_{};
         mux::StreamTable<StreamSlot> streams_{};
         FrameDecoder decoder_{};

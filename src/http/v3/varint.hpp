@@ -5,8 +5,8 @@
  * @brief RFC 9000 Section 16 QUIC / HTTP/3 变长整数 (Variable-Length Integer) 编解码器。
  */
 
-#include "buffer.hpp"
 #include "error.hpp"
+#include "requestBuffer.hpp"
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -168,7 +168,7 @@ namespace mynet
          * @param in 输入数据缓冲区
          * @return 成功且完整交付数值；数据不足时交付 nullopt；协议破损交付错误状态码
          */
-        [[nodiscard]] inline std::expected<std::optional<uint64_t>, VARINT_ERROR> decodeVarint(Buffer &in) noexcept
+        [[nodiscard]] inline std::expected<std::optional<uint64_t>, VARINT_ERROR> decodeVarint(RequestBuffer &in) noexcept
         {
             const size_t available = in.readableBytes();
             if (available == 0) [[unlikely]]

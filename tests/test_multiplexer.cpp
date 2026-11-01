@@ -80,7 +80,7 @@ namespace
             while (hasResponse())
                 bytes += takeResponse();
             std::vector<Frame> frames;
-            Buffer in;
+            RequestBuffer in;
             if (!bytes.empty())
             {
                 [[maybe_unused]] auto _ = in.append(bytes);
@@ -149,7 +149,7 @@ namespace
             while (hasResponse())
                 bytes += takeResponse();
             std::vector<Frame> frames;
-            Buffer in;
+            RequestBuffer in;
             if (!bytes.empty())
             {
                 [[maybe_unused]] auto _ = in.append(bytes);
@@ -1055,7 +1055,7 @@ public:
         while (hasResponse())
             bytes += takeResponse();
         std::vector<Frame> frames;
-        Buffer in;
+        RequestBuffer in;
         if (!bytes.empty())
         {
             [[maybe_unused]] auto _ = in.append(bytes);
@@ -1174,4 +1174,101 @@ TEST(HandlerHttp2, DrainingOutboundRestoresPausedStreamWindow)
     EXPECT_EQ(increment, 40u * 1024u);
     ASSERT_NE(mux.stream(1), nullptr);
     EXPECT_EQ(mux.stream(1)->recvWindow, mux::kInitialWindowSize);
+}
+
+TEST(HandlerHttp2, LifecycleAndFd)
+{
+    HandlerHttp2 mux;
+    EXPECT_EQ(mux.fd(), -1);
+
+    mux.onConnect(55);
+    EXPECT_EQ(mux.fd(), 55);
+
+    mux.reset();
+    EXPECT_EQ(mux.fd(), -1);
+}
+
+TEST(HandlerHttp2, SendHeadersDataAndResponse)
+{
+    TwoPartMux mux;
+    mux.warmUp();
+    // 建立流 1
+    mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    mux.takeFrames(); // 清空初始化响应
+
+    // 1. sendHeaders 发送首部块
+    EXPECT_TRUE(mux.sendHeaders(1, "custom-headers", false));
+    auto frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::HEADERS);
+    EXPECT_EQ(frames[0].streamId, 1u);
+    EXPECT_EQ(frames[0].payload, "custom-headers");
+
+    // 2. sendData 发送数据
+    EXPECT_TRUE(mux.sendData(1, "custom-data", false));
+    frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::DATA);
+    EXPECT_EQ(frames[0].streamId, 1u);
+    EXPECT_EQ(frames[0].payload, "custom-data");
+
+    // 3. sendResponse 完整发送首部与数据（流终结模式下由 pumpStream 产生 HEADERS、DATA 与 END_STREAM 帧）
+    EXPECT_TRUE(mux.sendResponse(1, "headers2", "body2"));
+    frames = mux.takeFrames();
+    ASSERT_EQ(frames.size(), 3u);
+    EXPECT_EQ(frames[0].type, FRAME_TYPE::HEADERS);
+    EXPECT_EQ(frames[0].payload, "headers2");
+    EXPECT_EQ(frames[1].type, FRAME_TYPE::DATA);
+    EXPECT_EQ(frames[1].payload, "body2");
+    EXPECT_EQ(frames[2].type, FRAME_TYPE::DATA);
+    EXPECT_TRUE(frames[2].hasFlag(FrameFlags::kEndStream));
+
+    // 4. 对不存在的流发送失败
+    EXPECT_FALSE(mux.sendHeaders(99, "h", false));
+    EXPECT_FALSE(mux.sendData(99, "d", false));
+}
+
+TEST(HandlerHttp2, EchoMultiStream)
+{
+    class TestHttp2EchoMux : public HandlerHttp2<HandlerConnection>
+    {
+    public:
+        using HandlerHttp2::stream;
+    };
+
+    TestHttp2EchoMux mux;
+    // 建立流 1
+    std::string bytes;
+    appendFrame(bytes, makeFrame(FRAME_TYPE::SETTINGS, 0, 0, {}));
+    appendFrame(bytes, makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, "h"));
+    [[maybe_unused]] auto _ = mux.appendRequest(bytes.data(), bytes.size());
+    mux.process();
+    while (mux.hasResponse())
+    {
+        [[maybe_unused]] auto dummy = mux.takeResponse();
+    }
+
+    auto *slot = mux.stream(1);
+    ASSERT_NE(slot, nullptr);
+    ASSERT_NE(slot->handler, nullptr);
+
+    // 向流 1 缓冲区灌入待回显数据
+    [[maybe_unused]] auto _2 = slot->handler->appendRequest("echo-test-bytes", 15);
+
+    // 触发 HTTP/2 级多流 echo
+    mux.echo();
+    ASSERT_TRUE(mux.hasResponse());
+    std::string resp = mux.takeResponse();
+    EXPECT_FALSE(resp.empty());
+
+    // 解析回复中的 DATA 帧
+    RequestBuffer in;
+    [[maybe_unused]] auto _3 = in.append(resp);
+    FrameDecoder decoder;
+    auto parsed = decoder.next(in);
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(parsed->has_value());
+    EXPECT_EQ((*parsed)->type, FRAME_TYPE::DATA);
+    EXPECT_EQ((*parsed)->streamId, 1u);
+    EXPECT_EQ((*parsed)->payload, "echo-test-bytes");
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "constraints.hpp"
+#include "configHolder.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
 #include <arpa/inet.h>
@@ -19,11 +20,11 @@ namespace mynet
 {
 
     /**
-     * @brief UDP 数据报回复上下文元信息封装
+     * @brief UDP 数据报报文上下文元信息封装（涵盖回复、转发、广播与主动发包）
      *
-     * 关联对端地址元数据与待发送二进制报文载荷。
+     * 关联目标对端地址元数据与待发送二进制报文载荷。
      */
-    struct DatagramReply
+    struct DatagramPacket
     {
         sockaddr_in peer{};
         std::string bytes{};
@@ -54,7 +55,7 @@ namespace mynet
      * @brief UDP 数据报无连接协议处理器基类
      *
      * 本类是报文传输层次的根：不继承任何处理器基类，独立提供无连接套接字上
-     * 对端报文交织问题所需的回复队列管理与溢出丢包计数防护，以及与传输无关的
+     * 对端报文交织问题所需的外发队列管理与溢出丢包计数防护，以及与传输无关的
      * 生命周期钩子（reset / onMessageComplete / onParseError）。派生类实现
      * onDatagram() 后再叠加自身协议语义。
      *
@@ -66,32 +67,67 @@ namespace mynet
     class HandlerDatagram
     {
     public:
-        HandlerDatagram() noexcept = default;
+        HandlerDatagram() noexcept
+            : HandlerDatagram(getDatagramConfig())
+        {
+        }
+
+        explicit HandlerDatagram(const DatagramConfig &config) noexcept
+            : maxDatagramBytes_(config.maxDatagramBytes),
+              maxPendingOutgoing_(config.maxPendingOutgoing)
+        {
+        }
+
         virtual ~HandlerDatagram() noexcept = default;
 
-        HandlerDatagram(const HandlerDatagram &) = delete("a datagram handler owns the reply queue for one socket");
+        HandlerDatagram(const HandlerDatagram &) = delete("a datagram handler owns the outgoing queue for one socket");
         HandlerDatagram &
-        operator=(const HandlerDatagram &) = delete("a datagram handler owns the reply queue for one socket");
-        HandlerDatagram(HandlerDatagram &&) = delete("a datagram handler owns the reply queue for one socket");
+        operator=(const HandlerDatagram &) = delete("a datagram handler owns the outgoing queue for one socket");
+        HandlerDatagram(HandlerDatagram &&) = delete("a datagram handler owns the outgoing queue for one socket");
         HandlerDatagram &
-        operator=(HandlerDatagram &&) = delete("a datagram handler owns the reply queue for one socket");
+        operator=(HandlerDatagram &&) = delete("a datagram handler owns the outgoing queue for one socket");
 
         /**
-         * @brief 单个完整数据报到达回调
+         * @brief 协议层回显辅助方法：标准 UDP 数据报回显
+         *
+         * 将收到的对端数据报原样推入外发队列待发送。由派生回显处理器（如 UdpEchoHandler）自主调用。
          *
          * @param peer 发送方网络地址
          * @param data 报文载荷首地址
          * @param n 报文有效字节长度
          */
-        virtual void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept = 0;
+        inline void echo(const sockaddr_in &peer, const char *data, size_t n) noexcept
+        {
+            if (data != nullptr && n > 0) [[likely]]
+            {
+                sendTo(peer, data, n);
+            }
+        }
+
+        /**
+         * @brief 单个完整数据报到达业务入口钩子（派生类实现具体的协议解析、转发或回显）
+         *
+         * 基类提供空操作，不再强行写死默认回显；回显等具体业务逻辑完全由派生类决定。
+         *
+         * @param peer 发送方网络地址
+         * @param data 报文载荷首地址
+         * @param n 报文有效字节长度
+         */
+        virtual void onDatagram([[maybe_unused]] const sockaddr_in &peer,
+                                [[maybe_unused]] const char *data,
+                                [[maybe_unused]] size_t n) noexcept
+        {
+        }
 
         /**
          * @brief 重置处理器状态与队列计数
          */
         virtual void reset() noexcept
         {
-            replies_.clear();
-            droppedReplies_ = 0;
+            outgoing_.clear();
+            droppedOutgoing_ = 0;
+            maxDatagramBytes_ = getDatagramConfig().maxDatagramBytes;
+            maxPendingOutgoing_ = getDatagramConfig().maxPendingOutgoing;
         }
 
         /**
@@ -106,65 +142,103 @@ namespace mynet
          */
         virtual void onParseError([[maybe_unused]] const char *reason) noexcept {}
 
-        // ---- 回复队列管理 (Reply Side) ----
+        // ---- 报文发送与转发队列管理 (Send / Forward / Broadcast) ----
 
-        inline void pushReply(const sockaddr_in &peer, const char *buf, size_t n)
+        /**
+         * @brief 向指定目标地址发送数据报（涵盖回复、反向代理转发或主动发起）
+         *
+         * @param target 目标对端网络地址
+         * @param buf 报文载荷首地址（非空）
+         * @param n 报文有效字节长度
+         */
+        inline void sendTo(const sockaddr_in &target, const char *buf, size_t n)
         {
             contract_assert(buf != nullptr);
-            if (replies_.size() >= maxPendingReplies_) [[unlikely]]
+            if (outgoing_.size() >= maxPendingOutgoing_) [[unlikely]]
             {
-                ++droppedReplies_;
-                LOG_WARN("HandlerDatagram: reply queue full ({} pending), dropping a {} byte reply for {}",
-                         replies_.size(), n, datagramPeerText(peer));
+                ++droppedOutgoing_;
+                LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
+                         outgoing_.size(), n, datagramPeerText(target));
                 return;
             }
-            replies_.push_back(DatagramReply{peer, (n > 0) ? std::string(buf, n) : std::string()});
+            outgoing_.push_back(DatagramPacket{target, (n > 0) ? std::string(buf, n) : std::string()});
         }
 
-        inline void pushReply(const sockaddr_in &peer, std::string bytes)
+        /**
+         * @brief 向指定目标地址发送数据报（移动语义载荷）
+         */
+        inline void sendTo(const sockaddr_in &target, std::string bytes)
         {
-            if (replies_.size() >= maxPendingReplies_) [[unlikely]]
+            if (outgoing_.size() >= maxPendingOutgoing_) [[unlikely]]
             {
-                ++droppedReplies_;
-                LOG_WARN("HandlerDatagram: reply queue full ({} pending), dropping a {} byte reply for {}",
-                         replies_.size(), bytes.size(), datagramPeerText(peer));
+                ++droppedOutgoing_;
+                LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
+                         outgoing_.size(), bytes.size(), datagramPeerText(target));
                 return;
             }
-            replies_.push_back(DatagramReply{peer, std::move(bytes)});
+            outgoing_.push_back(DatagramPacket{target, std::move(bytes)});
         }
 
-        [[nodiscard]] inline bool hasReply() const noexcept { return !replies_.empty(); }
-        [[nodiscard]] inline size_t replyCount() const noexcept { return replies_.size(); }
-        [[nodiscard]] inline const DatagramReply &peekReply() const noexcept { return replies_.front(); }
-
-        [[nodiscard]] inline DatagramReply takeReply()
+        /**
+         * @brief 将当前收到的报文零修改转发至上游目标地址（UDP 代理 / 网关转发语义）
+         *
+         * @param upstream 上游服务器对端地址
+         * @param data 报文载荷首地址
+         * @param n 报文有效字节长度
+         */
+        inline void forwardTo(const sockaddr_in &upstream, const char *data, size_t n)
         {
-            if (replies_.empty()) [[unlikely]]
+            sendTo(upstream, data, n);
+        }
+
+        /**
+         * @brief 将同一份报文广播/多播至多个目标地址
+         *
+         * @param targets 目标对端地址列表
+         * @param data 报文载荷首地址
+         * @param n 报文有效字节长度
+         */
+        inline void broadcastTo(const std::vector<sockaddr_in> &targets, const char *data, size_t n)
+        {
+            if (data == nullptr || n == 0) return;
+            for (const auto &target : targets)
+            {
+                sendTo(target, data, n);
+            }
+        }
+
+        [[nodiscard]] inline bool hasOutgoing() const noexcept { return !outgoing_.empty(); }
+        [[nodiscard]] inline size_t outgoingCount() const noexcept { return outgoing_.size(); }
+        [[nodiscard]] inline const DatagramPacket &peekOutgoing() const noexcept { return outgoing_.front(); }
+
+        [[nodiscard]] inline DatagramPacket takeOutgoing()
+        {
+            if (outgoing_.empty()) [[unlikely]]
             {
                 return {};
             }
-            DatagramReply out = std::move(replies_.front());
-            replies_.pop_front();
+            DatagramPacket out = std::move(outgoing_.front());
+            outgoing_.pop_front();
             return out;
         }
 
-        [[nodiscard]] inline size_t droppedReplies() const noexcept { return droppedReplies_; }
+        [[nodiscard]] inline size_t droppedOutgoing() const noexcept { return droppedOutgoing_; }
 
         inline void setMaxDatagramBytes(size_t n) noexcept { maxDatagramBytes_ = n; }
         [[nodiscard]] inline size_t maxDatagramBytes() const noexcept { return maxDatagramBytes_; }
 
-        inline void setMaxPendingReplies(size_t n) noexcept
+        inline void setMaxPendingOutgoing(size_t n) noexcept
         {
             contract_assert(n > 0);
-            maxPendingReplies_ = n;
+            maxPendingOutgoing_ = n;
         }
-        [[nodiscard]] inline size_t maxPendingReplies() const noexcept { return maxPendingReplies_; }
+        [[nodiscard]] inline size_t maxPendingOutgoing() const noexcept { return maxPendingOutgoing_; }
 
     protected:
-        size_t maxDatagramBytes_ = (64 << 10) - 1;
-        size_t maxPendingReplies_ = 1 << 10;
-        size_t droppedReplies_ = 0;
-        std::deque<DatagramReply> replies_{};
+        size_t maxDatagramBytes_ = getDatagramConfig().maxDatagramBytes;
+        size_t maxPendingOutgoing_ = getDatagramConfig().maxPendingOutgoing;
+        size_t droppedOutgoing_ = 0;
+        std::deque<DatagramPacket> outgoing_{};
     };
 
     /**
@@ -181,20 +255,20 @@ namespace mynet
      * 1. 派生约束：必须继承 HandlerDatagram，回复队列必须来自真实基类子对象；
      * 2. 方法约束：逐项校验引擎通过处理器类型 H 本身调用的接口。
      *
-     * 为何不把 hasReply / takeReply 也纳入约束：回复队列的存取由 Datagram<H>
+     * 为何不把 hasOutgoing / takeOutgoing 也纳入约束：外发队列的存取由 Datagram<H>
      * 经基类子对象发起（派生约束已保证该子对象存在），派生类既无法移除它们、
      * 也无法改变实际被调用的版本。把它们写进约束只会误拒一类合法写法（派生类
      * 用不带 noexcept 的同名函数隐藏基类版本，引擎行为完全不变），属于过度约束，
      * 因此不列入。
      *
-     * onDatagram 是纯虚钩子，缺了就不可能实例化；列在这里是为了让违反者
+     * onDatagram 是报文到达业务入口，由派生类实现协议语义；列在这里是为了让违反者
      * 得到指向概念的清晰诊断，而不是一层层模板实例化错误。
      */
     template <typename D>
     concept MandatoryMethodDatagram =
         DerivedFromHandlerDatagram<D> && Resettable<D> &&
         requires(D &d, const sockaddr_in &peer, const char *buf, size_t n) {
-            // 单条报文到达的业务入口（纯虚，派生类必须实现）
+            // 单条报文到达的业务入口（派生类实现具体的协议处理或回显）
             { d.onDatagram(peer, buf, n) } noexcept;
             // 接收上界由引擎经处理器类型直接读取，因此必须可调用
             { d.maxDatagramBytes() } noexcept -> std::same_as<size_t>;
@@ -204,11 +278,11 @@ namespace mynet
      * @brief 数据报传输层会话（Connection<H> 在 UDP 路径上的对等物）
      *
      * 分层与流式一侧保持对称：
-     * - HandlerDatagram 是协议侧根类，持有回复队列与报文上界，只关心「回什么」；
+     * - HandlerDatagram 是协议侧根类，持有外发队列与报文上界，只关心「发什么」；
      * - 本类是该处理器在一条 UDP 套接字上的传输侧载体，持有接收窗口与收发计数，
      *   并承担超界截断、发送失败统计这些与协议语义无关的工作；
      * - 引擎因此退化为事件分发：可读就 recvfrom 进 recvBuffer()，交给 receiveFrom()
-     *   派发，再用 flushTo() 把回复排空。
+     *   派发，再用 flushTo() 把外发报文排空。
      *
      * 与 Connection<H> 的差异源于传输语义本身：UDP 无连接，所以本类不持有 fd
      * （fd 归 EventBase，生命周期比会话更长），也不持有对端地址（每条报文自带），
@@ -284,6 +358,8 @@ namespace mynet
         {
             handler_ = nullptr;
             recvWindow_.clear();
+            hasPendingPacket_ = false;
+            pendingPacket_ = {};
             receivedDatagrams_ = 0;
             receivedBytes_ = 0;
             truncatedDatagrams_ = 0;
@@ -357,6 +433,15 @@ namespace mynet
          * 刻意不加 [[nodiscard]]：这是以副作用为主的操作，返回值只是附带观测，
          * 而引擎的流式路径也会实例化到这个调用点（经空壳 NoDatagram）。
          */
+        /**
+         * @brief 排空处理器积压的待发报文队列（包含 EAGAIN/EWOULDBLOCK 时未发出的暂存报文）
+         *
+         * @param fd 已绑定的 UDP 套接字描述符
+         * @return 本次成功发出的报文条数（累计值见 sentDatagrams()）
+         *
+         * 刻意不加 [[nodiscard]]：这是以副作用为主的操作，返回值只是附带观测，
+         * 而引擎的流式路径也会实例化到这个调用点（经空壳 NoDatagram）。
+         */
         inline size_t flushTo(int fd) noexcept
         {
             if (handler_ == nullptr) [[unlikely]]
@@ -364,13 +449,14 @@ namespace mynet
                 return 0;
             }
             size_t sent = 0;
-            while (handler_->hasReply())
+
+            // 优先重试此前遭遇 EAGAIN/EWOULDBLOCK 暂存的报文
+            if (hasPendingPacket_)
             {
-                DatagramReply reply = handler_->takeReply();
                 for (;;)
                 {
-                    ssize_t n = ::sendto(fd, reply.bytes.data(), reply.bytes.size(), 0,
-                                         reinterpret_cast<const sockaddr *>(&reply.peer),
+                    ssize_t n = ::sendto(fd, pendingPacket_.bytes.data(), pendingPacket_.bytes.size(), 0,
+                                         reinterpret_cast<const sockaddr *>(&pendingPacket_.peer),
                                          static_cast<socklen_t>(sizeof(sockaddr_in)));
                     if (n < 0) [[unlikely]]
                     {
@@ -378,8 +464,49 @@ namespace mynet
                         {
                             continue;
                         }
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            // 内核发送缓冲区依然已满，保留暂存报文，等待下一次写就绪事件
+                            return sent;
+                        }
                         ++sendFailures_;
-                        LOG_WARN("Datagram: sendto to {} failed: {}", datagramPeerText(reply.peer), errnoText(errno));
+                        LOG_WARN("Datagram: retry pending sendto to {} failed: {}",
+                                 datagramPeerText(pendingPacket_.peer), errnoText(errno));
+                        hasPendingPacket_ = false;
+                        pendingPacket_ = {};
+                        break;
+                    }
+                    ++sentDatagrams_;
+                    ++sent;
+                    hasPendingPacket_ = false;
+                    pendingPacket_ = {};
+                    break;
+                }
+            }
+
+            while (handler_->hasOutgoing())
+            {
+                DatagramPacket packet = handler_->takeOutgoing();
+                for (;;)
+                {
+                    ssize_t n = ::sendto(fd, packet.bytes.data(), packet.bytes.size(), 0,
+                                         reinterpret_cast<const sockaddr *>(&packet.peer),
+                                         static_cast<socklen_t>(sizeof(sockaddr_in)));
+                    if (n < 0) [[unlikely]]
+                    {
+                        if (errno == EINTR)
+                        {
+                            continue;
+                        }
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            // 内核发送缓冲区满：暂存该报文，防止静默丢包，等待下次写事件触发 flushTo
+                            pendingPacket_ = std::move(packet);
+                            hasPendingPacket_ = true;
+                            return sent;
+                        }
+                        ++sendFailures_;
+                        LOG_WARN("Datagram: sendto to {} failed: {}", datagramPeerText(packet.peer), errnoText(errno));
                         break;
                     }
                     ++sentDatagrams_;
@@ -388,6 +515,39 @@ namespace mynet
                 }
             }
             return sent;
+        }
+
+        /**
+         * @brief 绕过队列直接向目标地址发送单条报文（同步非阻塞）
+         *
+         * @param fd UDP 套接字描述符
+         * @param peer 目标地址
+         * @param data 报文载荷首地址
+         * @param n 报文有效字节数
+         * @return ssize_t 实际写入字节数，或负数表示系统调用失败
+         */
+        inline ssize_t sendDirect(int fd, const sockaddr_in &peer, const char *data, size_t n) noexcept
+        {
+            if (data == nullptr && n > 0) return -1;
+            for (;;)
+            {
+                ssize_t ret = ::sendto(fd, data, n, 0,
+                                      reinterpret_cast<const sockaddr *>(&peer),
+                                      static_cast<socklen_t>(sizeof(sockaddr_in)));
+                if (ret < 0)
+                {
+                    if (errno == EINTR) continue;
+                    ++sendFailures_;
+                    return -1;
+                }
+                ++sentDatagrams_;
+                return ret;
+            }
+        }
+
+        [[nodiscard]] inline bool hasPending() const noexcept
+        {
+            return hasPendingPacket_ || (handler_ != nullptr && handler_->hasOutgoing());
         }
 
         /**
@@ -408,6 +568,8 @@ namespace mynet
     private:
         Handler *handler_ = nullptr;
         std::vector<char> recvWindow_{};
+        DatagramPacket pendingPacket_{};
+        bool hasPendingPacket_ = false;
         uint64_t receivedDatagrams_ = 0;
         uint64_t receivedBytes_ = 0;
         uint64_t truncatedDatagrams_ = 0;
@@ -432,6 +594,8 @@ namespace mynet
         [[nodiscard]] size_t recvCapacity() const noexcept { return 0; }
         void receiveFrom(const sockaddr_in &, const char *, size_t) noexcept {}
         size_t flushTo(int) noexcept { return 0; }
+        [[nodiscard]] bool hasPending() const noexcept { return false; }
+        ssize_t sendDirect(int, const sockaddr_in &, const char *, size_t) noexcept { return 0; }
     };
 
     /**

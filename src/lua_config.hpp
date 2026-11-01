@@ -202,6 +202,77 @@ namespace mynet
             return valid;
         }
 
+        inline bool loadConnectionSection(lua_State *L, int idx, ConnectionConfig &cfg)
+        {
+            bool valid = true;
+            lua_Integer num = 0;
+
+            if (readNumberField(L, idx, "responseCapacity", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 65536);
+                cfg.responseCapacity = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "readChunkSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 256, 16 << 20);
+                cfg.readChunkSize = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxRequestBytes", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.maxRequestBytes = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "writeHighWaterMark", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.writeHighWaterMark = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "writeHardCapFactor", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 64);
+                cfg.writeHardCapFactor = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "spliceChunkSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 16 << 20);
+                cfg.spliceChunkSize = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxWriteIov", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 64);
+                cfg.maxWriteIov = static_cast<size_t>(v);
+            }
+
+            return valid;
+        }
+
+        inline bool loadDatagramSection(lua_State *L, int idx, DatagramConfig &cfg)
+        {
+            bool valid = true;
+            lua_Integer num = 0;
+
+            if (readNumberField(L, idx, "maxDatagramBytes", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 512, 65535);
+                cfg.maxDatagramBytes = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxPendingOutgoing", num, valid) ||
+                readNumberField(L, idx, "maxPendingReplies", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 16, 65536);
+                cfg.maxPendingOutgoing = static_cast<size_t>(v);
+            }
+
+            return valid;
+        }
+
         inline bool loadProactorSection(lua_State *L, int idx, ProactorConfig &cfg)
         {
             bool valid = true;
@@ -356,6 +427,44 @@ namespace mynet
         else if (lua_type(L, -1) != LUA_TNIL)
         {
             detail::printError("global 'server' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        newCfg.connection.writeHighWaterMark = newCfg.server.writeHighWaterMark;
+        newCfg.connection.maxRequestBytes = newCfg.server.maxRequestBytes;
+
+        lua_getglobal(L, "connection");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadConnectionSection(L, idx, newCfg.connection))
+            {
+                valid = false;
+            }
+            // 反向同步回 server，保持两处一致性
+            newCfg.server.writeHighWaterMark = newCfg.connection.writeHighWaterMark;
+            newCfg.server.maxRequestBytes = newCfg.connection.maxRequestBytes;
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'connection' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "datagram");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadDatagramSection(L, idx, newCfg.datagram))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'datagram' must be a table");
             valid = false;
         }
         lua_pop(L, 1);

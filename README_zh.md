@@ -49,10 +49,10 @@
   - **Proactor**: 纯异步完成态 `io_uring` 驱动，支持多次并发接收（`io_uring_prep_recv_multishot`）、多次连接接收（`io_uring_prep_accept`）、内核注册缓冲环（`io_uring_setup_buf_ring`）以及 Poll 驱动的无损 TLS。
 - **热路径零动态堆内存分配**:
   - 地址稳定的固定容量对象池 `ObjectPool<T>`，内部使用连续槽位数组 `std::unique_ptr<Slot[]>` 与索引栈，彻底避免内存扩容重分配造成的指针失效与抖动。
-  - 滑动窗口自收缩字节缓冲区 `Buffer`，针对长连接读取优化，有效平摊与消除内存重新分配。
+  - 滑动窗口自收缩字节缓冲区 `RequestBuffer`，针对长连接读取优化，有效平摊与消除内存重新分配。
 - **统一连接抽象与极端零拷贝传输**:
   - 声明 `kEnableSplice = true` 的处理器在明文 TCP 下自动启用 Linux `splice(2)` 内核零拷贝环回通道（`socket -> pipe -> socket`），达成 0 用户态内存拷贝与 0 内核内存拷贝（开启方式见 `examples/common/handlers.hpp` 的 `SpliceEchoHandler`）。
-  - 用户态直写摄入架构（Direct Writable Ingress）：传输层通过 `prepareRequestWritable` 直接向 `Buffer` 底层内存发起 `recv()`，彻底消除临时栈缓冲与中间 `memcpy`。
+  - 用户态直写摄入架构（Direct Writable Ingress）：传输层通过 `prepareRequestWritable` 直接向 `RequestBuffer` 底层内存发起 `recv()`，彻底消除临时栈缓冲与中间 `memcpy`。
   - 向量化批量发送：明文连接支持通过 `writev(2)` 单次系统调用原子合并聚合冲刷至多 16 个响应切片，大幅降低系统调用开销。
 - **透明统一的安全传输层**:
   - 一等公民级 OpenSSL 3.x 集成，明文 TCP 与加密 TLS 复用同一套数据收发主干逻辑。
@@ -100,7 +100,7 @@ flowchart TD
     subgraph Foundation ["内存基础设施与底层原语 (Foundation)"]
         direction LR
         Pool["ObjectPool<T>"]
-        Buf["Buffer"]
+        Buf["RequestBuffer"]
         Constraints["constraints"]
         Err["Err & IoEnd"]
         Log["mynet::log (mylog -> stderr)"]
@@ -121,7 +121,7 @@ flowchart TD
 | :----------------------- | :--------------------------------------------------------- | :------------------------------------------------------------------------------- |
 | **底层内核调用**   | Linux `epoll`（边缘触发，`EPOLLET`）                   | Linux `io_uring`                                                               |
 | **I/O 事件机制**   | 就绪通知（Readiness Notification）                         | 异步完成通知（Completion Notification）                                          |
-| **内存缓冲管理**   | 用户空间连接私有 `Buffer`                                | 内核空间注册的缓冲环（`io_uring_buf_ring`）                                    |
+| **内存缓冲管理**   | 用户空间连接私有 `RequestBuffer`                         | 内核空间注册的缓冲环（`io_uring_buf_ring`）                                    |
 | **系统调用开销**   | 每次事件循环触发 `epoll_wait` + 非阻塞 `recv`/`send` | 批量收割 CQE 完成事件，`multishot` 实现零系统调用连续接收                      |
 | **TLS 结合方案**   | 直接调用 OpenSSL 非阻塞 `SSL_read`/`SSL_write`         | 通过 `io_uring_prep_poll_add` 监听就绪掩码驱动 OpenSSL，防止密文被内核提早劫持 |
 | **跨线程任务投递** | `eventfd` 唤醒 + 循环所属任务队列（`runInLoop`）       | `std::stop_source` 信号与环队列批量投递                                        |
@@ -131,16 +131,16 @@ flowchart TD
 `Connection<HandlerType>` 统一了套接字描述符、TLS 加密状态、协议处理器与待发送队列：
 
 - **传输对称性**：纯文本 TCP 与 TLS 加密会话复用同一套发送与接收骨干（`doRecv` 与 `doSend`）。TLS 仅作为底层传输属性，对上层协议处理器完全透明。
-- **流水线安全**：发送队列采用定容环形队列 `RingQueue<std::string>`，每个响应完整保存在独立字符串中，入队与出队热路径彻底杜绝动态堆分配，支持 HTTP/1.1 Pipelining 在单次读取产生多个响应时不会互相破坏缓冲区。
+- **流水线安全**：发送队列采用定容响应队列 `ResponseQueue`，每个响应完整保存在独立字符串中，入队与出队热路径彻底杜绝动态堆分配，支持 HTTP/1.1 Pipelining 在单次读取产生多个响应时不会互相破坏缓冲区。
 - **背压控制（Backpressure）**：内置高水位标记监测，当发送积压超出限额时自动触发 `readCredit()` 暂停接收端读取，避免发送队列无序膨胀引发内存溢出。
 - **Proactor 会话生命周期保护**：在 `Proactor` 引擎中，每个连接被封装于 `Session` 中并严格统计内核在途操作（`inFlight`）。只有在会话被标记为终止且所有在途读写全部完成后，会话才会被安全回收到对象池。
 - **处理器分层**：`HandlerConnection`（`connection.hpp`）与 `HandlerDatagram`（`datagram.hpp`）是两个并列的处理器基类，彼此没有共同祖先：前者持有流式会话的请求缓冲、响应队列与读信用背压，后者持有无连接数据报的对端回复队列。协议处理器（`HandlerHttp`、`HandlerHttp2`、`HandlerHttp3`）继承对应基类；需要双传输的处理器（`HandlerHttp3`）同时继承两者，由于两个基类都不是虚基类，成员访问是直接偏移，不存在虚基类间接寻址与共享子对象记账。原公共根类的基础契约（`reset`、`onMessageComplete`、`onParseError`）分别落在两个基类上，并以传输无关的方式表达为 `HandlerConstraint` 概念（`constraints.hpp`）——事件槽位只依赖这一份最小契约（对象池只需要其中的 `Resettable`）。两个引擎契约为各自的传输通道命名，含义就是「该通道真正会调用的必需方法集合」：`MandatoryMethodConnection`（`connection.hpp`）与 `MandatoryMethodDatagram`（`datagram.hpp`）。二者各自紧邻其基类定义，使 `std::derived_from` 始终看到完整类型；同时都要求派生并逐项校验引擎经处理器类型本身调用的签名。纯报文处理器只需派生 `HandlerDatagram`：引擎把非流式处理器映射到无状态的 `NoConnection` 槽位（`ConnectionSlot`），把纯流式处理器映射到 `NoDatagram` 槽位（`DatagramSlot`），两条路径都不会实例化对方的传输设施。
 
 ### 3. 热路径零堆分配内存架构
 
-- **`ObjectPool<Object>`**：预先分配由连续槽位数组 `std::unique_ptr<Slot[]>` 与定容环形索引队列 `RingQueue<size_t>` 构成的池化结构。对象一旦分配，其在内存中的地址终生不变，确保注册在 epoll 凭证或 io_uring 完成事件上下文中的裸指针永不失效，彻底消除频繁创建与销毁连接导致的内存碎片与分配开销。
-- **`Buffer`**：纯自管连续堆内存块（`operator new[](std::nothrow)` 零异常语义），提供真实可写直接窗口（`writableBytes()`、`writableBegin()`、`commitWritten()`、`ensureWritable()`）与零拷贝读视图（`readableView()`）。仅当已消费的死数据前缀超过 4 KiB 且达到占用总量一半以上时，才会在 `retrieve()` 触发就地数据搬移压缩，兼具极致性能与安全内存边界。
-- **`RingQueue<T>`**：定容连续循环环形队列（`src/ringQueue.hpp`），提供 $O(1)$ 零堆分配入队/出队与严格有界内存开销。
+- **`ObjectPool<Object>`**：预先分配由连续槽位数组 `std::unique_ptr<Slot[]>` 与定容索引栈构成的池化结构。对象一旦分配，其在内存中的地址终生不变，确保注册在 epoll 凭证或 io_uring 完成事件上下文中的裸指针永不失效，彻底消除频繁创建与销毁连接导致的内存碎片与分配开销。
+- **`RequestBuffer`**：纯自管连续堆内存块（`operator new[](std::nothrow)` 零异常语义），提供真实可写直接窗口（`writableBytes()`、`writableBegin()`、`commitWritten()`、`ensureWritable()`）与零拷贝读视图（`readableView()`）。仅当已消费的死数据前缀超过 4 KiB 且达到占用总量一半以上时，才会在 `retrieve()` 触发就地数据搬移压缩，兼具极致性能与安全内存边界。
+- **`ResponseQueue`**：定容连续循环响应队列（`src/responseQueue.hpp`），提供 $O(1)$ 零堆分配入队/出队与严格有界内存开销。
 - **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/http/v2/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
 
 ### 4. HTTP/2 帧编解码与流多路复用
@@ -176,6 +176,17 @@ cat payload.bin | ./build/client_tcp 127.0.0.1:8888 > output.bin
 
 内置标准输入高低水位回压调节、平滑半关闭握手（TCP `FIN` 或 TLS `close_notify`）、`SIGPIPE` 信号阻断与还原，支持管道、终端与常规文件重定向。
 
+TLS 接口可传入 `TlsOptions` 配置最低/最高 TLS 版本、TLS 1.2 密码套件、TLS 1.3 密码套件和 ALPN 协议列表；不传时维持 TLS 1.2 最低版本及 OpenSSL 默认套件策略。客户端始终验证服务端证书。该配置用于协议兼容与安全策略，不提供伪造 ClientHello 扩展顺序或仿冒其他实现的 JA4 指纹功能。
+
+```cpp
+TlsOptions tls;
+tls.minVersion = TLS1_2_VERSION;
+tls.maxVersion = TLS1_3_VERSION;
+tls.alpnProtocols = {"h2", "http/1.1"};
+Client<EventSsl<HandlerConnection>> client;
+client.runSsl("127.0.0.1", 443, "example.com", nullptr, 16 << 10, tls);
+```
+
 ---
 
 ## 性能基准测试
@@ -185,9 +196,9 @@ cat payload.bin | ./build/client_tcp 127.0.0.1:8888 > output.bin
 ```text
 基准测试项 (Benchmark)                        单操作耗时 (ns/op)   数据吞吐量 (Throughput)
 --------------------------------------------------------------------------------------
-Buffer::append+retrieveAll (1KiB)                 12.7 ns/op         80,477.0 MB/s
-Buffer::append (16B) to 1KiB + drain               2.5 ns/op                  --
-Buffer::append+retrieve (16B)                      4.0 ns/op          4,041.9 MB/s
+RequestBuffer::append+reset (1KiB)                 12.7 ns/op         80,477.0 MB/s
+RequestBuffer::append (16B) to 1KiB + drain               2.5 ns/op                  --
+RequestBuffer::append+retrieve (16B)                      4.0 ns/op          4,041.9 MB/s
 appendFrame (负载 16B)                             4.5 ns/op          3,555.4 MB/s
 appendFrame (负载 1024B)                          12.3 ns/op         83,077.8 MB/s
 appendFrame (负载 16384B)                        223.4 ns/op         73,328.8 MB/s
@@ -396,8 +407,8 @@ mynet/
 │   ├── lua_config.hpp          # 沙箱化 Lua 配置加载与热重载（reloadConfig）
 │   ├── error.hpp               # 强类型错误码枚举 Err、IoEnd 与 errno/OpenSSL 错误文本
 │   ├── log_config.hpp          # 日志输出配置（mylog 输出至 stderr）
-│   ├── buffer.hpp              # 滑动窗口自收缩低开销字节缓冲区
-│   ├── ringQueue.hpp           # 零分配定容循环环形队列
+│   ├── requestBuffer.hpp       # 滑动窗口自收缩低开销字节缓冲区
+│   ├── responseQueue.hpp       # 零分配定容循环响应队列
 │   ├── objectPool.hpp          # 地址稳定的固定容量对象池
 │   ├── timer.hpp               # 惰性删除的高效二叉最小堆定时器队列
 │   ├── loop.hpp                # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
@@ -449,7 +460,7 @@ mynet/
 │       └── http3.cpp           # proactor_http3 HTTP/3（QUIC/UDP）
 │
 ├── tests/                      # 单元测试工程（Google Test + ASan 内存安全检查）
-│   ├── test_buffer.cpp         # 缓冲区边界与压缩测试
+│   ├── test_request_buffer.cpp # 缓冲区边界与压缩测试
 │   ├── test_config_lua.cpp     # 沙箱化 Lua 配置热重载与边界钳位测试
 │   ├── test_constraints.cpp    # 约束概念与可重置性测试
 │   ├── test_datagram.cpp       # UDP 传输会话的窗口定容、截断与排空测试
@@ -484,8 +495,8 @@ ctest --output-on-failure
 
 ```text
 Test project /home/aaa/code/mynet/build
-    Start  1: test_buffer
- 1/11 Test  #1: test_buffer ......................   Passed    0.01 sec
+    Start  1: test_request_buffer
+ 1/11 Test  #1: test_request_buffer ..............   Passed    0.01 sec
     Start  2: test_constraints
  2/11 Test  #2: test_constraints .................   Passed    0.01 sec
     Start  3: test_datagram

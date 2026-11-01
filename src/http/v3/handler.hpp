@@ -38,6 +38,9 @@ namespace mynet
         class HandlerHttp3 : public HandlerConnection, public HandlerDatagram
         {
         public:
+            using HandlerConnection::echo;
+            using HandlerDatagram::echo;
+
             struct SessionKey
             {
                 uint32_t addr = 0;
@@ -80,7 +83,8 @@ namespace mynet
                 }
             };
 
-            explicit HandlerHttp3(size_t responseCapacity = 64, size_t maxStreams = 128) noexcept
+            explicit HandlerHttp3(size_t responseCapacity = getConnectionConfig().responseCapacity,
+                                  size_t maxStreams = 128) noexcept
                 : HandlerConnection(responseCapacity),
                   maxStreams_(maxStreams),
                   streamTable_(maxStreams)
@@ -105,7 +109,16 @@ namespace mynet
                 nextPacketNumber_ = 1;
                 controlStreamSent_ = false;
                 peerSettings_ = Settings{};
+                fd_ = -1;
             }
+
+            void onConnect(int fd) noexcept override
+            {
+                HandlerConnection::onConnect(fd);
+                fd_ = fd;
+            }
+
+            [[nodiscard]] inline int fd() const noexcept { return fd_; }
 
             /// 两个传输基类各自提供同名生命周期钩子，此处显式覆盖以消除二义，
             /// 并逐层转发，保留任一层将来加入行为时的语义。
@@ -205,7 +218,7 @@ namespace mynet
                     if (!frameRes)
                     {
                         LOG_WARN("HandlerHttp3::process: frame decode error: {}", toString(frameRes.error()));
-                        requestBuffer_.retrieveAll();
+                        requestBuffer_.reset();
                         break;
                     }
                     if (!frameRes->has_value())
@@ -299,7 +312,7 @@ namespace mynet
                 }
                 session->bytesReceived += n;
 
-                Buffer directBuf;
+                RequestBuffer directBuf;
                 [[maybe_unused]] auto _ = directBuf.append(data, n);
                 while (true)
                 {
@@ -365,7 +378,7 @@ namespace mynet
                     else
                     {
                         session->bytesSent += frameBytes.size();
-                        pushReply(peer, std::move(frameBytes));
+                        sendTo(peer, std::move(frameBytes));
                     }
                     session->streamTable.close(0);
                 }
@@ -444,7 +457,7 @@ namespace mynet
                 }
 
                 session.bytesSent += packet.size();
-                pushReply(peer, std::move(packet));
+                sendTo(peer, std::move(packet));
             }
 
             /**
@@ -459,6 +472,45 @@ namespace mynet
                     sendQuicReply(peer, *sess, streamId, statusCode, headers, body);
                 }
             }
+
+            /**
+             * @brief 将当前收到的 UDP / QUIC 报文转发至指定上游对端（直接复用 HandlerDatagram::forwardTo）
+             *
+             * 适用于 HTTP/3 透明代理、MASQUE (RFC 9298) UDP 代理网关与反向中继。
+             *
+             * @param upstream 上游服务器对端地址
+             * @param data 报文载荷首地址
+             * @param n 报文有效长度
+             */
+            inline void forwardDatagram(const sockaddr_in &upstream, const char *data, size_t n)
+            {
+                forwardTo(upstream, data, n);
+            }
+
+            /**
+             * @brief 将当前数据报广播/多播至多个对端地址（直接复用 HandlerDatagram::broadcastTo）
+             *
+             * 适用于 WebTransport 组播分发、多路径探索与广播通道。
+             *
+             * @param targets 目标对端地址列表
+             * @param data 报文载荷首地址
+             * @param n 报文有效长度
+             */
+            inline void broadcastDatagram(const std::vector<sockaddr_in> &targets, const char *data, size_t n)
+            {
+                broadcastTo(targets, data, n);
+            }
+
+            /**
+             * @brief 开启零拷贝反向代理或流式隧道（直接复用 HandlerConnection 零拷贝管道）
+             *
+             * 适用于流式仿真回退场景下直接穿透至上游描述符。
+             *
+             * @param targetFd 目标文件或套接字描述符
+             */
+            inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
+            inline void disableSpliceTunnel() noexcept { disableSplice(); }
+            [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
 
             QuicSession *getOrCreateSession(const sockaddr_in &peer, const ConnectionId &dcid)
             {
@@ -599,6 +651,7 @@ namespace mynet
             static constexpr size_t kMaxRequestBodyBytes = 16 << 20;  // 16 MiB
             static constexpr size_t kMaxStreamBufferBytes = 16 << 20; // 16 MiB
 
+            int fd_ = -1;
             size_t maxStreams_ = 128;
             size_t maxSessions_ = 1024;
             StreamTable streamTable_;

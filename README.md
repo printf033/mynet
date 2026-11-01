@@ -1,11 +1,11 @@
 # mynet
 
-[**English**](README.md) | [**中文简体**](README_zh.md)
-
 [![Standard](https://img.shields.io/badge/C%2B%2B-26-blue.svg)](https://en.cppreference.com/w/cpp/26)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange.svg)](https://kernel.org/)
-[![Engines](https://img.shields.io/badge/I%2FO%20Engine-epoll%20%7C%20io__uring-brightgreen.svg)](#architecture)
+[![Engines](<https://img.shields.io/badge/I%2FO%20Engine-epoll%20%7C%20io__uring-brightgreen.svg>)](#architecture)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+[**English**](README.md) | [**中文简体**](README_zh.md)
 
 `mynet` is an ultra-high-performance, modern C++26 asynchronous network framework and protocol toolkit designed for Linux. Built from the ground up for microsecond-level latency, zero-copy/zero-allocation hot paths, and robust software engineering practices, `mynet` provides dual I/O engines (**Reactor** powered by edge-triggered `epoll` and **Proactor** powered by `io_uring` with kernel buffer rings), unified stream and datagram transports (TCP, TLS, UDP), an HTTP/2 wire-compatible stream multiplexer, and strongly-typed error semantics.
 
@@ -17,22 +17,22 @@
 - [Architecture](#architecture)
 - [Core Components](#core-components)
   - [Dual I/O Engines: Reactor vs Proactor](#1-dual-io-engines-reactor-vs-proactor)
-  - [Unified Connection & Session Ownership](#2-unified-connection--session-ownership)
+  - [Unified Connection &amp; Session Ownership](#2-unified-connection--session-ownership)
   - [Zero-Allocation Memory Architecture](#3-zero-allocation-memory-architecture)
-  - [HTTP/2 Framing & Stream Multiplexer](#4-http2-framing--stream-multiplexer)
+  - [HTTP/2 Framing &amp; Stream Multiplexer](#4-http2-framing--stream-multiplexer)
   - [Datagram Transport (UDP)](#5-datagram-transport-udp)
-  - [Modern C++26 & Strongly-Typed Error Semantics](#6-modern-c26--strongly-typed-error-semantics)
+  - [Modern C++26 &amp; Strongly-Typed Error Semantics](#6-modern-c26--strongly-typed-error-semantics)
   - [Bidirectional Stream Client (Client)](#7-bidirectional-stream-client-client)
 - [Benchmark Results](#benchmark-results)
-- [Dependencies & Prerequisites](#dependencies--prerequisites)
-- [Building & Installation](#building--installation)
+- [Dependencies &amp; Prerequisites](#dependencies--prerequisites)
+- [Building &amp; Installation](#building--installation)
 - [Quick Start Guide](#quick-start-guide)
   - [1. Epoll-Based TCP Echo Server (Reactor)](#1-epoll-based-tcp-echo-server-reactor)
   - [2. io_uring TCP Server with Kernel Buffer Ring (Proactor)](#2-io_uring-tcp-server-with-kernel-buffer-ring-proactor)
   - [3. Multiplexed Stream Server](#3-multiplexed-stream-server)
   - [4. Unix-Philosophy Stdin/Stdout Client (Client)](#4-unix-philosophy-stdinstdout-client-client)
 - [Project Layout](#project-layout)
-- [Testing & Quality Assurance](#testing--quality-assurance)
+- [Testing &amp; Quality Assurance](#testing--quality-assurance)
 - [License](#license)
 
 ---
@@ -49,10 +49,10 @@
   - **Proactor**: Pure asynchronous `io_uring` utilizing multishot accepts (`io_uring_prep_accept`), multishot receives (`io_uring_prep_recv_multishot`), kernel-managed registered buffer rings (`io_uring_setup_buf_ring`), and poll-driven TLS.
 - **Zero-Allocation Hot Paths**:
   - Address-stable fixed-capacity `ObjectPool<T>` preventing memory reallocation and pointer invalidation during event dispatch.
-  - Sliding-window auto-compacting `Buffer` designed for long-lived connections.
+  - Sliding-window auto-compacting `RequestBuffer` designed for long-lived connections.
 - **Extreme Zero-Copy Data Pipelines**:
   - Linux `splice(2)` kernel-level zero-copy looping: a handler that declares `kEnableSplice = true` gets an in-kernel non-blocking pipe buffer (`socket -> pipe -> socket`) on plain TCP, delivering 0 user-space copies and 0 kernel memory copies (`SpliceEchoHandler` in `examples/common/handlers.hpp` shows the opt-in).
-  - Direct writable ingress: connections read directly into pre-allocated `Buffer` write windows via `prepareRequestWritable`, eliminating stack scratch buffers and intermediary `memcpy`.
+  - Direct writable ingress: connections read directly into pre-allocated `RequestBuffer` write windows via `prepareRequestWritable`, eliminating stack scratch buffers and intermediary `memcpy`.
   - Vectorized scatter-gather I/O: plain connections aggregate up to 16 response segments per single `writev(2)` syscall.
 - **Transparent Security**:
   - First-class OpenSSL 3.x integration with zero code duplication between plain TCP and TLS pipelines.
@@ -100,7 +100,7 @@ flowchart TD
     subgraph Foundation ["Memory, Primitives & Diagnostics"]
         direction LR
         Pool["ObjectPool<T>"]
-        Buf["Buffer"]
+        Buf["RequestBuffer"]
         Constraints["constraints"]
         Err["Err & IoEnd"]
         Log["mynet::log (mylog -> stderr)"]
@@ -117,29 +117,30 @@ flowchart TD
 
 ### 1. Dual I/O Engines: Reactor vs Proactor
 
-| Feature | Reactor (`Reactor<Event>`) | Proactor (`Proactor<Event>`) |
-| :--- | :--- | :--- |
-| **Kernel Subsystem** | Linux `epoll` (Edge-Triggered, `EPOLLET`) | Linux `io_uring` |
-| **Notification Model** | Readiness Notification | Asynchronous Completion Notification |
-| **Buffer Management** | Userspace `Buffer` per Connection | Kernel-managed registered buffer ring (`io_uring_buf_ring`) |
-| **Syscall Overhead** | One `epoll_wait` + subsequent non-blocking `recv`/`send` | Batch completion via `io_uring_wait_cqe`, multishot syscall-free reads |
-| **TLS Integration** | Direct non-blocking OpenSSL `SSL_read`/`SSL_write` | Poll-driven readiness mask (`io_uring_prep_poll_add`) to avoid ciphertext detachment |
-| **Cross-Thread Dispatch** | `eventfd` wakeup + loop-bound task queue (`runInLoop`) | `std::stop_source` / submission ring scheduling |
+| Feature                         | Reactor (`Reactor<Event>`)                                   | Proactor (`Proactor<Event>`)                                                         |
+| :------------------------------ | :------------------------------------------------------------- | :------------------------------------------------------------------------------------- |
+| **Kernel Subsystem**      | Linux `epoll` (Edge-Triggered, `EPOLLET`)                  | Linux `io_uring`                                                                     |
+| **Notification Model**    | Readiness Notification                                         | Asynchronous Completion Notification                                                   |
+| **Buffer Management**     | Userspace `RequestBuffer` per Connection                     | Kernel-managed registered buffer ring (`io_uring_buf_ring`)                          |
+| **Syscall Overhead**      | One `epoll_wait` + subsequent non-blocking `recv`/`send` | Batch completion via `io_uring_wait_cqe`, multishot syscall-free reads               |
+| **TLS Integration**       | Direct non-blocking OpenSSL `SSL_read`/`SSL_write`         | Poll-driven readiness mask (`io_uring_prep_poll_add`) to avoid ciphertext detachment |
+| **Cross-Thread Dispatch** | `eventfd` wakeup + loop-bound task queue (`runInLoop`)     | `std::stop_source` / submission ring scheduling                                      |
 
 ### 2. Unified Connection & Session Ownership
 
 `Connection<HandlerType>` unifies socket state, TLS encryption, protocol handling, and outgoing write queues:
+
 - **Transport Symmetry**: Plain TCP and encrypted TLS share the same data path (`doRecv` / `doSend`). TLS is treated as a transport property rather than requiring a separate loop or wrapper.
-- **Pipelining Safety**: Responses reside in an internal fixed-capacity `RingQueue<std::string>` write queue by value. Multiple responses generated from a single batch read are guaranteed to arrive in-order without dynamic allocations during enqueuing or overwriting shared buffers.
+- **Pipelining Safety**: Responses reside in an internal fixed-capacity `ResponseQueue` write queue by value. Multiple responses generated from a single batch read are guaranteed to arrive in-order without dynamic allocations during enqueuing or overwriting shared buffers.
 - **Backpressure**: Integrated high-watermark inspection and `readCredit()` hooks pause reads when downstream consumer queues become saturated.
 - **Reference-Counted Lifetime in Proactor**: In `Proactor`, connections are wrapped inside `Session` structs tracking `inFlight` ring operations. Connections are never returned to the pool while the kernel has outstanding writes or reads.
 - **Handler Layering**: `HandlerConnection` (`connection.hpp`) and `HandlerDatagram` (`datagram.hpp`) are two peer base classes with no shared ancestor: the former owns the request buffer, response queue and read-credit backpressure for stream sessions, the latter the peer-tagged reply queue for connectionless datagrams. Protocol handlers (`HandlerHttp`, `HandlerHttp2`, `HandlerHttp3`) derive from these; a handler that needs both transports (`HandlerHttp3`) inherits both, and since neither base is virtual there is no virtual-base indirection or shared subobject bookkeeping on member access. The contract that used to sit in a common root — `reset`, `onMessageComplete`, `onParseError` — now lives on each base class and, transport-agnostically, in the `HandlerConstraint` concept (`constraints.hpp`), which is all the event slots require (the object pool needs only `Resettable`). The two engine contracts are named for what they are — the mandatory method set each transport actually calls: `MandatoryMethodConnection` (`connection.hpp`) and `MandatoryMethodDatagram` (`datagram.hpp`). Each lives beside its own base class so `std::derived_from` always sees a complete type, and each requires derivation plus validates the signatures the engine calls through the handler type itself. A datagram-only handler needs `HandlerDatagram` alone: the engines map non-streaming handlers to a stateless `NoConnection` slot (`ConnectionSlot`) and stream-only handlers to a `NoDatagram` slot (`DatagramSlot`), so neither path instantiates the other transport's machinery.
 
 ### 3. Zero-Allocation Memory Architecture
 
-- **`ObjectPool<Object>`**: Pre-allocates a contiguous array of slots via `std::unique_ptr<Slot[]>` with an index-based ring queue (`RingQueue<size_t>`). Objects are pinned in memory so epoll data pointers and io_uring completion context pointers remain 100% stable, completely bypassing heap allocation during connection accept/release cycles.
-- **`Buffer`**: A zero-exception, self-managed contiguous byte buffer (`operator new[](std::nothrow)`) with sliding-window auto-compaction and direct zero-copy write window (`writableBytes()`, `writableBegin()`, `commitWritten()`, `ensureWritable()`, `readableView()`). Storage is compacted in-place only when dead prefix space exceeds 4 KiB and occupies at least half of the allocation, amortizing compaction overhead while keeping memory footprints bounded.
-- **`RingQueue<T>`**: Fixed-capacity contiguous circular ring buffer (`src/ringQueue.hpp`) providing $O(1)$ zero-allocation enqueue/dequeue operations with bounded memory footprints.
+- **`ObjectPool<Object>`**: Pre-allocates a contiguous array of slots via `std::unique_ptr<Slot[]>` with an index-based free stack. Objects are pinned in memory so epoll data pointers and io_uring completion context pointers remain 100% stable, completely bypassing heap allocation during connection accept/release cycles.
+- **`RequestBuffer`**: A zero-exception, self-managed contiguous byte buffer (`operator new[](std::nothrow)`) with sliding-window auto-compaction and direct zero-copy write window (`writableBytes()`, `writableBegin()`, `commitWritten()`, `ensureWritable()`, `readableView()`). Storage is compacted in-place only when dead prefix space exceeds 4 KiB and occupies at least half of the allocation, amortizing compaction overhead while keeping memory footprints bounded.
+- **`ResponseQueue`**: Fixed-capacity contiguous circular ring buffer (`src/responseQueue.hpp`) providing $O(1)$ zero-allocation enqueue/dequeue operations with bounded memory footprints.
 - **`StreamTable<T>`**: Open-addressing flat hash table (`src/http/v2/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
 
 ### 4. HTTP/2 Framing & Stream Multiplexer
@@ -168,10 +169,23 @@ flowchart TD
 ### 7. Bidirectional Stream Client (Client)
 
 `Client<Event>` is an idiomatic Unix-style pipeline client bridging stdin/stdout and network sockets:
+
 ```bash
 cat request.bin | ./build/client_tcp 127.0.0.1:8888 > response.bin
 ```
+
 Features watermark-based backpressure for stdin, graceful TCP/TLS half-close forwarding (`close_notify` / `SHUT_WR`), signal-safe blocking of `SIGPIPE`, and detection of regular file vs interactive terminal descriptors.
+
+TLS entry points accept an optional `TlsOptions` argument for minimum/maximum protocol versions, TLS 1.2 cipher lists, TLS 1.3 cipher suites, and ALPN protocols. Defaults retain the TLS 1.2 minimum and OpenSSL's default cipher policy; the client always verifies the server certificate. These are interoperability and security settings, not ClientHello extension-order controls or JA4 impersonation.
+
+```cpp
+TlsOptions tls;
+tls.minVersion = TLS1_2_VERSION;
+tls.maxVersion = TLS1_3_VERSION;
+tls.alpnProtocols = {"h2", "http/1.1"};
+Client<EventSsl<HandlerConnection>> client;
+client.runSsl("127.0.0.1", 443, "example.com", nullptr, 16 << 10, tls);
+```
 
 ---
 
@@ -182,9 +196,9 @@ Benchmarks run on Linux (x86_64, GCC 15, Release build `-O2`, single process, wi
 ```text
 benchmark                                      latency        throughput
 --------------------------------------------------------------------------------
-Buffer::append+retrieveAll (1KiB)              12.7 ns/op    80,477.0 MB/s
-Buffer::append (16B) to 1KiB + drain            2.5 ns/op             --
-Buffer::append+retrieve (16B)                   4.0 ns/op     4,041.9 MB/s
+RequestBuffer::append+reset (1KiB)              12.7 ns/op    80,477.0 MB/s
+RequestBuffer::append (16B) to 1KiB + drain            2.5 ns/op             --
+RequestBuffer::append+retrieve (16B)                   4.0 ns/op     4,041.9 MB/s
 appendFrame (payload 16B)                       4.5 ns/op     3,555.4 MB/s
 appendFrame (payload 1024B)                    12.3 ns/op    83,077.8 MB/s
 appendFrame (payload 16384B)                  223.4 ns/op    73,328.8 MB/s
@@ -213,6 +227,7 @@ HandlerHttp2 open+echo+close (64 streams)            553.4 ns/op             --
   - `llhttp`
 
 On Debian/Ubuntu 25.10+:
+
 ```bash
 sudo apt-get update
 sudo apt-get install -y g++ cmake make pkg-config libssl-dev liburing-dev libgtest-dev libpq-dev
@@ -228,7 +243,9 @@ sudo apt-get install -y g++ cmake make pkg-config libssl-dev liburing-dev libgte
 git clone --recurse-submodules https://github.com/printf033/mynet.git
 cd mynet
 ```
+
 If already cloned without submodules:
+
 ```bash
 git submodule update --init --recursive
 ```
@@ -243,15 +260,16 @@ make -j$(nproc)
 
 ### 3. CMake Configuration Options
 
-| Option | Default | Description |
-| :--- | :--- | :--- |
-| `CMAKE_BUILD_TYPE` | `Debug` | Build profile (`Debug`, `Release`, `RelWithDebInfo`) |
-| `BUILD_TESTING` | `ON` | Build Google Test unit test executables |
-| `MYNET_BUILD_BENCH` | `ON` | Build micro-benchmark executables (`bench/bench`) |
+| Option                | Default   | Description                                                |
+| :-------------------- | :-------- | :--------------------------------------------------------- |
+| `CMAKE_BUILD_TYPE`  | `Debug` | Build profile (`Debug`, `Release`, `RelWithDebInfo`) |
+| `BUILD_TESTING`     | `ON`    | Build Google Test unit test executables                    |
+| `MYNET_BUILD_BENCH` | `ON`    | Build micro-benchmark executables (`bench/bench`)        |
 
 ### 4. Docker Quickstart
 
 A multi-stage `Dockerfile` based on Ubuntu 25.10 is included in the root directory:
+
 ```bash
 docker build -t mynet:latest .
 docker run --rm -it -p 8888:8888 mynet:latest
@@ -390,8 +408,8 @@ mynet/
 │   ├── lua_config.hpp          # Sandboxed Lua config loader & hot reload (reloadConfig)
 │   ├── error.hpp               # Strongly-typed Err & IoEnd + errno/OpenSSL text helpers
 │   ├── log_config.hpp          # Logging setup (mylog -> stderr)
-│   ├── buffer.hpp              # Low-allocation auto-compacting byte buffer
-│   ├── ringQueue.hpp           # Zero-allocation fixed-capacity circular ring queue
+│   ├── requestBuffer.hpp       # Low-allocation auto-compacting byte buffer
+│   ├── responseQueue.hpp       # Zero-allocation fixed-capacity circular response queue
 │   ├── objectPool.hpp          # Fixed-capacity stable-pointer object pool
 │   ├── timer.hpp               # Lazy-cancellation binary min-heap timer queue
 │   ├── loop.hpp                # epoll EventLoop with eventfd wakeups
@@ -443,7 +461,7 @@ mynet/
 │       └── http3.cpp           # proactor_http3 HTTP/3 over QUIC/UDP
 │
 ├── tests/                      # Unit Test Suite (Google Test + ASan)
-│   ├── test_buffer.cpp
+│   ├── test_request_buffer.cpp
 │   ├── test_config_lua.cpp     # Sandboxed Lua configuration hot-reloading tests
 │   ├── test_constraints.cpp
 │   ├── test_datagram.cpp       # UDP transport session tests
@@ -475,10 +493,11 @@ ctest --output-on-failure
 ```
 
 Output:
+
 ```text
 Test project /home/aaa/code/mynet/build
-    Start  1: test_buffer
- 1/11 Test  #1: test_buffer ......................   Passed    0.01 sec
+    Start  1: test_request_buffer
+ 1/11 Test  #1: test_request_buffer ..............   Passed    0.01 sec
     Start  2: test_constraints
  2/11 Test  #2: test_constraints .................   Passed    0.01 sec
     Start  3: test_datagram

@@ -16,7 +16,7 @@
  *   压缩仅在"拒绝路径 + 存在墓碑"这一低频降级点发生，热路径零开销。
  *
  * 异常策略：全部操作 noexcept；唯一可失败路径是 init() 的槽位分配，
- * 以 Result<> 返回，与 ringQueue.hpp / ObjectPool 的组件契约一致。
+ * 以 Result<> 返回，与 responseQueue.hpp / ObjectPool 的组件契约一致。
  */
 #pragma once
 

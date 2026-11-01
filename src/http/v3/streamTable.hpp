@@ -5,9 +5,9 @@
  * @brief RFC 9114 HTTP/3 流类型判定、生命周期跟踪与流表管理器。
  */
 
-#include "buffer.hpp"
 #include "frame.hpp"
 #include "qpack.hpp"
+#include "requestBuffer.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -70,7 +70,7 @@ namespace mynet
             bool isUnidirectional = false;
             bool uniTypeIdentified = false;
             uint64_t uniType = 0;
-            Buffer inBuffer{};
+            RequestBuffer inBuffer{};
             bool finReceived = false;
             bool headersComplete = false;
             std::vector<Header> requestHeaders{};
@@ -89,7 +89,7 @@ namespace mynet
                 isUnidirectional = false;
                 uniTypeIdentified = false;
                 uniType = 0;
-                inBuffer.retrieveAll();
+                inBuffer.reset();
                 finReceived = false;
                 headersComplete = false;
                 requestHeaders.clear();

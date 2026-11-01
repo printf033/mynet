@@ -3,12 +3,12 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include "buffer.hpp"
 #include "constraints.hpp"
 #include "configHolder.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "ringQueue.hpp"
+#include "requestBuffer.hpp"
+#include "responseQueue.hpp"
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -48,19 +48,39 @@ namespace mynet
     class HandlerConnection
     {
     public:
-        /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝环回（派生类按协议特性开启）
+        /// 零拷贝目标状态常量
+        static constexpr int kSpliceDisabled = -1; ///< 禁用零拷贝（走常规用户态读取与协议解析）
+
+        /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝（派生类按协议特性开启）
         static constexpr bool kEnableSplice = false;
 
         /**
-         * @brief 构造时一次性定容响应队列
-         *
-         * 默认 64 槽对齐流水线深度：开箱即可用，后续连接层可在建连时调用
-         * reserveResponses() 按协议需求重新定容（init 幂等）。
+         * @brief 默认构造函数（使用全局 ConnectionConfig 设定的默认响应队列容量与参数）
          */
-        explicit HandlerConnection(size_t responseCapacity = 64) noexcept
+        HandlerConnection() noexcept
+            : HandlerConnection(getConnectionConfig())
+        {
+        }
+
+        /**
+         * @brief 显式指定响应队列槽位容量构造
+         *
+         * @param responseCapacity 响应队列槽位容量（开箱即可用，支持后续按需 reserveResponses 调整）
+         */
+        explicit HandlerConnection(size_t responseCapacity) noexcept
         {
             [[maybe_unused]] auto _ =
                 responseQueue_.init(responseCapacity); // 槽位分配失败降级为容量 0 拒收，不折损零异常构造
+        }
+
+        /**
+         * @brief 显式传入完整连接配置构造
+         */
+        explicit HandlerConnection(const ConnectionConfig &config) noexcept
+            : maxRequestBytes_(config.maxRequestBytes)
+        {
+            [[maybe_unused]] auto _ =
+                responseQueue_.init(config.responseCapacity);
         }
 
         virtual ~HandlerConnection() noexcept = default;
@@ -82,10 +102,11 @@ namespace mynet
         virtual void reset() noexcept
         {
             requestBuffer_.reset();
-            responseQueue_.clear();
+            responseQueue_.reset();
             spare_.clear();
             closeAfterResponse_ = false;
-            spliceEnabled_ = false;
+            spliceTargetFd_ = kSpliceDisabled;
+            maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
         }
 
         // ---- 读取侧控制 (Read Side) ----
@@ -93,7 +114,7 @@ namespace mynet
         /**
          * @brief 追加一段对端请求字节到解析缓冲（零异常，失败显式错误码）
          *
-         * Buffer::append() 为 nothrow 接口：堆扩容失败以 ERR::BUF_ALLOC_FAILED
+         * RequestBuffer::append() 为 nothrow 接口：堆扩容失败以 ERR::BUF_ALLOC_FAILED
          * 交付，缓冲区保持原样，调用方据此可安全丢弃本次读到的字节（对端重传
          * 或连接关闭兜底）。
          *
@@ -113,10 +134,11 @@ namespace mynet
         /**
          * @brief 确保请求解析缓冲区至少拥有 minBytes 的可直写连续空间（零拷贝直接读取）
          *
-         * @param minBytes 期望的最小写窗口字节数（默认 4096）
+         * @param minBytes 期望的最小写窗口字节数（默认由全局 ConnectionConfig 提供）
          * @return 成功返回可直写的内存首地址指针；扩容失败返回错误码
          */
-        [[nodiscard]] inline std::expected<char *, ERR> prepareRequestWritable(size_t minBytes = 4 << 10) noexcept
+        [[nodiscard]] inline std::expected<char *, ERR> prepareRequestWritable(
+            size_t minBytes = getConnectionConfig().readChunkSize) noexcept
         {
             if (auto res = requestBuffer_.ensureWritable(minBytes); !res) [[unlikely]]
             {
@@ -148,7 +170,7 @@ namespace mynet
 
         inline void requestConsume(size_t n) noexcept { requestBuffer_.retrieve(n); }
 
-        inline void requestClear() noexcept { requestBuffer_.retrieveAll(); }
+        inline void requestClear() noexcept { requestBuffer_.reset(); }
 
         /**
          * @brief 剩余信用窗口（为 0 时事件循环将暂停接收读取，实施背压保护）
@@ -251,9 +273,35 @@ namespace mynet
 
         inline void setCloseAfterResponse(bool v) noexcept { closeAfterResponse_ = v; }
 
-        [[nodiscard]] inline bool spliceEnabled() const noexcept { return spliceEnabled_; }
+        // ---- 零拷贝管道控制 (Zero-Copy Splice Routing) ----
 
-        inline void setSpliceEnabled(bool v) noexcept { spliceEnabled_ = v; }
+        /**
+         * @brief 设置零拷贝数据转发的目标描述符
+         *
+         * 解耦核心：不再写死当前套接字。
+         * - targetFd >= 0: 转发至目标描述符（反向代理后端 socket、磁盘文件落盘等）；
+         * - targetFd == kSpliceDisabled: 关闭零拷贝，回到用户态协议解析。
+         */
+        inline void setSpliceTarget(int targetFd) noexcept { spliceTargetFd_ = targetFd; }
+        [[nodiscard]] inline int spliceTarget() const noexcept { return spliceTargetFd_; }
+        [[nodiscard]] inline bool isSpliceActive() const noexcept { return spliceTargetFd_ >= 0; }
+
+        /// 禁用零拷贝
+        inline void disableSplice() noexcept { spliceTargetFd_ = kSpliceDisabled; }
+
+        [[nodiscard]] inline bool spliceEnabled() const noexcept { return isSpliceActive(); }
+
+        /**
+         * @brief 连接就绪与描述符分配钩子
+         *
+         * 在连接成功建立并绑定底层 fd 后由 Connection 层回调。
+         * 协议处理器可在此完成初始化，或针对零拷贝场景指定数据流向目标：
+         * 例如回显处理器（EchoHandler）可在此通过 setSpliceTarget(fd) 将自身设为目标；
+         * 代理处理器（ProxyHandler）可在此设定上游目标描述符。
+         *
+         * @param fd 连接关联的底层套接字文件描述符
+         */
+        virtual void onConnect([[maybe_unused]] int fd) noexcept {}
 
         /**
          * @brief 协议升级钩子（如 HTTP/1.1 Upgrade，连接语义由此移交上层）
@@ -275,7 +323,7 @@ namespace mynet
         /**
          * @brief 默认执行逻辑：标准 Echo 协议回显
          */
-        void process()
+        void echo()
         {
             if (requestBuffer_.empty()) [[unlikely]]
             {
@@ -283,18 +331,18 @@ namespace mynet
             }
             if (!pushResponse(requestBuffer_.readableView())) [[unlikely]]
             {
-                LOG_WARN("HandlerConnection::process: response queue full, echoing dropped");
+                LOG_WARN("HandlerConnection::echo: response queue full, echoing dropped");
             }
-            requestBuffer_.retrieveAll();
+            requestBuffer_.reset();
         }
 
     protected:
-        Buffer requestBuffer_;
-        RingQueue responseQueue_;
+        RequestBuffer requestBuffer_;
+        ResponseQueue responseQueue_;
         std::string spare_{};
-        size_t maxRequestBytes_ = 4 << 20;
+        size_t maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
         bool closeAfterResponse_ = false;
-        bool spliceEnabled_ = false;
+        int spliceTargetFd_ = kSpliceDisabled;
     };
 
     /**
@@ -329,7 +377,7 @@ namespace mynet
             { h.hasResponse() } noexcept -> std::same_as<bool>;
             { h.takeResponse() } -> std::same_as<std::string>;
             { h.requestOverLimit() } noexcept -> std::same_as<bool>;
-            h.process();
+            h.echo();
             // 下面这些同样被连接层直接调用，无 requires 保护，必须由概念兜底：
             // 零拷贝直写窗口、读信用背压、请求上限与关闭/错误钩子
             { h.prepareRequestWritable(n) } noexcept;
@@ -440,9 +488,9 @@ namespace mynet
             timerId_ = 0;
             lastActive_ = std::chrono::steady_clock::time_point{};
             events_ = 0;
-            writeHighWaterMark_ = getNetConfig().server.writeHighWaterMark;
+            writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
             handler_.reset();
-            handler_.setMaxRequestBytes(getNetConfig().server.maxRequestBytes);
+            handler_.setMaxRequestBytes(getConnectionConfig().maxRequestBytes);
         }
 
         [[nodiscard]] inline int fd() const noexcept { return fd_; }
@@ -456,8 +504,9 @@ namespace mynet
                     constexpr int one = 1;
                     [[maybe_unused]] auto _ = ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
                 }
-                writeHighWaterMark_ = getNetConfig().server.writeHighWaterMark;
-                handler_.setMaxRequestBytes(getNetConfig().server.maxRequestBytes);
+                writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
+                handler_.setMaxRequestBytes(getConnectionConfig().maxRequestBytes);
+                handler_.onConnect(fd_);
             }
         }
         [[nodiscard]] inline const sockaddr_in &addr() const noexcept { return addr_; }
@@ -481,7 +530,7 @@ namespace mynet
             {
                 if constexpr (HandlerType::kEnableSplice)
                 {
-                    return handler_.spliceEnabled();
+                    return handler_.spliceTarget() >= 0;
                 }
             }
             return false;
@@ -628,15 +677,170 @@ namespace mynet
             return true;
         }
 
+        // ---- 零拷贝通用流管道 (Zero-Copy Splice APIs) ----
+
+        /**
+         * @brief 从当前网络连接套接字 (fd_) 向目标描述符零拷贝搬移数据（供反向代理至上游或文件上传落盘）
+         *
+         * @param targetFd 目标文件或套接字描述符
+         * @param maxBytes 单次最大搬移字节数
+         * @return 成功返回实际搬移字节数；出错返回 IO_END（WOULDBLOCK / EOF_REACHED / FATAL）
+         */
+        [[nodiscard]] inline std::expected<size_t, IO_END> spliceTo(
+            int targetFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
+        {
+            if (targetFd < 0 || fd_ < 0) [[unlikely]]
+            {
+                return std::unexpected(IO_END::FATAL);
+            }
+            if (!ensurePipe()) [[unlikely]]
+            {
+                return std::unexpected(IO_END::FATAL);
+            }
+
+            // 1. 若管道中已有残留数据，先尝试刷向目标描述符
+            while (pipePending_ > 0)
+            {
+                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
+                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sOut > 0) [[likely]]
+                {
+                    pipePending_ -= static_cast<size_t>(sOut);
+                    continue;
+                }
+                if (sOut < 0)
+                {
+                    if (errno == EINTR) continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
+                    return std::unexpected(IO_END::FATAL);
+                }
+                break;
+            }
+            if (pipePending_ > 0)
+            {
+                return std::unexpected(IO_END::WOULDBLOCK);
+            }
+
+            // 2. 从当前套接字摄入数据至管道写端
+            const ssize_t sIn = ::splice(fd_, nullptr, pipeFd_[1], nullptr, maxBytes,
+                                         SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sIn <= 0)
+            {
+                if (sIn == 0) return std::unexpected(IO_END::EOF_REACHED); // EOF
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
+                if (errno == EINTR) return 0;
+                return std::unexpected(IO_END::FATAL);
+            }
+
+            pipePending_ += static_cast<size_t>(sIn);
+            size_t totalWritten = 0;
+
+            // 3. 将管道内数据泵至目标描述符
+            while (pipePending_ > 0)
+            {
+                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
+                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sOut > 0) [[likely]]
+                {
+                    pipePending_ -= static_cast<size_t>(sOut);
+                    totalWritten += static_cast<size_t>(sOut);
+                    continue;
+                }
+                if (sOut < 0 && errno == EINTR) continue;
+                break;
+            }
+
+            return totalWritten;
+        }
+
+        /**
+         * @brief 从源描述符向当前网络连接套接字 (fd_) 零拷贝搬移数据（供静态文件下载或上游响应回传）
+         *
+         * @param sourceFd 源文件或上游套接字描述符
+         * @param maxBytes 单次最大搬移字节数
+         * @return 成功返回实际搬移字节数；出错返回 IO_END（WOULDBLOCK / EOF_REACHED / FATAL）
+         */
+        [[nodiscard]] inline std::expected<size_t, IO_END> spliceFrom(
+            int sourceFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
+        {
+            if (sourceFd < 0 || fd_ < 0) [[unlikely]]
+            {
+                return std::unexpected(IO_END::FATAL);
+            }
+            if (!ensurePipe()) [[unlikely]]
+            {
+                return std::unexpected(IO_END::FATAL);
+            }
+
+            // 1. 若管道中已有残留数据，先尝试刷向当前 socket
+            while (pipePending_ > 0)
+            {
+                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_,
+                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sOut > 0) [[likely]]
+                {
+                    pipePending_ -= static_cast<size_t>(sOut);
+                    continue;
+                }
+                if (sOut < 0)
+                {
+                    if (errno == EINTR) continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
+                    return std::unexpected(IO_END::FATAL);
+                }
+                break;
+            }
+            if (pipePending_ > 0)
+            {
+                return std::unexpected(IO_END::WOULDBLOCK);
+            }
+
+            // 2. 从源描述符摄入数据至管道写端
+            const ssize_t sIn = ::splice(sourceFd, nullptr, pipeFd_[1], nullptr, maxBytes,
+                                         SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sIn <= 0)
+            {
+                if (sIn == 0) return std::unexpected(IO_END::EOF_REACHED);
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
+                if (errno == EINTR) return 0;
+                return std::unexpected(IO_END::FATAL);
+            }
+
+            pipePending_ += static_cast<size_t>(sIn);
+            size_t totalWritten = 0;
+
+            // 3. 将管道内数据泵至当前连接套接字 fd_
+            while (pipePending_ > 0)
+            {
+                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_,
+                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sOut > 0) [[likely]]
+                {
+                    pipePending_ -= static_cast<size_t>(sOut);
+                    totalWritten += static_cast<size_t>(sOut);
+                    continue;
+                }
+                if (sOut < 0 && errno == EINTR) continue;
+                break;
+            }
+
+            return totalWritten;
+        }
+
         [[nodiscard]] IO_STATUS handleSplice() noexcept
         {
-            constexpr size_t kSpliceChunk = 64 << 10;
+            const int targetFd = handler_.spliceTarget();
+            if (targetFd < 0) [[unlikely]]
+            {
+                return IO_STATUS::KEEP;
+            }
+            const size_t spliceChunk = getConnectionConfig().spliceChunkSize;
 
-            // 1. 如果此前管道中尚有未排空的残留数据（对端 TCP 接收窗口满），先尝试刷出
+            // 1. 如果此前管道中尚有未排空的残留数据（目标端 TCP 接收窗口满），先尝试刷出
             while (pipePending_ > 0)
             {
                 const ssize_t sOut =
-                    ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                    ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (sOut > 0) [[likely]]
                 {
                     pipePending_ -= static_cast<size_t>(sOut);
@@ -660,7 +864,7 @@ namespace mynet
                         peerGone_ = true;
                         return IO_STATUS::CLOSE;
                     }
-                    LOG_WARN("Connection::handleSplice: fd {}: splice pipe->socket failed: {}", fd_,
+                    LOG_WARN("Connection::handleSplice: fd {}: splice pipe->target ({}) failed: {}", fd_, targetFd,
                              errnoText(errno));
                     peerGone_ = true;
                     return IO_STATUS::CLOSE;
@@ -675,20 +879,20 @@ namespace mynet
                 return IO_STATUS::KEEP;
             }
 
-            // 2. 管道已空，持续从对端 socket 读取数据移入管道，并直接环回写出（内核零拷贝）
+            // 2. 管道已空，持续从对端 socket 读取数据移入管道，并直接向目标描述符转发写出（内核零拷贝）
             while (!readPaused_)
             {
                 const ssize_t sIn =
-                    ::splice(fd_, nullptr, pipeFd_[1], nullptr, kSpliceChunk, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                    ::splice(fd_, nullptr, pipeFd_[1], nullptr, spliceChunk, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (sIn > 0) [[likely]]
                 {
                     touch();
                     pipePending_ += static_cast<size_t>(sIn);
 
-                    // 立即将摄入管道的数据原样零拷贝回显写入对端 socket
+                    // 立即将摄入管道的数据原样零拷贝写入目标描述符
                     while (pipePending_ > 0)
                     {
-                        const ssize_t sOut = ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_,
+                        const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
                                                       SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                         if (sOut > 0) [[likely]]
                         {
@@ -712,7 +916,7 @@ namespace mynet
                                 peerGone_ = true;
                                 return IO_STATUS::CLOSE;
                             }
-                            LOG_WARN("Connection::handleSplice: fd {}: splice pipe->socket failed: {}", fd_,
+                            LOG_WARN("Connection::handleSplice: fd {}: splice pipe->target ({}) failed: {}", fd_, targetFd,
                                      errnoText(errno));
                             peerGone_ = true;
                             return IO_STATUS::CLOSE;
@@ -800,7 +1004,7 @@ namespace mynet
                 }
 
                 // 零拷贝直写：直接向 handler_ 的请求缓冲区发起底层接收，彻底消除栈临时缓冲与中间 memcpy
-                const size_t want = std::min(size_t{4 << 10}, credit);
+                const size_t want = std::min(getConnectionConfig().readChunkSize, credit);
                 auto prepRes = handler_.prepareRequestWritable(want);
                 if (!prepRes) [[unlikely]]
                 {
@@ -847,7 +1051,14 @@ namespace mynet
                     readPaused_ = true;
                     return IO_STATUS::KEEP;
                 }
-                handler_.process();
+                if constexpr (requires { handler_.process(); })
+                {
+                    handler_.process();
+                }
+                else
+                {
+                    handler_.echo();
+                }
                 collectResponses();
                 if (closeAfterWrite_)
                 {
@@ -903,46 +1114,50 @@ namespace mynet
                 state_ = CONN_STATE::OPEN;
             }
 
-            // 若存在内核 splice 管道残留数据，先冲刷管道
+            // 若存在内核 splice 管道残留数据，先冲刷管道至目标描述符
             if (pipePending_ > 0)
             {
-                while (pipePending_ > 0)
+                const int targetFd = handler_.spliceTarget();
+                if (targetFd >= 0)
                 {
-                    const ssize_t sOut =
-                        ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                    if (sOut > 0) [[likely]]
+                    while (pipePending_ > 0)
                     {
-                        pipePending_ -= static_cast<size_t>(sOut);
-                        touch();
-                        continue;
-                    }
-                    if (sOut < 0)
-                    {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        const ssize_t sOut =
+                            ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                        if (sOut > 0) [[likely]]
                         {
-                            wantWrite_ = true;
-                            return IO_STATUS::KEEP;
-                        }
-                        if (errno == EINTR)
-                        {
+                            pipePending_ -= static_cast<size_t>(sOut);
+                            touch();
                             continue;
                         }
-                        if (errno == ECONNRESET || errno == EPIPE)
+                        if (sOut < 0)
                         {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            {
+                                wantWrite_ = true;
+                                return IO_STATUS::KEEP;
+                            }
+                            if (errno == EINTR)
+                            {
+                                continue;
+                            }
+                            if (errno == ECONNRESET || errno == EPIPE)
+                            {
+                                peerGone_ = true;
+                                return IO_STATUS::CLOSE;
+                            }
+                            LOG_WARN("Connection::handleWrite: fd {}: splice pipe->target ({}) failed: {}", fd_, targetFd,
+                                     errnoText(errno));
                             peerGone_ = true;
                             return IO_STATUS::CLOSE;
                         }
-                        LOG_WARN("Connection::handleWrite: fd {}: splice pipe->socket failed: {}", fd_,
-                                 errnoText(errno));
-                        peerGone_ = true;
-                        return IO_STATUS::CLOSE;
+                        break;
                     }
-                    break;
-                }
-                if (pipePending_ == 0)
-                {
-                    wantWrite_ = false;
-                    readPaused_ = false;
+                    if (pipePending_ == 0)
+                    {
+                        wantWrite_ = false;
+                        readPaused_ = false;
+                    }
                 }
             }
 
@@ -977,13 +1192,14 @@ namespace mynet
                     return std::nullopt;
                 }
 
-                // 明文多条响应积压路径：利用向量化 I/O (writev) 聚合至多 16 个分片单次系统调用冲刷
+                // 明文多条响应积压路径：利用向量化 I/O (writev) 聚合至多 maxWriteIov 个分片单次系统调用冲刷
                 if (ssl_ == nullptr && writeQueue_.size() > 1)
                 {
-                    constexpr size_t kMaxIov = 16;
-                    iovec iov[kMaxIov];
+                    constexpr size_t kStackIovCapacity = 64;
+                    const size_t maxIov = std::clamp(getConnectionConfig().maxWriteIov, size_t{1}, kStackIovCapacity);
+                    iovec iov[kStackIovCapacity];
                     size_t count = 0;
-                    for (auto it = writeQueue_.begin(); it != writeQueue_.end() && count < kMaxIov; ++it)
+                    for (auto it = writeQueue_.begin(); it != writeQueue_.end() && count < maxIov; ++it)
                     {
                         const size_t offset = (count == 0) ? writeOffset_ : 0;
                         if (it->size() > offset)
@@ -1159,7 +1375,7 @@ namespace mynet
         std::deque<std::string> writeQueue_;
         size_t writeOffset_ = 0;
         size_t pendingBytes_ = 0;
-        size_t writeHighWaterMark_ = getNetConfig().server.writeHighWaterMark;
+        size_t writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
 
         int pipeFd_[2] = {-1, -1};
         size_t pipePending_ = 0;
@@ -1328,9 +1544,9 @@ namespace mynet
             while (handler_.hasResponse())
             {
                 // 慢读放大硬顶：对端零窗口时 send 停滞，若继续收割响应，writeQueue_
-                // 可积压至响应槽数(64) × 单请求上限(4MiB) = 256MiB/连接，多连接叠加导致 OOM。
-                // 超过 2×高水位即停止搬运并标记发完即关，把单连接写队列压在 8MiB 以内。
-                if (pendingBytes_ >= 2 * writeHighWaterMark_) [[unlikely]]
+                // 可积压导致 OOM。超过 writeHardCapFactor × 高水位即停止搬运并标记发完即关。
+                const size_t hardCapFactor = getConnectionConfig().writeHardCapFactor;
+                if (pendingBytes_ >= hardCapFactor * writeHighWaterMark_) [[unlikely]]
                 {
                     LOG_WARN("Connection: fd {}: write backlog {} exceeds hard cap, closing after flush", fd_,
                              pendingBytes_);

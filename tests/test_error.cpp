@@ -22,7 +22,7 @@ TEST(ERR, EveryValueHasTextAndAnExitCode)
 
 TEST(ERR, LastEnumeratorIsIncludedInTheWalk)
 {
-    EXPECT_EQ(std::to_underlying(ERR::NOT_INITIALISED), kErrCount - 1);
+    EXPECT_EQ(std::to_underlying(ERR::SSL_CONFIG_FAILED), kErrCount - 1);
 }
 
 TEST(ERR, UnknownValueIsNamedRatherThanEmpty)
@@ -36,6 +36,7 @@ TEST(ERR, TextIsStableForASpotCheckValue)
     EXPECT_EQ(toString(ERR::BIND_FAILED), "bind() failed");
     EXPECT_EQ(toString(ERR::SSL_KEY_MISMATCH), "the private key does not match the certificate");
     EXPECT_EQ(toString(ERR::NOT_INITIALISED), "the event loop was not initialised");
+    EXPECT_EQ(toString(ERR::SSL_CONFIG_FAILED), "the TLS version, cipher suite, or ALPN configuration is invalid");
     EXPECT_EQ(toString(ERR::BUF_ALLOC_FAILED), "the buffer could not grow: the allocator returned no memory");
     EXPECT_EQ(toString(ERR::QUEUE_FULL), "the bounded queue is full and the element was refused");
 }
@@ -45,7 +46,7 @@ TEST(ERR, ReflectionNameOf)
     EXPECT_EQ(nameOf(ERR::BIND_FAILED), "BIND_FAILED");
     EXPECT_EQ(nameOf(ERR::SSL_KEY_MISMATCH), "SSL_KEY_MISMATCH");
     EXPECT_EQ(nameOf(ERR::NOT_INITIALISED), "NOT_INITIALISED");
-    EXPECT_EQ(kErrCount, 35);
+    EXPECT_EQ(kErrCount, 36);
 }
 
 TEST(IO_END, CoversTheFourOrdinaryOutcomesOfATransfer)

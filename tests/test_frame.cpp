@@ -27,9 +27,9 @@ namespace
         return out;
     }
 
-    Buffer bufferOf(const std::string &bytes)
+    RequestBuffer bufferOf(const std::string &bytes)
     {
-        Buffer b;
+        RequestBuffer b;
         [[maybe_unused]] auto _ = b.append(bytes.data(), bytes.size());
         return b;
     }
@@ -38,7 +38,7 @@ namespace
 TEST(FrameDecoder, IncompleteHeaderAsksForMoreBytes)
 {
     FrameDecoder decoder;
-    Buffer in = bufferOf(std::string(8, 'x')); // 比 9 字节帧头少 1 字节
+    RequestBuffer in = bufferOf(std::string(8, 'x')); // 比 9 字节帧头少 1 字节
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->has_value());
@@ -48,7 +48,7 @@ TEST(FrameDecoder, IncompleteHeaderAsksForMoreBytes)
 TEST(FrameDecoder, EmptyBufferIsNotAnError)
 {
     FrameDecoder decoder;
-    Buffer in;
+    RequestBuffer in;
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->has_value());
@@ -58,7 +58,7 @@ TEST(FrameDecoder, PayloadSplitAcrossReadsStaysUnconsumed)
 {
     FrameDecoder decoder;
     const std::string header = makeHeader(10, FRAME_TYPE::DATA, 0, 1);
-    Buffer in = bufferOf(header + "abc"); // 10 字节载荷中仅到达 3 字节
+    RequestBuffer in = bufferOf(header + "abc"); // 10 字节载荷中仅到达 3 字节
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->has_value());
@@ -69,7 +69,7 @@ TEST(FrameDecoder, WholeFrameCarriesItsFieldsAndIsConsumed)
 {
     FrameDecoder decoder;
     const std::string bytes = makeHeader(5, FRAME_TYPE::DATA, 0x1, 3) + "hello";
-    Buffer in = bufferOf(bytes);
+    RequestBuffer in = bufferOf(bytes);
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     ASSERT_TRUE(result->has_value());
@@ -84,7 +84,7 @@ TEST(FrameDecoder, WholeFrameCarriesItsFieldsAndIsConsumed)
 TEST(FrameDecoder, ZeroLengthFrameIsComplete)
 {
     FrameDecoder decoder;
-    Buffer in = bufferOf(makeHeader(0, FRAME_TYPE::PING, FrameFlags::kAck, 0));
+    RequestBuffer in = bufferOf(makeHeader(0, FRAME_TYPE::PING, FrameFlags::kAck, 0));
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     ASSERT_TRUE(result->has_value());
@@ -95,7 +95,7 @@ TEST(FrameDecoder, ZeroLengthFrameIsComplete)
 TEST(FrameDecoder, OversizedFrameIsRejectedBeforeItsPayloadArrives)
 {
     FrameDecoder decoder;
-    Buffer in = bufferOf(makeHeader(frame::kDefaultMaxFrameSize + 1, FRAME_TYPE::DATA, 0, 1));
+    RequestBuffer in = bufferOf(makeHeader(frame::kDefaultMaxFrameSize + 1, FRAME_TYPE::DATA, 0, 1));
     const Decoded result = decoder.next(in);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), FRAME_ERROR::FRAME_TOO_LARGE);
@@ -108,11 +108,11 @@ TEST(FrameDecoder, MaxFrameSizeIsConfigurableAndZeroRestoresTheDefault)
 
     decoder.setMaxFrameSize(1 << 10);
     EXPECT_EQ(decoder.maxFrameSize(), 1 << 10);
-    Buffer big = bufferOf(makeHeader((1 << 10) + 1, FRAME_TYPE::DATA, 0, 1));
+    RequestBuffer big = bufferOf(makeHeader((1 << 10) + 1, FRAME_TYPE::DATA, 0, 1));
     ASSERT_FALSE(decoder.next(big).has_value());
     EXPECT_EQ(decoder.next(big).error(), FRAME_ERROR::FRAME_TOO_LARGE);
 
-    Buffer fits = bufferOf(makeHeader(1 << 10, FRAME_TYPE::DATA, 0, 1) + std::string(1 << 10, 'z'));
+    RequestBuffer fits = bufferOf(makeHeader(1 << 10, FRAME_TYPE::DATA, 0, 1) + std::string(1 << 10, 'z'));
     const Decoded ok = decoder.next(fits);
     ASSERT_TRUE(ok.has_value());
     EXPECT_TRUE(ok->has_value());
@@ -124,7 +124,7 @@ TEST(FrameDecoder, MaxFrameSizeIsConfigurableAndZeroRestoresTheDefault)
 TEST(FrameDecoder, ReservedBitIsAnErrorOnceTheFrameIsWhole)
 {
     FrameDecoder decoder;
-    Buffer in = bufferOf(makeHeader(0, FRAME_TYPE::DATA, 0, 1, /*reserved=*/true));
+    RequestBuffer in = bufferOf(makeHeader(0, FRAME_TYPE::DATA, 0, 1, /*reserved=*/true));
     const Decoded result = decoder.next(in);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), FRAME_ERROR::RESERVED_BIT_SET);
@@ -135,7 +135,7 @@ TEST(FrameDecoder, ReservedBitWaitsForTheWholeFrame)
     // 校验顺序是刻意设计的：仅部分到达的不完整帧返回“暂无帧”，
     // 即使其帧头已携带保留位，因此偷窥半到达的帧绝不会导致连接被误断开。
     FrameDecoder decoder;
-    Buffer in = bufferOf(makeHeader(4, FRAME_TYPE::DATA, 0, 1, true) + "ab");
+    RequestBuffer in = bufferOf(makeHeader(4, FRAME_TYPE::DATA, 0, 1, true) + "ab");
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->has_value());
@@ -144,7 +144,7 @@ TEST(FrameDecoder, ReservedBitWaitsForTheWholeFrame)
 TEST(FrameDecoder, TwoFramesInOneBufferComeOutInOrder)
 {
     FrameDecoder decoder;
-    Buffer in =
+    RequestBuffer in =
         bufferOf(makeHeader(1, FRAME_TYPE::HEADERS, 0x4, 1) + "a" + makeHeader(2, FRAME_TYPE::DATA, 0, 1) + "bc");
     const Decoded first = decoder.next(in);
     ASSERT_TRUE(first.has_value() && first->has_value());
@@ -161,7 +161,7 @@ TEST(FrameDecoder, TwoFramesInOneBufferComeOutInOrder)
 TEST(FrameDecoder, BytesAfterTheFrameStayInTheBuffer)
 {
     FrameDecoder decoder;
-    Buffer in = bufferOf(makeHeader(1, FRAME_TYPE::DATA, 0, 1) + "a" + "ZZ");
+    RequestBuffer in = bufferOf(makeHeader(1, FRAME_TYPE::DATA, 0, 1) + "a" + "ZZ");
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value() && result->has_value());
     EXPECT_EQ(in.readableBytes(), size_t{2});
@@ -180,7 +180,7 @@ TEST(AppendFrame, RoundTripsEveryField)
     appendFrame(wire, original);
     ASSERT_EQ(wire.size(), frame::kHeaderBytes + original.payload.size());
 
-    Buffer in = bufferOf(wire);
+    RequestBuffer in = bufferOf(wire);
     FrameDecoder decoder;
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value() && result->has_value());
@@ -202,7 +202,7 @@ TEST(AppendFrame, MasksTheReservedBitOfTheStreamIdentifier)
 
     // 相同的字节能被正常解码，保留位被清除而非报错：
     // 在出站时进行掩码处理保证了往返传输的合规性。
-    Buffer in = bufferOf(wire);
+    RequestBuffer in = bufferOf(wire);
     FrameDecoder decoder;
     const Decoded result = decoder.next(in);
     ASSERT_TRUE(result.has_value() && result->has_value());

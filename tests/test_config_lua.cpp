@@ -1,3 +1,4 @@
+#include "connection.hpp"
 #include "lua_config.hpp"
 #include <filesystem>
 #include <fstream>
@@ -29,6 +30,19 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
                                     "  tcpNoDelay = true,\n"
                                     "  tcpQuickAck = true,\n"
                                     "  enableSplice = false\n"
+                                    "}\n"
+                                    "connection = {\n"
+                                    "  responseCapacity = 128,\n"
+                                    "  readChunkSize = 8192,\n"
+                                    "  maxRequestBytes = 2097152,\n"
+                                    "  writeHighWaterMark = 8388608,\n"
+                                    "  writeHardCapFactor = 4,\n"
+                                    "  spliceChunkSize = 131072,\n"
+                                    "  maxWriteIov = 32\n"
+                                    "}\n"
+                                    "datagram = {\n"
+                                    "  maxDatagramBytes = 32768,\n"
+                                    "  maxPendingOutgoing = 512\n"
                                     "}\n"
                                     "proactor = {\n"
                                     "  sqEntries = 4096,\n"
@@ -66,6 +80,17 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
     EXPECT_TRUE(cfg.server.tcpQuickAck);
     EXPECT_FALSE(cfg.server.enableSplice);
 
+    EXPECT_EQ(cfg.connection.responseCapacity, 128u);
+    EXPECT_EQ(cfg.connection.readChunkSize, 8192u);
+    EXPECT_EQ(cfg.connection.maxRequestBytes, 2097152u);
+    EXPECT_EQ(cfg.connection.writeHighWaterMark, 8388608u);
+    EXPECT_EQ(cfg.connection.writeHardCapFactor, 4u);
+    EXPECT_EQ(cfg.connection.spliceChunkSize, 131072u);
+    EXPECT_EQ(cfg.connection.maxWriteIov, 32u);
+
+    EXPECT_EQ(cfg.datagram.maxDatagramBytes, 32768u);
+    EXPECT_EQ(cfg.datagram.maxPendingOutgoing, 512u);
+
     EXPECT_EQ(cfg.proactor.sqEntries, 4096u);
     EXPECT_EQ(cfg.proactor.bufEntries, 2048u);
     EXPECT_EQ(cfg.proactor.bufSize, 8192u);
@@ -93,6 +118,12 @@ TEST(ConfigLua, ClampsOutliersSafely)
                                    "  port = 999999,\n"
                                    "  keepAliveTimeoutMs = 1\n"
                                    "}\n"
+                                   "connection = {\n"
+                                   "  responseCapacity = 0,\n"
+                                   "  readChunkSize = 10,\n"
+                                   "  maxWriteIov = 9999,\n"
+                                   "  writeHardCapFactor = 100\n"
+                                   "}\n"
                                    "multiplexer = {\n"
                                    "  maxFrameSize = 10\n"
                                    "}\n");
@@ -102,6 +133,10 @@ TEST(ConfigLua, ClampsOutliersSafely)
     const mynet::NetConfig cfg = mynet::getNetConfig();
     EXPECT_EQ(cfg.server.port, 65535u);
     EXPECT_EQ(cfg.server.keepAliveTimeout_ms, 100u);
+    EXPECT_EQ(cfg.connection.responseCapacity, 1u);
+    EXPECT_EQ(cfg.connection.readChunkSize, 256u);
+    EXPECT_EQ(cfg.connection.maxWriteIov, 64u);
+    EXPECT_EQ(cfg.connection.writeHardCapFactor, 64u);
     EXPECT_EQ(cfg.multiplexer.maxFrameSize, 16384u);
 
     std::filesystem::remove(clampPath);
@@ -169,4 +204,38 @@ TEST(ConfigLua, RejectsInvalidFieldTypes)
     EXPECT_EQ(before.server.port, after.server.port);
 
     std::filesystem::remove(badFieldPath);
+}
+
+TEST(ConfigLua, ConnectionConfigLoadsAndAppliesDynamically)
+{
+    const std::filesystem::path connPath = "test_config_conn.lua";
+    writeTestConfigFile(connPath, "connection = {\n"
+                                  "  responseCapacity = 32,\n"
+                                  "  readChunkSize = 2048,\n"
+                                  "  maxRequestBytes = 1048576,\n"
+                                  "  writeHighWaterMark = 2097152,\n"
+                                  "  writeHardCapFactor = 3,\n"
+                                  "  spliceChunkSize = 32768,\n"
+                                  "  maxWriteIov = 8\n"
+                                  "}\n");
+
+    EXPECT_TRUE(mynet::reloadConfig(connPath));
+
+    const auto &connCfg = mynet::getConnectionConfig();
+    EXPECT_EQ(connCfg.responseCapacity, 32u);
+    EXPECT_EQ(connCfg.readChunkSize, 2048u);
+    EXPECT_EQ(connCfg.maxRequestBytes, 1048576u);
+    EXPECT_EQ(connCfg.writeHighWaterMark, 2097152u);
+    EXPECT_EQ(connCfg.writeHardCapFactor, 3u);
+    EXPECT_EQ(connCfg.spliceChunkSize, 32768u);
+    EXPECT_EQ(connCfg.maxWriteIov, 8u);
+
+    // 验证 HandlerConnection 默认构造拾取配置中的容量与读写参数
+    mynet::HandlerConnection handler;
+    EXPECT_EQ(handler.readCredit(), 1048576u);
+    auto prepRes = handler.prepareRequestWritable();
+    ASSERT_TRUE(prepRes.has_value());
+    EXPECT_GE(handler.requestWritableBytes(), 2048u);
+
+    std::filesystem::remove(connPath);
 }

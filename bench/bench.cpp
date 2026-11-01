@@ -1,4 +1,4 @@
-// 字节传输核心基准测试：涵盖 Buffer 缓冲区、帧编解码器、
+// 字节传输核心基准测试：涵盖 RequestBuffer 缓冲区、帧编解码器、
 // Handler 响应队列、ObjectPool 对象池与 HandlerHttp2 多路复用器。
 //
 // 测试框架设计刻意保持极简。Google Benchmark 非常优秀，但在一个已依赖
@@ -13,12 +13,12 @@
 // 单进程运行，并将日志输出重定向至远离被测路径的终端。
 //
 // 运行命令：./bench 2>/dev/null （日志行输出至 stderr）
-#include "buffer.hpp"
 #include "connection.hpp"
 #include "http/v2/frame.hpp"
 #include "http/v2/handler.hpp"
 #include "log_config.hpp"
 #include "objectPool.hpp"
+#include "requestBuffer.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -98,7 +98,7 @@ namespace
         return out;
     }
 
-    // ---- 缓冲区 (Buffer) 基准测试 ----
+    // ---- 缓冲区 (RequestBuffer) 基准测试 ----
 
     void benchBuffer()
     {
@@ -108,39 +108,39 @@ namespace
             [&](size_t iterations)
             {
                 uint64_t sink = 0;
-                Buffer buffer;
+                RequestBuffer buffer;
                 for (size_t i = 0; i < iterations; ++i)
                 {
                     [[maybe_unused]] auto _ = buffer.append(block);
                     sink += buffer.readableBytes();
-                    buffer.retrieveAll();
+                    buffer.reset();
                 }
                 g_sink += sink;
             });
-        report("Buffer::append+retrieveAll (1KiB)", appendRetrieve, static_cast<double>(1 << 10));
+        report("RequestBuffer::append+reset (1KiB)", appendRetrieve, static_cast<double>(1 << 10));
 
         const Sample appendSmall = run(
             [&](size_t iterations)
             {
                 uint64_t sink = 0;
-                Buffer buffer;
+                RequestBuffer buffer;
                 for (size_t i = 0; i < iterations; ++i)
                 {
                     for (int k = 0; k < 64; ++k) [[maybe_unused]]
                         auto _ = buffer.append(sixteen);
                     sink += buffer.readableBytes();
-                    buffer.retrieveAll();
+                    buffer.reset();
                 }
                 g_sink += sink;
             },
             64);
-        report("Buffer::append (16B) to 1KiB + drain", appendSmall);
+        report("RequestBuffer::append (16B) to 1KiB + drain", appendSmall);
 
         const Sample retrieve = run(
             [&](size_t iterations)
             {
                 uint64_t sink = 0;
-                Buffer buffer;
+                RequestBuffer buffer;
                 std::string chunk(16, 'x');
                 for (size_t i = 0; i < iterations; ++i)
                 {
@@ -150,7 +150,7 @@ namespace
                 }
                 g_sink += sink;
             });
-        report("Buffer::append+retrieve (16B)", retrieve, 16.0);
+        report("RequestBuffer::append+retrieve (16B)", retrieve, 16.0);
     }
 
     // ---- 分帧 (Framing) 基准测试 ----
@@ -191,7 +191,7 @@ namespace
                 uint64_t sink = 0;
                 for (size_t pass = 0; pass < iterations; ++pass)
                 {
-                    Buffer in;
+                    RequestBuffer in;
                     [[maybe_unused]] auto _ = in.append(bytes);
                     FrameDecoder decoder;
                     while (in.readableBytes() > 0)
@@ -287,12 +287,12 @@ namespace
                 for (size_t i = 0; i < iterations; ++i)
                 {
                     [[maybe_unused]] auto _ = handler.appendRequest(body.data(), static_cast<ssize_t>(body.size()));
-                    handler.process();
+                    handler.echo();
                     sink += handler.takeResponse().size();
                 }
                 g_sink += sink;
             });
-        report("HandlerConnection::process echo (1KiB)", echo, static_cast<double>(1 << 10));
+        report("HandlerConnection::echo (1KiB)", echo, static_cast<double>(1 << 10));
     }
 
     // ---- HTTP/2 多路复用器 (HandlerHttp2) 基准测试 ----
