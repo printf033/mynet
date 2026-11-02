@@ -433,7 +433,7 @@ TEST(Http3Qpack, PrefixedIntDecodeRejectsAtLimit)
 
 TEST(Http3Qpack, RejectsHuffmanEncodedLiterals)
 {
-    // 构造首部块：前缀 + 字面量首部（H=1 表示 Huffman 编码）
+    // 构造首部块：前缀 + 字面量首部（H=1 表示 Huffman 编码，但数据非法）
     std::string block;
     block.push_back('\0');
     block.push_back('\0');
@@ -443,11 +443,33 @@ TEST(Http3Qpack, RejectsHuffmanEncodedLiterals)
     block.append("custom");
     // 写入一个 H=1 的值字面量: 0x80 | 4
     block.push_back(static_cast<char>(0x84));
-    block.append("test");
+    block.append("test"); // 非法 Huffman 码字
 
     auto res = decodeHeaders(block);
     EXPECT_FALSE(res.has_value());
     EXPECT_EQ(res.error(), H3_ERROR::H3_FRAME_ERROR);
+}
+
+TEST(Http3Qpack, DecodesValidHuffmanEncodedLiterals)
+{
+    // 构造首部块：前缀 + 字面量首部（H=1 合法 Huffman 编码）
+    std::string block;
+    block.push_back('\0');
+    block.push_back('\0');
+
+    // 模式: 0 0 1 0 N 0 NameLen
+    encodePrefixedInt(block, 3, 0x20, 10);
+    block.append("user-agent");
+    // "curl/8.22.0" 的合法 Huffman 编码: 8 字节
+    const uint8_t huff[] = {0x25, 0xb6, 0x50, 0xc3, 0xcb, 0x88, 0x4b, 0x83};
+    encodePrefixedInt(block, 7, 0x80, sizeof(huff));
+    block.append(reinterpret_cast<const char *>(huff), sizeof(huff));
+
+    auto res = decodeHeaders(block);
+    ASSERT_TRUE(res.has_value());
+    ASSERT_EQ(res->size(), 1u);
+    EXPECT_EQ((*res)[0].name, "user-agent");
+    EXPECT_EQ((*res)[0].value, "curl/8.22.0");
 }
 
 TEST(Http3Qpack, TruncatedLiteralReturnsFrameError)

@@ -287,6 +287,10 @@ namespace mynet
              * @param i 槽位下标，需满足 i < capacity()；调用方负责 ready() 前置。
              */
             [[nodiscard]] inline T *slotAt(size_t i) noexcept { return slots_[i].used ? &slots_[i].value : nullptr; }
+            [[nodiscard]] inline const T *slotAt(size_t i) const noexcept
+            {
+                return slots_[i].used ? &slots_[i].value : nullptr;
+            }
 
             /**
              * @brief 释放槽位内存，表回到未初始化态（析构等价操作）。

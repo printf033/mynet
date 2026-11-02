@@ -23,6 +23,7 @@
   - [UDP 数据报传输系统](#5-udp-数据报传输系统)
   - [现代 C++26 语言规范与强类型错误语义](#6-现代-c26-语言规范与强类型错误语义)
   - [管道式双向客户端（Client）](#7-管道式双向客户端client)
+  - [配置归属](#8-配置归属引擎侧不保留硬编码默认值)
 - [性能基准测试](#性能基准测试)
 - [系统依赖与前置要求](#系统依赖与前置要求)
 - [构建与编译](#构建与编译)
@@ -59,6 +60,7 @@
   - 原生支持 ALPN 协议协商、SNI 域名匹配、异步握手流控制与平滑双向 TLS 关闭（`SSL_shutdown`）。
 - **线网级协议解析与多路复用**:
   - HTTP/2 线网兼容的 9 字节标准帧编解码器（`Length:24`, `Type:8`, `Flags:8`, `StreamID:31`）。
+  - RFC 7541 HPACK 首部压缩（静态表、动态表与 Huffman 解码）以及 RFC 9113 客户端连接前言校验，`curl --http2-prior-knowledge` 与 `nghttp` 可端到端互通。
   - 通用型流多路复用处理器 `HandlerHttp2<StreamHandler>`，实现单 TCP 连接承载多逻辑流，具备连接级与流级信用流控（`WINDOW_UPDATE`）、并发流数量上限控制与优雅 `GOAWAY` 下线。
   - 基于 `llhttp` 的 HTTP/1.x 编解码实现，支持请求流水线（Pipelining）与 Keep-Alive。
 - **完备的系统可观测性与运维友好性**:
@@ -146,6 +148,13 @@ flowchart TD
 ### 4. HTTP/2 帧编解码与流多路复用
 
 - **标准线网帧格式**：`FrameDecoder` 与 `appendFrame` 原生兼容标准 9 字节 HTTP/2 帧头，涵盖 `DATA`、`HEADERS`、`PRIORITY`、`RST_STREAM`、`SETTINGS`、`PUSH_PROMISE`、`PING`、`GOAWAY`、`WINDOW_UPDATE`。
+- **客户端连接前言**：在解码任何帧之前校验 RFC 9113 §3.4 的 24 字节前言（允许分片到达）；前言错误回 `GOAWAY(PROTOCOL_ERROR)`，而不是被误读成 5 MiB 的帧。
+- **HPACK（`http/v2/hpack.hpp`）**：RFC 7541 解码——静态表、带淘汰的动态表、表大小更新与 Huffman 字符串——以及供 `sendResponse` 使用的无状态编码器。压缩失步以 `COMPRESSION_ERROR` 关闭连接；首部列表超限只重置该流。
+- **分片首部块**：未带 `END_HEADERS` 的 `HEADERS` 由同流 `CONTINUATION` 帧重组（分片边界可以落在 HPACK 字段中间）。按 RFC 9113 §6.2，期间插入任何其他帧（包括其他流的帧）都以连接错误终止——这同时是 CVE-2024-27983 的防线；零长 `CONTINUATION` 洪水受 32 个空帧上限约束（总片数上限 4096），解码后超过宣告上限的首部列表回 `RST_STREAM`——该块仍会先被完整 HPACK 解码，连接的动态表绝不因此失步。
+- **首部列表上限**：`sendSettings` 宣告的 `SETTINGS_MAX_HEADER_LIST_SIZE` 与解码器实际执行的上限取同一值，合规对端不会在中途触发上限。对端宣告的上限用于出站约束：`sendResponse` 拒绝对端已声明不接受的首部列表，出站 `HEADERS` 按对端 `SETTINGS_MAX_FRAME_SIZE` 拆成 `CONTINUATION`。
+- **`HandlerHttp2<StreamHandler>`**：在单一字节流上承载多条独立请求/响应流。
+  - `onStreamHeadersDecoded` 交付解码后的伪首部；`onStreamEnd` 在请求体完整到达时触发。
+  - `sendResponse(streamId, status, body, extra)` 编码 `:status` 并沿既有流控路径发送响应。
 - **`HandlerHttp2<StreamHandler>`**：
   - 实现单条物理传输流上承载海量并发逻辑流（Stream）。
   - 流表采用高性能定容开放寻址流表 `mux::StreamTable<StreamSlot>`，热路径无动态堆分配。
@@ -186,6 +195,67 @@ tls.alpnProtocols = {"h2", "http/1.1"};
 Client<EventSsl<HandlerConnection>> client;
 client.runSsl("127.0.0.1", 443, "example.com", nullptr, 16 << 10, tls);
 ```
+
+### 8. 配置归属：引擎侧不保留硬编码默认值
+
+所有决定服务端引擎**分配多少**、内核队列**排多深**的可调参数，只有一个归属地：`configHolder.hpp` 提供编译期内建基线，`config/config.lua` 经 `reloadConfig()` 解析并钳位。`Reactor` 与 `Proactor` 自身不携带默认实参——两参数调用读取当前 `NetConfig` 快照：
+
+```cpp
+// 没有任何代码会自动加载 config.lua：新进程一开始用的就是 configHolder.hpp 的基线。
+// 想应用 config/config.lua，必须在启动时显式调用一次。
+mynet::reloadConfig("config/config.lua");
+
+// 完全取自配置：监听地址来自 server.host / server.port
+server.runTcp();
+
+// 显式指定端点，配置仍取自快照
+server.runTcp("0.0.0.0", 8888);
+
+// 全部显式传入；校验契约相同
+ReactorConfig reactorCfg = mynet::getReactorConfig();
+reactorCfg.maxEvents = 2048;
+server.runTcp("0.0.0.0", 8888, mynet::getServerConfig(), reactorCfg);
+
+// TLS：runSsl() 从 security 段取 certFile / keyFile，未配置时拒绝启动；
+// runSsl(crt, key) 则沿用配置里的监听地址。
+tlsServer.runSsl();
+```
+
+不调用 `reloadConfig()` 也能跑，用的是编译期内建基线——它与随仓库提供的 `config.lua` 数值完全一致（有测试逐字段守着）。读者**不应**假定的是：只改 `config.lua` 就能改变一个正在运行的服务器。
+
+每个字段还声明了**何时生效**，而且这个声明是数据而非文档：`configHolder.hpp` 里的 `kConfigReloadMap` 把每个点分路径映射到一个 `ReloadMode`，并由一条测试用静态反射枚举 `NetConfig` 全部字段，证明没有遗漏。
+
+- **`Hot`（热）**——`reloadConfig()` 后立即生效。读取点在每连接或每次 I/O 的路径上（`Connection`、`Datagram`、`HandlerHttp2`），新连接与在途 I/O 立刻看到新值。
+- **`Startup`（启动）**——只在 `listen()` / `serve()` / `runSsl()` 里读一次。`reloadConfig()` 会更新快照，但已在运行的引擎仍用启动时的值；要生效需重启该服务。
+
+| 配置段 | 字段 | 生效时机 |
+| :----- | :--- | :------- |
+| `server` | `host`、`port`、`backlog`、`maxConnections`、`idleTimeoutSecs` | 启动 |
+| `server` | `tcpNoDelay`、`tcpQuickAck`、`enableSplice` | 热 |
+| `reactor` | `maxEvents`、`idleSweepIntervalMs` | 启动 |
+| `proactor` | `sqEntries`、`cqEntries`、`maxAcceptEvents`、`bufEntries`、`bufSize`、`udpBufSize`、`bufRingAlignment`、`cqeWaitMs` | 启动 |
+| `connection` | `responseCapacity`、`readChunkSize`、`maxRequestBytes`、`writeHighWaterMark`、`writeHardCapFactor`、`spliceChunkSize`、`maxWriteIov` | 热 |
+| `datagram` | `maxDatagramBytes`、`maxPendingOutgoing` | 热 |
+| `multiplexer` | `maxConcurrentStreams`、`initialWindowSize`、`maxFrameSize` | 热 |
+| `security` | `certFile`、`keyFile`、`caFile`、`ciphers`、`alpnProtocols` | 启动 |
+
+`server.maxConnections` 是容量的唯一真源：Reactor 用它做连接池槽位数，Proactor 用它做会话池槽位数。`server.host`/`port` 由无参的 `runTcp()` / `runSsl()` 消费，`security.certFile`/`keyFile` 由不带路径参数的 `runSsl()` 消费——那个重载在路径未配置时会直接拒绝启动，而不是悄悄降级成明文。
+
+把两个真相源合并成一个，必然要选定其中一个数值。因此有两处默认值发生了变化，这里明确写出，而不是留给运维者上线后意外发现：
+
+- **监听 backlog `511` → `128`**：`runTcp`/`runSsl` 原本默认 `511`，而 `config.lua` 早已文档化为 `128`。以文档化值为准。
+- **Proactor `sqEntries` `512` → `2048`，且 `cqEntries` 独立成项、默认 `2048`**：引擎原本默认 `sq=512`/`cq=1024`，而 `config.lua` 文档化为 `sq=2048`。以文档化值为准，同时把 `cq` 从"固定 2×sq"变成可配置项。
+- **池容量统一到 `server.maxConnections`**：`reactor.connectionPoolSize` 与 `proactor.sessionPoolSize` 本是同一概念的两个名字，已删除。默认值 `8192`，对应的旧值是 Reactor 池 `1024`、Proactor 会话池 `512`。这是**预分配**的槽位数，不是可增长的上限：实测每槽约 3 KiB，因此 `8192` 启动即占约 24–26 MiB RSS，`65536` 约 190 MiB。（明文回显与 HTTP/2 两种处理器都实测过；HTTP/2 的流池按需分配，高并发多路复用在此外额外增长。）`config.lua` 原先写的 `65536` 从未被分配过（那是个只写不读的字段），所以没有沿用为默认值。
+
+公开的引擎签名也变了，直接调用它们的代码需要注意：`Reactor::serve(size_t,int,int)` → `serve(const ServerConfig&, const ReactorConfig&)`、`Reactor::serveDatagram(int)` → `serveDatagram(const ReactorConfig&)`、`Proactor::serve(...)` → `serve(const ServerConfig&, const ProactorConfig&, bool)`，以及 `Event::listenTcp` 去掉了 `backlog = 511` 默认实参。仓库内调用点已全部更新；下游代码会在编译期失败，而不是悄悄改变行为。
+
+另有四个别名被直接删除，它们的作用只是给另一个字段喂一份副本：`server.keepAliveTimeout_ms`（由 `server.idleTimeoutSecs` 取代）、`server.writeHighWaterMark` / `server.maxRequestBytes`（真正的消费者是 `connection` 段）、`security.enableTls`（调 `runSsl` 还是 `runTcp` 是编译期选择）、`multiplexer.maxHeaderListSize`（背后没有任何实现）。没有丢掉任何曾经生效的行为。被删的每个字段，要么从未被读取，要么只被用来填充另一个同样没有消费者的字段（`server.writeHighWaterMark` / `server.maxRequestBytes` 由解析器拷进 `connection` 段，而引擎真正读的是 `connection` 段）——一条指向虚无的别名链。
+
+ALPN 需要单独说明：它**默认不启用**。`security.alpnProtocols = ""` 表示 `runSsl` 不安装 ALPN 选择回调，与本次重构之前的行为完全一致。只有当处理器确实实现了所宣告的协议时才应填写——一个回声服务器宣告 `h2` 等于对客户端撒谎。
+
+密码套件遵循同一条"没让你改就别改"的原则。`security.ciphers` 为空（默认值）以及字面量 `"DEFAULT"`，都会被归一为**不调用** `SSL_CTX_set_cipher_list`。这不只是抠字眼：显式设置 `"DEFAULT"` 会覆盖 libssl 从 `openssl.cnf` 读到的 `system_default` 套件串，把加固策略悄悄顶掉；留空则让那套策略继续生效。
+
+有两条性质由机制保证，而非依赖约定。`validReactorConfig()` / `validProactorConfig()` 是 `constexpr` 谓词，在每个引擎入口以及两个 `publish*Config()` 发布入口以契约断言校验，非法配置在调用点即中止，而不会延后表现为莫名的 `EPOLL`/`EINVAL` 错误。另一条是 `proactor.cqEntries < proactor.sqEntries`——内核在 `IORING_SETUP_CQSIZE` 下会以 `-EINVAL` 拒绝——解析期直接抬升到 `sqEntries`：两个各自合法的数字，不允许组合出一个起不来的引擎。
 
 ---
 
@@ -319,8 +389,9 @@ int main() {
     // 创建基于 io_uring 的 Proactor 前摄器服务端
     Proactor<EventSocket<HandlerConnection>> server;
 
-    // 参数：IP, 端口, backlog, SQ队列长度, CQ队列长度, 最大并发Accept, 会话池大小, 缓冲环单元数, 单缓冲区大小
-    if (auto res = server.runTcp("0.0.0.0", 8888, 511, 512, 1024, 256, 512, 1024, 4096); !res) {
+    // 调优参数统一放在 config.lua 的 server / proactor 段，经 ConfigHolder 发布；
+    // 引擎自身不再保留硬编码默认值。
+    if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("Proactor 启动失败: {}", toString(res.error()));
         return toExitCode(res.error());
     }
@@ -495,30 +566,32 @@ ctest --output-on-failure
 
 ```text
 Test project /home/aaa/code/mynet/build
-    Start  1: test_request_buffer
- 1/11 Test  #1: test_request_buffer ..............   Passed    0.01 sec
-    Start  2: test_constraints
- 2/11 Test  #2: test_constraints .................   Passed    0.01 sec
-    Start  3: test_datagram
- 3/11 Test  #3: test_datagram ....................   Passed    0.02 sec
-    Start  4: test_error
- 4/11 Test  #4: test_error .......................   Passed    0.01 sec
-    Start  5: test_frame
- 5/11 Test  #5: test_frame .......................   Passed    0.01 sec
-    Start  6: test_handler
- 6/11 Test  #6: test_handler .....................   Passed    0.03 sec
-    Start  7: test_http3
- 7/11 Test  #7: test_http3 .......................   Passed    0.02 sec
-    Start  8: test_multiplexer
- 8/11 Test  #8: test_multiplexer .................   Passed    0.09 sec
-    Start  9: test_object_pool
- 9/11 Test  #9: test_object_pool .................   Passed    0.02 sec
-    Start 10: test_timer
-10/11 Test #10: test_timer .......................   Passed    0.03 sec
-    Start 11: test_config_lua
-11/11 Test #11: test_config_lua ..................   Passed    0.02 sec
+      Start  1: test_request_buffer
+ 1/12 Test  #1: test_request_buffer ..............   Passed    0.01 sec
+      Start  2: test_constraints
+ 2/12 Test  #2: test_constraints .................   Passed    0.01 sec
+      Start  3: test_datagram
+ 3/12 Test  #3: test_datagram ....................   Passed    0.02 sec
+      Start  4: test_error
+ 4/12 Test  #4: test_error .......................   Passed    0.01 sec
+      Start  5: test_frame
+ 5/12 Test  #5: test_frame .......................   Passed    0.01 sec
+      Start  6: test_handler
+ 6/12 Test  #6: test_handler .....................   Passed    0.03 sec
+      Start  7: test_http3
+ 7/12 Test  #7: test_http3 .......................   Passed    0.02 sec
+      Start  8: test_multiplexer
+ 8/12 Test  #8: test_multiplexer .................   Passed    0.10 sec
+      Start  9: test_object_pool
+ 9/12 Test  #9: test_object_pool .................   Passed    0.02 sec
+      Start 10: test_timer
+10/12 Test #10: test_timer .......................   Passed    0.03 sec
+      Start 11: test_tls
+11/12 Test #11: test_tls .........................   Passed    0.02 sec
+      Start 12: test_config_lua
+12/12 Test #12: test_config_lua ..................   Passed    0.02 sec
 
-100% tests passed, 0 tests failed out of 11
+100% tests passed, 0 tests failed out of 12
 ```
 
 ---

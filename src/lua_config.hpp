@@ -4,9 +4,9 @@
  * @file lua_config.hpp
  * @brief 沙箱化 Lua 配置加载与热重载引擎（loadServerSection / reloadConfig）。
  *
- * 把 config.lua 中的 server / proactor / multiplexer / security 各段解析进
- * configHolder.hpp 定义的配置结构体，并提供 reloadConfig() 在信号或 mylog
- * 热重载时重新装载。
+ * 把 config.lua 中的 server / reactor / connection / datagram / proactor /
+ * multiplexer / security 各段解析进 configHolder.hpp 定义的配置结构体，并提供
+ * reloadConfig() 在信号或 mylog 热重载时重新装载。
  */
 
 #include "configHolder.hpp"
@@ -53,6 +53,13 @@ namespace mynet
         inline void printError(std::format_string<> fmt)
         {
             std::fprintf(stderr, "[mynet] config error: %s\n", std::format(fmt).c_str());
+        }
+
+        /// 用于"已被自动修正、配置仍然生效"的情形，避免把纠偏写成拒绝。
+        template <typename... Args>
+        inline void printWarning(std::format_string<Args...> fmt, Args &&...args)
+        {
+            std::fprintf(stderr, "[mynet] config warning: %s\n", std::format(fmt, std::forward<Args>(args)...).c_str());
         }
 
         template <typename T>
@@ -129,8 +136,6 @@ namespace mynet
             return true;
         }
 
-
-
         inline bool loadServerSection(lua_State *L, int idx, ServerConfig &cfg)
         {
             bool valid = true;
@@ -165,23 +170,11 @@ namespace mynet
                 cfg.maxConnections = static_cast<size_t>(v);
             }
 
-            if (readNumberField(L, idx, "keepAliveTimeout_ms", num, valid) ||
-                readNumberField(L, idx, "keepAliveTimeoutMs", num, valid))
+            if (readNumberField(L, idx, "idleTimeoutSecs", num, valid) ||
+                readNumberField(L, idx, "idleTimeout", num, valid))
             {
-                const lua_Integer v = clampValue<lua_Integer>(num, 100, 86'400'000);
-                cfg.keepAliveTimeout_ms = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "writeHighWaterMark", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
-                cfg.writeHighWaterMark = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "maxRequestBytes", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
-                cfg.maxRequestBytes = static_cast<size_t>(v);
+                const lua_Integer v = clampValue<lua_Integer>(num, 0, 86'400);
+                cfg.idleTimeoutSecs = static_cast<int>(v);
             }
 
             if (readBoolField(L, idx, "tcpNoDelay", flag, valid))
@@ -197,6 +190,26 @@ namespace mynet
             if (readBoolField(L, idx, "enableSplice", flag, valid))
             {
                 cfg.enableSplice = flag;
+            }
+
+            return valid;
+        }
+
+        inline bool loadReactorSection(lua_State *L, int idx, ReactorConfig &cfg)
+        {
+            bool valid = true;
+            lua_Integer num = 0;
+
+            if (readNumberField(L, idx, "maxEvents", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 16, 65536);
+                cfg.maxEvents = static_cast<int>(v);
+            }
+
+            if (readNumberField(L, idx, "idleSweepIntervalMs", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 10, 60'000);
+                cfg.idleSweepIntervalMs = static_cast<int>(v);
             }
 
             return valid;
@@ -284,7 +297,19 @@ namespace mynet
                 cfg.sqEntries = static_cast<size_t>(v);
             }
 
-            if (readNumberField(L, idx, "bufEntries", num, valid))
+            if (readNumberField(L, idx, "cqEntries", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 64, 32768);
+                cfg.cqEntries = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxAcceptEvents", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 4096);
+                cfg.maxAcceptEvents = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "bufEntries", num, valid) || readNumberField(L, idx, "maxBufEntrs", num, valid))
             {
                 const lua_Integer v = clampValue<lua_Integer>(num, 16, 65536);
                 cfg.bufEntries = static_cast<size_t>(v);
@@ -294,6 +319,44 @@ namespace mynet
             {
                 const lua_Integer v = clampValue<lua_Integer>(num, 512, 1 << 20);
                 cfg.bufSize = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "udpBufSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 512, 1 << 20);
+                cfg.udpBufSize = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "bufRingAlignment", num, valid))
+            {
+                // posix_memalign 要求对齐为 2 的幂；非法值收敛到页大小而不是让引擎启动失败。
+                const lua_Integer raw = clampValue<lua_Integer>(num, 8, 1 << 20);
+                if (raw != 0 && (raw & (raw - 1)) == 0)
+                {
+                    cfg.bufRingAlignment = static_cast<size_t>(raw);
+                }
+                else
+                {
+                    printWarning("proactor.bufRingAlignment ({}) is not a power of two; using {})", raw,
+                                 cfg.bufRingAlignment);
+                }
+            }
+
+            if (readNumberField(L, idx, "cqeWaitMs", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 60'000);
+                cfg.cqeWaitMs = static_cast<int>(v);
+            }
+
+            // 跨字段一致性：内核在 IORING_SETUP_CQSIZE 下要求 cq_entries >= sq_entries，
+            // 否则 io_uring_queue_init_params() 直接返回 -EINVAL。这类约束必须在这里
+            // 收敛，否则配置合法的两个数字凑在一起会让引擎启动失败。
+            if (cfg.cqEntries < cfg.sqEntries)
+            {
+                printWarning("proactor.cqEntries ({}) was below sqEntries ({}); raised to sqEntries "
+                             "so io_uring can initialise (configuration still applied)",
+                             cfg.cqEntries, cfg.sqEntries);
+                cfg.cqEntries = cfg.sqEntries;
             }
 
             return valid;
@@ -322,25 +385,13 @@ namespace mynet
                 cfg.maxFrameSize = static_cast<size_t>(v);
             }
 
-            if (readNumberField(L, idx, "maxHeaderListSize", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 512, 1 << 20);
-                cfg.maxHeaderListSize = static_cast<size_t>(v);
-            }
-
             return valid;
         }
 
         inline bool loadSecuritySection(lua_State *L, int idx, SecurityConfig &cfg)
         {
             bool valid = true;
-            bool flag = false;
             std::string text;
-
-            if (readBoolField(L, idx, "enableTls", flag, valid))
-            {
-                cfg.enableTls = flag;
-            }
 
             if (readStringField(L, idx, "certFile", text, valid))
             {
@@ -379,7 +430,7 @@ namespace mynet
      * 1. 创建沙箱化隔离 Lua 虚拟机（luaL_newstate() 零加载标准库，杜绝 os、io、package 等任何系统级库与任意代码执行）；
      * 2. 设置单次执行指令配额（50,000,000 条指令）以防死循环拒绝服务；
      * 3. 强制使用 "t" 模式加载文本脚本，杜绝恶意二进制字节码；
-     * 4. 解析校验 server、proactor、multiplexer、security 等各配置节；
+     * 4. 解析校验 server、reactor、connection、datagram、proactor、multiplexer、security 等各配置节；
      * 5. 若配置脚本包含 logger 或 fileManager 配置节，自动联合重新加载 mylog 日志配置；
      * 6. 校验全部通过后，原子发布到 NetConfigHolder；若失败则保持运行中配置不发生任何部分修改（All-or-Nothing）。
      *
@@ -431,8 +482,21 @@ namespace mynet
         }
         lua_pop(L, 1);
 
-        newCfg.connection.writeHighWaterMark = newCfg.server.writeHighWaterMark;
-        newCfg.connection.maxRequestBytes = newCfg.server.maxRequestBytes;
+        lua_getglobal(L, "reactor");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadReactorSection(L, idx, newCfg.reactor))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'reactor' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
 
         lua_getglobal(L, "connection");
         if (lua_istable(L, -1))
@@ -442,9 +506,6 @@ namespace mynet
             {
                 valid = false;
             }
-            // 反向同步回 server，保持两处一致性
-            newCfg.server.writeHighWaterMark = newCfg.connection.writeHighWaterMark;
-            newCfg.server.maxRequestBytes = newCfg.connection.maxRequestBytes;
         }
         else if (lua_type(L, -1) != LUA_TNIL)
         {

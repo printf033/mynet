@@ -5,6 +5,7 @@
  * @brief 基于 epoll 的高性能反应器（Reactor）事件解复用器与服务器事件循环。
  */
 
+#include "configHolder.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
@@ -85,47 +86,141 @@ namespace mynet
         inline void quit() noexcept { loop_.quit(); }
 
         /**
-         * @brief 在指定 IP 和端口上运行 TCP 服务器，直至被请求停止。
+         * @brief 以全局配置（server + reactor 段）运行 TCP 服务器，直至被请求停止。
          * @param ip 监听 IPv4 地址字面量。
          * @param port 监听端口。
-         * @param backlog 监听全连接队列长度。
-         * @param connectionPoolSize 预分配连接池容量。
-         * @param maxEvents 每次 epoll_wait 最大返回事件数。
-         * @param idleTimeoutSecs 空闲连接超时时间（秒，0 表示禁用）。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
-        [[nodiscard]] Result<> runTcp(const char *ip, int port, int backlog = 511, size_t connectionPoolSize = 1 << 10,
-                                      int maxEvents = 1 << 10, int idleTimeoutSecs = 0)
+        /**
+         * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
+         */
+        [[nodiscard]] Result<> runTcp()
             requires kStreaming
         {
-            if (auto err = listener_.listenTcp(ip, port, backlog); !err) [[unlikely]]
+            // 深拷贝一份：get*Config() 返回的是 thread_local 快照的引用，并发的
+            // reloadConfig() 会重新赋值该快照，令 host.c_str() 在调用栈更深处悬垂。
+            // 拷贝成局部值后，指针的生命周期覆盖整个 run* 调用。
+            const NetConfig cfg = getNetConfig();
+            return runTcp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.server, cfg.reactor);
+        }
+
+        [[nodiscard]] Result<> runTcp(const char *ip, int port)
+            requires kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runTcp(ip, port, cfg.server, cfg.reactor);
+        }
+
+        /**
+         * @brief 以显式配置运行 TCP 服务器，直至被请求停止。
+         *
+         * 监听参数取自 server 段，事件循环参数取自 reactor 段；两者都由
+         * config.lua 解析并钳位，引擎侧不再保留任何默认实参。
+         *
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param server 服务端传输配置（backlog / maxConnections / idleTimeoutSecs 等）。
+         * @param reactor 反应器运行时配置（maxEvents / idleSweepIntervalMs）。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runTcp(const char *ip, int port, const ServerConfig &server,
+                                      const ReactorConfig &reactor)
+            requires kStreaming
+        {
+            contract_assert(validServerConfig(server));
+            contract_assert(validReactorConfig(reactor));
+            if (auto err = listener_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
             {
                 reset();
                 return err;
             }
-            Result<> rc = serve(connectionPoolSize, maxEvents, idleTimeoutSecs);
+            Result<> rc = serve(server, reactor);
             reset();
             return rc;
         }
 
         /**
-         * @brief 在指定 IP 和端口上运行 TLS/SSL 服务器，直至被请求停止。
+         * @brief 以全局配置运行 TLS/SSL 服务器，TLS 协商参数取自 security 段。
          * @param ip 监听 IPv4 地址字面量。
          * @param port 监听端口。
          * @param crt PEM 格式证书文件路径。
          * @param key PEM 格式私钥文件路径。
-         * @param backlog 监听全连接队列长度。
-         * @param connectionPoolSize 预分配连接池容量。
-         * @param maxEvents 每次 epoll_wait 最大返回事件数。
-         * @param idleTimeoutSecs 空闲连接超时时间（秒，0 表示禁用）。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
-        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
-                                      size_t connectionPoolSize = 1 << 10, int maxEvents = 1 << 10,
-                                      int idleTimeoutSecs = 0, const TlsOptions &tlsOptions = {})
+        /**
+         * @brief 完全以全局配置运行 TLS 服务器：监听地址与证书路径都取自配置段。
+         *
+         * 证书与私钥取自 security.certFile / security.keyFile；任一为空表示"未配置"，
+         * 直接失败而不是悄悄降级成明文——TLS 服务端不应在配置缺失时静默裸奔。
+         */
+        [[nodiscard]] Result<> runSsl()
             requires SslEvent<Event> && kStreaming
         {
-            if (auto err = listener_.listenTcp(ip, port, backlog); !err) [[unlikely]]
+            const NetConfig cfg = getNetConfig();
+            if (cfg.security.certFile.empty() || cfg.security.keyFile.empty()) [[unlikely]]
+            {
+                LOG_ERROR("runSsl: security.certFile / security.keyFile are empty; "
+                          "set them in config.lua or call the explicit-path overload");
+                return std::unexpected(ERR::SSL_CERT_FAILED);
+            }
+            return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.security.certFile.c_str(),
+                          cfg.security.keyFile.c_str(), cfg.server, cfg.reactor, detail::tlsOptionsFrom(cfg.security));
+        }
+
+        /**
+         * @brief 以全局配置的监听地址 + 显式证书路径运行 TLS 服务器。
+         */
+        [[nodiscard]] Result<> runSsl(const char *crt, const char *key)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), crt, key, cfg.server, cfg.reactor,
+                          detail::tlsOptionsFrom(cfg.security));
+        }
+
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, detail::tlsOptionsFrom(cfg.security));
+        }
+
+        /**
+         * @brief 以显式 TLS 选项 + 全局 server/reactor 配置运行 TLS/SSL 服务器。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param crt PEM 格式证书文件路径。
+         * @param key PEM 格式私钥文件路径。
+         * @param tlsOptions TLS 版本、密码套件与 ALPN 协商选项。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
+                                      const TlsOptions &tlsOptions)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, tlsOptions);
+        }
+
+        /**
+         * @brief 以显式配置运行 TLS/SSL 服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param crt PEM 格式证书文件路径。
+         * @param key PEM 格式私钥文件路径。
+         * @param server 服务端传输配置。
+         * @param reactor 反应器运行时配置。
+         * @param tlsOptions TLS 协商选项。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
+                                      const ServerConfig &server, const ReactorConfig &reactor,
+                                      const TlsOptions &tlsOptions)
+            requires SslEvent<Event> && kStreaming
+        {
+            contract_assert(validServerConfig(server));
+            contract_assert(validReactorConfig(reactor));
+            if (auto err = listener_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
             {
                 reset();
                 return err;
@@ -162,22 +257,37 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_KEY_MISMATCH);
             }
-            Result<> rc = serve(connectionPoolSize, maxEvents, idleTimeoutSecs);
+            Result<> rc = serve(server, reactor);
             reset();
             return rc;
         }
 
         /**
-         * @brief 在指定 IP 和端口上运行 UDP 数据报服务器，直至被请求停止。
+         * @brief 以全局配置（reactor 段）运行 UDP 数据报服务器，直至被请求停止。
          * @param ip 监听 IPv4 地址字面量。
          * @param port 监听端口。
          * @param handler 数据报处理器引用。
-         * @param maxEvents 每次 epoll_wait 最大返回事件数。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
-        [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, int maxEvents = 1 << 10)
+        [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler)
             requires MandatoryMethodDatagram<Handler>
         {
+            const ReactorConfig cfg = getReactorConfig();
+            return runUdp(ip, port, handler, cfg);
+        }
+
+        /**
+         * @brief 以显式配置运行 UDP 数据报服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param handler 数据报处理器引用。
+         * @param reactor 反应器运行时配置（maxEvents）。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, const ReactorConfig &reactor)
+            requires MandatoryMethodDatagram<Handler>
+        {
+            contract_assert(validReactorConfig(reactor));
             if (auto err = listener_.listenUdp(ip, port); !err) [[unlikely]]
             {
                 reset();
@@ -185,7 +295,7 @@ namespace mynet
             }
             handler.reset();
             datagram_.bind(handler);
-            Result<> rc = serveDatagram(maxEvents);
+            Result<> rc = serveDatagram(reactor);
             reset();
             return rc;
         }
@@ -237,16 +347,24 @@ namespace mynet
         /**
          * @brief 面向流式连接的核心事件循环。
          */
-        [[nodiscard]] inline Result<> serve(size_t connectionPoolSize, int maxEvents, int idleTimeoutSecs)
+        [[nodiscard]] inline Result<> serve(const ServerConfig &server, const ReactorConfig &reactor)
             requires kStreaming
         {
+            // 这两个 serve 是 public 的（可在 runTcp 之外直接驱动），因此校验必须
+            // 落在它们自己身上，而不是只靠调用方。maxConnections == 0 会让
+            // ObjectPool::init(0) 成功返回一个空池，随后每个 accept 都被当作
+            // "池耗尽"关掉——表现为一个静默不服务的服务器，而不是明确失败。
+            contract_assert(validServerConfig(server));
+            contract_assert(validReactorConfig(reactor));
             if (loop_.epollFd() < 0) [[unlikely]]
             {
                 LOG_ERROR("Reactor::serve: the event loop has no epoll descriptor");
                 return std::unexpected(ERR::EPOLL_CREATE_FAILED);
             }
-            loop_.reserveEvents(maxEvents > 0 ? static_cast<size_t>(maxEvents) : (1 << 10));
-            const size_t connSlots = connectionPoolSize > 0 ? connectionPoolSize : (1 << 10);
+            // 配置在 lua_config 解析阶段已完成钳位，这里不再重复兜底，
+            // 避免两处默认值分叉。
+            loop_.setEventCapacity(static_cast<size_t>(reactor.maxEvents));
+            const size_t connSlots = server.maxConnections;
             if (auto poolRes = connPool_.init(connSlots); !poolRes) [[unlikely]]
             {
                 LOG_ERROR("Reactor::serve: initialising connection pool ({} slots) failed", connSlots);
@@ -256,14 +374,14 @@ namespace mynet
             loop_.setEventCallback([this](uint32_t events, void *ptr) { onEvent(events, ptr); });
             if (auto res = loop_.addFd(listener_.fd, EPOLLIN | EPOLLET, &listener_); !res) [[unlikely]]
             {
-                LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", listener_.fd,
-                          errnoText(errno));
+                LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", listener_.fd, errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
-            if (idleTimeoutSecs > 0)
+            if (server.idleTimeoutSecs > 0)
             {
-                idleTimeout_ = std::chrono::seconds(idleTimeoutSecs);
-                idleTimerId_ = loop_.runEvery(std::chrono::seconds(1), [this] { sweepIdle(); });
+                idleTimeout_ = std::chrono::seconds(server.idleTimeoutSecs);
+                idleTimerId_ =
+                    loop_.runEvery(std::chrono::milliseconds(reactor.idleSweepIntervalMs), [this] { sweepIdle(); });
             }
             return loop_.run();
         }
@@ -271,14 +389,15 @@ namespace mynet
         /**
          * @brief 面向数据报的核心事件循环。
          */
-        [[nodiscard]] inline Result<> serveDatagram(int maxEvents)
+        [[nodiscard]] inline Result<> serveDatagram(const ReactorConfig &reactor)
         {
+            contract_assert(validReactorConfig(reactor));
             if (loop_.epollFd() < 0) [[unlikely]]
             {
                 LOG_ERROR("Reactor::serveDatagram: the event loop has no epoll descriptor");
                 return std::unexpected(ERR::EPOLL_CREATE_FAILED);
             }
-            loop_.reserveEvents(maxEvents > 0 ? static_cast<size_t>(maxEvents) : (1 << 10));
+            loop_.setEventCapacity(static_cast<size_t>(reactor.maxEvents));
             loop_.setEventCallback([this](uint32_t events, void *ptr) { onEvent(events, ptr); });
             if (auto res = loop_.addFd(listener_.fd, EPOLLIN | EPOLLET, &listener_); !res) [[unlikely]]
             {
@@ -352,8 +471,7 @@ namespace mynet
                     {
                         if (auto err = acceptAll(); !err) [[unlikely]]
                         {
-                            LOG_DEBUG("Reactor::onEvent: draining accept backlog ended with {}",
-                                      toString(err.error()));
+                            LOG_DEBUG("Reactor::onEvent: draining accept backlog ended with {}", toString(err.error()));
                         }
                     }
                 }
@@ -583,10 +701,7 @@ namespace mynet
             connPool_.release(conn);
         }
 
-        inline void drainDatagrams()
-        {
-            [[maybe_unused]] auto _ = datagram_.handleRead(listener_.fd);
-        }
+        inline void drainDatagrams() { [[maybe_unused]] auto _ = datagram_.handleRead(listener_.fd); }
 
         inline void sweepIdle()
             requires kStreaming

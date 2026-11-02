@@ -23,6 +23,7 @@
   - [Datagram Transport (UDP)](#5-datagram-transport-udp)
   - [Modern C++26 &amp; Strongly-Typed Error Semantics](#6-modern-c26--strongly-typed-error-semantics)
   - [Bidirectional Stream Client (Client)](#7-bidirectional-stream-client-client)
+  - [Configuration Ownership](#8-configuration-ownership-no-hard-coded-engine-defaults)
 - [Benchmark Results](#benchmark-results)
 - [Dependencies &amp; Prerequisites](#dependencies--prerequisites)
 - [Building &amp; Installation](#building--installation)
@@ -59,6 +60,7 @@
   - Full support for ALPN negotiation, SNI host matching, and asynchronous TLS handshakes.
 - **Protocol Engineering & Framing**:
   - HTTP/2 wire-compatible 9-byte frame codec (`Length:24`, `Type:8`, `Flags:8`, `StreamID:31`).
+  - RFC 7541 HPACK header compression (static/dynamic tables and Huffman decoding) plus RFC 9113 client connection-preface validation, so `curl --http2-prior-knowledge` and `nghttp` interoperate end to end.
   - Generalized `HandlerHttp2<StreamHandler>` supporting concurrent stream management, priority, ping, reset, connection/stream-level flow control (`WINDOW_UPDATE`), and graceful `GOAWAY` teardown.
   - HTTP/1.x codec powered by `llhttp` supporting pipelining and keep-alive.
 - **Observability & Operability**:
@@ -146,7 +148,13 @@ flowchart TD
 ### 4. HTTP/2 Framing & Stream Multiplexer
 
 - **Wire Compatibility**: `FrameDecoder` and `appendFrame` parse and construct 9-byte HTTP/2 standard frames (`DATA`, `HEADERS`, `PRIORITY`, `RST_STREAM`, `SETTINGS`, `PUSH_PROMISE`, `PING`, `GOAWAY`, `WINDOW_UPDATE`).
+- **Client Connection Preface**: the 24-byte RFC 9113 §3.4 preface is validated before any frame is decoded (it may arrive split across reads); a wrong preface is answered with `GOAWAY(PROTOCOL_ERROR)` instead of being misparsed as a 5 MiB frame.
+- **HPACK (`http/v2/hpack.hpp`)**: RFC 7541 decoding — static table, dynamic table with eviction, table-size updates and Huffman strings — plus a stateless encoder used by `sendResponse`. Compression failures end the connection with `COMPRESSION_ERROR`; an over-large header list resets only that stream.
+- **Fragmented Header Blocks**: `HEADERS` without `END_HEADERS` is assembled from same-stream `CONTINUATION` frames (fragment boundaries may fall inside an HPACK field). Per RFC 9113 §6.2 any interleaved frame — including one on another stream — ends the connection, which is also the CVE-2024-27983 defense; a zero-length `CONTINUATION` flood hits a 32-empty-frame cap (total fragments capped at 4096), and a header list that decodes past the advertised limit is answered with `RST_STREAM` — the block is still fully HPACK-decoded first, so the connection's dynamic table never desynchronises.
+- **Header List Limits**: `sendSettings` advertises `SETTINGS_MAX_HEADER_LIST_SIZE` with the same value the decoder enforces, so a compliant peer never trips the limit mid-block. The peer's advertised limit is honoured on the way out: `sendResponse` refuses a header list the peer said it will not accept, and outbound `HEADERS` are split into `CONTINUATION` frames by the peer's `SETTINGS_MAX_FRAME_SIZE`.
 - **`HandlerHttp2<StreamHandler>`**: Enables many independent logical request/response streams over a single byte stream.
+  - `onStreamHeadersDecoded` delivers decoded pseudo-headers; `onStreamEnd` fires when a request body is complete.
+  - `sendResponse(streamId, status, body, extra)` encodes `:status` and sends the response through the existing flow-control path.
   - Implements credit-based flow control at both connection and stream levels.
   - Utilizes `mux::StreamTable<StreamSlot>` for zero-allocation stream lookups and lifecycles.
   - Automatically sends `WINDOW_UPDATE` frames when window thresholds drop below half.
@@ -186,6 +194,67 @@ tls.alpnProtocols = {"h2", "http/1.1"};
 Client<EventSsl<HandlerConnection>> client;
 client.runSsl("127.0.0.1", 443, "example.com", nullptr, 16 << 10, tls);
 ```
+
+### 8. Configuration Ownership: No Hard-Coded Engine Defaults
+
+Every tunable that decides *how much* a server engine allocates or how deep its kernel queues run lives in exactly one place: `configHolder.hpp` (the compiled-in baseline) parsed and clamped by `config/config.lua` via `reloadConfig()`. `Reactor` and `Proactor` carry no default arguments of their own — the two-argument call reads the current `NetConfig` snapshot:
+
+```cpp
+// Nothing is loaded for you: the baseline in configHolder.hpp is what a fresh
+// process already has. Call this once at startup to apply config/config.lua.
+mynet::reloadConfig("config/config.lua");
+
+// Fully from config: host and port come from server.host / server.port.
+server.runTcp();
+
+// Explicit endpoint, configuration still from the snapshot.
+server.runTcp("0.0.0.0", 8888);
+
+// Everything explicit; the same validation contracts apply.
+ReactorConfig reactorCfg = mynet::getReactorConfig();
+reactorCfg.maxEvents = 2048;
+server.runTcp("0.0.0.0", 8888, mynet::getServerConfig(), reactorCfg);
+
+// TLS: runSsl() takes certFile / keyFile from the security section and refuses
+// to start when they are unset; runSsl(crt, key) keeps the configured endpoint.
+tlsServer.runSsl();
+```
+
+Without that `reloadConfig()` call the library still runs, on the compiled-in baseline — which is exactly the same value set the shipped `config.lua` carries (a test enforces it field by field). What a reader should *not* assume is that editing `config.lua` alone changes a running server.
+
+Every field also declares **when** it takes effect, and that declaration is data, not documentation: `kConfigReloadMap` in `configHolder.hpp` maps every dotted path to a `ReloadMode`, and a test enumerates `NetConfig` by static reflection to prove no field is missing from it.
+
+- **`Hot`** — picked up by `reloadConfig()` immediately. The reading site is on a per-connection or per-I/O path (`Connection`, `Datagram`, `HandlerHttp2`), so new connections and in-flight I/O see the new value right away.
+- **`Startup`** — read once inside `listen()` / `serve()` / `runSsl()`. `reloadConfig()` updates the snapshot, but a running engine keeps the values it started with; restart the server to apply.
+
+| Section | Fields | Effect |
+| :------ | :----- | :----- |
+| `server` | `host`, `port`, `backlog`, `maxConnections`, `idleTimeoutSecs` | Startup |
+| `server` | `tcpNoDelay`, `tcpQuickAck`, `enableSplice` | Hot |
+| `reactor` | `maxEvents`, `idleSweepIntervalMs` | Startup |
+| `proactor` | `sqEntries`, `cqEntries`, `maxAcceptEvents`, `bufEntries`, `bufSize`, `udpBufSize`, `bufRingAlignment`, `cqeWaitMs` | Startup |
+| `connection` | `responseCapacity`, `readChunkSize`, `maxRequestBytes`, `writeHighWaterMark`, `writeHardCapFactor`, `spliceChunkSize`, `maxWriteIov` | Hot |
+| `datagram` | `maxDatagramBytes`, `maxPendingOutgoing` | Hot |
+| `multiplexer` | `maxConcurrentStreams`, `initialWindowSize`, `maxFrameSize` | Hot |
+| `security` | `certFile`, `keyFile`, `caFile`, `ciphers`, `alpnProtocols` | Startup |
+
+`server.maxConnections` is the single source of truth for capacity: the Reactor sizes its connection pool from it and the Proactor its session pool. `server.host`/`port` are consumed by the zero-argument `runTcp()` / `runSsl()`, and `security.certFile`/`keyFile` by `runSsl()` with no path arguments — that overload refuses to start rather than silently falling back to plaintext when the paths are unset.
+
+Collapsing two sources of truth into one necessarily picks one of the two numbers. Two defaults therefore moved, and they are stated here rather than left for a surprised operator to discover:
+
+- **listen backlog `511` → `128`** — `runTcp`/`runSsl` used to default to `511` while `config.lua` already documented `128`. The documented value won.
+- **Proactor `sqEntries` `512` → `2048`, and `cqEntries` is now a separate knob defaulting to `2048`** — the engine used to default to `sq=512`/`cq=1024`, while `config.lua` documented `sq=2048`. The documented value won, and `cq` became configurable instead of being fixed at `2 × sq`.
+- **Pool sizing moved to `server.maxConnections`** — `reactor.connectionPoolSize` and `proactor.sessionPoolSize` were two names for one concept and are gone. The default is `8192`, versus the old Reactor pool of `1024` and Proactor session pool of `512`. This is a **preallocated** slot count, not a growable ceiling: measured cost is ≈ 3 KiB per slot, so `8192` costs ≈ 24–26 MiB of RSS at startup and `65536` ≈ 190 MiB. (Measured on both the plaintext echo and the HTTP/2 handler; HTTP/2 stream pools are allocated lazily, so heavy multiplexing adds on top.) The `65536` that `config.lua` used to document was never allocated — it was a write-only field — so it is not the new default.
+
+The public engine signatures also changed, which matters if you call them directly: `Reactor::serve(size_t,int,int)` → `serve(const ServerConfig&, const ReactorConfig&)`, `Reactor::serveDatagram(int)` → `serveDatagram(const ReactorConfig&)`, `Proactor::serve(...)` → `serve(const ServerConfig&, const ProactorConfig&, bool)`, and `Event::listenTcp` lost its `backlog = 511` default argument. Every in-repo call site was updated; downstream code fails at compile time rather than changing behaviour silently.
+
+Four aliases that existed only to feed a duplicate of another field were removed outright: `server.keepAliveTimeout_ms` (superseded by `server.idleTimeoutSecs`), `server.writeHighWaterMark` / `server.maxRequestBytes` (the `connection` section is the consumer), `security.enableTls` (which `runSsl` you call is a compile-time choice), and `multiplexer.maxHeaderListSize` (no enforcement existed behind it). Nothing that was previously honoured was dropped. Each removed field was either never read at all, or read only to populate another field that itself had no consumer (`server.writeHighWaterMark` / `server.maxRequestBytes` were copied into the `connection` section by the parser, and the `connection` section is what the engine actually reads) — a chain of aliases ending nowhere.
+
+ALPN deserves its own note. It is **not** enabled by default: `security.alpnProtocols = ""` means `runSsl` installs no ALPN selection callback, exactly as before this refactor. Set it only when the handler actually speaks the advertised protocol — an echo server that advertises `h2` is lying to its clients.
+
+Ciphers follow the same "don't override what you weren't asked to change" rule. An empty `security.ciphers` (the default) — and the literal `"DEFAULT"` — are both normalized to *not calling* `SSL_CTX_set_cipher_list`. That matters beyond pedantry: explicitly setting `"DEFAULT"` replaces the `system_default` cipher string libssl read from `openssl.cnf`, silently discarding a hardening policy. Leaving it empty keeps that policy in force.
+
+Two properties are enforced in mechanism rather than by convention. `validReactorConfig()` / `validProactorConfig()` are `constexpr` predicates asserted at every engine entry point — and at both `publish*Config()` entry points — so a non-runnable configuration aborts at the call site instead of surfacing as a mysterious `EPOLL`/`EINVAL` later. And `proactor.cqEntries < proactor.sqEntries` — which the kernel rejects with `-EINVAL` under `IORING_SETUP_CQSIZE` — is raised to `sqEntries` during parsing, because two individually valid numbers must not be allowed to compose into an unbootable engine.
 
 ---
 
@@ -319,8 +388,9 @@ int main() {
     // Instantiate a Proactor using io_uring multishot accept & multishot recv
     Proactor<EventSocket<HandlerConnection>> server;
 
-    // Parameters: IP, Port, backlog, SQ entries, CQ entries, max accept ops, session pool, buf ring count, buf size
-    if (auto res = server.runTcp("0.0.0.0", 8888, 511, 512, 1024, 256, 512, 1024, 4096); !res) {
+    // Tuning lives in config.lua (server / proactor sections) and is published
+    // through ConfigHolder; the engine keeps no hard-coded defaults of its own.
+    if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("Proactor failed: {}", toString(res.error()));
         return toExitCode(res.error());
     }
@@ -496,30 +566,32 @@ Output:
 
 ```text
 Test project /home/aaa/code/mynet/build
-    Start  1: test_request_buffer
- 1/11 Test  #1: test_request_buffer ..............   Passed    0.01 sec
-    Start  2: test_constraints
- 2/11 Test  #2: test_constraints .................   Passed    0.01 sec
-    Start  3: test_datagram
- 3/11 Test  #3: test_datagram ....................   Passed    0.02 sec
-    Start  4: test_error
- 4/11 Test  #4: test_error .......................   Passed    0.01 sec
-    Start  5: test_frame
- 5/11 Test  #5: test_frame .......................   Passed    0.01 sec
-    Start  6: test_handler
- 6/11 Test  #6: test_handler .....................   Passed    0.03 sec
-    Start  7: test_http3
- 7/11 Test  #7: test_http3 .......................   Passed    0.02 sec
-    Start  8: test_multiplexer
- 8/11 Test  #8: test_multiplexer .................   Passed    0.09 sec
-    Start  9: test_object_pool
- 9/11 Test  #9: test_object_pool .................   Passed    0.02 sec
-    Start 10: test_timer
-10/11 Test #10: test_timer .......................   Passed    0.03 sec
-    Start 11: test_config_lua
-11/11 Test #11: test_config_lua ..................   Passed    0.02 sec
+      Start  1: test_request_buffer
+ 1/12 Test  #1: test_request_buffer ..............   Passed    0.01 sec
+      Start  2: test_constraints
+ 2/12 Test  #2: test_constraints .................   Passed    0.01 sec
+      Start  3: test_datagram
+ 3/12 Test  #3: test_datagram ....................   Passed    0.02 sec
+      Start  4: test_error
+ 4/12 Test  #4: test_error .......................   Passed    0.01 sec
+      Start  5: test_frame
+ 5/12 Test  #5: test_frame .......................   Passed    0.01 sec
+      Start  6: test_handler
+ 6/12 Test  #6: test_handler .....................   Passed    0.03 sec
+      Start  7: test_http3
+ 7/12 Test  #7: test_http3 .......................   Passed    0.02 sec
+      Start  8: test_multiplexer
+ 8/12 Test  #8: test_multiplexer .................   Passed    0.10 sec
+      Start  9: test_object_pool
+ 9/12 Test  #9: test_object_pool .................   Passed    0.02 sec
+      Start 10: test_timer
+10/12 Test #10: test_timer .......................   Passed    0.03 sec
+      Start 11: test_tls
+11/12 Test #11: test_tls .........................   Passed    0.02 sec
+      Start 12: test_config_lua
+12/12 Test #12: test_config_lua ..................   Passed    0.02 sec
 
-100% tests passed, 0 tests failed out of 11
+100% tests passed, 0 tests failed out of 12
 ```
 
 ---

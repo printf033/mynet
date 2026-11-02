@@ -1,4 +1,5 @@
 #include "common/endpoint.hpp"
+#include "common/http2.hpp"
 #include "connection.hpp"
 #include "error.hpp"
 #include "http/v2/handler.hpp"
@@ -10,8 +11,9 @@
 //     ./proactor_http2              # 监听 0.0.0.0:8888
 //     ./proactor_http2 0.0.0.0:9000
 //
-// HandlerHttp2 之下的逻辑不随底层引擎改变：它继承自 HandlerConnection，
-// 因此在 reactor_http2 与本示例中具有完全相同的分层边界。
+// HandlerHttp2 之下的逻辑不随底层引擎改变：连接前言、HPACK、分帧与流控都在
+// 协议层完成，因此在 reactor_http2 与本示例中可用同样的标准客户端验证：
+//     curl --http2-prior-knowledge -d hello http://127.0.0.1:8888/
 
 int main(int argc, char *argv[])
 {
@@ -28,7 +30,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (http/2, proactor)", listen.text);
 
     using namespace mynet;
-    using Handler = HandlerHttp2<HandlerConnection>;
+    using Handler = example::Http2EchoHandler;
     if (auto res = Proactor<EventSocket<Handler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));

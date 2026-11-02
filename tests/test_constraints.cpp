@@ -1,5 +1,6 @@
-#include "constraints.hpp"
+#include "configHolder.hpp"
 #include "connection.hpp"
+#include "constraints.hpp"
 #include "datagram.hpp"
 #include "event.hpp"
 #include "http/v1/handler.hpp"
@@ -194,7 +195,11 @@ namespace
 
         bool hasOutgoing() noexcept { return false; }
         size_t outgoingCount() noexcept { return 0; }
-        const DatagramPacket &peekOutgoing() noexcept { static DatagramPacket p; return p; }
+        const DatagramPacket &peekOutgoing() noexcept
+        {
+            static DatagramPacket p;
+            return p;
+        }
         DatagramPacket takeOutgoing() { return {}; }
         size_t droppedOutgoing() noexcept { return 0; }
 
@@ -279,7 +284,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     // 两层要求各自可独立生效：结构齐全但不派生 → 仍被拒
     static_assert(!MandatoryMethodConnection<FullContractWithoutDerivation>);
     static_assert(!MandatoryMethodConnection<LegacySixMemberHandler>); // 既未派生又缺方法
-    static_assert(MandatoryMethodConnection<CombinedHandler>);        // 双特化组合（流式 + 数据报）仍然成立
+    static_assert(MandatoryMethodConnection<CombinedHandler>);         // 双特化组合（流式 + 数据报）仍然成立
     static_assert(MandatoryMethodConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(!MandatoryMethodConnection<ThrowingAppendHandler>); // 旧语义：允许抛出的摄入路径现被约束拒绝
 
@@ -480,4 +485,96 @@ TEST(Constraints, EnginesAcceptPureDatagramHandlers)
 
     EXPECT_FALSE(Reactor<PureEv>::kStreaming);
     EXPECT_TRUE(Reactor<StreamEv>::kStreaming);
+}
+
+// ---------------------------------------------------------------------------
+// 每个公开的 run* 重载都必须**真正可实例化**。
+//
+// 这条约束的存在理由：类模板的成员函数体只在被使用时才实例化，因此
+// `requires { e.runSsl(); }` 这类表达式只能验证签名存在，验证不到函数体。
+// 曾有一个重载把 cfg.reactor 传给要求 ProactorConfig 的参数——签名合法、
+// 概念检查通过，直到用户真的调用才发现编不过。下面的函数体强制实例化
+// 每一个重载，这个编译错误就再也藏不住了（本文件不链接运行它们）。
+// ---------------------------------------------------------------------------
+namespace
+{
+    template <typename Engine, typename Handler>
+    void instantiateEveryRunOverload(Engine &engine, Handler &handler) noexcept
+    {
+        [[maybe_unused]] mynet::Result<> r{};
+        if constexpr (requires { engine.runTcp(); })
+        {
+            r = engine.runTcp();
+        }
+        if constexpr (requires { engine.runTcp("127.0.0.1", 0); })
+        {
+            r = engine.runTcp("127.0.0.1", 0);
+        }
+        if constexpr (requires { engine.runUdp("127.0.0.1", 0, handler); })
+        {
+            r = engine.runUdp("127.0.0.1", 0, handler);
+        }
+        (void)r;
+    }
+
+    template <typename Engine>
+    void instantiateSslRunOverloads(Engine &engine) noexcept
+    {
+        [[maybe_unused]] mynet::Result<> r{};
+        if constexpr (requires { engine.runSsl(); })
+        {
+            r = engine.runSsl();
+        }
+        if constexpr (requires { engine.runSsl("crt", "key"); })
+        {
+            r = engine.runSsl("crt", "key");
+        }
+        if constexpr (requires { engine.runSsl("127.0.0.1", 0, "crt", "key"); })
+        {
+            r = engine.runSsl("127.0.0.1", 0, "crt", "key");
+        }
+        (void)r;
+    }
+} // namespace
+
+TEST(Constraints, EveryRunOverloadIsInstantiable)
+{
+    // 这里真的调用每一个公开重载。它们当然会失败（端口 0 / 证书路径不存在），
+    // 但我们只关心"函数体能否被编译出来"——这正是之前那个 cfg.reactor /
+    // cfg.proactor 笔误唯一能被抓到的地方。requires 表达式抓不到，因为它
+    // 只检查签名；if constexpr(false) 也抓不到，因为未采用的分支不实例化。
+    mynet::HandlerDatagram datagramHandler{};
+
+    // 把监听地址预先改成不可能绑定的字面量：零参重载会读取它并立刻失败，
+    // 于是本测试只做"函数体能否编译"，绝不会真的进入事件循环把测试挂住。
+    const mynet::NetConfig saved = mynet::getNetConfig();
+    mynet::NetConfig poison = saved;
+    poison.server.host = "256.256.256.256";
+    poison.server.port = 1;
+    mynet::publishNetConfig(poison);
+
+    mynet::Reactor<mynet::EventSocket<mynet::HandlerConnection>> reactorStream;
+    mynet::Reactor<mynet::EventSocket<mynet::HandlerDatagram>> reactorDatagram;
+    mynet::Proactor<mynet::EventSocket<mynet::HandlerConnection>> proactorStream;
+
+    mynet::Reactor<mynet::EventSsl<mynet::HandlerConnection>> reactorTls;
+    mynet::Proactor<mynet::EventSsl<mynet::HandlerConnection>> proactorTls;
+
+    // 每次调用都会立刻失败（监听/加载证书），因此不会真的进入事件循环。
+    [[maybe_unused]] auto r1 = reactorStream.runTcp("1.2.3.4", 0);
+    [[maybe_unused]] auto r2 = reactorStream.runTcp();
+    [[maybe_unused]] auto r3 = reactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
+    [[maybe_unused]] auto r4 = proactorStream.runTcp("1.2.3.4", 0);
+    [[maybe_unused]] auto r5 = proactorStream.runTcp();
+
+    [[maybe_unused]] auto r6 = reactorTls.runSsl();
+    [[maybe_unused]] auto r7 = reactorTls.runSsl("missing.crt", "missing.key");
+    [[maybe_unused]] auto r8 = reactorTls.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
+
+    [[maybe_unused]] auto r9 = proactorTls.runSsl();
+    [[maybe_unused]] auto r10 = proactorTls.runSsl("missing.crt", "missing.key");
+    [[maybe_unused]] auto r11 = proactorTls.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
+
+    mynet::publishNetConfig(saved);
+    SUCCEED();
 }

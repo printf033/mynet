@@ -1,4 +1,5 @@
 #include "common/endpoint.hpp"
+#include "common/http2.hpp"
 #include "connection.hpp"
 #include "error.hpp"
 #include "http/v2/handler.hpp"
@@ -10,9 +11,12 @@
 //     ./reactor_http2              # 监听 0.0.0.0:8888
 //     ./reactor_http2 0.0.0.0:9000
 //
-// 分层边界是本示例的重点：HandlerHttp2 负责分帧、流标识符管理、流控与连接拆除，
-// 并为每条流提供透明的纯字节流——此处为 HandlerConnection，它把流内字节原样回显。
-// 流处理器完全感知不到帧首部，HandlerHttp2 也不理解上层应用协议报文。
+// 分层边界是本示例的重点：HandlerHttp2 负责连接前言、分帧、HPACK、流标识符管理、
+// 流控与连接拆除；每条流的请求体由 per-stream 处理器缓冲，END_STREAM 到达后由
+// 应用层回一条 200 响应（common/http2.hpp 中的 Http2EchoHandler）。
+//
+// 因此标准客户端可直接互通：
+//     curl --http2-prior-knowledge -d hello http://127.0.0.1:8888/
 //
 // 准入上限 128 条并发流（mux::kDefaultMaxStreams，通过 SETTINGS_MAX_CONCURRENT_STREAMS
 // 宣告）。超限的新建流被 RST_STREAM 拒绝而非排队缓冲——强行缓存帧只会把积压藏起来。
@@ -32,7 +36,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (http/2, reactor)", listen.text);
 
     using namespace mynet;
-    using Handler = HandlerHttp2<HandlerConnection>;
+    using Handler = example::Http2EchoHandler;
     if (auto res = Reactor<EventSocket<Handler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));

@@ -5,6 +5,7 @@
  * @brief RFC 9204 QPACK 头部压缩静态表与字段编解码器。
  */
 
+#include "../v2/hpack.hpp"
 #include "frame.hpp"
 #include <array>
 #include <cstddef>
@@ -96,6 +97,7 @@ namespace mynet
             {"content-type", "text/plain; charset=utf-8"},
             {"range", "bytes=0-"},
             {"strict-transport-security", "max-age=31536000"},
+            {"strict-transport-security", "max-age=31536000; includesubdomains"},
             {"strict-transport-security", "max-age=31536000; includesubdomains; preload"},
             {"vary", "accept-encoding"},
             {"vary", "origin"},
@@ -137,7 +139,6 @@ namespace mynet
             {"x-forwarded-for", ""},
             {"x-frame-options", "deny"},
             {"x-frame-options", "sameorigin"},
-            {":status", "502"},
         }};
 
         /**
@@ -261,11 +262,7 @@ namespace mynet
                 return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
             }
             // RFC 9204 Section 4.1.2: 最高位为 H 标志（Huffman 压缩）
-            if ((*ptr & 0x80u) != 0) [[unlikely]]
-            {
-                // 基线实现不支持 Huffman 压缩字面量，依规以协议帧错误拒绝
-                return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
-            }
+            const bool isHuffman = (*ptr & 0x80u) != 0;
             auto lenRes = decodePrefixedInt(ptr, rem, 7);
             if (!lenRes)
             {
@@ -280,10 +277,19 @@ namespace mynet
             {
                 return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
             }
-            std::string s(reinterpret_cast<const char *>(ptr), len);
+            std::string_view raw(reinterpret_cast<const char *>(ptr), len);
             ptr += len;
             rem -= len;
-            return s;
+            if (isHuffman)
+            {
+                auto decRes = http::v2::hpack::huffmanDecode(raw);
+                if (!decRes)
+                {
+                    return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
+                }
+                return *decRes;
+            }
+            return std::string(raw);
         }
 
         /**
@@ -404,10 +410,7 @@ namespace mynet
                     // Literal Without Name Reference (Section 4.5.6)
                     // 模式: 0 0 1 0 N 0 NameLen (3 位前缀, N=0 -> 0x20)
                     // 第 3 位 (0x08) 为名称 Huffman 压缩标志 H
-                    if ((b & 0x08u) != 0) [[unlikely]]
-                    {
-                        return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
-                    }
+                    const bool nameHuffman = (b & 0x08u) != 0;
                     auto nameLenRes = decodePrefixedInt(ptr, rem, 3);
                     if (!nameLenRes)
                     {
@@ -422,9 +425,23 @@ namespace mynet
                     {
                         return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
                     }
-                    std::string name(reinterpret_cast<const char *>(ptr), nameLen);
+                    std::string_view rawName(reinterpret_cast<const char *>(ptr), nameLen);
                     ptr += nameLen;
                     rem -= nameLen;
+                    std::string name;
+                    if (nameHuffman)
+                    {
+                        auto decRes = http::v2::hpack::huffmanDecode(rawName);
+                        if (!decRes)
+                        {
+                            return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
+                        }
+                        name = std::move(*decRes);
+                    }
+                    else
+                    {
+                        name = std::string(rawName);
+                    }
 
                     auto valRes = readStringLiteral(ptr, rem);
                     if (!valRes)

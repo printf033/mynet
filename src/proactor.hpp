@@ -5,6 +5,7 @@
  * @brief 高性能 Linux io_uring 前摄器（Proactor）服务器实现。
  */
 
+#include "configHolder.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
@@ -70,47 +71,139 @@ namespace mynet
             delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
 
         /**
-         * @brief 在指定 IP 和端口上运行 TCP 服务器，直至被请求停止。
+         * @brief 以全局配置（server + proactor 段）运行 TCP 服务器，直至被请求停止。
          * @param ip 监听 IPv4 地址字面量。
          * @param port 监听端口。
-         * @param backlog 监听全连接队列长度。
-         * @param sqEntries io_uring 提交队列大小。
-         * @param cqEntries io_uring 完成队列大小。
-         * @param maxAcceptEvents 最大在途 accept 操作并发数。
-         * @param sessionPoolSize 预分配会话对象池容量。
-         * @param maxBufEntrs 内核 Buffer Ring 中的缓冲区条目数。
-         * @param bufSize Buffer Ring 中每个缓冲区的大小。
-         * @param idleTimeoutSecs 空闲连接超时时间（秒，0 表示禁用）。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
-        [[nodiscard]] Result<> runTcp(const char *ip, int port, int backlog = 511, unsigned int sqEntries = 512,
-                                      unsigned int cqEntries = 1 << 10, int maxAcceptEvents = 256,
-                                      size_t sessionPoolSize = 512, int maxBufEntrs = 1 << 10, int bufSize = 4 << 10,
-                                      int idleTimeoutSecs = 0)
+        /**
+         * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
+         */
+        [[nodiscard]] Result<> runTcp()
             requires SocketEvent<Event> && kStreaming
         {
-            if (auto err = acceptor_.listenTcp(ip, port, backlog); !err) [[unlikely]]
+            const NetConfig cfg = getNetConfig();
+            return runTcp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.server, cfg.proactor);
+        }
+
+        [[nodiscard]] Result<> runTcp(const char *ip, int port)
+            requires SocketEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runTcp(ip, port, cfg.server, cfg.proactor);
+        }
+
+        /**
+         * @brief 以显式配置运行 TCP 服务器，直至被请求停止。
+         *
+         * 监听参数取自 server 段，环/缓冲/池参数取自 proactor 段；两者都由
+         * config.lua 解析并钳位，引擎侧不再保留任何默认实参。
+         *
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param server 服务端传输配置（backlog / idleTimeoutSecs 等）。
+         * @param proactor io_uring 队列、缓冲环与会话池配置。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runTcp(const char *ip, int port, const ServerConfig &server,
+                                      const ProactorConfig &proactor)
+            requires SocketEvent<Event> && kStreaming
+        {
+            contract_assert(validServerConfig(server));
+            contract_assert(validProactorConfig(proactor));
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
             {
                 reset();
                 return err;
             }
-            Result<> rc =
-                serve(sqEntries, cqEntries, maxAcceptEvents, sessionPoolSize, maxBufEntrs, bufSize, idleTimeoutSecs);
+            Result<> rc = serve(server, proactor, true);
             reset();
             return rc;
         }
 
         /**
-         * @brief 在指定 IP 和端口上运行 TLS/SSL 服务器，直至被请求停止。
+         * @brief 以全局配置运行 TLS/SSL 服务器，TLS 协商参数取自 security 段。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param crt PEM 格式证书文件路径。
+         * @param key PEM 格式私钥文件路径。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
-        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key, int backlog = 511,
-                                      unsigned int sqEntries = 512, unsigned int cqEntries = 1 << 10,
-                                      int maxAcceptEvents = 256, size_t sessionPoolSize = 512,
-                                      int maxBufEntrs = 1 << 10, int bufSize = 4 << 10, int idleTimeoutSecs = 0,
-                                      const TlsOptions &tlsOptions = {})
+        /**
+         * @brief 完全以全局配置运行 TLS 服务器：监听地址与证书路径都取自配置段。
+         *
+         * 证书与私钥取自 security.certFile / security.keyFile；任一为空表示"未配置"，
+         * 直接失败而不是悄悄降级成明文——TLS 服务端不应在配置缺失时静默裸奔。
+         */
+        [[nodiscard]] Result<> runSsl()
             requires SslEvent<Event> && kStreaming
         {
-            if (auto err = acceptor_.listenTcp(ip, port, backlog); !err) [[unlikely]]
+            const NetConfig cfg = getNetConfig();
+            if (cfg.security.certFile.empty() || cfg.security.keyFile.empty()) [[unlikely]]
+            {
+                LOG_ERROR("runSsl: security.certFile / security.keyFile are empty; "
+                          "set them in config.lua or call the explicit-path overload");
+                return std::unexpected(ERR::SSL_CERT_FAILED);
+            }
+            return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.security.certFile.c_str(),
+                          cfg.security.keyFile.c_str(), cfg.server, cfg.proactor,
+                          detail::tlsOptionsFrom(cfg.security));
+        }
+
+        /**
+         * @brief 以全局配置的监听地址 + 显式证书路径运行 TLS 服务器。
+         */
+        [[nodiscard]] Result<> runSsl(const char *crt, const char *key)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), crt, key, cfg.server,
+                          cfg.proactor, detail::tlsOptionsFrom(cfg.security));
+        }
+
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(ip, port, crt, key, cfg.server, cfg.proactor, detail::tlsOptionsFrom(cfg.security));
+        }
+
+        /**
+         * @brief 以显式 TLS 选项 + 全局 server/proactor 配置运行 TLS/SSL 服务器。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param crt PEM 格式证书文件路径。
+         * @param key PEM 格式私钥文件路径。
+         * @param tlsOptions TLS 版本、密码套件与 ALPN 协商选项。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
+                                      const TlsOptions &tlsOptions)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(ip, port, crt, key, cfg.server, cfg.proactor, tlsOptions);
+        }
+
+        /**
+         * @brief 以显式配置运行 TLS/SSL 服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param crt PEM 格式证书文件路径。
+         * @param key PEM 格式私钥文件路径。
+         * @param server 服务端传输配置。
+         * @param proactor io_uring 队列、缓冲环与会话池配置。
+         * @param tlsOptions TLS 协商选项。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
+                                      const ServerConfig &server, const ProactorConfig &proactor,
+                                      const TlsOptions &tlsOptions)
+            requires SslEvent<Event> && kStreaming
+        {
+            contract_assert(validServerConfig(server));
+            contract_assert(validProactorConfig(proactor));
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
             {
                 reset();
                 return err;
@@ -147,44 +240,54 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::SSL_KEY_MISMATCH);
             }
-            Result<> rc =
-                serve(sqEntries, cqEntries, maxAcceptEvents, sessionPoolSize, maxBufEntrs, bufSize, idleTimeoutSecs);
+            Result<> rc = serve(server, proactor, true);
             reset();
             return rc;
         }
 
         /**
-         * @brief 在指定 IP 和端口上运行 UDP 数据报服务器，直至被请求停止。
+         * @brief 以全局配置（proactor 段）运行 UDP 数据报服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param handler 数据报处理器引用。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler)
+            requires MandatoryMethodDatagram<Handler>
+        {
+            const ProactorConfig cfg = getProactorConfig();
+            return runUdp(ip, port, handler, cfg);
+        }
+
+        /**
+         * @brief 以显式配置运行 UDP 数据报服务器，直至被请求停止。
+         *
+         * UDP 路径不建立内核 Buffer Ring，proactor.bufEntries 被忽略；
+         * proactor.udpBufSize 只作为**接收窗口下限**，真正的接收上界由处理器的
+         * maxDatagramBytes() 决定，两者取较大者并额外留 1 字节用于超界判定，
+         * 因此两个引擎交付给处理器的报文长度上界一致。
          *
          * @param ip 监听 IPv4 地址字面量。
          * @param port 监听端口。
          * @param handler 数据报处理器引用。
-         * @param sqEntries io_uring 提交队列大小。
-         * @param cqEntries io_uring 完成队列大小。
-         * @param sessionPoolSize 预分配会话对象池容量（UDP 路径实际只用 1 个）。
-         * @param bufSize 接收窗口的下限字节数——UDP 路径不建立内核 Buffer Ring，
-         *                真正的接收上界由处理器的 maxDatagramBytes() 决定。
-         * @param idleTimeoutSecs 空闲超时（UDP 路径不使用）。
+         * @param proactor io_uring 队列、会话池与 UDP 接收窗口配置。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
-        [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, unsigned int sqEntries = 512,
-                                      unsigned int cqEntries = 1 << 10, size_t sessionPoolSize = 512,
-                                      int bufSize = 64 << 10, int idleTimeoutSecs = 0)
+        [[nodiscard]] Result<> runUdp(const char *ip, int port, Handler &handler, const ProactorConfig &proactor)
             requires MandatoryMethodDatagram<Handler>
         {
+            contract_assert(validProactorConfig(proactor));
             if (auto err = acceptor_.listenUdp(ip, port); !err) [[unlikely]]
             {
                 reset();
                 return err;
             }
             handler.reset();
-            // UDP 路径不建立内核 Buffer Ring（runUdp 以 maxBufEntrs=0 调 serve，
-            // io_uring_setup_buf_ring 不会被执行），bufSize 在这里只表示**接收窗口
-            // 下限**。Datagram::bind 会把它与处理器声明的报文上界取较大者，并额外
-            // 留出 1 字节用于超界判定；因此两个引擎交付给处理器的报文长度上界一致。
-            const size_t windowFloor = static_cast<size_t>(bufSize > 0 ? bufSize : (64 << 10));
-            datagram_.bind(handler, windowFloor);
-            Result<> rc = serve(sqEntries, cqEntries, 0, sessionPoolSize, 0, bufSize, idleTimeoutSecs);
+            datagram_.bind(handler, proactor.udpBufSize);
+            // UDP 只占用 1 个会话槽，server.maxConnections 对它没有意义，
+            // 这里仍当前置条件校验（值本身必须合法），但不参与分配。
+            const ServerConfig server = getServerConfig();
+            Result<> rc = serve(server, proactor, false);
             reset();
             return rc;
         }
@@ -197,43 +300,49 @@ namespace mynet
         /**
          * @brief io_uring 核心事件循环。
          */
-        [[nodiscard]] inline Result<> serve(unsigned int sqEntries, unsigned int cqEntries, int maxAcceptEvents,
-                                            size_t sessionPoolSize, int maxBufEntrs, int bufSize, int idleTimeoutSecs)
+        [[nodiscard]] inline Result<> serve(const ServerConfig &server, const ProactorConfig &proactor,
+                                            bool withBufRing)
         {
+            // 配置在 lua_config 解析阶段已完成钳位，这里不再重复兜底，
+            // 避免引擎头文件与 config.lua 两处默认值分叉。
+            contract_assert(validServerConfig(server));
+            contract_assert(validProactorConfig(proactor));
             io_uring_params params = {};
             params.flags = IORING_SETUP_CQSIZE;
-            params.cq_entries = cqEntries;
-            int qi = io_uring_queue_init_params(sqEntries, &uring_, &params);
+            params.cq_entries = static_cast<unsigned int>(proactor.cqEntries);
+            int qi = io_uring_queue_init_params(static_cast<unsigned int>(proactor.sqEntries), &uring_, &params);
             if (qi < 0) [[unlikely]]
             {
-                LOG_ERROR("Proactor::serve: io_uring_queue_init_params({} sq entries) failed: {}", sqEntries,
+                LOG_ERROR("Proactor::serve: io_uring_queue_init_params({} sq entries) failed: {}", proactor.sqEntries,
                           errnoText(-qi));
                 reset();
                 return std::unexpected(ERR::URING_QUEUE_FAILED);
             }
             uringInited_ = true;
-            const size_t sessionSlots = datagram_.bound() ? 1 : (sessionPoolSize > 0 ? sessionPoolSize : 1);
+            const size_t sessionSlots = datagram_.bound() ? 1 : server.maxConnections;
             if (auto poolRes = sessionPool_.init(sessionSlots); !poolRes) [[unlikely]]
             {
                 LOG_ERROR("Proactor::serve: initialising session pool ({} slots) failed", sessionSlots);
                 reset();
                 return std::unexpected(ERR::POOL_ALLOC_FAILED);
             }
-            const size_t acceptSlots = static_cast<size_t>(maxAcceptEvents > 0 ? maxAcceptEvents : 1);
+            // 数据报路径不投递任何 accept，旧实现以 maxAcceptEvents=0 调用时
+            // 会退化成 1 槽。这里保留同样的 1 槽，而不是白占 maxAcceptEvents 份内存。
+            const size_t acceptSlots = datagram_.bound() ? 1 : proactor.maxAcceptEvents;
             if (auto poolRes = acceptPool_.init(acceptSlots); !poolRes) [[unlikely]]
             {
                 LOG_ERROR("Proactor::serve: initialising accept pool ({} slots) failed", acceptSlots);
                 reset();
                 return std::unexpected(ERR::POOL_ALLOC_FAILED);
             }
-            sessions_.reserve(sessionPoolSize > 0 ? sessionPoolSize : 1);
-            maxAccepts_ = maxAcceptEvents > 0 ? maxAcceptEvents : 1;
+            sessions_.reserve(sessionSlots);
+            maxAccepts_ = static_cast<int>(proactor.maxAcceptEvents);
             maxBufEntrs_ =
-                maxBufEntrs > 0 ? static_cast<int>(std::bit_ceil(static_cast<unsigned int>(maxBufEntrs))) : 0;
-            bufSize_ = bufSize > 0 ? bufSize : (4 << 10);
+                withBufRing ? static_cast<int>(std::bit_ceil(static_cast<unsigned int>(proactor.bufEntries))) : 0;
+            bufSize_ = static_cast<int>(proactor.bufSize);
             if (maxBufEntrs_ > 0)
             {
-                int ma = posix_memalign(&bufBase_, 4 << 10,
+                int ma = posix_memalign(&bufBase_, proactor.bufRingAlignment,
                                         static_cast<size_t>(maxBufEntrs_) * static_cast<size_t>(bufSize_));
                 if (ma != 0) [[unlikely]]
                 {
@@ -262,7 +371,7 @@ namespace mynet
                 }
                 io_uring_buf_ring_advance(bufRing_, maxBufEntrs_);
             }
-            idleTimeout_ = std::chrono::seconds(idleTimeoutSecs > 0 ? idleTimeoutSecs : 0);
+            idleTimeout_ = std::chrono::seconds(server.idleTimeoutSecs > 0 ? server.idleTimeoutSecs : 0);
             Result<> armed = {};
             if constexpr (kStreaming)
             {
@@ -284,7 +393,7 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::URING_SUBMIT_FAILED);
             }
-            __kernel_timespec ts = {1, 0};
+            __kernel_timespec ts = {proactor.cqeWaitMs / 1000, (proactor.cqeWaitMs % 1000) * 1000000L};
             while (!stopSource_.stop_requested())
             {
                 io_uring_cqe *cqe = nullptr;
@@ -363,7 +472,7 @@ namespace mynet
                 bufBase_ = nullptr;
             }
             maxBufEntrs_ = 0;
-            bufSize_ = 4 << 10;
+            bufSize_ = 0;
             bgid_ = 1;
             acceptPool_.reset();
             sessionPool_.reset();
@@ -510,8 +619,7 @@ namespace mynet
         {
             if (cqe->res < 0) [[unlikely]]
             {
-                LOG_WARN("Proactor::onDatagramDone: recvmsg on fd {} failed: {}", acceptor_.fd,
-                         errnoText(-cqe->res));
+                LOG_WARN("Proactor::onDatagramDone: recvmsg on fd {} failed: {}", acceptor_.fd, errnoText(-cqe->res));
             }
             else if (cqe->res > 0)
             {
@@ -766,6 +874,10 @@ namespace mynet
                         char *buf = reinterpret_cast<char *>(bufBase_) +
                                     static_cast<size_t>(bid) * static_cast<size_t>(bufSize_);
                         Handler &handler = session->conn.handler();
+                        // Proactor 直接调用 handler.appendRequest，不经过
+                        // Connection::handleRead，因此 quick ack 必须在这里重置；
+                        // 否则 io_uring 路径上它只在建连时生效一次。
+                        session->conn.applyQuickAck();
                         if (!handler.appendRequest(buf, static_cast<ssize_t>(cqe->res))) [[unlikely]]
                         {
                             // 解析缓冲扩容失败：请求流断裂，降级关闭会话；本次读缓冲已回收，避免泄漏 fd 与会话槽
@@ -1142,7 +1254,7 @@ namespace mynet
         int bgid_ = 1;
         io_uring_buf_ring *bufRing_ = nullptr;
         int maxBufEntrs_ = 0;
-        int bufSize_ = 4 << 10;
+        int bufSize_ = 0;
         void *bufBase_ = nullptr;
         Event acceptor_;
         Protocol<Event> protocol_{};

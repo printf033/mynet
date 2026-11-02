@@ -3,8 +3,8 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include "constraints.hpp"
 #include "configHolder.hpp"
+#include "constraints.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
 #include "requestBuffer.hpp"
@@ -108,22 +108,19 @@ namespace mynet
         explicit HandlerConnection(const ConnectionConfig &config) noexcept
             : maxRequestBytes_(config.maxRequestBytes)
         {
-            [[maybe_unused]] auto _ =
-                responseQueue_.init(config.responseCapacity);
+            [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
         }
 
         virtual ~HandlerConnection() noexcept = default;
 
         HandlerConnection(const HandlerConnection &) =
-            delete("a connection handler holds parser state bound to one connection");
-        HandlerConnection &
-        operator=(const HandlerConnection &) =
-            delete("a connection handler holds parser state bound to one connection");
+            delete ("a connection handler holds parser state bound to one connection");
+        HandlerConnection &operator=(const HandlerConnection &) =
+            delete ("a connection handler holds parser state bound to one connection");
         HandlerConnection(HandlerConnection &&) =
-            delete("a connection handler holds parser state bound to one connection");
+            delete ("a connection handler holds parser state bound to one connection");
         HandlerConnection &
-        operator=(HandlerConnection &&) =
-            delete("a connection handler holds parser state bound to one connection");
+        operator=(HandlerConnection &&) = delete("a connection handler holds parser state bound to one connection");
 
         /**
          * @brief 重置处理器状态（派生类重置专属解析器后应调用本实现）
@@ -176,8 +173,8 @@ namespace mynet
          * @param minBytes 期望的最小写窗口字节数（默认由全局 ConnectionConfig 提供）
          * @return 成功返回可直写的内存首地址指针；扩容失败返回错误码
          */
-        [[nodiscard]] inline std::expected<char *, ERR> prepareRequestWritable(
-            size_t minBytes = getConnectionConfig().readChunkSize) noexcept
+        [[nodiscard]] inline std::expected<char *, ERR>
+        prepareRequestWritable(size_t minBytes = getConnectionConfig().readChunkSize) noexcept
         {
             if (auto res = requestBuffer_.ensureWritable(minBytes); !res) [[unlikely]]
             {
@@ -226,12 +223,26 @@ namespace mynet
         }
 
         inline void setMaxRequestBytes(size_t n) noexcept { maxRequestBytes_ = n; }
+        [[nodiscard]] inline size_t maxRequestBytes() const noexcept { return maxRequestBytes_; }
 
         // ---- 发送响应侧控制 (Write Side) ----
 
         [[nodiscard]] inline bool hasResponse() const noexcept { return !responseQueue_.empty(); }
 
+        /**
+         * @brief 处理器是否因出站背压而暂缓了解码、且凭当前状态仍能继续推进
+         *
+         * 连接层在响应队列被搬运之后据此重新驱动 process()。默认 false：只有
+         * 会主动分轮解码的处理器（如 HandlerHttp2）才需要覆写。
+         */
+        [[nodiscard]] inline bool needsProcess() const noexcept { return false; }
+
         [[nodiscard]] inline size_t responseCount() const noexcept { return responseQueue_.size(); }
+
+        /**
+         * @brief 响应队列的槽位容量（用于在压满前施加背压，避免 mux 帧被丢弃）
+         */
+        [[nodiscard]] inline size_t responseCapacity() const noexcept { return responseQueue_.capacity(); }
 
         [[nodiscard]] inline std::string takeResponse()
         {
@@ -347,10 +358,7 @@ namespace mynet
         /**
          * @brief 设置零拷贝目标控制状态（重定向至 setSpliceControl）
          */
-        inline void setSpliceTarget(SPLICE_CONTROL ctrl) noexcept
-        {
-            setSpliceControl(ctrl);
-        }
+        inline void setSpliceTarget(SPLICE_CONTROL ctrl) noexcept { setSpliceControl(ctrl); }
 
         [[nodiscard]] inline SPLICE_CONTROL spliceControl() const noexcept { return spliceControl_; }
         [[nodiscard]] inline int spliceTarget() const noexcept { return spliceTargetFd_; }
@@ -469,8 +477,8 @@ namespace mynet
     template <typename H>
     concept MandatoryMethodConnection =
         DerivedFromHandlerConnection<H> && Resettable<H> &&
-        requires(H &h, const char *buf, ssize_t rn, size_t n, std::string_view sv,
-                 const std::string &str, std::string &&s, bool b, int fd, SPLICE_CONTROL ctrl) {
+        requires(H &h, const char *buf, ssize_t rn, size_t n, std::string_view sv, const std::string &str,
+                 std::string &&s, bool b, int fd, SPLICE_CONTROL ctrl) {
             // ---- 读取侧控制 (Read Side) ----
             { h.appendRequest(buf, rn) } noexcept -> std::same_as<Result<>>;
             { h.appendRequest(sv) } noexcept -> std::same_as<Result<>>;
@@ -522,8 +530,6 @@ namespace mynet
             { h.fd() } noexcept -> std::same_as<int>;
             h.echo();
         };
-
-
 
     /**
      * @brief TLS 握手演进状态枚举
@@ -623,11 +629,12 @@ namespace mynet
             fd_ = fd;
             if (fd_ >= 0)
             {
-                if (getNetConfig().server.tcpNoDelay)
+                if (getServerConfig().tcpNoDelay)
                 {
                     constexpr int one = 1;
                     [[maybe_unused]] auto _ = ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
                 }
+                applyQuickAck();
                 writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
                 handler_.setMaxRequestBytes(getConnectionConfig().maxRequestBytes);
                 handler_.onConnect(fd_);
@@ -642,9 +649,25 @@ namespace mynet
         [[nodiscard]] inline uint32_t events() const noexcept { return events_; }
         inline void setEvents(uint32_t events) noexcept { events_ = events; }
 
+        /**
+         * @brief 按配置重设 TCP_QUICKACK。
+         *
+         * Linux 语义：设置后只影响下一个待发 ACK，发出即失效，因此调用点必须
+         * 分布在"每次可能产生 ACK 的收包之后"，而不是只在建连时设一次。
+         * 关闭时（默认）本函数是空调用，热路径零系统调用。
+         */
+        inline void applyQuickAck() noexcept
+        {
+            if (fd_ >= 0 && getServerConfig().tcpQuickAck)
+            {
+                constexpr int one = 1;
+                [[maybe_unused]] auto _ = ::setsockopt(fd_, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+            }
+        }
+
         [[nodiscard]] inline bool isSpliceEnabled() const noexcept
         {
-            if (ssl_ != nullptr || !getNetConfig().server.enableSplice)
+            if (ssl_ != nullptr || !getServerConfig().enableSplice)
             {
                 return false;
             }
@@ -811,8 +834,8 @@ namespace mynet
          * @param maxBytes 单次最大搬移字节数
          * @return 成功返回实际搬移字节数；出错返回 IO_END（WOULDBLOCK / EOF_REACHED / FATAL）
          */
-        [[nodiscard]] inline std::expected<size_t, IO_END> spliceTo(
-            int targetFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
+        [[nodiscard]] inline std::expected<size_t, IO_END>
+        spliceTo(int targetFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
         {
             if (targetFd < 0 || fd_ < 0) [[unlikely]]
             {
@@ -826,8 +849,8 @@ namespace mynet
             // 1. 若管道中已有残留数据，先尝试刷向目标描述符
             while (pipePending_ > 0)
             {
-                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
-                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                const ssize_t sOut =
+                    ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (sOut > 0) [[likely]]
                 {
                     pipePending_ -= static_cast<size_t>(sOut);
@@ -835,8 +858,10 @@ namespace mynet
                 }
                 if (sOut < 0)
                 {
-                    if (errno == EINTR) continue;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
+                    if (errno == EINTR)
+                        continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        return std::unexpected(IO_END::WOULDBLOCK);
                     return std::unexpected(IO_END::FATAL);
                 }
                 break;
@@ -847,13 +872,16 @@ namespace mynet
             }
 
             // 2. 从当前套接字摄入数据至管道写端
-            const ssize_t sIn = ::splice(fd_, nullptr, pipeFd_[1], nullptr, maxBytes,
-                                         SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            const ssize_t sIn =
+                ::splice(fd_, nullptr, pipeFd_[1], nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
             if (sIn <= 0)
             {
-                if (sIn == 0) return std::unexpected(IO_END::EOF_REACHED); // EOF
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
-                if (errno == EINTR) return 0;
+                if (sIn == 0)
+                    return std::unexpected(IO_END::EOF_REACHED); // EOF
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    return std::unexpected(IO_END::WOULDBLOCK);
+                if (errno == EINTR)
+                    return 0;
                 return std::unexpected(IO_END::FATAL);
             }
 
@@ -863,15 +891,16 @@ namespace mynet
             // 3. 将管道内数据泵至目标描述符
             while (pipePending_ > 0)
             {
-                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
-                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                const ssize_t sOut =
+                    ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (sOut > 0) [[likely]]
                 {
                     pipePending_ -= static_cast<size_t>(sOut);
                     totalWritten += static_cast<size_t>(sOut);
                     continue;
                 }
-                if (sOut < 0 && errno == EINTR) continue;
+                if (sOut < 0 && errno == EINTR)
+                    continue;
                 break;
             }
 
@@ -885,8 +914,8 @@ namespace mynet
          * @param maxBytes 单次最大搬移字节数
          * @return 成功返回实际搬移字节数；出错返回 IO_END（WOULDBLOCK / EOF_REACHED / FATAL）
          */
-        [[nodiscard]] inline std::expected<size_t, IO_END> spliceFrom(
-            int sourceFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
+        [[nodiscard]] inline std::expected<size_t, IO_END>
+        spliceFrom(int sourceFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
         {
             if (sourceFd < 0 || fd_ < 0) [[unlikely]]
             {
@@ -900,8 +929,8 @@ namespace mynet
             // 1. 若管道中已有残留数据，先尝试刷向当前 socket
             while (pipePending_ > 0)
             {
-                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_,
-                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                const ssize_t sOut =
+                    ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (sOut > 0) [[likely]]
                 {
                     pipePending_ -= static_cast<size_t>(sOut);
@@ -909,8 +938,10 @@ namespace mynet
                 }
                 if (sOut < 0)
                 {
-                    if (errno == EINTR) continue;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
+                    if (errno == EINTR)
+                        continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        return std::unexpected(IO_END::WOULDBLOCK);
                     return std::unexpected(IO_END::FATAL);
                 }
                 break;
@@ -921,13 +952,16 @@ namespace mynet
             }
 
             // 2. 从源描述符摄入数据至管道写端
-            const ssize_t sIn = ::splice(sourceFd, nullptr, pipeFd_[1], nullptr, maxBytes,
-                                         SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            const ssize_t sIn =
+                ::splice(sourceFd, nullptr, pipeFd_[1], nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
             if (sIn <= 0)
             {
-                if (sIn == 0) return std::unexpected(IO_END::EOF_REACHED);
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(IO_END::WOULDBLOCK);
-                if (errno == EINTR) return 0;
+                if (sIn == 0)
+                    return std::unexpected(IO_END::EOF_REACHED);
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    return std::unexpected(IO_END::WOULDBLOCK);
+                if (errno == EINTR)
+                    return 0;
                 return std::unexpected(IO_END::FATAL);
             }
 
@@ -937,15 +971,16 @@ namespace mynet
             // 3. 将管道内数据泵至当前连接套接字 fd_
             while (pipePending_ > 0)
             {
-                const ssize_t sOut = ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_,
-                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                const ssize_t sOut =
+                    ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (sOut > 0) [[likely]]
                 {
                     pipePending_ -= static_cast<size_t>(sOut);
                     totalWritten += static_cast<size_t>(sOut);
                     continue;
                 }
-                if (sOut < 0 && errno == EINTR) continue;
+                if (sOut < 0 && errno == EINTR)
+                    continue;
                 break;
             }
 
@@ -1054,8 +1089,8 @@ namespace mynet
                                 peerGone_ = true;
                                 return IO_STATUS::CLOSE;
                             }
-                            LOG_WARN("Connection::handleSplice: fd {}: splice pipe->target ({}) failed: {}", fd_, targetFd,
-                                     errnoText(errno));
+                            LOG_WARN("Connection::handleSplice: fd {}: splice pipe->target ({}) failed: {}", fd_,
+                                     targetFd, errnoText(errno));
                             peerGone_ = true;
                             return IO_STATUS::CLOSE;
                         }
@@ -1128,6 +1163,9 @@ namespace mynet
             {
                 if (ensurePipe())
                 {
+                    // splice 路径不经过下面的 recv 循环，因此要在这里单独重置 quick ack，
+                    // 否则开启 splice 时每个连接只会在建连那次拿到 quick ack。
+                    applyQuickAck();
                     return handleSplice();
                 }
             }
@@ -1179,6 +1217,10 @@ namespace mynet
                     break;
                 }
 
+                // TCP_QUICKACK 不是持久 socket 选项：内核发出下一个 ACK 后就会清除它。
+                // 因此要它持续生效，必须每次收到数据后重设——这也是它默认关闭的原因
+                // （每个 recv 多一次 setsockopt）。只在显式开启时才付出这个代价。
+                applyQuickAck();
                 handler_.commitRequest(*rn);
                 touch();
                 if (handler_.requestOverLimit()) [[unlikely]]
@@ -1204,6 +1246,8 @@ namespace mynet
                 }
             }
 
+            collectResponses();
+            drainBackpressuredHandler();
             collectResponses();
             if (handler_.closeAfterResponse())
             {
@@ -1260,8 +1304,8 @@ namespace mynet
                 {
                     while (pipePending_ > 0)
                     {
-                        const ssize_t sOut =
-                            ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                        const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
+                                                      SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                         if (sOut > 0) [[likely]]
                         {
                             pipePending_ -= static_cast<size_t>(sOut);
@@ -1284,8 +1328,8 @@ namespace mynet
                                 peerGone_ = true;
                                 return IO_STATUS::CLOSE;
                             }
-                            LOG_WARN("Connection::handleWrite: fd {}: splice pipe->target ({}) failed: {}", fd_, targetFd,
-                                     errnoText(errno));
+                            LOG_WARN("Connection::handleWrite: fd {}: splice pipe->target ({}) failed: {}", fd_,
+                                     targetFd, errnoText(errno));
                             peerGone_ = true;
                             return IO_STATUS::CLOSE;
                         }
@@ -1303,6 +1347,8 @@ namespace mynet
                 }
             }
 
+            collectResponses();
+            drainBackpressuredHandler();
             collectResponses();
             const std::optional<IO_END> r = flush();
             if (r)
@@ -1431,9 +1477,50 @@ namespace mynet
 
         // ---- 双引擎通用钩子 (Hooks for Reactor & Proactor) ----
 
+        /**
+         * @brief 响应队列搬空后，继续驱动因出站背压提前返回的处理器
+         *
+         * HandlerHttp2 在响应队列压满时停下解码，把剩余帧留在请求缓冲里。连接层
+         * 每轮只搬运一次响应队列，因此必须在这里补上"下一轮"，否则大响应会在
+         * 队列第一次压满处永久停住（对端收不到数据也就不会再补窗口）。
+         *
+         * 以发送积压高水位为界：超过高水位就交给写路径，避免把内存一次性推满。
+         */
+        inline void drainBackpressuredHandler() noexcept
+        {
+            if constexpr (requires {
+                              handler_.process();
+                              handler_.needsProcess();
+                          })
+            {
+                // 上界 + 进展检测：任何"声称需要推进却推不动"的退化路径（例如响应
+                // 队列容量为 0、初始化失败）都只是把驱动推迟到下一个事件，绝不能在
+                // 事件循环里空转。
+                constexpr size_t kMaxDrainRounds = 64;
+                for (size_t round = 0; round < kMaxDrainRounds; ++round)
+                {
+                    if (!handler_.needsProcess() || pendingBytes_ >= writeHighWaterMark_ || closeAfterWrite_ ||
+                        peerGone_)
+                    {
+                        return;
+                    }
+                    const size_t bytesBefore = pendingBytes_;
+                    const size_t bufferedBefore = handler_.requestBytes();
+                    handler_.process();
+                    collectResponses();
+                    const bool progressed = pendingBytes_ > bytesBefore || handler_.requestBytes() < bufferedBefore;
+                    if (!progressed)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+
         inline void pump() noexcept
         {
             collectResponses();
+            drainBackpressuredHandler();
             if (handler_.closeAfterResponse())
             {
                 closeAfterWrite_ = true;

@@ -39,6 +39,15 @@ namespace mynet
         using Time = TimerQueue::Time;
         using TimerCallback = TimerQueue::Callback;
 
+        ///
+        /// epoll 就绪事件数组的初始槽位数量。
+        ///
+        /// 只服务于**不显式设定容量**的使用方（例如 Client，它不接收 maxEvents
+        /// 配置）。Reactor 一侧会用 reactor.maxEvents 调 setEventCapacity() 覆盖
+        /// 这个值，因此它不构成引擎的默认值，也不进入 config.lua。
+        ///
+        static constexpr size_t kInitialEventCapacity = 1 << 10;
+
         /**
          * @brief 初始化 epoll 与跨线程唤醒 eventfd 描述符对（具备幂等性）
          *
@@ -100,7 +109,7 @@ namespace mynet
         EventLoop()
         {
             threadId_ = std::this_thread::get_id();
-            events_.resize(1 << 10);
+            events_.resize(kInitialEventCapacity);
             if (auto res = init(); !res) [[unlikely]]
             {
                 LOG_ERROR("EventLoop: constructor init failed: {}", toString(res.error()));
@@ -130,11 +139,28 @@ namespace mynet
 
         inline void setEventCallback(EventCallback callback) { eventCallback_ = std::move(callback); }
 
-        inline void reserveEvents(size_t count)
+        /**
+         * @brief 当前单次 epoll_wait 的就绪事件数组容量（诊断用）。
+         */
+        [[nodiscard]] inline size_t eventCapacity() const noexcept { return events_.size(); }
+
+        /**
+         * @brief 精确设定单次 epoll_wait 的就绪事件数组容量。
+         *
+         * 必须**精确**而不是只增：引擎把 reactor.maxEvents 传进来，若配置写 512
+         * 而实际仍按 1024 收事件，这项配置就成了一句谎。下限 1，因为 epoll_wait
+         * 的 maxevents 必须大于 0。
+         *
+         * 注意 run() 在"本轮事件数恰好填满数组"时会翻倍扩容——那是满载时的
+         * 自适应，用于避免就绪事件被丢弃。因此本容量是**启动值**：空闲时就是
+         * reactor.maxEvents，只有真正打满过一轮之后才会增长到更高水位。
+         */
+        inline void setEventCapacity(size_t count)
         {
-            if (count > events_.size())
+            const size_t target = count > 0 ? count : 1;
+            if (target != events_.size())
             {
-                events_.resize(count);
+                events_.resize(target);
             }
         }
 

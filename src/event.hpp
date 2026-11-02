@@ -78,7 +78,7 @@ namespace mynet
          * @param backlog 挂起连接队列上限深度
          * @return Result<> 成功返回 {}，失败返回具体系统调用失败错误枚举
          */
-        [[nodiscard]] Result<> listenTcp(const char *ip, int port, int backlog = 511) noexcept
+        [[nodiscard]] Result<> listenTcp(const char *ip, int port, int backlog) noexcept
         {
             contract_assert(ip != nullptr);
             contract_assert(port >= 0 && port <= ((1 << 16) - 1));

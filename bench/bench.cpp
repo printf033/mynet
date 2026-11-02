@@ -307,11 +307,19 @@ namespace
         // 每轮扫描复用同一条连接。构造多路复用器会构建流对象池，
         // 若每轮都新建对象池，会将池构造开销与往返测量混杂在一起。
         NoopMux mux;
-        mux.process(); // 在测量路径之外预先宣告一次 SETTINGS 帧
+        // 预热：真实客户端总是先发送 24 字节连接前言，帧解码器在其之后才开始工作。
+        [[maybe_unused]] auto preface = mux.appendRequest(NoopMux::kClientPreface);
+        mux.process(); // 在测量路径之外预先宣告一次 SETTINGS 帧并消费前言
         while (mux.hasResponse())
         {
             [[maybe_unused]] auto _ = mux.takeResponse();
         }
+        // :method GET 的静态表索引表示，是合法的最小 HPACK 首部块。
+        const std::string headerBlock(1, '\x82');
+
+        // 流 ID 必须在整条连接上单调递增，且 run() 会多次调用测量闭包，
+        // 因此游标放在闭包外；接近 31 位上限时重置连接继续测。
+        uint32_t nextId = 1;
 
         const Sample sample = run(
             [&](size_t iterations)
@@ -321,12 +329,21 @@ namespace
                 {
                     for (size_t k = 0; k < kStreams; ++k)
                     {
-                        const uint32_t id = static_cast<uint32_t>(k * 2 + 1);
+                        if (nextId > 0x7fffffffU - 4U) [[unlikely]]
+                        {
+                            mux.reset();
+                            mux.process();
+                            while (mux.hasResponse())
+                                sink += mux.takeResponse().size();
+                            nextId = 1;
+                        }
+                        const uint32_t id = nextId;
+                        nextId += 2;
                         std::string bytes;
                         appendFrame(bytes, Frame{.streamId = id,
                                                  .type = FRAME_TYPE::HEADERS,
                                                  .flags = FrameFlags::kEndHeaders,
-                                                 .payload = "h"});
+                                                 .payload = headerBlock});
                         appendFrame(bytes, Frame{.streamId = id,
                                                  .type = FRAME_TYPE::DATA,
                                                  .flags = FrameFlags::kEndStream,
