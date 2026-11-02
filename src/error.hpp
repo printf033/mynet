@@ -85,6 +85,21 @@ namespace mynet
     inline constexpr size_t kIoEndCount = mylog::reflect::countEnumMembers<IO_END>();
     static_assert(kIoEndCount == 4, "Expected 4 IO end outcomes");
 
+    /**
+     * @brief I/O 事件处理后套接字保留决策
+     */
+    enum class IO_STATUS : uint8_t
+    {
+        KEEP = 0, ///< 保持存活：继续等待下一轮就绪通知或完成通知
+        CLOSE = 1 ///< 关闭断开：立即进入下线回收流程
+    };
+
+    /**
+     * @brief 编译期校验 IO_STATUS 枚举总数与反射信息一致
+     */
+    inline constexpr size_t kIoStatusCount = mylog::reflect::countEnumMembers<IO_STATUS>();
+    static_assert(kIoStatusCount == 2, "Expected 2 IO status outcomes");
+
     namespace detail
     {
         inline constexpr std::array<std::string_view, kErrCount> kErrDescriptions = {

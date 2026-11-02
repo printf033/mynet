@@ -44,19 +44,47 @@ namespace
     struct FullContractWithoutDerivation
     {
         [[nodiscard]] Result<> appendRequest(const char *, ssize_t) noexcept { return {}; }
+        [[nodiscard]] Result<> appendRequest(std::string_view) noexcept { return {}; }
         bool hasResponse() noexcept { return false; }
+        size_t responseCount() noexcept { return 0; }
         std::string takeResponse() { return ""; }
+        void recycleSpare(std::string &&) noexcept {}
+        Result<> pushResponse(std::string &&) noexcept { return {}; }
+        Result<> pushResponse(const std::string &) noexcept { return {}; }
+        Result<> pushResponse(std::string_view) noexcept { return {}; }
+        Result<> pushResponse(const char *) noexcept { return {}; }
+        Result<> reserveResponses(size_t) noexcept { return {}; }
         bool requestOverLimit() noexcept { return false; }
+        size_t requestBytes() noexcept { return 0; }
+        const char *requestBegin() noexcept { return ""; }
+        void requestConsume(size_t) noexcept {}
+        void requestClear() noexcept {}
         void echo() {}
         void reset() noexcept {}
+        void onConnect(int) noexcept {}
+        void onUpgrade() noexcept {}
         void onMessageComplete() noexcept {}
         void onParseError(const char *) noexcept {}
         [[nodiscard]] std::expected<char *, ERR> prepareRequestWritable(size_t = 4 << 10) noexcept { return nullptr; }
+        char *requestWritableBegin() noexcept { return nullptr; }
         size_t requestWritableBytes() noexcept { return 0; }
         void commitRequest(size_t) noexcept {}
         size_t readCredit() noexcept { return 0; }
         void setMaxRequestBytes(size_t) noexcept {}
         bool closeAfterResponse() noexcept { return false; }
+        void setCloseAfterResponse(bool) noexcept {}
+        void setSpliceTarget(int) noexcept {}
+        void setSpliceTarget(SPLICE_CONTROL) noexcept {}
+        void setSpliceControl(SPLICE_CONTROL) noexcept {}
+        SPLICE_CONTROL spliceControl() noexcept { return SPLICE_CONTROL::DISABLED; }
+        int spliceTarget() noexcept { return -1; }
+        bool isSpliceActive() noexcept { return false; }
+        void pauseSplice() noexcept {}
+        void resumeSplice() noexcept {}
+        void drainSplice() noexcept {}
+        void disableSplice() noexcept {}
+        bool spliceEnabled() noexcept { return false; }
+        int fd() noexcept { return -1; }
     };
 
     /// 反例：只有六个方法。同时不满足派生与结构两层要求。
@@ -87,12 +115,29 @@ namespace
         std::string takeResponse() = delete;
     };
 
+    struct DeletedPushResponseHandler : public HandlerConnection
+    {
+        Result<> pushResponse(std::string &&) = delete;
+    };
+
+    struct DeletedPrepareRequestWritableHandler : public HandlerConnection
+    {
+        std::expected<char *, ERR> prepareRequestWritable(size_t) = delete;
+    };
+
+    struct DeletedSpliceControlHandler : public HandlerConnection
+    {
+        void setSpliceControl(SPLICE_CONTROL) = delete;
+    };
+
+    struct DeletedPauseSpliceHandler : public HandlerConnection
+    {
+        void pauseSplice() = delete;
+    };
+
     /// 双特化组合：两个并列的独立基类，成员访问均为直接偏移，不经过虚基类。
     struct CombinedHandler : HandlerConnection, HandlerDatagram
     {
-        using HandlerConnection::echo;
-        using HandlerDatagram::echo;
-
         void reset() noexcept override
         {
             HandlerConnection::reset();
@@ -118,14 +163,20 @@ namespace
     };
 
     /// 反例：已派生报文特化，但引擎经处理器类型直接读取的接收上界缺失。
-    ///
-    /// 只有 maxDatagramBytes() 与 onDatagram() 属于约束范围：外发队列的
-    /// hasOutgoing / takeOutgoing 由引擎经 HandlerDatagram* 调用，派生类改不动，
-    /// 写进约束只会误拒合法写法，故不设桩。
     struct MissingMaxDatagramBytesHandler : HandlerDatagram
     {
         void onDatagram(const sockaddr_in &, const char *, size_t) noexcept override {}
         size_t maxDatagramBytes() = delete;
+    };
+
+    struct DeletedSendToHandler : HandlerDatagram
+    {
+        void sendTo(const sockaddr_in &, const char *, size_t) = delete;
+    };
+
+    struct DeletedTakeOutgoingHandler : HandlerDatagram
+    {
+        DatagramPacket takeOutgoing() = delete;
     };
 
     /// 反例：方法全齐、可重置，但未派生 HandlerDatagram。
@@ -133,12 +184,25 @@ namespace
     struct DatagramContractWithoutDerivation
     {
         void onDatagram(const sockaddr_in &, const char *, size_t) noexcept {}
-        bool hasOutgoing() noexcept { return false; }
-        DatagramPacket takeOutgoing() { return {}; }
-        size_t maxDatagramBytes() noexcept { return 0; }
-        void reset() noexcept {}
         void onMessageComplete() noexcept {}
         void onParseError(const char *) noexcept {}
+
+        void sendTo(const sockaddr_in &, const char *, size_t) {}
+        void sendTo(const sockaddr_in &, std::string) {}
+        void forwardTo(const sockaddr_in &, const char *, size_t) {}
+        void broadcastTo(const std::vector<sockaddr_in> &, const char *, size_t) {}
+
+        bool hasOutgoing() noexcept { return false; }
+        size_t outgoingCount() noexcept { return 0; }
+        const DatagramPacket &peekOutgoing() noexcept { static DatagramPacket p; return p; }
+        DatagramPacket takeOutgoing() { return {}; }
+        size_t droppedOutgoing() noexcept { return 0; }
+
+        void setMaxDatagramBytes(size_t) noexcept {}
+        size_t maxDatagramBytes() noexcept { return 0; }
+        void setMaxPendingOutgoing(size_t) noexcept {}
+        size_t maxPendingOutgoing() noexcept { return 0; }
+        void reset() noexcept {}
     };
 
     /// 流式入口可用性探测。
@@ -221,6 +285,10 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
 
     static_assert(!MandatoryMethodConnection<DeletedEchoHandler>);
     static_assert(!MandatoryMethodConnection<DeletedTakeResponseHandler>);
+    static_assert(!MandatoryMethodConnection<DeletedPushResponseHandler>);
+    static_assert(!MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);
+    static_assert(!MandatoryMethodConnection<DeletedSpliceControlHandler>);
+    static_assert(!MandatoryMethodConnection<DeletedPauseSpliceHandler>);
     static_assert(!MandatoryMethodConnection<NonDerivedHandler>);
     static_assert(!MandatoryMethodConnection<NoReset>);
 
@@ -231,6 +299,10 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     EXPECT_FALSE(MandatoryMethodConnection<ThrowingAppendHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedEchoHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedTakeResponseHandler>);
+    EXPECT_FALSE(MandatoryMethodConnection<DeletedPushResponseHandler>);
+    EXPECT_FALSE(MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);
+    EXPECT_FALSE(MandatoryMethodConnection<DeletedSpliceControlHandler>);
+    EXPECT_FALSE(MandatoryMethodConnection<DeletedPauseSpliceHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<NonDerivedHandler>);
 }
 
@@ -313,6 +385,8 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
 
     // 派生但缺必需方法 → 被拒
     static_assert(!MandatoryMethodDatagram<MissingMaxDatagramBytesHandler>);
+    static_assert(!MandatoryMethodDatagram<DeletedSendToHandler>);
+    static_assert(!MandatoryMethodDatagram<DeletedTakeOutgoingHandler>);
 
     // 方法齐、可重置，但未派生 → 仍被拒（回复队列必须来自真实基类子对象）
     static_assert(!MandatoryMethodDatagram<DatagramContractWithoutDerivation>);
@@ -324,6 +398,8 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
     EXPECT_TRUE(MandatoryMethodDatagram<PureDatagramHandler>);
     EXPECT_TRUE(MandatoryMethodDatagram<CombinedHandler>);
     EXPECT_FALSE(MandatoryMethodDatagram<MissingMaxDatagramBytesHandler>);
+    EXPECT_FALSE(MandatoryMethodDatagram<DeletedSendToHandler>);
+    EXPECT_FALSE(MandatoryMethodDatagram<DeletedTakeOutgoingHandler>);
     EXPECT_FALSE(MandatoryMethodDatagram<DatagramContractWithoutDerivation>);
 }
 

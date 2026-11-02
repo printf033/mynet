@@ -39,7 +39,6 @@ namespace mynet
         {
         public:
             using HandlerConnection::echo;
-            using HandlerDatagram::echo;
 
             struct SessionKey
             {
@@ -109,16 +108,12 @@ namespace mynet
                 nextPacketNumber_ = 1;
                 controlStreamSent_ = false;
                 peerSettings_ = Settings{};
-                fd_ = -1;
             }
 
             void onConnect(int fd) noexcept override
             {
                 HandlerConnection::onConnect(fd);
-                fd_ = fd;
             }
-
-            [[nodiscard]] inline int fd() const noexcept { return fd_; }
 
             /// 两个传输基类各自提供同名生命周期钩子，此处显式覆盖以消除二义，
             /// 并逐层转发，保留任一层将来加入行为时的语义。
@@ -509,6 +504,7 @@ namespace mynet
              * @param targetFd 目标文件或套接字描述符
              */
             inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
+            inline void enableSpliceTunnel(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
             inline void disableSpliceTunnel() noexcept { disableSplice(); }
             [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
 
@@ -651,7 +647,6 @@ namespace mynet
             static constexpr size_t kMaxRequestBodyBytes = 16 << 20;  // 16 MiB
             static constexpr size_t kMaxStreamBufferBytes = 16 << 20; // 16 MiB
 
-            int fd_ = -1;
             size_t maxStreams_ = 128;
             size_t maxSessions_ = 1024;
             StreamTable streamTable_;

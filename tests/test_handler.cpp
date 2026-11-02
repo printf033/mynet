@@ -53,9 +53,6 @@ namespace
     class CombinedEchoHandler : public HandlerConnection, public HandlerDatagram
     {
     public:
-        using HandlerConnection::echo;
-        using HandlerDatagram::echo;
-
         void reset() noexcept override
         {
             HandlerConnection::reset();
@@ -389,8 +386,8 @@ TEST(HandlerDatagram, StandsAloneWithoutTheStreamFacilities)
     EXPECT_FALSE(handler.hasOutgoing());
     EXPECT_EQ(handler.outgoingCount(), size_t{0});
 
-    // 显式直接调用 echo 接口（协议级回显能力）
-    handler.echo(peer, "direct_echo", 11);
+    // 显式直接调用 sendTo 接口（协议级外发能力）
+    handler.sendTo(peer, "direct_echo", 11);
     ASSERT_EQ(handler.outgoingCount(), size_t{1});
     EXPECT_EQ(handler.takeOutgoing().bytes, "direct_echo");
 
@@ -709,15 +706,41 @@ TEST(HandlerConnection, SpliceTargetApis)
 {
     HandlerConnection handler;
     EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
 
     handler.setSpliceTarget(42);
     EXPECT_TRUE(handler.isSpliceActive());
     EXPECT_EQ(handler.spliceTarget(), 42);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
 
+    // 暂停挂起
+    handler.pauseSplice();
+    EXPECT_FALSE(handler.isSpliceActive());
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::PAUSED);
+    EXPECT_EQ(handler.spliceTarget(), 42);
+
+    // 恢复活跃
+    handler.resumeSplice();
+    EXPECT_TRUE(handler.isSpliceActive());
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
+
+    // 管道排空
+    handler.drainSplice();
+    EXPECT_FALSE(handler.isSpliceActive());
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DRAINING);
+    EXPECT_EQ(handler.spliceTarget(), 42);
+
+    // 禁用重置
     handler.disableSplice();
     EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
+
+    // 控制状态枚举设置与闭合
+    handler.setSpliceControl(SPLICE_CONTROL::CLOSED);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::CLOSED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
 }
 
 TEST(HandlerHttp, LifecycleAndFd)
@@ -763,13 +786,16 @@ TEST(HandlerHttp, SpliceTunnelApis)
 {
     http::v1::HandlerHttp<HTTP_MODE::REQUEST> handler;
     EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
 
     handler.enableSpliceTunnel(100);
     EXPECT_TRUE(handler.isSpliceTunnelActive());
     EXPECT_EQ(handler.spliceTarget(), 100);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
 
     handler.disableSpliceTunnel();
     EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
 }

@@ -41,9 +41,6 @@ namespace
     /// 同时具备两种传输能力（与 HandlerHttp3 同构）。
     struct DualHandler : HandlerConnection, HandlerDatagram
     {
-        using HandlerConnection::echo;
-        using HandlerDatagram::echo;
-
         void reset() noexcept override
         {
             HandlerConnection::reset();
@@ -393,12 +390,12 @@ TEST(Datagram, FlushToAccumulatesCountsAcrossReplies)
 
 TEST(Datagram, UdpEchoHandlerEchoWorksInSession)
 {
-    // 回显作为协议级业务处理：由派生回显处理器在 onDatagram 中调用 echo
+    // 回显作为协议级业务处理：由派生回显处理器在 onDatagram 中调用 sendTo
     struct TestDatagramEchoHandler : HandlerDatagram
     {
         void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
-            echo(peer, data, n);
+            sendTo(peer, data, n);
         }
     };
 
@@ -510,4 +507,42 @@ TEST(Datagram, SendDirectAndHasPending)
     EXPECT_TRUE(session.hasPending());
     EXPECT_EQ(session.flushTo(pair.tx), 1u);
     EXPECT_FALSE(session.hasPending());
+}
+
+TEST(Datagram, HandleReadAndWriteApis)
+{
+    UdpPair pair;
+    ASSERT_TRUE(pair.ok());
+
+    // 设置接收端为非阻塞，使 handleRead 内的 recvfrom 循环在读空时正常退出
+    int flags = ::fcntl(pair.rx, F_GETFL, 0);
+    ASSERT_GE(flags, 0);
+    ASSERT_EQ(::fcntl(pair.rx, F_SETFL, flags | O_NONBLOCK), 0);
+
+    RecordingHandler handler;
+    Datagram<RecordingHandler> session;
+    session.bind(handler);
+
+    // 1. 发送测试报文到 rx
+    const char msg[] = "handle-read-datagram-test";
+    ssize_t sent = ::sendto(pair.tx, msg, sizeof(msg) - 1, 0,
+                            reinterpret_cast<const sockaddr *>(&pair.rxAddr), sizeof(pair.rxAddr));
+    ASSERT_EQ(sent, static_cast<ssize_t>(sizeof(msg) - 1));
+
+    // 2. 调用 handleRead 驱动事件循环读取（传入套接字 fd）
+    EXPECT_EQ(session.handleRead(pair.rx), IO_STATUS::KEEP);
+    EXPECT_EQ(handler.calls, 1u);
+    EXPECT_EQ(handler.lastPayload, msg);
+
+    // 3. 测试 handleWrite 排空
+    handler.sendTo(pair.rxAddr, "response-datagram", 17);
+    EXPECT_TRUE(session.hasPending());
+    EXPECT_EQ(session.handleWrite(pair.tx), IO_STATUS::KEEP);
+    EXPECT_FALSE(session.hasPending());
+
+    // 4. 重置会话与处理器
+    session.reset();
+    EXPECT_FALSE(session.hasPending());
+    handler.reset();
+    EXPECT_FALSE(handler.hasOutgoing());
 }

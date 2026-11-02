@@ -338,7 +338,11 @@ namespace mynet
                 {
                     if (events & EPOLLIN)
                     {
-                        drainDatagrams();
+                        [[maybe_unused]] auto _ = datagram_.handleRead(listener_.fd);
+                    }
+                    if (events & EPOLLOUT)
+                    {
+                        [[maybe_unused]] auto _ = datagram_.handleWrite(listener_.fd);
                     }
                     return;
                 }
@@ -581,32 +585,7 @@ namespace mynet
 
         inline void drainDatagrams()
         {
-            // 接收窗口与截断判定都由 Datagram 持有，引擎只负责把内核数据搬进窗口。
-            char *window = datagram_.recvBuffer();
-            const size_t windowBytes = datagram_.recvCapacity();
-            for (;;)
-            {
-                sockaddr_in peer{};
-                socklen_t peerLen = static_cast<socklen_t>(sizeof(sockaddr_in));
-                ssize_t n = ::recvfrom(listener_.fd, window, windowBytes, 0, reinterpret_cast<sockaddr *>(&peer),
-                                       &peerLen);
-                if (n < 0)
-                {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    {
-                        break;
-                    }
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    LOG_WARN("Reactor::drainDatagrams: recvfrom on fd {} failed: {}", listener_.fd,
-                             errnoText(errno));
-                    break;
-                }
-                datagram_.receiveFrom(peer, window, static_cast<size_t>(n));
-            }
-            datagram_.flushTo(listener_.fd);
+            [[maybe_unused]] auto _ = datagram_.handleRead(listener_.fd);
         }
 
         inline void sweepIdle()

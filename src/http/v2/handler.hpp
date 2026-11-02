@@ -34,14 +34,27 @@ namespace mynet
      * @namespace mux
      * @brief 流多路复用的协议常量与设置项标识符。
      */
+    /**
+     * @brief HTTP/2 SETTINGS 帧参数标识符枚举 (RFC 7540 Section 6.5.2)
+     */
+    enum class SETTINGS_ID : uint16_t
+    {
+        HEADER_TABLE_SIZE = 0x1,
+        ENABLE_PUSH = 0x2,
+        MAX_CONCURRENT_STREAMS = 0x3,
+        INITIAL_WINDOW_SIZE = 0x4,
+        MAX_FRAME_SIZE = 0x5,
+        MAX_HEADER_LIST_SIZE = 0x6
+    };
+
     namespace mux
     {
         inline constexpr uint32_t kInitialWindowSize = (64 << 10) - 1;
         inline constexpr uint32_t kWindowUpdateThreshold = kInitialWindowSize / 2;
         inline constexpr uint32_t kDefaultMaxStreams = 128;
-        inline constexpr uint16_t kSettingMaxConcurrentStreams = 0x3;
-        inline constexpr uint16_t kSettingInitialWindowSize = 0x4;
-        inline constexpr uint16_t kSettingMaxFrameSize = 0x5;
+        inline constexpr uint16_t kSettingMaxConcurrentStreams = std::to_underlying(SETTINGS_ID::MAX_CONCURRENT_STREAMS);
+        inline constexpr uint16_t kSettingInitialWindowSize = std::to_underlying(SETTINGS_ID::INITIAL_WINDOW_SIZE);
+        inline constexpr uint16_t kSettingMaxFrameSize = std::to_underlying(SETTINGS_ID::MAX_FRAME_SIZE);
     } // namespace mux
 
     /**
@@ -153,15 +166,12 @@ namespace mynet
             settingsSent_ = false;
             goawayReceived_ = false;
             outScratch_.clear();
-            fd_ = -1;
         }
 
         void onConnect(int fd) noexcept override
         {
-            fd_ = fd;
+            HandlerConnection::onConnect(fd);
         }
-
-        [[nodiscard]] inline int fd() const noexcept { return fd_; }
 
         /**
          * @brief 适配 Connection::echo 契约：遍历当前活跃流表，驱动每条流上的处理器执行 echo() 并泵送响应
@@ -1172,7 +1182,6 @@ namespace mynet
         static constexpr size_t kMaxConsecutiveWindowUpdates = 100;
         static constexpr size_t kMaxConsecutivePriorityFrames = 64;
 
-        int fd_ = -1;
         ObjectPool<StreamHandler> streamPool_{};
         mux::StreamTable<StreamSlot> streams_{};
         FrameDecoder decoder_{};

@@ -525,7 +525,7 @@ namespace mynet
                              datagramPeerText(datagramOp_.peer));
                 }
                 datagram_.receiveFrom(datagramOp_.peer, datagram_.recvBuffer(), static_cast<size_t>(cqe->res));
-                datagram_.flushTo(acceptor_.fd);
+                [[maybe_unused]] auto _ = datagram_.handleWrite(acceptor_.fd);
             }
             if (!stopSource_.stop_requested())
             {

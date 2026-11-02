@@ -30,6 +30,36 @@ namespace mynet
 {
 
     /**
+     * @brief 零拷贝管道控制与生命周期状态枚举
+     */
+    enum class SPLICE_CONTROL : uint8_t
+    {
+        DISABLED = 0, ///< 禁用 / 初始状态（走常规用户态缓冲读取与协议解析）
+        ACTIVE = 1,   ///< 活跃直通（内核 splice 管道建立，数据直通目标描述符）
+        PAUSED = 2,   ///< 暂停挂起（背压保护或流控限制，暂时暂停管道读写）
+        DRAINING = 3, ///< 管道排空（停止摄入新数据，等待管道内剩余字节完全刷入目标）
+        CLOSED = 4    ///< 隧道关闭（目标描述符关闭或传输完成）
+    };
+
+    [[nodiscard]] constexpr std::string_view toString(SPLICE_CONTROL ctrl) noexcept
+    {
+        switch (ctrl)
+        {
+        case SPLICE_CONTROL::DISABLED:
+            return "DISABLED";
+        case SPLICE_CONTROL::ACTIVE:
+            return "ACTIVE";
+        case SPLICE_CONTROL::PAUSED:
+            return "PAUSED";
+        case SPLICE_CONTROL::DRAINING:
+            return "DRAINING";
+        case SPLICE_CONTROL::CLOSED:
+            return "CLOSED";
+        }
+        return "UNKNOWN";
+    }
+
+    /**
      * @brief 偏连接的流式协议处理器基类
      *
      * 本类是流式传输层次的根：不继承任何处理器基类，独立提供流式会话所需的全部
@@ -48,8 +78,7 @@ namespace mynet
     class HandlerConnection
     {
     public:
-        /// 零拷贝目标状态常量
-        static constexpr int kSpliceDisabled = -1; ///< 禁用零拷贝（走常规用户态读取与协议解析）
+        using SPLICE_CONTROL = mynet::SPLICE_CONTROL;
 
         /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝（派生类按协议特性开启）
         static constexpr bool kEnableSplice = false;
@@ -105,8 +134,10 @@ namespace mynet
             responseQueue_.reset();
             spare_.clear();
             closeAfterResponse_ = false;
-            spliceTargetFd_ = kSpliceDisabled;
+            spliceControl_ = SPLICE_CONTROL::DISABLED;
+            spliceTargetFd_ = -1;
             maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
+            fd_ = -1;
         }
 
         // ---- 读取侧控制 (Read Side) ----
@@ -132,6 +163,14 @@ namespace mynet
         }
 
         /**
+         * @brief 追加一段视图请求字节到解析缓冲（视图适配重载）
+         */
+        [[nodiscard]] inline Result<> appendRequest(std::string_view sv) noexcept
+        {
+            return appendRequest(sv.data(), static_cast<ssize_t>(sv.size()));
+        }
+
+        /**
          * @brief 确保请求解析缓冲区至少拥有 minBytes 的可直写连续空间（零拷贝直接读取）
          *
          * @param minBytes 期望的最小写窗口字节数（默认由全局 ConnectionConfig 提供）
@@ -146,6 +185,11 @@ namespace mynet
             }
             return requestBuffer_.writableBegin();
         }
+
+        /**
+         * @brief 当前请求缓冲区可直接写入的连续窗口首地址
+         */
+        [[nodiscard]] inline char *requestWritableBegin() noexcept { return requestBuffer_.writableBegin(); }
 
         /**
          * @brief 当前请求缓冲区可直接写入的连续窗口大小
@@ -279,15 +323,75 @@ namespace mynet
          * @brief 设置零拷贝数据转发的目标描述符
          *
          * 解耦核心：不再写死当前套接字。
-         * - targetFd >= 0: 转发至目标描述符（反向代理后端 socket、磁盘文件落盘等）；
-         * - targetFd == kSpliceDisabled: 关闭零拷贝，回到用户态协议解析。
+         * - targetFd >= 0: 转发至目标描述符，自动将状态切换为 ACTIVE；
+         * - targetFd < 0: 关闭零拷贝，回到 DISABLED。
          */
-        inline void setSpliceTarget(int targetFd) noexcept { spliceTargetFd_ = targetFd; }
+        inline void setSpliceTarget(int targetFd) noexcept
+        {
+            spliceTargetFd_ = targetFd;
+            spliceControl_ = (targetFd >= 0) ? SPLICE_CONTROL::ACTIVE : SPLICE_CONTROL::DISABLED;
+        }
+
+        /**
+         * @brief 设置零拷贝管道控制状态
+         */
+        inline void setSpliceControl(SPLICE_CONTROL ctrl) noexcept
+        {
+            spliceControl_ = ctrl;
+            if (ctrl == SPLICE_CONTROL::DISABLED || ctrl == SPLICE_CONTROL::CLOSED)
+            {
+                spliceTargetFd_ = -1;
+            }
+        }
+
+        /**
+         * @brief 设置零拷贝目标控制状态（重定向至 setSpliceControl）
+         */
+        inline void setSpliceTarget(SPLICE_CONTROL ctrl) noexcept
+        {
+            setSpliceControl(ctrl);
+        }
+
+        [[nodiscard]] inline SPLICE_CONTROL spliceControl() const noexcept { return spliceControl_; }
         [[nodiscard]] inline int spliceTarget() const noexcept { return spliceTargetFd_; }
-        [[nodiscard]] inline bool isSpliceActive() const noexcept { return spliceTargetFd_ >= 0; }
+        [[nodiscard]] inline bool isSpliceActive() const noexcept
+        {
+            return spliceControl_ == SPLICE_CONTROL::ACTIVE && spliceTargetFd_ >= 0;
+        }
+
+        /// 挂起 / 暂停零拷贝直通
+        inline void pauseSplice() noexcept
+        {
+            if (spliceControl_ == SPLICE_CONTROL::ACTIVE)
+            {
+                spliceControl_ = SPLICE_CONTROL::PAUSED;
+            }
+        }
+
+        /// 恢复零拷贝直通
+        inline void resumeSplice() noexcept
+        {
+            if (spliceControl_ == SPLICE_CONTROL::PAUSED)
+            {
+                spliceControl_ = (spliceTargetFd_ >= 0) ? SPLICE_CONTROL::ACTIVE : SPLICE_CONTROL::DISABLED;
+            }
+        }
+
+        /// 排空零拷贝管道残留数据
+        inline void drainSplice() noexcept
+        {
+            if (spliceControl_ == SPLICE_CONTROL::ACTIVE)
+            {
+                spliceControl_ = SPLICE_CONTROL::DRAINING;
+            }
+        }
 
         /// 禁用零拷贝
-        inline void disableSplice() noexcept { spliceTargetFd_ = kSpliceDisabled; }
+        inline void disableSplice() noexcept
+        {
+            spliceControl_ = SPLICE_CONTROL::DISABLED;
+            spliceTargetFd_ = -1;
+        }
 
         [[nodiscard]] inline bool spliceEnabled() const noexcept { return isSpliceActive(); }
 
@@ -295,13 +399,12 @@ namespace mynet
          * @brief 连接就绪与描述符分配钩子
          *
          * 在连接成功建立并绑定底层 fd 后由 Connection 层回调。
-         * 协议处理器可在此完成初始化，或针对零拷贝场景指定数据流向目标：
-         * 例如回显处理器（EchoHandler）可在此通过 setSpliceTarget(fd) 将自身设为目标；
-         * 代理处理器（ProxyHandler）可在此设定上游目标描述符。
          *
          * @param fd 连接关联的底层套接字文件描述符
          */
-        virtual void onConnect([[maybe_unused]] int fd) noexcept {}
+        virtual void onConnect(int fd) noexcept { fd_ = fd; }
+
+        [[nodiscard]] inline int fd() const noexcept { return fd_; }
 
         /**
          * @brief 协议升级钩子（如 HTTP/1.1 Upgrade，连接语义由此移交上层）
@@ -342,7 +445,9 @@ namespace mynet
         std::string spare_{};
         size_t maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
         bool closeAfterResponse_ = false;
-        int spliceTargetFd_ = kSpliceDisabled;
+        SPLICE_CONTROL spliceControl_ = SPLICE_CONTROL::DISABLED;
+        int spliceTargetFd_ = -1;
+        int fd_ = -1;
     };
 
     /**
@@ -358,48 +463,67 @@ namespace mynet
     /**
      * @brief 流式会话处理器的必需方法集合
      *
-     * 名字直指含义：这是 Connection<H> 在热路径上真正会调用的方法清单，
-     * 缺一不可。两层保证：
-     * 1. 派生约束：必须继承 HandlerConnection，从而持有真实的请求/响应/背压状态；
-     * 2. 方法约束：逐个校验签名与 noexcept，防止派生类用 = delete 或改签名
-     *    让某个调用点失效。
-     *
-     * 仅靠方法约束会让一个手写同名成员但未继承 HandlerConnection 的类型通过，
-     * 而 Connection<H> 仍能在其上编译——这类处理器没有共享的基类状态，
-     * 语义上不可信，因此本概念显式要求派生关系。
+     * 名字直指含义：这是 Connection<H> 及流式处理架构下对派生处理器的全量契约清单，
+     * 逐项校验所有成员函数的签名与 noexcept 规范，防止派生类用 = delete 或不兼容签名破坏契约。
      */
     template <typename H>
     concept MandatoryMethodConnection =
         DerivedFromHandlerConnection<H> && Resettable<H> &&
-        requires(H &h, const char *buf, ssize_t rn, size_t n) {
-            // 零异常纪律：摄入路径 noexcept，扩容失败经错误码交付
+        requires(H &h, const char *buf, ssize_t rn, size_t n, std::string_view sv,
+                 const std::string &str, std::string &&s, bool b, int fd, SPLICE_CONTROL ctrl) {
+            // ---- 读取侧控制 (Read Side) ----
             { h.appendRequest(buf, rn) } noexcept -> std::same_as<Result<>>;
-            { h.hasResponse() } noexcept -> std::same_as<bool>;
-            { h.takeResponse() } -> std::same_as<std::string>;
-            { h.requestOverLimit() } noexcept -> std::same_as<bool>;
-            h.echo();
-            // 下面这些同样被连接层直接调用，无 requires 保护，必须由概念兜底：
-            // 零拷贝直写窗口、读信用背压、请求上限与关闭/错误钩子
-            { h.prepareRequestWritable(n) } noexcept;
+            { h.appendRequest(sv) } noexcept -> std::same_as<Result<>>;
+            { h.prepareRequestWritable(n) } noexcept -> std::same_as<std::expected<char *, ERR>>;
+            { h.requestWritableBegin() } noexcept -> std::same_as<char *>;
             { h.requestWritableBytes() } noexcept -> std::same_as<size_t>;
             { h.commitRequest(n) } noexcept;
+            { h.requestOverLimit() } noexcept -> std::same_as<bool>;
+            { h.requestBytes() } noexcept -> std::same_as<size_t>;
+            { h.requestBegin() } noexcept -> std::same_as<const char *>;
+            { h.requestConsume(n) } noexcept;
+            { h.requestClear() } noexcept;
             { h.readCredit() } noexcept -> std::same_as<size_t>;
             { h.setMaxRequestBytes(n) } noexcept;
-            { h.onParseError(buf) } noexcept;
+
+            // ---- 发送响应侧控制 (Write Side) ----
+            { h.hasResponse() } noexcept -> std::same_as<bool>;
+            { h.responseCount() } noexcept -> std::same_as<size_t>;
+            { h.takeResponse() } -> std::same_as<std::string>;
+            { h.recycleSpare(std::move(s)) } noexcept;
+            { h.pushResponse(std::move(s)) } noexcept -> std::same_as<Result<>>;
+            { h.pushResponse(str) } noexcept -> std::same_as<Result<>>;
+            { h.pushResponse(sv) } noexcept -> std::same_as<Result<>>;
+            { h.pushResponse(buf) } noexcept -> std::same_as<Result<>>;
+            { h.reserveResponses(n) } noexcept -> std::same_as<Result<>>;
+
+            // ---- 生命周期管理 (Lifecycle) ----
             { h.closeAfterResponse() } noexcept -> std::same_as<bool>;
-            // Connection::isSpliceEnabled() 在 kEnableSplice 为 true 时直接调用本方法，
-            // 故它同样属于「热路径真正会调用的清单」。
+            { h.setCloseAfterResponse(b) } noexcept;
+
+            // ---- 零拷贝管道控制 (Zero-Copy Splice Routing) ----
+            { h.setSpliceTarget(fd) } noexcept;
+            { h.setSpliceTarget(ctrl) } noexcept;
+            { h.setSpliceControl(ctrl) } noexcept;
+            { h.spliceControl() } noexcept -> std::same_as<SPLICE_CONTROL>;
+            { h.spliceTarget() } noexcept -> std::same_as<int>;
+            { h.isSpliceActive() } noexcept -> std::same_as<bool>;
+            { h.pauseSplice() } noexcept;
+            { h.resumeSplice() } noexcept;
+            { h.drainSplice() } noexcept;
+            { h.disableSplice() } noexcept;
             { h.spliceEnabled() } noexcept -> std::same_as<bool>;
+
+            // ---- 协议钩子与连接状态 (Hooks & Connection State) ----
+            { h.onConnect(fd) } noexcept;
+            { h.onUpgrade() } noexcept;
+            { h.onMessageComplete() } noexcept;
+            { h.onParseError(buf) } noexcept;
+            { h.fd() } noexcept -> std::same_as<int>;
+            h.echo();
         };
 
-    /**
-     * @brief I/O 处理后套接字保留决策
-     */
-    enum class IO_STATUS : uint8_t
-    {
-        KEEP = 0, ///< 保持存活：继续等待下一轮就绪通知或完成通知
-        CLOSE = 1 ///< 关闭断开：立即进入下线回收流程
-    };
+
 
     /**
      * @brief TLS 握手演进状态枚举
@@ -530,7 +654,8 @@ namespace mynet
             {
                 if constexpr (HandlerType::kEnableSplice)
                 {
-                    return handler_.spliceTarget() >= 0;
+                    return handler_.isSpliceActive() ||
+                           (handler_.spliceControl() == SPLICE_CONTROL::DRAINING && pipePending_ > 0);
                 }
             }
             return false;
@@ -829,6 +954,12 @@ namespace mynet
 
         [[nodiscard]] IO_STATUS handleSplice() noexcept
         {
+            const SPLICE_CONTROL ctrl = handler_.spliceControl();
+            if (ctrl == SPLICE_CONTROL::PAUSED || ctrl == SPLICE_CONTROL::DISABLED || ctrl == SPLICE_CONTROL::CLOSED)
+            {
+                return IO_STATUS::KEEP;
+            }
+
             const int targetFd = handler_.spliceTarget();
             if (targetFd < 0) [[unlikely]]
             {
@@ -876,6 +1007,13 @@ namespace mynet
             {
                 wantWrite_ = true;
                 readPaused_ = true;
+                return IO_STATUS::KEEP;
+            }
+
+            // 若当前处于排空状态，管道残留数据已刷空，则将通道置为 CLOSED 并退出
+            if (ctrl == SPLICE_CONTROL::DRAINING)
+            {
+                handler_.setSpliceControl(SPLICE_CONTROL::CLOSED);
                 return IO_STATUS::KEEP;
             }
 
@@ -1157,6 +1295,10 @@ namespace mynet
                     {
                         wantWrite_ = false;
                         readPaused_ = false;
+                        if (handler_.spliceControl() == SPLICE_CONTROL::DRAINING)
+                        {
+                            handler_.setSpliceControl(SPLICE_CONTROL::CLOSED);
+                        }
                     }
                 }
             }

@@ -72,16 +72,13 @@ namespace mynet
                 currentField_.clear();
                 currentValue_.clear();
                 totalHeaderBytes_ = 0;
-                fd_ = -1;
                 HandlerConnection::reset();
             }
 
             void onConnect(int fd) noexcept override
             {
-                fd_ = fd;
+                HandlerConnection::onConnect(fd);
             }
-
-            [[nodiscard]] inline int fd() const noexcept { return fd_; }
 
             /**
              * @brief 开启零拷贝反向代理或升级隧道（直接复用 Connection 零拷贝管道）
@@ -92,6 +89,7 @@ namespace mynet
              * @param targetFd 目标上游套接字或落盘文件描述符
              */
             inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
+            inline void enableSpliceTunnel(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
             inline void disableSpliceTunnel() noexcept { disableSplice(); }
             [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
 
@@ -301,7 +299,6 @@ namespace mynet
             static constexpr size_t kMaxTotalHeadersLength = 65536;    // 64 KiB
             static constexpr size_t kMaxBodyLength = 16 * 1024 * 1024; // 16 MiB
 
-            int fd_ = -1;
             llhttp_t parser_{};
             llhttp_settings_t settings_{};
 

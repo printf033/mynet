@@ -88,23 +88,6 @@ namespace mynet
         operator=(HandlerDatagram &&) = delete("a datagram handler owns the outgoing queue for one socket");
 
         /**
-         * @brief 协议层回显辅助方法：标准 UDP 数据报回显
-         *
-         * 将收到的对端数据报原样推入外发队列待发送。由派生回显处理器（如 UdpEchoHandler）自主调用。
-         *
-         * @param peer 发送方网络地址
-         * @param data 报文载荷首地址
-         * @param n 报文有效字节长度
-         */
-        inline void echo(const sockaddr_in &peer, const char *data, size_t n) noexcept
-        {
-            if (data != nullptr && n > 0) [[likely]]
-            {
-                sendTo(peer, data, n);
-            }
-        }
-
-        /**
          * @brief 单个完整数据报到达业务入口钩子（派生类实现具体的协议解析、转发或回显）
          *
          * 基类提供空操作，不再强行写死默认回显；回显等具体业务逻辑完全由派生类决定。
@@ -250,28 +233,36 @@ namespace mynet
     /**
      * @brief 数据报处理器的必需方法集合
      *
-     * 与 MandatoryMethodConnection 对称：这是引擎在 UDP 路径上真正会调用的
-     * 方法清单。两层保证：
-     * 1. 派生约束：必须继承 HandlerDatagram，回复队列必须来自真实基类子对象；
-     * 2. 方法约束：逐项校验引擎通过处理器类型 H 本身调用的接口。
-     *
-     * 为何不把 hasOutgoing / takeOutgoing 也纳入约束：外发队列的存取由 Datagram<H>
-     * 经基类子对象发起（派生约束已保证该子对象存在），派生类既无法移除它们、
-     * 也无法改变实际被调用的版本。把它们写进约束只会误拒一类合法写法（派生类
-     * 用不带 noexcept 的同名函数隐藏基类版本，引擎行为完全不变），属于过度约束，
-     * 因此不列入。
-     *
-     * onDatagram 是报文到达业务入口，由派生类实现协议语义；列在这里是为了让违反者
-     * 得到指向概念的清晰诊断，而不是一层层模板实例化错误。
+     * 与 MandatoryMethodConnection 对称：这是 Datagram<H> 及数据报处理架构下
+     * 对派生处理器的全量契约清单，逐项校验所有成员函数的签名与 noexcept 规范，
+     * 防止派生类用 = delete 或不兼容签名破坏报文处理契约。
      */
     template <typename D>
     concept MandatoryMethodDatagram =
         DerivedFromHandlerDatagram<D> && Resettable<D> &&
-        requires(D &d, const sockaddr_in &peer, const char *buf, size_t n) {
-            // 单条报文到达的业务入口（派生类实现具体的协议处理或回显）
+        requires(D &d, const sockaddr_in &peer, const char *buf, size_t n, std::string bytes,
+                 const std::vector<sockaddr_in> &targets) {
+            // ---- 报文接收入口与生命周期钩子 ----
             { d.onDatagram(peer, buf, n) } noexcept;
-            // 接收上界由引擎经处理器类型直接读取，因此必须可调用
+            { d.onMessageComplete() } noexcept;
+            { d.onParseError(buf) } noexcept;
+
+            // ---- 报文发送与转发队列控制 ----
+            d.sendTo(peer, buf, n);
+            d.sendTo(peer, std::move(bytes));
+            d.forwardTo(peer, buf, n);
+            d.broadcastTo(targets, buf, n);
+            { d.hasOutgoing() } noexcept -> std::same_as<bool>;
+            { d.outgoingCount() } noexcept -> std::same_as<size_t>;
+            { d.peekOutgoing() } noexcept -> std::same_as<const DatagramPacket &>;
+            { d.takeOutgoing() } -> std::same_as<DatagramPacket>;
+            { d.droppedOutgoing() } noexcept -> std::same_as<size_t>;
+
+            // ---- 容量与限制控制 ----
+            { d.setMaxDatagramBytes(n) } noexcept;
             { d.maxDatagramBytes() } noexcept -> std::same_as<size_t>;
+            { d.setMaxPendingOutgoing(n) } noexcept;
+            { d.maxPendingOutgoing() } noexcept -> std::same_as<size_t>;
         };
 
     /**
@@ -551,6 +542,61 @@ namespace mynet
         }
 
         /**
+         * @brief 数据报读事件驱动核心：从套接字循环读空所有可用报文并交付处理器
+         *
+         * @param fd UDP 套接字描述符
+         * @return IO 处理决策（保持存活 KEEP）
+         */
+        [[nodiscard]] inline IO_STATUS handleRead(int fd) noexcept
+        {
+            if (handler_ == nullptr || fd < 0) [[unlikely]]
+            {
+                return IO_STATUS::KEEP;
+            }
+            char *window = recvBuffer();
+            const size_t windowBytes = recvCapacity();
+            for (;;)
+            {
+                sockaddr_in peer{};
+                socklen_t peerLen = static_cast<socklen_t>(sizeof(sockaddr_in));
+                ssize_t n = ::recvfrom(fd, window, windowBytes, 0,
+                                       reinterpret_cast<sockaddr *>(&peer), &peerLen);
+                if (n < 0)
+                {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        break;
+                    }
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    LOG_WARN("Datagram::handleRead: recvfrom on fd {} failed: {}", fd, errnoText(errno));
+                    break;
+                }
+                receiveFrom(peer, window, static_cast<size_t>(n));
+            }
+            [[maybe_unused]] auto _ = handleWrite(fd);
+            return IO_STATUS::KEEP;
+        }
+
+        /**
+         * @brief 数据报写事件驱动核心：排空外发回复队列
+         *
+         * @param fd UDP 套接字描述符
+         * @return IO 处理决策（保持存活 KEEP）
+         */
+        [[nodiscard]] inline IO_STATUS handleWrite(int fd) noexcept
+        {
+            if (handler_ == nullptr || fd < 0) [[unlikely]]
+            {
+                return IO_STATUS::KEEP;
+            }
+            flushTo(fd);
+            return IO_STATUS::KEEP;
+        }
+
+        /**
          * @brief 收发计数（只读）
          *
          * 定位是**单元测试与调试观测**，不是生产指标：引擎的 runUdp 在返回前
@@ -596,6 +642,8 @@ namespace mynet
         size_t flushTo(int) noexcept { return 0; }
         [[nodiscard]] bool hasPending() const noexcept { return false; }
         ssize_t sendDirect(int, const sockaddr_in &, const char *, size_t) noexcept { return 0; }
+        [[nodiscard]] IO_STATUS handleRead(int) noexcept { return IO_STATUS::KEEP; }
+        [[nodiscard]] IO_STATUS handleWrite(int) noexcept { return IO_STATUS::KEEP; }
     };
 
     /**

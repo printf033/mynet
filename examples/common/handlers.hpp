@@ -44,15 +44,17 @@ namespace mynet::example
     /**
      * @brief 数据报回显处理器
      *
-     * 只需偏报文的 HandlerDatagram：基类 HandlerDatagram::echo() 及默认
-     * onDatagram 实现本身即数据报回显，自带对端地址标签化的回复队列。
+     * 业务协议级回显：在 onDatagram 中自主将接收到的报文通过 sendTo 推入外发队列。
      */
     class UdpEchoHandler : public HandlerDatagram
     {
     public:
         void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
-            echo(peer, data, n);
+            if (data != nullptr && n > 0)
+            {
+                sendTo(peer, data, n);
+            }
         }
     };
 

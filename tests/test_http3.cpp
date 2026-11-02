@@ -667,13 +667,16 @@ TEST(HandlerHttp3, SpliceTunnelApis)
 {
     HandlerHttp3 handler;
     EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
 
     handler.enableSpliceTunnel(200);
     EXPECT_TRUE(handler.isSpliceTunnelActive());
     EXPECT_EQ(handler.spliceTarget(), 200);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
 
     handler.disableSpliceTunnel();
     EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceTarget(), HandlerConnection::kSpliceDisabled);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
 }
