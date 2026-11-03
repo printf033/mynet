@@ -11,7 +11,6 @@
 
 #include "connection.hpp"
 #include "datagram.hpp"
-
 #include <cstddef>
 
 namespace mynet::example
@@ -30,15 +29,9 @@ namespace mynet::example
     public:
         static constexpr bool kEnableSplice = true;
 
-        void onConnect(int fd) noexcept override
-        {
-            setSpliceTarget(fd);
-        }
+        void onConnect(int fd) noexcept override { setSpliceTarget(fd); }
 
-        void reset() noexcept override
-        {
-            HandlerConnection::reset();
-        }
+        void reset() noexcept override { HandlerConnection::reset(); }
     };
 
     /**

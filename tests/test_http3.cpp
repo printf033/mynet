@@ -632,8 +632,8 @@ TEST(HandlerHttp3, DualBaseLifecycleHooksAreUnambiguous)
     static_cast<HandlerDatagram &>(handler).onMessageComplete();
 
     handler.reset();
-    EXPECT_FALSE(handler.hasOutgoing());   // HandlerDatagram::reset()
-    EXPECT_FALSE(handler.hasResponse());   // HandlerConnection::reset()
+    EXPECT_FALSE(handler.hasOutgoing()); // HandlerDatagram::reset()
+    EXPECT_FALSE(handler.hasResponse()); // HandlerConnection::reset()
     EXPECT_EQ(handler.activeStreams(), size_t{0});
 }
 

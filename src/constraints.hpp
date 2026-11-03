@@ -28,11 +28,10 @@ namespace mynet
      * MandatoryMethodConnection / MandatoryMethodDatagram 给出。
      */
     template <typename H>
-    concept HandlerConstraint = Resettable<H> && std::destructible<H> &&
-                                requires(H &h, const char *reason) {
-                                    { h.onMessageComplete() } noexcept;
-                                    { h.onParseError(reason) } noexcept;
-                                };
+    concept HandlerConstraint = Resettable<H> && std::destructible<H> && requires(H &h, const char *reason) {
+        { h.onMessageComplete() } noexcept;
+        { h.onParseError(reason) } noexcept;
+    };
 
     // 基类与其派生约束分散在各自头文件：HandlerConnection / HandlerDatagram 及
     // 其概念在 connection.hpp、datagram.hpp，EventBase 及其概念在 event.hpp。

@@ -75,10 +75,7 @@ namespace mynet
                 HandlerConnection::reset();
             }
 
-            void onConnect(int fd) noexcept override
-            {
-                HandlerConnection::onConnect(fd);
-            }
+            void onConnect(int fd) noexcept override { HandlerConnection::onConnect(fd); }
 
             /**
              * @brief 开启零拷贝反向代理或升级隧道（直接复用 Connection 零拷贝管道）
@@ -132,7 +129,8 @@ namespace mynet
                 return pushResponse(std::move(resp));
             }
 
-            [[nodiscard]] inline Result<> sendResponse(int statusCode, std::string_view statusText, std::string_view body)
+            [[nodiscard]] inline Result<> sendResponse(int statusCode, std::string_view statusText,
+                                                       std::string_view body)
             {
                 return sendResponse(statusCode, statusText, {}, body);
             }
@@ -147,8 +145,7 @@ namespace mynet
                     if (!body_.empty())
                     {
                         std::vector<std::pair<std::string, std::string>> hdrs = {
-                            {"Content-Type", "application/octet-stream"}
-                        };
+                            {"Content-Type", "application/octet-stream"}};
                         [[maybe_unused]] auto _ = sendResponse(200, "OK", hdrs, body_);
                     }
                 }
@@ -220,8 +217,7 @@ namespace mynet
                 if constexpr (Mode == HTTP_MODE::REQUEST)
                 {
                     std::vector<std::pair<std::string, std::string>> hdrs = {
-                        {"Content-Type", "application/octet-stream"}
-                    };
+                        {"Content-Type", "application/octet-stream"}};
                     if (!sendResponse(200, "OK", hdrs, body_)) [[unlikely]]
                     {
                         LOG_WARN("HandlerHttp: response queue full, response dropped");

@@ -22,8 +22,7 @@
   - [HTTP/2 帧编解码与流多路复用](#4-http2-帧编解码与流多路复用)
   - [UDP 数据报传输系统](#5-udp-数据报传输系统)
   - [现代 C++26 语言规范与强类型错误语义](#6-现代-c26-语言规范与强类型错误语义)
-  - [管道式双向客户端（Client）](#7-管道式双向客户端client)
-  - [配置归属](#8-配置归属引擎侧不保留硬编码默认值)
+  - [配置归属](#7-配置归属引擎侧不保留硬编码默认值)
 - [性能基准测试](#性能基准测试)
 - [系统依赖与前置要求](#系统依赖与前置要求)
 - [构建与编译](#构建与编译)
@@ -31,7 +30,6 @@
   - [1. 基于 epoll 的 TCP Echo 服务端（Reactor）](#1-基于-epoll-的-tcp-echo-服务端reactor)
   - [2. 基于 io_uring 与内核缓冲环的 TCP 服务端（Proactor）](#2-基于-io_uring-与内核缓冲环的-tcp-服务端proactor)
   - [3. 帧多路复用流服务端（HandlerHttp2）](#3-帧多路复用流服务端handlerhttp2)
-  - [4. Unix 管道风格双向流客户端（Client）](#4-unix-管道风格双向流客户端client)
 - [工程代码目录结构](#工程代码目录结构)
 - [单元测试与质量保证](#单元测试与质量保证)
 - [开源许可证](#开源许可证)
@@ -89,7 +87,6 @@ flowchart TD
         Conn["Connection<Handler>"]
         Dgram["Datagram<Handler>"]
         Session["Proactor::Session"]
-        PeerCl["Client<Event> (双向管道客户端)"]
         Datagram["DatagramReply"]
     end
 
@@ -175,28 +172,7 @@ flowchart TD
   - `enum class IO_END : uint8_t`：明确表达非错误性质的非阻塞 I/O 终结原因（`WOULDBLOCK` 需重试、`INTERRUPTED` 信号打断、`EOF_REACHED` 正常流结束、`FATAL` 致命错误），通过 `std::expected<size_t, IO_END>` 向上交付。
 - **契约式编程（Contracts）**：通过 `contract_assert` 在入口处声明不变量与前置条件（如指针非空、端口在有效 16 位区间等）。
 
-### 7. 管道式双向客户端（Client）
-
-`Client<Event>` 遵循 Unix 哲学，作为独立高效的命令行数据泵将标准输入（stdin）与套接字全双工桥接至标准输出（stdout）：
-
-```bash
-cat payload.bin | ./build/client_tcp 127.0.0.1:8888 > output.bin
-```
-
-内置标准输入高低水位回压调节、平滑半关闭握手（TCP `FIN` 或 TLS `close_notify`）、`SIGPIPE` 信号阻断与还原，支持管道、终端与常规文件重定向。
-
-TLS 接口可传入 `TlsOptions` 配置最低/最高 TLS 版本、TLS 1.2 密码套件、TLS 1.3 密码套件和 ALPN 协议列表；不传时维持 TLS 1.2 最低版本及 OpenSSL 默认套件策略。客户端始终验证服务端证书。该配置用于协议兼容与安全策略，不提供伪造 ClientHello 扩展顺序或仿冒其他实现的 JA4 指纹功能。
-
-```cpp
-TlsOptions tls;
-tls.minVersion = TLS1_2_VERSION;
-tls.maxVersion = TLS1_3_VERSION;
-tls.alpnProtocols = {"h2", "http/1.1"};
-Client<EventSsl<HandlerConnection>> client;
-client.runSsl("127.0.0.1", 443, "example.com", nullptr, 16 << 10, tls);
-```
-
-### 8. 配置归属：引擎侧不保留硬编码默认值
+### 7. 配置归属：引擎侧不保留硬编码默认值
 
 所有决定服务端引擎**分配多少**、内核队列**排多深**的可调参数，只有一个归属地：`configHolder.hpp` 提供编译期内建基线，`config/config.lua` 经 `reloadConfig()` 解析并钳位。`Reactor` 与 `Proactor` 自身不携带默认实参——两参数调用读取当前 `NetConfig` 快照：
 
@@ -423,41 +399,15 @@ int main() {
 }
 ```
 
-### 4. Unix 管道风格双向流客户端（Client）
-
-```cpp
-#include "connection.hpp"
-#include "error.hpp"
-#include "client.hpp"
-
-using namespace mynet;
-
-int main(int argc, char* argv[]) {
-    mynet::log::init();
-    Client<EventSocket<HandlerConnection>> client;
-
-    // 建立连接并将标准输入流入网络，将对端返回输出至标准输出
-    if (auto res = client.runTcp("127.0.0.1", 8888); !res) {
-        LOG_ERROR("Client 客户端发生错误: {}", toString(res.error()));
-        return toExitCode(res.error());
-    }
-    return 0;
-}
-```
-
 全部示例都接受单个 `<host>:<port>` 参数，省略时使用各自的默认端点：
 
 ```bash
-# 客户端：把 stdin 流向服务端，并把回包打印到 stdout
-printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/client_tcp 127.0.0.1:8888
-
 # 服务端：端点可任意指定（默认 0.0.0.0:8888，HTTP/3 为 4433）
 ./build/reactor_http1 127.0.0.1:9000
 curl -X POST --data-binary 'hello' http://127.0.0.1:9000/
 ```
 
-完整矩阵为：客户端 `client_{tcp,ssl,udp}`，服务端
-`{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}`。
+完整矩阵为：服务端 `{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}`。
 
 ---
 
@@ -501,8 +451,7 @@ mynet/
 │   │       ├── streamTable.hpp # HTTP/3 逻辑流表与状态跟踪
 │   │       └── handler.hpp     # 统一 HTTP/3 协议处理器（HandlerHttp3）
 │   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎
-│   ├── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎
-│   └── client.hpp              # 管道式双向网络客户端（stdin/stdout 桥接）
+│   └── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎
 │
 ├── config/                     # 运行时配置
 │   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）
@@ -511,10 +460,6 @@ mynet/
 │   ├── common/
 │   │   ├── endpoint.hpp        # 全部示例共用的 "<host>:<port>" 解析
 │   │   └── handlers.hpp        # 两个引擎共用的 SpliceEchoHandler / UdpEchoHandler
-│   ├── client/                 # Client 客户端（传输级，不解析应用协议）
-│   │   ├── tcp.cpp             # 命令行 TCP 流客户端（client_tcp）
-│   │   ├── ssl.cpp             # 命令行 TLS 安全客户端（client_ssl）
-│   │   └── udp.cpp             # 命令行 UDP 客户端（client_udp）
 │   ├── reactor/                # epoll 边沿触发 Reactor 服务端
 │   │   ├── tcp.cpp             # reactor_tcp   TCP 回显（splice 零拷贝）
 │   │   ├── ssl.cpp             # reactor_ssl   TLS 回显

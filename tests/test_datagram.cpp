@@ -6,8 +6,8 @@
 #include "datagram.hpp"
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
-#include <netinet/in.h>
 #include <limits>
+#include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -525,8 +525,8 @@ TEST(Datagram, HandleReadAndWriteApis)
 
     // 1. 发送测试报文到 rx
     const char msg[] = "handle-read-datagram-test";
-    ssize_t sent = ::sendto(pair.tx, msg, sizeof(msg) - 1, 0,
-                            reinterpret_cast<const sockaddr *>(&pair.rxAddr), sizeof(pair.rxAddr));
+    ssize_t sent = ::sendto(pair.tx, msg, sizeof(msg) - 1, 0, reinterpret_cast<const sockaddr *>(&pair.rxAddr),
+                            sizeof(pair.rxAddr));
     ASSERT_EQ(sent, static_cast<ssize_t>(sizeof(msg) - 1));
 
     // 2. 调用 handleRead 驱动事件循环读取（传入套接字 fd）

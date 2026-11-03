@@ -32,9 +32,10 @@ namespace mynet
 
         ~ResponseQueue() noexcept { destroy(); }
 
-        ResponseQueue(const ResponseQueue &) = delete("a response queue owns one slot array; a copy would alias the strings");
-        ResponseQueue &
-        operator=(const ResponseQueue &) = delete("a response queue owns one slot array; a copy would alias the strings");
+        ResponseQueue(const ResponseQueue &) =
+            delete ("a response queue owns one slot array; a copy would alias the strings");
+        ResponseQueue &operator=(const ResponseQueue &) =
+            delete ("a response queue owns one slot array; a copy would alias the strings");
 
         ResponseQueue(ResponseQueue &&other) noexcept
             : slots_(std::exchange(other.slots_, nullptr)),

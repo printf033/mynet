@@ -95,7 +95,7 @@ namespace mynet
          * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
          */
         [[nodiscard]] Result<> runTcp()
-            requires kStreaming
+            requires SocketEvent<Event> && kStreaming
         {
             // 深拷贝一份：get*Config() 返回的是 thread_local 快照的引用，并发的
             // reloadConfig() 会重新赋值该快照，令 host.c_str() 在调用栈更深处悬垂。
@@ -105,7 +105,7 @@ namespace mynet
         }
 
         [[nodiscard]] Result<> runTcp(const char *ip, int port)
-            requires kStreaming
+            requires SocketEvent<Event> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
             return runTcp(ip, port, cfg.server, cfg.reactor);
@@ -125,7 +125,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runTcp(const char *ip, int port, const ServerConfig &server,
                                       const ReactorConfig &reactor)
-            requires kStreaming
+            requires SocketEvent<Event> && kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validReactorConfig(reactor));
@@ -225,41 +225,71 @@ namespace mynet
                 reset();
                 return err;
             }
-            if ((protocol_.ctx = SSL_CTX_new(TLS_server_method())) == nullptr) [[unlikely]]
-            {
-                LOG_ERROR("Reactor::runSsl: SSL_CTX_new() failed: {}", sslText());
-                reset();
-                return std::unexpected(ERR::SSL_CTX_FAILED);
-            }
             tlsOptions_ = tlsOptions;
-            if (auto err = detail::configureTlsContext(protocol_.ctx, tlsOptions_, true); !err) [[unlikely]]
+            auto ctxRes = detail::createServerContext(crt, key, tlsOptions_);
+            if (!ctxRes) [[unlikely]]
             {
-                LOG_ERROR("Reactor::runSsl: invalid TLS options: {}", sslText());
                 reset();
-                return err;
+                return std::unexpected(ctxRes.error());
             }
-            if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("Reactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, sslText());
-                reset();
-                return std::unexpected(ERR::SSL_CERT_FAILED);
-            }
-            if (SSL_CTX_use_PrivateKey_file(protocol_.ctx, key, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("Reactor::runSsl: private key file \"{}\" could not be loaded: {}", key, sslText());
-                reset();
-                return std::unexpected(ERR::SSL_KEY_FAILED);
-            }
-            if (SSL_CTX_check_private_key(protocol_.ctx) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("Reactor::runSsl: private key \"{}\" does not match certificate \"{}\": {}", key, crt,
-                          sslText());
-                reset();
-                return std::unexpected(ERR::SSL_KEY_MISMATCH);
-            }
+            protocol_.ctx = *ctxRes;
             Result<> rc = serve(server, reactor);
             reset();
             return rc;
+        }
+
+        /**
+         * @brief 使用 SNI 多域名证书调度器运行 TLS 服务器。
+         */
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager,
+                                      const ServerConfig &server, const ReactorConfig &reactor)
+            requires SslEvent<Event> && kStreaming
+        {
+            contract_assert(validServerConfig(server));
+            contract_assert(validReactorConfig(reactor));
+            if (auto err = listener_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
+            {
+                reset();
+                return err;
+            }
+            protocol_.ctx = sniManager.defaultContext();
+            if (protocol_.ctx == nullptr) [[unlikely]]
+            {
+                reset();
+                return std::unexpected(ERR::SSL_CTX_FAILED);
+            }
+            Result<> rc = serve(server, reactor);
+            // 由 sniManager 管理其托管的 SSL_CTX 生命周期，退出时置空避免 double-free
+            protocol_.ctx = nullptr;
+            reset();
+            return rc;
+        }
+
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(ip, port, sniManager, cfg.server, cfg.reactor);
+        }
+
+        [[nodiscard]] Result<> runSsl(SniCertificateManager &sniManager)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), sniManager, cfg.server,
+                          cfg.reactor);
+        }
+
+        /**
+         * @brief 完全以全局配置运行 UDP 数据报服务器（监听地址取自 server.host/port）。
+         * @param handler 数据报处理器引用。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runUdp(Handler &handler)
+            requires MandatoryMethodDatagram<Handler>
+        {
+            const NetConfig cfg = getNetConfig();
+            return runUdp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler, cfg.reactor);
         }
 
         /**
@@ -432,11 +462,7 @@ namespace mynet
             loop_.setEventCallback({});
             if constexpr (SslEvent<Event>)
             {
-                if (protocol_.ctx != nullptr)
-                {
-                    SSL_CTX_free(protocol_.ctx);
-                    protocol_.ctx = nullptr;
-                }
+                detail::freeContext(protocol_.ctx);
             }
             listener_.reset();
             datagram_.reset();

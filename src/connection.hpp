@@ -587,6 +587,7 @@ namespace mynet
             }
 #ifdef MYNET_HAVE_KTLS
             ktlsRx_ = false;
+            ktlsTx_ = false;
 #endif
             if (fd_ != -1)
             {
@@ -667,9 +668,21 @@ namespace mynet
 
         [[nodiscard]] inline bool isSpliceEnabled() const noexcept
         {
-            if (ssl_ != nullptr || !getServerConfig().enableSplice)
+            if (!getServerConfig().enableSplice)
             {
                 return false;
+            }
+            if (ssl_ != nullptr)
+            {
+#ifdef MYNET_HAVE_KTLS
+                // kTLS RX 激活时，内核已在接收队列中完成对称解密，splice(fd_, ...) 读出的即为明文
+                if (!ktlsRx_)
+                {
+                    return false;
+                }
+#else
+                return false;
+#endif
             }
             if constexpr (requires {
                               { HandlerType::kEnableSplice } -> std::convertible_to<bool>;
@@ -733,7 +746,8 @@ namespace mynet
             }
 #ifdef MYNET_HAVE_KTLS
             ktlsRx_ = false;
-            // 请求内核 TLS RX offload；仅当握手后 BIO_get_ktls_recv 确认生效时才走快路径
+            ktlsTx_ = false;
+            // 请求内核 TLS RX 与 TX offload；仅当握手后 BIO 确认生效时才走快路径
             SSL_set_options(ssl_, SSL_OP_ENABLE_KTLS);
 #endif
             if (SSL_set_fd(ssl_, fd_) != 1) [[unlikely]]
@@ -760,12 +774,15 @@ namespace mynet
             {
                 handshakeDone_ = true;
 #ifdef MYNET_HAVE_KTLS
-                // 内核完成 RX offload 时读 BIO 已切换为 kTLS：后续 recv() 直接返回明文，
-                // Proactor 可安全复用 multishot + buffer ring 快路径；未生效则保持慢路径
+                // 内核完成 RX/TX offload 时底层 BIO 会切换为 kTLS：
+                // RX 生效时后续 recv() 直接返回明文，Proactor 可安全复用 multishot + buffer ring 快路径；
+                // TX 生效时发送可直接走 ::send 或 splice 零拷贝
                 ktlsRx_ = BIO_get_ktls_recv(SSL_get_rbio(ssl_)) > 0;
-                if (ktlsRx_) [[unlikely]]
+                ktlsTx_ = BIO_get_ktls_send(SSL_get_wbio(ssl_)) > 0;
+                if (ktlsRx_ || ktlsTx_) [[unlikely]]
                 {
-                    LOG_INFO("Connection::doHandshake: fd {}: kTLS RX offload active", fd_);
+                    LOG_INFO("Connection::doHandshake: fd {}: kTLS offload active (RX={}, TX={})", fd_, ktlsRx_,
+                             ktlsTx_);
                 }
 #endif
                 return HANDSHAKE_STATUS::DONE;
@@ -790,6 +807,16 @@ namespace mynet
         {
 #ifdef MYNET_HAVE_KTLS
             return ktlsRx_;
+#else
+            return false;
+#endif
+        }
+
+        /// kTLS TX offload 是否已生效（握手后由内核确认）。
+        [[nodiscard]] inline bool ktlsTxActive() const noexcept
+        {
+#ifdef MYNET_HAVE_KTLS
+            return ktlsTx_;
 #else
             return false;
 #endif
@@ -1598,6 +1625,7 @@ namespace mynet
         bool handshakeDone_ = false;
 #ifdef MYNET_HAVE_KTLS
         bool ktlsRx_ = false;
+        bool ktlsTx_ = false;
 #endif
         HandlerType handler_{};
 
@@ -1711,6 +1739,31 @@ namespace mynet
         {
             if (ssl_ != nullptr)
             {
+#ifdef MYNET_HAVE_KTLS
+                // kTLS TX 生效时，内核直接在套接字发送层完成对称加密分帧，可走 ::send 极速路径
+                if (ktlsTx_)
+                {
+                    const ssize_t sn = ::send(fd_, buf, n, MSG_NOSIGNAL);
+                    if (sn > 0) [[likely]]
+                    {
+                        return static_cast<size_t>(sn);
+                    }
+                    if (sn < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                        {
+                            return std::unexpected(IO_END::WOULDBLOCK);
+                        }
+                        if (errno == ECONNRESET || errno == EPIPE)
+                        {
+                            return std::unexpected(IO_END::EOF_REACHED);
+                        }
+                        LOG_WARN("Connection::doSend: fd {}: ktls send() failed: {}", fd_, errnoText(errno));
+                        return std::unexpected(IO_END::FATAL);
+                    }
+                    return std::unexpected(IO_END::EOF_REACHED);
+                }
+#endif
                 const int sn = SSL_write(ssl_, buf, static_cast<int>(n));
                 if (sn > 0) [[likely]]
                 {

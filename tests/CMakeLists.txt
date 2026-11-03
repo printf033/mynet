@@ -27,6 +27,7 @@ mynet_unit_test(test_multiplexer)
 mynet_unit_test(test_object_pool)
 mynet_unit_test(test_timer)
 mynet_unit_test(test_tls)
+mynet_unit_test(test_socks5)
 
 if(MYNET_ENABLE_LUA)
     add_executable(test_config_lua test_config_lua.cpp)

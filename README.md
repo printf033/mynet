@@ -22,8 +22,7 @@
   - [HTTP/2 Framing &amp; Stream Multiplexer](#4-http2-framing--stream-multiplexer)
   - [Datagram Transport (UDP)](#5-datagram-transport-udp)
   - [Modern C++26 &amp; Strongly-Typed Error Semantics](#6-modern-c26--strongly-typed-error-semantics)
-  - [Bidirectional Stream Client (Client)](#7-bidirectional-stream-client-client)
-  - [Configuration Ownership](#8-configuration-ownership-no-hard-coded-engine-defaults)
+  - [Configuration Ownership](#7-configuration-ownership-no-hard-coded-engine-defaults)
 - [Benchmark Results](#benchmark-results)
 - [Dependencies &amp; Prerequisites](#dependencies--prerequisites)
 - [Building &amp; Installation](#building--installation)
@@ -31,7 +30,6 @@
   - [1. Epoll-Based TCP Echo Server (Reactor)](#1-epoll-based-tcp-echo-server-reactor)
   - [2. io_uring TCP Server with Kernel Buffer Ring (Proactor)](#2-io_uring-tcp-server-with-kernel-buffer-ring-proactor)
   - [3. Multiplexed Stream Server](#3-multiplexed-stream-server)
-  - [4. Unix-Philosophy Stdin/Stdout Client (Client)](#4-unix-philosophy-stdinstdout-client-client)
 - [Project Layout](#project-layout)
 - [Testing &amp; Quality Assurance](#testing--quality-assurance)
 - [License](#license)
@@ -89,7 +87,6 @@ flowchart TD
         Conn["Connection<Handler>"]
         Dgram["Datagram<Handler>"]
         Session["Proactor::Session"]
-        PeerCl["Client<Event> (Client)"]
         Datagram["DatagramReply"]
     end
 
@@ -174,28 +171,7 @@ flowchart TD
   - `enum class IO_END : uint8_t`: Explicit, non-error I/O state explanations (`WOULDBLOCK`, `INTERRUPTED`, `EOF_REACHED`, `FATAL`) returned via `std::expected<size_t, IO_END>`.
 - **Precondition Contracts**: Contract violations (`contract_assert`) catch programmer errors (e.g., null pointers, out-of-range port numbers) at translation boundaries.
 
-### 7. Bidirectional Stream Client (Client)
-
-`Client<Event>` is an idiomatic Unix-style pipeline client bridging stdin/stdout and network sockets:
-
-```bash
-cat request.bin | ./build/client_tcp 127.0.0.1:8888 > response.bin
-```
-
-Features watermark-based backpressure for stdin, graceful TCP/TLS half-close forwarding (`close_notify` / `SHUT_WR`), signal-safe blocking of `SIGPIPE`, and detection of regular file vs interactive terminal descriptors.
-
-TLS entry points accept an optional `TlsOptions` argument for minimum/maximum protocol versions, TLS 1.2 cipher lists, TLS 1.3 cipher suites, and ALPN protocols. Defaults retain the TLS 1.2 minimum and OpenSSL's default cipher policy; the client always verifies the server certificate. These are interoperability and security settings, not ClientHello extension-order controls or JA4 impersonation.
-
-```cpp
-TlsOptions tls;
-tls.minVersion = TLS1_2_VERSION;
-tls.maxVersion = TLS1_3_VERSION;
-tls.alpnProtocols = {"h2", "http/1.1"};
-Client<EventSsl<HandlerConnection>> client;
-client.runSsl("127.0.0.1", 443, "example.com", nullptr, 16 << 10, tls);
-```
-
-### 8. Configuration Ownership: No Hard-Coded Engine Defaults
+### 7. Configuration Ownership: No Hard-Coded Engine Defaults
 
 Every tunable that decides *how much* a server engine allocates or how deep its kernel queues run lives in exactly one place: `configHolder.hpp` (the compiled-in baseline) parsed and clamped by `config/config.lua` via `reloadConfig()`. `Reactor` and `Proactor` carry no default arguments of their own — the two-argument call reads the current `NetConfig` snapshot:
 
@@ -422,42 +398,15 @@ int main() {
 }
 ```
 
-### 4. Unix-Philosophy Stdin/Stdout Client (Client)
-
-```cpp
-#include "client.hpp"
-#include "connection.hpp"
-#include "error.hpp"
-#include "log_config.hpp"
-
-using namespace mynet;
-
-int main(int argc, char* argv[]) {
-    mynet::log::init();
-    Client<EventSocket<HandlerConnection>> client;
-
-    // Connects to target server, streams stdin -> server and server -> stdout
-    if (auto res = client.runTcp("127.0.0.1", 8888); !res) {
-        LOG_ERROR("Client error: {}", toString(res.error()));
-        return toExitCode(res.error());
-    }
-    return 0;
-}
-```
-
 Every sample takes a single `<host>:<port>` argument and falls back to its own default:
 
 ```bash
-# Client: stream stdin to the server, print whatever comes back
-printf "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n" | ./build/client_tcp 127.0.0.1:8888
-
 # Server: pick any endpoint you like (defaults to 0.0.0.0:8888, HTTP/3 uses 4433)
 ./build/reactor_http1 127.0.0.1:9000
 curl -X POST --data-binary 'hello' http://127.0.0.1:9000/
 ```
 
-The full matrix is `client_{tcp,ssl,udp}` for the client and
-`{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}` for the servers.
+The full matrix is `{reactor,proactor}_{tcp,ssl,udp,http1,http2,http3}` for the servers.
 
 ---
 
@@ -501,8 +450,7 @@ mynet/
 │   │       ├── streamTable.hpp # HTTP/3 logical stream table and state tracker
 │   │       └── handler.hpp     # Unified HTTP/3 protocol handler (HandlerHttp3)
 │   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine
-│   ├── proactor.hpp            # io_uring-based completion Proactor engine
-│   └── client.hpp              # Pipeline client abstraction (stdin/stdout bridge)
+│   └── proactor.hpp            # io_uring-based completion Proactor engine
 │
 ├── config/                     # Runtime configuration
 │   └── config.lua              # Documented sandboxed Lua configuration (all sections)
@@ -511,10 +459,6 @@ mynet/
 │   ├── common/
 │   │   ├── endpoint.hpp        # "<host>:<port>" parser shared by every sample
 │   │   └── handlers.hpp        # SpliceEchoHandler / UdpEchoHandler shared by both engines
-│   ├── client/                 # Client (transport-level, protocol-agnostic)
-│   │   ├── tcp.cpp             # Stdin/stdout TCP client (client_tcp)
-│   │   ├── ssl.cpp             # Stdin/stdout TLS client (client_ssl)
-│   │   └── udp.cpp             # Stdin/stdout UDP client (client_udp)
 │   ├── reactor/                # epoll Edge-Triggered Reactor servers
 │   │   ├── tcp.cpp             # reactor_tcp    TCP echo (splice zero-copy)
 │   │   ├── ssl.cpp             # reactor_ssl    TLS echo

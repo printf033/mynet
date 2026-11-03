@@ -37,6 +37,7 @@ int main()
     SSL *ssl = SSL_new(ctx);
     (void)SSL_set_options(ssl, SSL_OP_ENABLE_KTLS);
     (void)BIO_get_ktls_recv(SSL_get_rbio(ssl));
+    (void)BIO_get_ktls_send(SSL_get_wbio(ssl));
     SSL_free(ssl);
     SSL_CTX_free(ctx);
     return 0;

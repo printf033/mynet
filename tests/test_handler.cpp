@@ -3,9 +3,9 @@
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "http/v1/handler.hpp"
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <string>
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -30,15 +30,9 @@ namespace
     public:
         static constexpr bool kEnableSplice = true;
 
-        void onConnect(int fd) noexcept override
-        {
-            setSpliceTarget(fd);
-        }
+        void onConnect(int fd) noexcept override { setSpliceTarget(fd); }
 
-        void reset() noexcept override
-        {
-            HandlerConnection::reset();
-        }
+        void reset() noexcept override { HandlerConnection::reset(); }
     };
 
     /**
@@ -574,7 +568,7 @@ TEST(Connection, CommitSentRestoresReadPause)
     EXPECT_FALSE(conn.wantRead());
 
     // 全部发送完毕：积压清零，commitSent 必须恢复读背压
-    //（Proactor onSendDone 只经此路径递减积压）
+    // （Proactor onSendDone 只经此路径递减积压）
     EXPECT_TRUE(conn.commitSent(2 * (3u << 20)));
     EXPECT_TRUE(conn.wantRead());
 

@@ -110,10 +110,7 @@ namespace mynet
                 peerSettings_ = Settings{};
             }
 
-            void onConnect(int fd) noexcept override
-            {
-                HandlerConnection::onConnect(fd);
-            }
+            void onConnect(int fd) noexcept override { HandlerConnection::onConnect(fd); }
 
             /// 两个传输基类各自提供同名生命周期钩子，此处显式覆盖以消除二义，
             /// 并逐层转发，保留任一层将来加入行为时的语义。
@@ -367,8 +364,9 @@ namespace mynet
                     if (!session->addressValidated &&
                         session->bytesSent + frameBytes.size() > 3 * session->bytesReceived)
                     {
-                        LOG_WARN("HandlerHttp3: direct fallback anti-amplification limit exceeded (received {}, sent {})",
-                                 session->bytesReceived, session->bytesSent + frameBytes.size());
+                        LOG_WARN(
+                            "HandlerHttp3: direct fallback anti-amplification limit exceeded (received {}, sent {})",
+                            session->bytesReceived, session->bytesSent + frameBytes.size());
                     }
                     else
                     {
@@ -446,8 +444,9 @@ namespace mynet
                 // RFC 9000 Section 8.1: 地址验证前响应字节数不得超过接收字节数的 3 倍 (Anti-Amplification Limit)
                 if (!session.addressValidated && session.bytesSent + packet.size() > 3 * session.bytesReceived)
                 {
-                    LOG_WARN("HandlerHttp3: anti-amplification limit exceeded for peer {} (received={}, sent={}, packet={})",
-                             datagramPeerText(peer), session.bytesReceived, session.bytesSent, packet.size());
+                    LOG_WARN(
+                        "HandlerHttp3: anti-amplification limit exceeded for peer {} (received={}, sent={}, packet={})",
+                        datagramPeerText(peer), session.bytesReceived, session.bytesSent, packet.size());
                     return;
                 }
 

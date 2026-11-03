@@ -556,6 +556,7 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     mynet::Reactor<mynet::EventSocket<mynet::HandlerConnection>> reactorStream;
     mynet::Reactor<mynet::EventSocket<mynet::HandlerDatagram>> reactorDatagram;
     mynet::Proactor<mynet::EventSocket<mynet::HandlerConnection>> proactorStream;
+    mynet::Proactor<mynet::EventSocket<mynet::HandlerDatagram>> proactorDatagram;
 
     mynet::Reactor<mynet::EventSsl<mynet::HandlerConnection>> reactorTls;
     mynet::Proactor<mynet::EventSsl<mynet::HandlerConnection>> proactorTls;
@@ -564,8 +565,11 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     [[maybe_unused]] auto r1 = reactorStream.runTcp("1.2.3.4", 0);
     [[maybe_unused]] auto r2 = reactorStream.runTcp();
     [[maybe_unused]] auto r3 = reactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
+    [[maybe_unused]] auto r3_zero = reactorDatagram.runUdp(datagramHandler);
     [[maybe_unused]] auto r4 = proactorStream.runTcp("1.2.3.4", 0);
     [[maybe_unused]] auto r5 = proactorStream.runTcp();
+    [[maybe_unused]] auto r5_udp = proactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
+    [[maybe_unused]] auto r5_udp_zero = proactorDatagram.runUdp(datagramHandler);
 
     [[maybe_unused]] auto r6 = reactorTls.runSsl();
     [[maybe_unused]] auto r7 = reactorTls.runSsl("missing.crt", "missing.key");

@@ -105,10 +105,10 @@ namespace mynet
         HandlerHttp2(const HandlerHttp2 &) =
             delete ("an http2 handler owns the stream table and the frames bound to it");
         HandlerHttp2 &
-        operator=(const HandlerHttp2 &) = delete ("an http2 handler owns the stream table and the frames bound to it");
-        HandlerHttp2(HandlerHttp2 &&) = delete ("an http2 handler owns the stream table and the frames bound to it");
+        operator=(const HandlerHttp2 &) = delete("an http2 handler owns the stream table and the frames bound to it");
+        HandlerHttp2(HandlerHttp2 &&) = delete("an http2 handler owns the stream table and the frames bound to it");
         HandlerHttp2 &
-        operator=(HandlerHttp2 &&) = delete ("an http2 handler owns the stream table and the frames bound to it");
+        operator=(HandlerHttp2 &&) = delete("an http2 handler owns the stream table and the frames bound to it");
 
         /**
          * @brief 设置允许的最大并发活跃流数量。

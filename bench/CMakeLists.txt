@@ -7,3 +7,4 @@ function(mynet_bench name)
 endfunction()
 
 mynet_bench(bench)
+mynet_bench(bench_network)

@@ -1,5 +1,5 @@
-#include "common/endpoint.hpp"
 #include "common/http2.hpp"
+#include "common/endpoint.hpp"
 #include "connection.hpp"
 #include "error.hpp"
 #include "http/v2/handler.hpp"

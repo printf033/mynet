@@ -276,10 +276,12 @@ TEST(EventLoop, ReentrantRunReturnsAlreadyRunning)
 {
     EventLoop loop;
     Result<> innerRes = {};
-    loop.queueInLoop([&] {
-        innerRes = loop.run();
-        loop.quit();
-    });
+    loop.queueInLoop(
+        [&]
+        {
+            innerRes = loop.run();
+            loop.quit();
+        });
     auto res = loop.run();
     EXPECT_TRUE(res.has_value());
     EXPECT_FALSE(innerRes.has_value());

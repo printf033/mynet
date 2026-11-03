@@ -1,7 +1,7 @@
 #pragma once
 
-#include "constraints.hpp"
 #include "configHolder.hpp"
+#include "constraints.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
 #include <arpa/inet.h>
@@ -96,8 +96,7 @@ namespace mynet
          * @param data 报文载荷首地址
          * @param n 报文有效字节长度
          */
-        virtual void onDatagram([[maybe_unused]] const sockaddr_in &peer,
-                                [[maybe_unused]] const char *data,
+        virtual void onDatagram([[maybe_unused]] const sockaddr_in &peer, [[maybe_unused]] const char *data,
                                 [[maybe_unused]] size_t n) noexcept
         {
         }
@@ -169,10 +168,7 @@ namespace mynet
          * @param data 报文载荷首地址
          * @param n 报文有效字节长度
          */
-        inline void forwardTo(const sockaddr_in &upstream, const char *data, size_t n)
-        {
-            sendTo(upstream, data, n);
-        }
+        inline void forwardTo(const sockaddr_in &upstream, const char *data, size_t n) { sendTo(upstream, data, n); }
 
         /**
          * @brief 将同一份报文广播/多播至多个目标地址
@@ -183,7 +179,8 @@ namespace mynet
          */
         inline void broadcastTo(const std::vector<sockaddr_in> &targets, const char *data, size_t n)
         {
-            if (data == nullptr || n == 0) return;
+            if (data == nullptr || n == 0)
+                return;
             for (const auto &target : targets)
             {
                 sendTo(target, data, n);
@@ -238,32 +235,31 @@ namespace mynet
      * 防止派生类用 = delete 或不兼容签名破坏报文处理契约。
      */
     template <typename D>
-    concept MandatoryMethodDatagram =
-        DerivedFromHandlerDatagram<D> && Resettable<D> &&
-        requires(D &d, const sockaddr_in &peer, const char *buf, size_t n, std::string bytes,
-                 const std::vector<sockaddr_in> &targets) {
-            // ---- 报文接收入口与生命周期钩子 ----
-            { d.onDatagram(peer, buf, n) } noexcept;
-            { d.onMessageComplete() } noexcept;
-            { d.onParseError(buf) } noexcept;
+    concept MandatoryMethodDatagram = DerivedFromHandlerDatagram<D> && Resettable<D> &&
+                                      requires(D &d, const sockaddr_in &peer, const char *buf, size_t n,
+                                               std::string bytes, const std::vector<sockaddr_in> &targets) {
+                                          // ---- 报文接收入口与生命周期钩子 ----
+                                          { d.onDatagram(peer, buf, n) } noexcept;
+                                          { d.onMessageComplete() } noexcept;
+                                          { d.onParseError(buf) } noexcept;
 
-            // ---- 报文发送与转发队列控制 ----
-            d.sendTo(peer, buf, n);
-            d.sendTo(peer, std::move(bytes));
-            d.forwardTo(peer, buf, n);
-            d.broadcastTo(targets, buf, n);
-            { d.hasOutgoing() } noexcept -> std::same_as<bool>;
-            { d.outgoingCount() } noexcept -> std::same_as<size_t>;
-            { d.peekOutgoing() } noexcept -> std::same_as<const DatagramPacket &>;
-            { d.takeOutgoing() } -> std::same_as<DatagramPacket>;
-            { d.droppedOutgoing() } noexcept -> std::same_as<size_t>;
+                                          // ---- 报文发送与转发队列控制 ----
+                                          d.sendTo(peer, buf, n);
+                                          d.sendTo(peer, std::move(bytes));
+                                          d.forwardTo(peer, buf, n);
+                                          d.broadcastTo(targets, buf, n);
+                                          { d.hasOutgoing() } noexcept -> std::same_as<bool>;
+                                          { d.outgoingCount() } noexcept -> std::same_as<size_t>;
+                                          { d.peekOutgoing() } noexcept -> std::same_as<const DatagramPacket &>;
+                                          { d.takeOutgoing() } -> std::same_as<DatagramPacket>;
+                                          { d.droppedOutgoing() } noexcept -> std::same_as<size_t>;
 
-            // ---- 容量与限制控制 ----
-            { d.setMaxDatagramBytes(n) } noexcept;
-            { d.maxDatagramBytes() } noexcept -> std::same_as<size_t>;
-            { d.setMaxPendingOutgoing(n) } noexcept;
-            { d.maxPendingOutgoing() } noexcept -> std::same_as<size_t>;
-        };
+                                          // ---- 容量与限制控制 ----
+                                          { d.setMaxDatagramBytes(n) } noexcept;
+                                          { d.maxDatagramBytes() } noexcept -> std::same_as<size_t>;
+                                          { d.setMaxPendingOutgoing(n) } noexcept;
+                                          { d.maxPendingOutgoing() } noexcept -> std::same_as<size_t>;
+                                      };
 
     /**
      * @brief 数据报传输层会话（Connection<H> 在 UDP 路径上的对等物）
@@ -294,13 +290,13 @@ namespace mynet
         ~Datagram() noexcept = default;
 
         Datagram(const Datagram &) =
-            delete("a datagram binding owns a handler reference and the receive window of one socket");
+            delete ("a datagram binding owns a handler reference and the receive window of one socket");
         Datagram &operator=(const Datagram &) =
-            delete("a datagram binding owns a handler reference and the receive window of one socket");
+            delete ("a datagram binding owns a handler reference and the receive window of one socket");
         Datagram(Datagram &&) =
-            delete("a datagram binding owns a handler reference and the receive window of one socket");
+            delete ("a datagram binding owns a handler reference and the receive window of one socket");
         Datagram &operator=(Datagram &&) =
-            delete("a datagram binding owns a handler reference and the receive window of one socket");
+            delete ("a datagram binding owns a handler reference and the receive window of one socket");
 
         /**
          * @brief 计算接收窗口容量（纯函数，便于单独验证边界）
@@ -315,8 +311,8 @@ namespace mynet
         [[nodiscard]] static constexpr size_t windowCapacityFor(size_t maxDatagramBytes,
                                                                 size_t preferredCapacity = 0) noexcept
         {
-            size_t cap = (maxDatagramBytes == std::numeric_limits<size_t>::max()) ? maxDatagramBytes
-                                                                                 : maxDatagramBytes + 1;
+            size_t cap =
+                (maxDatagramBytes == std::numeric_limits<size_t>::max()) ? maxDatagramBytes : maxDatagramBytes + 1;
             if (preferredCapacity > cap)
             {
                 cap = preferredCapacity;
@@ -519,15 +515,16 @@ namespace mynet
          */
         inline ssize_t sendDirect(int fd, const sockaddr_in &peer, const char *data, size_t n) noexcept
         {
-            if (data == nullptr && n > 0) return -1;
+            if (data == nullptr && n > 0)
+                return -1;
             for (;;)
             {
-                ssize_t ret = ::sendto(fd, data, n, 0,
-                                      reinterpret_cast<const sockaddr *>(&peer),
-                                      static_cast<socklen_t>(sizeof(sockaddr_in)));
+                ssize_t ret = ::sendto(fd, data, n, 0, reinterpret_cast<const sockaddr *>(&peer),
+                                       static_cast<socklen_t>(sizeof(sockaddr_in)));
                 if (ret < 0)
                 {
-                    if (errno == EINTR) continue;
+                    if (errno == EINTR)
+                        continue;
                     ++sendFailures_;
                     return -1;
                 }
@@ -559,8 +556,7 @@ namespace mynet
             {
                 sockaddr_in peer{};
                 socklen_t peerLen = static_cast<socklen_t>(sizeof(sockaddr_in));
-                ssize_t n = ::recvfrom(fd, window, windowBytes, 0,
-                                       reinterpret_cast<sockaddr *>(&peer), &peerLen);
+                ssize_t n = ::recvfrom(fd, window, windowBytes, 0, reinterpret_cast<sockaddr *>(&peer), &peerLen);
                 if (n < 0)
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)

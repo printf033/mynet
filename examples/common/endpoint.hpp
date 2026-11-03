@@ -13,14 +13,13 @@
  */
 
 #include <arpa/inet.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <string_view>
+#include <sys/socket.h>
 
 namespace mynet::example
 {

@@ -15,6 +15,7 @@
 #include "../../error.hpp"
 #include "../../log_config.hpp"
 #include "../../requestBuffer.hpp"
+#include "../../tls.hpp"
 #include "frame.hpp"
 #include "handler.hpp"
 #include "qpack.hpp"
@@ -39,22 +40,6 @@ namespace mynet
 {
     namespace http::v3
     {
-        namespace detail
-        {
-            inline const unsigned char kAlpnH3[] = {2, 'h', '3'};
-
-            inline int selectAlpn([[maybe_unused]] SSL *ssl, const unsigned char **out, unsigned char *out_len,
-                                  const unsigned char *in, unsigned int in_len, [[maybe_unused]] void *arg)
-            {
-                if (SSL_select_next_proto(const_cast<unsigned char **>(out), out_len, kAlpnH3, sizeof(kAlpnH3), in,
-                                          in_len) == OPENSSL_NPN_NEGOTIATED)
-                {
-                    return SSL_TLSEXT_ERR_OK;
-                }
-                return SSL_TLSEXT_ERR_ALERT_FATAL;
-            }
-        } // namespace detail
-
         /**
          * @class ServerHttp3
          * @brief RFC 9114 HTTP/3 服务端运行引擎
@@ -63,7 +48,8 @@ namespace mynet
         {
         public:
             ServerHttp3(std::string certPath = "certs/ser.crt", std::string keyPath = "certs/ser.key") noexcept
-                : certPath_(std::move(certPath)), keyPath_(std::move(keyPath))
+                : certPath_(std::move(certPath)),
+                  keyPath_(std::move(keyPath))
             {
             }
 
@@ -102,37 +88,22 @@ namespace mynet
             {
                 stopRequested_.store(false, std::memory_order_relaxed);
 
-                SSL_CTX *ctx = SSL_CTX_new(OSSL_QUIC_server_method());
-                if (ctx == nullptr) [[unlikely]]
+                TlsOptions tlsOpt{};
+                tlsOpt.alpnProtocols = {"h3"};
+                auto ctxRes = detail::createServerContext(certPath_.c_str(), keyPath_.c_str(), tlsOpt,
+                                                          TlsProtocolType::DatagramQuic);
+                if (!ctxRes) [[unlikely]]
                 {
-                    LOG_ERROR("ServerHttp3: SSL_CTX_new(OSSL_QUIC_server_method()) failed");
-                    return std::unexpected(ERR::SSL_CTX_FAILED);
+                    LOG_ERROR("ServerHttp3: TLS setup failed: {}", ctxRes.error());
+                    return std::unexpected(ctxRes.error());
                 }
-
-                if (SSL_CTX_use_certificate_chain_file(ctx, certPath_.c_str()) <= 0) [[unlikely]]
-                {
-                    LOG_ERROR("ServerHttp3: certificate file \"{}\" could not be loaded: {}", certPath_,
-                              ERR_error_string(ERR_get_error(), nullptr));
-                    SSL_CTX_free(ctx);
-                    return std::unexpected(ERR::SSL_CERT_FAILED);
-                }
-
-                if (SSL_CTX_use_PrivateKey_file(ctx, keyPath_.c_str(), SSL_FILETYPE_PEM) <= 0) [[unlikely]]
-                {
-                    LOG_ERROR("ServerHttp3: private key file \"{}\" could not be loaded: {}", keyPath_,
-                              ERR_error_string(ERR_get_error(), nullptr));
-                    SSL_CTX_free(ctx);
-                    return std::unexpected(ERR::SSL_KEY_FAILED);
-                }
-
-                SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
-                SSL_CTX_set_alpn_select_cb(ctx, detail::selectAlpn, nullptr);
+                SSL_CTX *ctx = *ctxRes;
 
                 const int fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
                 if (fd < 0) [[unlikely]]
                 {
                     LOG_ERROR("ServerHttp3: socket(SOCK_DGRAM) failed: {}", strerror(errno));
-                    SSL_CTX_free(ctx);
+                    detail::freeContext(ctx);
                     return std::unexpected(ERR::SOCKET_FAILED);
                 }
 
@@ -304,8 +275,7 @@ namespace mynet
                             size_t nread = 0;
                             while (SSL_read_ex(st.stream, buf, sizeof(buf), &nread) > 0)
                             {
-                                [[maybe_unused]] auto _ =
-                                    st.inBuf.append(reinterpret_cast<const char *>(buf), nread);
+                                [[maybe_unused]] auto _ = st.inBuf.append(reinterpret_cast<const char *>(buf), nread);
                             }
 
                             // 解码 HTTP/3 协议帧
@@ -417,7 +387,7 @@ namespace mynet
                     SSL_free(qc->conn);
                 }
                 SSL_free(listener);
-                SSL_CTX_free(ctx);
+                detail::freeContext(ctx);
                 ::close(fd);
                 return {};
             }

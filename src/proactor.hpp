@@ -146,8 +146,7 @@ namespace mynet
                 return std::unexpected(ERR::SSL_CERT_FAILED);
             }
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.security.certFile.c_str(),
-                          cfg.security.keyFile.c_str(), cfg.server, cfg.proactor,
-                          detail::tlsOptionsFrom(cfg.security));
+                          cfg.security.keyFile.c_str(), cfg.server, cfg.proactor, detail::tlsOptionsFrom(cfg.security));
         }
 
         /**
@@ -208,41 +207,71 @@ namespace mynet
                 reset();
                 return err;
             }
-            if ((protocol_.ctx = SSL_CTX_new(TLS_server_method())) == nullptr) [[unlikely]]
-            {
-                LOG_ERROR("Proactor::runSsl: SSL_CTX_new() failed: {}", sslText());
-                reset();
-                return std::unexpected(ERR::SSL_CTX_FAILED);
-            }
             tlsOptions_ = tlsOptions;
-            if (auto err = detail::configureTlsContext(protocol_.ctx, tlsOptions_, true); !err) [[unlikely]]
+            auto ctxRes = detail::createServerContext(crt, key, tlsOptions_);
+            if (!ctxRes) [[unlikely]]
             {
-                LOG_ERROR("Proactor::runSsl: invalid TLS options: {}", sslText());
                 reset();
-                return err;
+                return std::unexpected(ctxRes.error());
             }
-            if (SSL_CTX_use_certificate_file(protocol_.ctx, crt, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("Proactor::runSsl: certificate file \"{}\" could not be loaded: {}", crt, sslText());
-                reset();
-                return std::unexpected(ERR::SSL_CERT_FAILED);
-            }
-            if (SSL_CTX_use_PrivateKey_file(protocol_.ctx, key, SSL_FILETYPE_PEM) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("Proactor::runSsl: private key file \"{}\" could not be loaded: {}", key, sslText());
-                reset();
-                return std::unexpected(ERR::SSL_KEY_FAILED);
-            }
-            if (SSL_CTX_check_private_key(protocol_.ctx) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("Proactor::runSsl: private key \"{}\" does not match certificate \"{}\": {}", key, crt,
-                          sslText());
-                reset();
-                return std::unexpected(ERR::SSL_KEY_MISMATCH);
-            }
+            protocol_.ctx = *ctxRes;
             Result<> rc = serve(server, proactor, true);
             reset();
             return rc;
+        }
+
+        /**
+         * @brief 使用 SNI 多域名证书调度器运行 TLS 服务器。
+         */
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager,
+                                      const ServerConfig &server, const ProactorConfig &proactor)
+            requires SslEvent<Event> && kStreaming
+        {
+            contract_assert(validServerConfig(server));
+            contract_assert(validProactorConfig(proactor));
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
+            {
+                reset();
+                return err;
+            }
+            protocol_.ctx = sniManager.defaultContext();
+            if (protocol_.ctx == nullptr) [[unlikely]]
+            {
+                reset();
+                return std::unexpected(ERR::SSL_CTX_FAILED);
+            }
+            Result<> rc = serve(server, proactor, true);
+            // 由 sniManager 管理其托管的 SSL_CTX 生命周期，退出时置空避免 double-free
+            protocol_.ctx = nullptr;
+            reset();
+            return rc;
+        }
+
+        [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(ip, port, sniManager, cfg.server, cfg.proactor);
+        }
+
+        [[nodiscard]] Result<> runSsl(SniCertificateManager &sniManager)
+            requires SslEvent<Event> && kStreaming
+        {
+            const NetConfig cfg = getNetConfig();
+            return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), sniManager, cfg.server,
+                          cfg.proactor);
+        }
+
+        /**
+         * @brief 完全以全局配置运行 UDP 数据报服务器（监听地址取自 server.host/port）。
+         * @param handler 数据报处理器引用。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
+        [[nodiscard]] Result<> runUdp(Handler &handler)
+            requires MandatoryMethodDatagram<Handler>
+        {
+            const NetConfig cfg = getNetConfig();
+            return runUdp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler, cfg.proactor);
         }
 
         /**
@@ -296,6 +325,11 @@ namespace mynet
          * @brief 优雅停止 proactor 事件循环。
          */
         inline void stop() const noexcept { stopSource_.request_stop(); }
+
+        /**
+         * @brief 优雅停止 proactor 事件循环（与 Reactor::quit 保持对称命名）。
+         */
+        inline void quit() const noexcept { stop(); }
 
         /**
          * @brief io_uring 核心事件循环。
@@ -491,11 +525,7 @@ namespace mynet
             cancelScratch_.clear();
             if constexpr (SslEvent<Event>)
             {
-                if (protocol_.ctx != nullptr)
-                {
-                    SSL_CTX_free(protocol_.ctx);
-                    protocol_.ctx = nullptr;
-                }
+                detail::freeContext(protocol_.ctx);
             }
             tlsOptions_ = {};
         }
@@ -1017,8 +1047,8 @@ namespace mynet
                 return;
             }
             Conn &conn = session->conn;
-            // kTLS RX 会话的接收已走 buffer ring 快路径，但发送仍需同步 SSL_write（TX 未 offload）
-            if (conn.ssl() != nullptr)
+            // kTLS TX offload 未生效的 TLS 会话仍需同步走 poll->handleWrite(SSL_write)
+            if (conn.ssl() != nullptr && !conn.ktlsTxActive())
             {
                 return;
             }
