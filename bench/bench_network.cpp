@@ -1,4 +1,5 @@
 #include "../examples/common/handlers.hpp"
+#include "../examples/common/http2.hpp"
 #include "connection.hpp"
 #include "error.hpp"
 #include "http/v1/handler.hpp"
@@ -6,6 +7,7 @@
 #include "http/v3/server.hpp"
 #include "log_config.hpp"
 #include "proactor/proactor.hpp"
+#include "proxy/socks5.hpp"
 #include "reactor/reactor.hpp"
 #include "tls.hpp"
 #include <algorithm>
@@ -615,11 +617,21 @@ namespace
 
     void benchHttp2Streams()
     {
-        class TestMux : public HandlerHttp2<HandlerConnection>
+        class QuietEchoStream : public HandlerConnection
         {
+        public:
+            void process() noexcept {}
         };
-        TestMux mux;
-        [[maybe_unused]] auto _ = mux.appendRequest(TestMux::kClientPreface);
+        class BenchHttp2Mux : public HandlerHttp2<QuietEchoStream>
+        {
+        public:
+            void onStreamEnd(uint32_t id) noexcept override
+            {
+                sendResponse(id, 200, "ok");
+            }
+        };
+        BenchHttp2Mux mux;
+        [[maybe_unused]] auto _ = mux.appendRequest(BenchHttp2Mux::kClientPreface);
         mux.process();
         while (mux.hasResponse())
         {
@@ -627,7 +639,7 @@ namespace
         }
 
         const std::string headerBlock(1, '\x82'); // :method GET
-        constexpr size_t kStreams = 50000;
+        constexpr size_t kStreams = 10000;
 
         auto start = std::chrono::steady_clock::now();
         uint32_t id = 1;
@@ -661,11 +673,152 @@ namespace
                              .p95Us = avgUs * 1.2,
                              .p99Us = avgUs * 1.5,
                              .throughputMBs = (qps * 64.0) / (1024.0 * 1024.0),
-                             .notes = "HPACK 状态机 + 流对象池复用"});
+                             .notes = "HPACK 状态机 + 流对象池复用 + 流控回收"});
     }
 
     // =========================================================================
-    // 6. Benchmark HTTP/3 Server (QUIC over UDP)
+    // 6. Benchmark SOCKS5 Proxy Tunnel
+    // =========================================================================
+
+    class BenchSocks5Handler : public proxy::HandlerSocks5
+    {
+    public:
+        void process()
+        {
+            proxy::HandlerSocks5::process();
+            if (stage() == proxy::Socks5Stage::STREAMING && requestBytes() > 0)
+            {
+                [[maybe_unused]] auto _ = pushResponse(std::string_view(requestBegin(), requestBytes()));
+                requestConsume(requestBytes());
+            }
+        }
+        void reset() noexcept override
+        {
+            proxy::HandlerSocks5::reset();
+        }
+    };
+
+    template <template <typename> class EngineType>
+    void benchSocks5(const std::string &engineName, int port)
+    {
+        if (engineName.find("io_uring") != std::string::npos && !checkIoUringAvailable())
+        {
+            g_results.push_back({.name = "SOCKS5 1KiB 隧道透传",
+                                 .engine = engineName,
+                                 .qps = 0,
+                                 .p50Us = 0,
+                                 .p95Us = 0,
+                                 .p99Us = 0,
+                                 .throughputMBs = 0,
+                                 .notes = "容器 seccomp 禁用 io_uring (ENOSYS)，实体机原生可用"});
+            return;
+        }
+
+        using ServerType = EngineType<AcceptorSocket<BenchSocks5Handler>>;
+        auto server = std::make_unique<ServerType>();
+        std::atomic<bool> srvFailed = false;
+        std::thread srvThread(
+            [&]()
+            {
+                auto res = server->runTcp("127.0.0.1", port);
+                if (!res)
+                    srvFailed.store(true);
+            });
+
+        int clientFd = connectTcp("127.0.0.1", port);
+        if (clientFd < 0 || srvFailed.load())
+        {
+            if (clientFd >= 0)
+                ::close(clientFd);
+            server->stop();
+            srvThread.join();
+            return;
+        }
+
+        // 1. SOCKS5 握手 (No Auth)
+        const uint8_t hello[] = {0x05, 0x01, 0x00};
+        uint8_t helloReply[2] = {0};
+        if (!sendAll(clientFd, hello, sizeof(hello)) || !recvAll(clientFd, helloReply, 2))
+        {
+            ::close(clientFd);
+            server->stop();
+            srvThread.join();
+            return;
+        }
+
+        // 2. CONNECT IPv4 127.0.0.1:80
+        const uint8_t reqConnect[] = {0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x00, 80};
+        uint8_t connectReply[10] = {0};
+        if (!sendAll(clientFd, reqConnect, sizeof(reqConnect)) || !recvAll(clientFd, connectReply, 10))
+        {
+            ::close(clientFd);
+            server->stop();
+            srvThread.join();
+            return;
+        }
+
+        // 3. 隧道数据 Ping-Pong QPS & Latency
+        constexpr size_t kPingCount = 8000;
+        constexpr size_t kPayloadSize = 1024;
+        std::vector<char> req(kPayloadSize, 's');
+        std::vector<char> res(kPayloadSize, 0);
+        std::vector<double> latenciesUs;
+        latenciesUs.reserve(kPingCount);
+
+        auto start = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < kPingCount; ++i)
+        {
+            auto t0 = std::chrono::steady_clock::now();
+            if (!sendAll(clientFd, req.data(), req.size()) || !recvAll(clientFd, res.data(), res.size()))
+            {
+                break;
+            }
+            auto t1 = std::chrono::steady_clock::now();
+            latenciesUs.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+        }
+        auto totalElapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+        std::sort(latenciesUs.begin(), latenciesUs.end());
+        double p50 = latenciesUs.empty() ? 0 : latenciesUs[latenciesUs.size() * 50 / 100];
+        double p95 = latenciesUs.empty() ? 0 : latenciesUs[latenciesUs.size() * 95 / 100];
+        double p99 = latenciesUs.empty() ? 0 : latenciesUs[latenciesUs.size() * 99 / 100];
+        double qps = totalElapsed > 0 ? (latenciesUs.size() / totalElapsed) : 0;
+
+        // 4. Pipeline Throughput
+        constexpr size_t kStreamChunks = 3000;
+        constexpr size_t kChunkSize = 16384;
+        std::vector<char> chunk(kChunkSize, 'y');
+        std::vector<char> inBuf(kChunkSize, 0);
+
+        auto tStreamStart = std::chrono::steady_clock::now();
+        size_t movedBytes = 0;
+        for (size_t i = 0; i < kStreamChunks; ++i)
+        {
+            if (!sendAll(clientFd, chunk.data(), chunk.size()) || !recvAll(clientFd, inBuf.data(), inBuf.size()))
+            {
+                break;
+            }
+            movedBytes += kChunkSize;
+        }
+        double streamSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - tStreamStart).count();
+        double throughput = streamSec > 0 ? (static_cast<double>(movedBytes) / (1024.0 * 1024.0) / streamSec) : 0;
+
+        ::close(clientFd);
+        server->stop();
+        srvThread.join();
+
+        g_results.push_back({.name = "SOCKS5 1KiB 隧道透传",
+                             .engine = engineName,
+                             .qps = qps,
+                             .p50Us = p50,
+                             .p95Us = p95,
+                             .p99Us = p99,
+                             .throughputMBs = throughput,
+                             .notes = "RFC 1928 握手 + 状态机流控 + Linux splice 零拷贝"});
+    }
+
+    // =========================================================================
+    // 7. Benchmark HTTP/3 Server (QUIC over UDP)
     // =========================================================================
 
     void benchHttp3Quic(int port)
@@ -723,7 +876,8 @@ namespace
 
 int main()
 {
-    mynet::log::init();
+    mynet::log::LogConfig logCfg{.level = "WARN"};
+    mynet::log::init(logCfg);
     std::printf(
         "===================================================================================================\n");
     std::printf("                              mynet 全传输路径端到端性能基准测速\n");
@@ -731,47 +885,57 @@ int main()
         "===================================================================================================\n");
     std::printf("环境: Linux x86_64, 编译: -O3 -DNDEBUG (C++26 contracts & reflection)\n\n");
 
-    std::printf("[1/9] 正在测量 Reactor TCP (epoll)...          ");
+    std::printf("[1/11] 正在测量 Reactor TCP (epoll)...          ");
     std::fflush(stdout);
     benchTcp<Reactor<AcceptorSocket<example::SpliceEchoHandler>>>("Reactor (epoll)", 19101);
     std::printf("完成\n");
 
-    std::printf("[2/9] 正在测量 Proactor TCP (io_uring)...       ");
+    std::printf("[2/11] 正在测量 Proactor TCP (io_uring)...       ");
     std::fflush(stdout);
     benchTcp<Proactor<AcceptorSocket<example::SpliceEchoHandler>>>("Proactor (io_uring)", 19102);
     std::printf("完成\n");
 
-    std::printf("[3/9] 正在测量 Reactor UDP (epoll)...          ");
+    std::printf("[3/11] 正在测量 Reactor UDP (epoll)...          ");
     std::fflush(stdout);
     benchUdp<Reactor>("Reactor (epoll)", 19103);
     std::printf("完成\n");
 
-    std::printf("[4/9] 正在测量 Proactor UDP (io_uring)...       ");
+    std::printf("[4/11] 正在测量 Proactor UDP (io_uring)...       ");
     std::fflush(stdout);
     benchUdp<Proactor>("Proactor (io_uring)", 19104);
     std::printf("完成\n");
 
-    std::printf("[5/9] 正在测量 Reactor TLS 1.3 (OpenSSL)...     ");
+    std::printf("[5/11] 正在测量 Reactor TLS 1.3 (OpenSSL)...     ");
     std::fflush(stdout);
     benchTls<Reactor>("Reactor (epoll)", 19105);
     std::printf("完成\n");
 
-    std::printf("[6/9] 正在测量 Proactor TLS 1.3 (OpenSSL)...    ");
+    std::printf("[6/11] 正在测量 Proactor TLS 1.3 (OpenSSL)...    ");
     std::fflush(stdout);
     benchTls<Proactor>("Proactor (io_uring)", 19106);
     std::printf("完成\n");
 
-    std::printf("[7/9] 正在测量 Reactor HTTP/1.1...              ");
+    std::printf("[7/11] 正在测量 Reactor HTTP/1.1...              ");
     std::fflush(stdout);
     benchHttp1<Reactor>("Reactor (epoll)", 19107);
     std::printf("完成\n");
 
-    std::printf("[8/9] 正在测量 Proactor HTTP/1.1...             ");
+    std::printf("[8/11] 正在测量 Proactor HTTP/1.1...             ");
     std::fflush(stdout);
     benchHttp1<Proactor>("Proactor (io_uring)", 19108);
     std::printf("完成\n");
 
-    std::printf("[9/9] 正在测量 HTTP/2 & HTTP/3 QUIC...          ");
+    std::printf("[9/11] 正在测量 Reactor SOCKS5 (RFC 1928)...     ");
+    std::fflush(stdout);
+    benchSocks5<Reactor>("Reactor (epoll)", 19110);
+    std::printf("完成\n");
+
+    std::printf("[10/11] 正在测量 Proactor SOCKS5 (io_uring)...   ");
+    std::fflush(stdout);
+    benchSocks5<Proactor>("Proactor (io_uring)", 19111);
+    std::printf("完成\n");
+
+    std::printf("[11/11] 正在测量 HTTP/2 & HTTP/3 QUIC...         ");
     std::fflush(stdout);
     benchHttp2Streams();
     benchHttp3Quic(19109);

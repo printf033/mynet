@@ -94,7 +94,7 @@ namespace mynet
 
                 SecurityConfig security{};
                 security.alpnProtocols = "h3";
-                auto ctxRes = detail::createServerContext(certPath_.c_str(), keyPath_.c_str(), security, nullptr,
+                auto ctxRes = detail::createServerContext(certPath_.c_str(), keyPath_.c_str(), security, &alpnList_,
                                                           TlsProtocolType::DatagramQuic);
                 if (!ctxRes) [[unlikely]]
                 {
@@ -236,6 +236,7 @@ namespace mynet
                             size_t written = 0;
                             SSL_write_ex(ctrl, ctrlPayload.data(), ctrlPayload.size(), &written);
                             qc->ctrlStream = ctrl;
+                            SSL_handle_events(conn);
                         }
 
                         conns.push_back(std::move(qc));
@@ -332,6 +333,7 @@ namespace mynet
                                 size_t written = 0;
                                 SSL_write_ex(st.stream, respFrames.data(), respFrames.size(), &written);
                                 SSL_stream_conclude(st.stream, 0);
+                                SSL_handle_events(qc->conn);
                                 st.responseSent = true;
                             }
 
@@ -428,6 +430,7 @@ namespace mynet
         private:
             std::string certPath_;
             std::string keyPath_;
+            std::vector<std::string> alpnList_{"h3"};
             std::atomic<bool> stopRequested_{false};
         };
 

@@ -22,6 +22,7 @@ gen_example(reactor_udp   reactor/udp.cpp)
 gen_example(reactor_http1 reactor/http1.cpp)
 gen_example(reactor_http2 reactor/http2.cpp)
 gen_example(reactor_http3 reactor/http3.cpp)
+gen_example(reactor_socks5 reactor/socks5.cpp)
 
 # ---- Proactor：io_uring 完成事件驱动 ----
 gen_example(proactor_tcp   proactor/tcp.cpp)
@@ -30,3 +31,4 @@ gen_example(proactor_udp   proactor/udp.cpp)
 gen_example(proactor_http1 proactor/http1.cpp)
 gen_example(proactor_http2 proactor/http2.cpp)
 gen_example(proactor_http3 proactor/http3.cpp)
+gen_example(proactor_socks5 proactor/socks5.cpp)

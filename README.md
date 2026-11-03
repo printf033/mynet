@@ -271,11 +271,17 @@ HandlerHttp2 open+echo+close (64 streams)            553.4 ns/op             --
   - `pkg-config`
   - `llhttp`
 
+On Arch Linux:
+
+```bash
+sudo pacman -Syu --needed base-devel gcc cmake ninja pkgconf git openssl liburing llhttp luajit gtest
+```
+
 On Debian/Ubuntu 25.10+:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y g++ cmake make pkg-config libssl-dev liburing-dev libgtest-dev libpq-dev
+sudo apt-get install -y g++ cmake make ninja-build pkg-config libssl-dev liburing-dev libllhttp-dev libluajit-5.1-dev libgtest-dev
 ```
 
 ---
@@ -313,7 +319,7 @@ make -j$(nproc)
 
 ### 4. Docker Quickstart
 
-A multi-stage `Dockerfile` based on Ubuntu 25.10 is included in the root directory:
+A multi-stage `Dockerfile` based on the latest rolling release Arch Linux (`archlinux:latest`) is included in the root directory:
 
 ```bash
 docker build -t mynet:latest .

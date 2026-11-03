@@ -272,11 +272,17 @@ HandlerHttp2 open+echo+close (64条流)                   553.4 ns/op           
   - `pkg-config`
   - `llhttp`
 
+在 Arch Linux 环境下安装必要依赖：
+
+```bash
+sudo pacman -Syu --needed base-devel gcc cmake ninja pkgconf git openssl liburing llhttp luajit gtest
+```
+
 在 Ubuntu 25.10+ / Debian 环境下安装必要依赖：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y g++ cmake make pkg-config libssl-dev liburing-dev libgtest-dev libpq-dev
+sudo apt-get install -y g++ cmake make ninja-build pkg-config libssl-dev liburing-dev libllhttp-dev libluajit-5.1-dev libgtest-dev
 ```
 
 ---
@@ -314,7 +320,7 @@ make -j$(nproc)
 
 ### 4. Docker 容器化运行
 
-根目录附带基于 Ubuntu 25.10 的多阶段 `Dockerfile`：
+根目录附带基于最新滚动发行版 Arch Linux（`archlinux:latest`）的多阶段 `Dockerfile`：
 
 ```bash
 docker build -t mynet:latest .
