@@ -5,8 +5,8 @@
 #include "http/v2/handler.hpp"
 #include "http/v3/server.hpp"
 #include "log_config.hpp"
-#include "proactor.hpp"
-#include "reactor.hpp"
+#include "proactor/proactor.hpp"
+#include "reactor/reactor.hpp"
 #include "tls.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -303,7 +303,7 @@ namespace
         }
 
         example::UdpEchoHandler handler;
-        auto server = std::make_unique<EngineType<EventSocket<example::UdpEchoHandler>>>();
+        auto server = std::make_unique<EngineType<AcceptorSocket<example::UdpEchoHandler>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
@@ -414,7 +414,7 @@ namespace
         }
 
         auto [certPath, keyPath] = findCertFiles();
-        auto server = std::make_unique<EngineType<EventSsl<HandlerConnection>>>();
+        auto server = std::make_unique<EngineType<AcceptorSsl<HandlerConnection>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
@@ -541,7 +541,7 @@ namespace
         }
 
         using Handler = http::v1::HandlerHttp<http::v1::HTTP_MODE::REQUEST>;
-        auto server = std::make_unique<EngineType<EventSocket<Handler>>>();
+        auto server = std::make_unique<EngineType<AcceptorSocket<Handler>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
@@ -733,12 +733,12 @@ int main()
 
     std::printf("[1/9] 正在测量 Reactor TCP (epoll)...          ");
     std::fflush(stdout);
-    benchTcp<Reactor<EventSocket<example::SpliceEchoHandler>>>("Reactor (epoll)", 19101);
+    benchTcp<Reactor<AcceptorSocket<example::SpliceEchoHandler>>>("Reactor (epoll)", 19101);
     std::printf("完成\n");
 
     std::printf("[2/9] 正在测量 Proactor TCP (io_uring)...       ");
     std::fflush(stdout);
-    benchTcp<Proactor<EventSocket<example::SpliceEchoHandler>>>("Proactor (io_uring)", 19102);
+    benchTcp<Proactor<AcceptorSocket<example::SpliceEchoHandler>>>("Proactor (io_uring)", 19102);
     std::printf("完成\n");
 
     std::printf("[3/9] 正在测量 Reactor UDP (epoll)...          ");

@@ -166,6 +166,8 @@ namespace mynet
         bool tcpNoDelay = true;
         bool tcpQuickAck = false;
         bool enableSplice = true;
+        bool reuseAddr = true; ///< 是否开启 SO_REUSEADDR 允许快速复用处于 TIME_WAIT 状态的端口
+        bool reusePort = true; ///< 是否开启 SO_REUSEPORT 允许多线程/多进程监听同一端口负载均衡
     };
 
     /**
@@ -175,29 +177,6 @@ namespace mynet
     {
         int maxEvents = 1 << 10;        ///< 单次 epoll_wait 最大返回事件数 (个)
         int idleSweepIntervalMs = 1000; ///< 空闲连接扫描节拍 (毫秒)
-    };
-
-    /**
-     * @brief 流式连接与请求响应管道配置
-     */
-    struct ConnectionConfig
-    {
-        size_t responseCapacity = 64;        ///< 默认响应队列初始槽位容量 (条)
-        size_t readChunkSize = 4 << 10;      ///< 单次直写请求接收读取分块大小 (4 KiB)
-        size_t maxRequestBytes = 4 << 20;    ///< 单连接请求解析缓冲上限 (4 MiB)
-        size_t writeHighWaterMark = 4 << 20; ///< 单连接发送队列高水位线 (4 MiB)
-        size_t writeHardCapFactor = 2;       ///< 发送积压硬顶倍数（>= factor * writeHighWaterMark 时发完即关）
-        size_t spliceChunkSize = 64 << 10;   ///< Linux splice(2) 单次移动分块大小 (64 KiB)
-        size_t maxWriteIov = 16;             ///< 向量化 I/O (writev) 单次聚合发送分片上限 (1~64)
-    };
-
-    /**
-     * @brief UDP 数据报会话与外发队列配置
-     */
-    struct DatagramConfig
-    {
-        size_t maxDatagramBytes = (64 << 10) - 1; ///< 单个 UDP 数据报载荷上限 (65535 字节)
-        size_t maxPendingOutgoing = 1024;         ///< 待发送外发队列槽位上限 (条)
     };
 
     /**
@@ -216,13 +195,28 @@ namespace mynet
     };
 
     /**
-     * @brief HTTP/2 多路复用器流式并发与窗口配置
+     * @brief 流式连接与请求响应管道配置
      */
-    struct MultiplexerConfig
+    struct ConnectionConfig
     {
-        size_t maxConcurrentStreams = 100; ///< 单连接最大并发活跃流数量
-        size_t initialWindowSize = 65535;  ///< 连接级与流级初始流控窗口 (字节)
-        size_t maxFrameSize = 16384;       ///< 本端接受的单帧 Payload 上限 (字节)
+        size_t responseCapacity = 64;        ///< 默认响应队列初始槽位容量 (条)
+        size_t readChunkSize = 4 << 10;      ///< 单次直写请求接收读取分块大小 (4 KiB)
+        size_t maxRequestBytes = 4 << 20;    ///< 单连接请求解析缓冲上限 (4 MiB)
+        size_t writeHighWaterMark = 4 << 20; ///< 单连接发送队列高水位线 (4 MiB)
+        size_t writeHardCapFactor = 2;       ///< 发送积压硬顶倍数（>= factor * writeHighWaterMark 时发完即关）
+        size_t spliceChunkSize = 64 << 10;   ///< Linux splice(2) 单次移动分块大小 (64 KiB)
+        size_t maxWriteIov = 16;             ///< 向量化 I/O (writev) 单次聚合发送分片上限 (1~64)
+        size_t readHighWaterMark = 64 << 10; ///< 单连接请求缓冲区滑动窗口高水位线 (64 KiB)
+        size_t maxDrainRounds = 64;          ///< 单次事件循环发送队列最大轮询清空轮次 (次)
+    };
+
+    /**
+     * @brief UDP 数据报会话与外发队列配置
+     */
+    struct DatagramConfig
+    {
+        size_t maxDatagramBytes = (64 << 10) - 1; ///< 单个 UDP 数据报载荷上限 (65535 字节)
+        size_t maxPendingOutgoing = 1024;         ///< 待发送外发队列槽位上限 (条)
     };
 
     /**
@@ -240,9 +234,71 @@ namespace mynet
         /// 从而保留 libssl 从 openssl.cnf 读取的 system_default 策略。
         /// 写 "DEFAULT" 会被归一为同样的"不调用"。
         std::string ciphers{};
+        /// TLS 1.3 密码套件列表（如 TLS_AES_256_GCM_SHA384 等）
+        std::string tls13CipherSuites{};
         /// ALPN 协议列表（逗号分隔）。默认空 = 不协商 ALPN，与引擎引入配置驱动前一致：
         /// 服务端只有在确实实现某协议时才应宣告它，否则会对客户端撒谎。
         std::string alpnProtocols{};
+        /// 最低 TLS 版本（默认 0x0303 即 TLS 1.2，RFC 5246；0x0304 为 TLS 1.3）
+        int minVersion = 0x0303;
+        /// 最高 TLS 版本（默认 0 表示 OpenSSL 自动协商上限）
+        int maxVersion = 0;
+        /// 服务端 TLS 会话缓存超时时间（秒），默认 3600 秒（1 小时）
+        long sessionTimeout = 3600;
+        /// 是否启用 TLS 会话凭证（Session Tickets，用于加速重连与会话恢复）
+        bool enableSessionTickets = true;
+        /// TLS 1.3 握手后发送的会话票据数量（OpenSSL 默认 2）
+        size_t numTickets = 2;
+        /// TLS 会话缓存标识上下文（默认 "mynet"）
+        std::string sessionIdContext = "mynet";
+    };
+
+    /**
+     * @brief HTTP/1.x 协议解析边界与安全限额配置
+     */
+    struct Http1Config
+    {
+        size_t maxUrlLength = 8192;              ///< URL 最大允许长度 (字节)
+        size_t maxHeadersCount = 100;            ///< 请求/响应允许包含的最大首部行数
+        size_t maxHeaderFieldLength = 4096;      ///< 单个首部字段名长度上限 (字节)
+        size_t maxHeaderValueLength = 16384;     ///< 单个首部字段值长度上限 (字节)
+        size_t maxTotalHeadersLength = 65536;    ///< 全部首部累计大小上限 (64 KiB)
+        size_t maxBodyLength = 16 * 1024 * 1024; ///< 请求/响应 Body 允许的最大长度 (16 MiB)
+    };
+
+    /**
+     * @brief HTTP/2 协议流并发、初始窗口与帧大小限额配置
+     */
+    struct Http2Config
+    {
+        size_t maxConcurrentStreams = 100;   ///< 单连接最大并发活跃流数量
+        size_t initialWindowSize = 65535;    ///< 连接级与流级初始流控窗口 (字节)
+        size_t maxFrameSize = 16384;         ///< 本端接受的单帧 Payload 上限 (字节)
+        size_t maxHeaderListSize = 64 << 10; ///< 本端接受的最大首部列表大小 (字节，默认 64 KiB)
+        size_t headerTableSize = 4096;       ///< HPACK 动态表初始容量上限 (字节，默认 4096)
+    };
+
+    /// 历史别名兼容
+    using MultiplexerConfig = Http2Config;
+
+    /**
+     * @brief HTTP/3 (QUIC) 传输层与协议层安全限额配置
+     */
+    struct Http3Config
+    {
+        size_t maxRequestBodyBytes = 16 << 20;  ///< HTTP/3 请求 Body 上限 (16 MiB)
+        size_t maxStreamBufferBytes = 16 << 20; ///< HTTP/3 单流缓冲接收上限 (16 MiB)
+        size_t maxHeaderBlockBytes = 64 << 10;  ///< QPACK 编码首部块上限 (64 KiB)
+        size_t maxHeaderEntries = 256;          ///< QPACK 允许包含的最大首部条目数
+        uint16_t port = 4433;                   ///< HTTP/3 UDP 默认监听端口
+    };
+
+    /**
+     * @brief SOCKS5 代理处理器配置选项
+     */
+    struct ProxyConfig
+    {
+        bool autoReplyConnectSuccess = true; ///< CONNECT 成功时自动向客户端回发 0x00 响应
     };
 
     /**
@@ -252,11 +308,14 @@ namespace mynet
     {
         ServerConfig server{};
         ReactorConfig reactor{};
+        ProactorConfig proactor{};
         ConnectionConfig connection{};
         DatagramConfig datagram{};
-        ProactorConfig proactor{};
-        MultiplexerConfig multiplexer{};
         SecurityConfig security{};
+        Http1Config http1{};
+        Http2Config http2{};
+        Http3Config http3{};
+        ProxyConfig proxy{};
     };
 
     /**
@@ -275,20 +334,11 @@ namespace mynet
         {"server.tcpNoDelay", ReloadMode::Hot},
         {"server.tcpQuickAck", ReloadMode::Hot},
         {"server.enableSplice", ReloadMode::Hot},
+        {"server.reuseAddr", ReloadMode::Startup},
+        {"server.reusePort", ReloadMode::Startup},
         // ---- reactor ----
         {"reactor.maxEvents", ReloadMode::Startup},
         {"reactor.idleSweepIntervalMs", ReloadMode::Startup},
-        // ---- connection ----
-        {"connection.responseCapacity", ReloadMode::Hot},
-        {"connection.readChunkSize", ReloadMode::Hot},
-        {"connection.maxRequestBytes", ReloadMode::Hot},
-        {"connection.writeHighWaterMark", ReloadMode::Hot},
-        {"connection.writeHardCapFactor", ReloadMode::Hot},
-        {"connection.spliceChunkSize", ReloadMode::Hot},
-        {"connection.maxWriteIov", ReloadMode::Hot},
-        // ---- datagram ----
-        {"datagram.maxDatagramBytes", ReloadMode::Hot},
-        {"datagram.maxPendingOutgoing", ReloadMode::Hot},
         // ---- proactor ----
         {"proactor.sqEntries", ReloadMode::Startup},
         {"proactor.cqEntries", ReloadMode::Startup},
@@ -298,16 +348,53 @@ namespace mynet
         {"proactor.udpBufSize", ReloadMode::Startup},
         {"proactor.bufRingAlignment", ReloadMode::Startup},
         {"proactor.cqeWaitMs", ReloadMode::Startup},
-        // ---- multiplexer ----
-        {"multiplexer.maxConcurrentStreams", ReloadMode::Hot},
-        {"multiplexer.initialWindowSize", ReloadMode::Hot},
-        {"multiplexer.maxFrameSize", ReloadMode::Hot},
+        // ---- connection ----
+        {"connection.responseCapacity", ReloadMode::Hot},
+        {"connection.readChunkSize", ReloadMode::Hot},
+        {"connection.maxRequestBytes", ReloadMode::Hot},
+        {"connection.writeHighWaterMark", ReloadMode::Hot},
+        {"connection.writeHardCapFactor", ReloadMode::Hot},
+        {"connection.spliceChunkSize", ReloadMode::Hot},
+        {"connection.maxWriteIov", ReloadMode::Hot},
+        {"connection.readHighWaterMark", ReloadMode::Hot},
+        {"connection.maxDrainRounds", ReloadMode::Hot},
+        // ---- datagram ----
+        {"datagram.maxDatagramBytes", ReloadMode::Hot},
+        {"datagram.maxPendingOutgoing", ReloadMode::Hot},
         // ---- security ----
         {"security.certFile", ReloadMode::Startup},
         {"security.keyFile", ReloadMode::Startup},
         {"security.caFile", ReloadMode::Startup},
         {"security.ciphers", ReloadMode::Startup},
+        {"security.tls13CipherSuites", ReloadMode::Startup},
         {"security.alpnProtocols", ReloadMode::Startup},
+        {"security.minVersion", ReloadMode::Startup},
+        {"security.maxVersion", ReloadMode::Startup},
+        {"security.sessionTimeout", ReloadMode::Startup},
+        {"security.enableSessionTickets", ReloadMode::Startup},
+        {"security.numTickets", ReloadMode::Startup},
+        {"security.sessionIdContext", ReloadMode::Startup},
+        // ---- http1 ----
+        {"http1.maxUrlLength", ReloadMode::Hot},
+        {"http1.maxHeadersCount", ReloadMode::Hot},
+        {"http1.maxHeaderFieldLength", ReloadMode::Hot},
+        {"http1.maxHeaderValueLength", ReloadMode::Hot},
+        {"http1.maxTotalHeadersLength", ReloadMode::Hot},
+        {"http1.maxBodyLength", ReloadMode::Hot},
+        // ---- http2 ----
+        {"http2.maxConcurrentStreams", ReloadMode::Hot},
+        {"http2.initialWindowSize", ReloadMode::Hot},
+        {"http2.maxFrameSize", ReloadMode::Hot},
+        {"http2.maxHeaderListSize", ReloadMode::Hot},
+        {"http2.headerTableSize", ReloadMode::Hot},
+        // ---- http3 ----
+        {"http3.maxRequestBodyBytes", ReloadMode::Hot},
+        {"http3.maxStreamBufferBytes", ReloadMode::Hot},
+        {"http3.maxHeaderBlockBytes", ReloadMode::Hot},
+        {"http3.maxHeaderEntries", ReloadMode::Hot},
+        {"http3.port", ReloadMode::Startup},
+        // ---- proxy ----
+        {"proxy.autoReplyConnectSuccess", ReloadMode::Hot},
     };
 
     /**
@@ -327,6 +414,23 @@ namespace mynet
         return ReloadMode::Startup;
     }
 
+    // =========================================================================
+    // 校验函数（Validation Predicates）
+    // 按分层逻辑严格对齐：
+    // 1. 服务端与底层引擎 (Server, Reactor, Proactor)
+    // 2. 传输层会话与队列 (Connection, Datagram)
+    // 3. 传输安全 (Security)
+    // 4. 应用层协议与代理 (Http1, Http2, Http3, Proxy)
+    // =========================================================================
+
+    /**
+     * @brief 校验服务端基础网络配置是否处于可运行区间
+     */
+    [[nodiscard]] constexpr bool validServerConfig(const ServerConfig &cfg) noexcept
+    {
+        return cfg.backlog >= 1 && cfg.maxConnections >= 1 && cfg.idleTimeoutSecs >= 0;
+    }
+
     /**
      * @brief 校验 Reactor 引擎配置是否处于可运行区间
      *
@@ -338,8 +442,7 @@ namespace mynet
     {
         // 这里只回答"能不能跑起来"，不回答"是否推荐"。
         // maxEvents = 1 技术上合法（epoll_wait 接受任何 >0 的 maxevents），
-        // 只是每轮只收一个事件、效率差；lua_config 里的 [16, 65536] 是**配置**
-        // 允许区间，比可运行下限更严。两者职责不同，不要合并。
+        // 只是每轮只收一个事件、效率差；lua_config 里的 [16, 65536] 是配置允许区间。
         return cfg.maxEvents >= 1 && cfg.idleSweepIntervalMs >= 1;
     }
 
@@ -359,11 +462,68 @@ namespace mynet
     }
 
     /**
-     * @brief 校验连接上限是否处于可运行区间
+     * @brief 校验流式连接与请求响应管道配置是否合法
      */
-    [[nodiscard]] constexpr bool validServerConfig(const ServerConfig &cfg) noexcept
+    [[nodiscard]] constexpr bool validConnectionConfig(const ConnectionConfig &cfg) noexcept
     {
-        return cfg.backlog >= 1 && cfg.maxConnections >= 1 && cfg.idleTimeoutSecs >= 0;
+        return cfg.responseCapacity >= 1 && cfg.readChunkSize >= 1 && cfg.maxRequestBytes >= 1 &&
+               cfg.writeHighWaterMark >= 1 && cfg.writeHardCapFactor >= 1 && cfg.spliceChunkSize >= 1 &&
+               cfg.maxWriteIov >= 1 && cfg.readHighWaterMark >= 1 && cfg.maxDrainRounds >= 1;
+    }
+
+    /**
+     * @brief 校验 UDP 数据报会话与外发队列配置是否合法
+     */
+    [[nodiscard]] constexpr bool validDatagramConfig(const DatagramConfig &cfg) noexcept
+    {
+        return cfg.maxDatagramBytes >= 1 && cfg.maxPendingOutgoing >= 1;
+    }
+
+    /**
+     * @brief 校验 TLS 安全配置是否处于可运行区间
+     */
+    [[nodiscard]] constexpr bool validSecurityConfig(const SecurityConfig &cfg) noexcept
+    {
+        return cfg.minVersion >= 0x0303 && (cfg.maxVersion == 0 || cfg.maxVersion >= cfg.minVersion);
+    }
+
+    /**
+     * @brief 校验 HTTP/1.x 边界限额配置是否处于可运行区间
+     */
+    [[nodiscard]] constexpr bool validHttp1Config(const Http1Config &cfg) noexcept
+    {
+        return cfg.maxUrlLength > 0 && cfg.maxHeadersCount > 0 && cfg.maxBodyLength > 0;
+    }
+
+    /**
+     * @brief 校验 HTTP/2 协议流并发、初始窗口与帧大小配置是否处于可运行区间
+     */
+    [[nodiscard]] constexpr bool validHttp2Config(const Http2Config &cfg) noexcept
+    {
+        return cfg.maxConcurrentStreams >= 1 && cfg.initialWindowSize >= 1 && cfg.maxFrameSize >= 16384 &&
+               cfg.maxHeaderListSize >= 1;
+    }
+
+    /// 历史别名兼容
+    [[nodiscard]] constexpr bool validMultiplexerConfig(const Http2Config &cfg) noexcept
+    {
+        return validHttp2Config(cfg);
+    }
+
+    /**
+     * @brief 校验 HTTP/3 边界限额配置是否处于可运行区间
+     */
+    [[nodiscard]] constexpr bool validHttp3Config(const Http3Config &cfg) noexcept
+    {
+        return cfg.maxRequestBodyBytes > 0 && cfg.maxStreamBufferBytes > 0 && cfg.port > 0;
+    }
+
+    /**
+     * @brief 校验代理配置是否合法
+     */
+    [[nodiscard]] constexpr bool validProxyConfig(const ProxyConfig & /*cfg*/) noexcept
+    {
+        return true;
     }
 
     /**
@@ -391,6 +551,15 @@ namespace mynet
     {
         return NetConfigHolder::getInstance().duplicate();
     }
+
+    // =========================================================================
+    // 快照获取函数（Snapshot Accessors）
+    // 按分层逻辑严格对齐：
+    // 1. 服务端与底层引擎 (Server, Reactor, Proactor)
+    // 2. 传输层会话与队列 (Connection, Datagram)
+    // 3. 传输安全 (Security)
+    // 4. 应用层协议与代理 (Http1, Http2, Http3, Proxy)
+    // =========================================================================
 
     /**
      * @brief 获取当前全局服务端配置的无锁快照
@@ -420,24 +589,6 @@ namespace mynet
     }
 
     /**
-     * @brief 获取当前全局 TLS 安全配置的无锁快照
-     */
-    [[nodiscard]] inline const SecurityConfig &getSecurityConfig() noexcept
-    {
-        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
-        return snapshot.refConfig().security;
-    }
-
-    /**
-     * @brief 获取当前全局 HTTP/2 多路复用器配置的无锁快照
-     */
-    [[nodiscard]] inline const MultiplexerConfig &getMultiplexerConfig() noexcept
-    {
-        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
-        return snapshot.refConfig().multiplexer;
-    }
-
-    /**
      * @brief 获取当前全局连接配置的无锁快照
      */
     [[nodiscard]] inline const ConnectionConfig &getConnectionConfig() noexcept
@@ -454,6 +605,67 @@ namespace mynet
         thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
         return snapshot.refConfig().datagram;
     }
+
+    /**
+     * @brief 获取当前全局 TLS 安全配置的无锁快照
+     */
+    [[nodiscard]] inline const SecurityConfig &getSecurityConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().security;
+    }
+
+    /**
+     * @brief 获取当前全局 HTTP/1.x 边界限额配置的无锁快照
+     */
+    [[nodiscard]] inline const Http1Config &getHttp1Config() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().http1;
+    }
+
+    /**
+     * @brief 获取当前全局 HTTP/2 协议配置的无锁快照
+     */
+    [[nodiscard]] inline const Http2Config &getHttp2Config() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().http2;
+    }
+
+    /// 历史别名兼容
+    [[nodiscard]] inline const Http2Config &getMultiplexerConfig() noexcept
+    {
+        return getHttp2Config();
+    }
+
+    /**
+     * @brief 获取当前全局 HTTP/3 (QUIC) 边界限额配置的无锁快照
+     */
+    [[nodiscard]] inline const Http3Config &getHttp3Config() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().http3;
+    }
+
+    /**
+     * @brief 获取当前全局代理配置的无锁快照
+     */
+    [[nodiscard]] inline const ProxyConfig &getProxyConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().proxy;
+    }
+
+    // =========================================================================
+    // 配置发布函数（Publishers）
+    // 按分层逻辑严格对齐：
+    // 0. 全局网络配置 (NetConfig)
+    // 1. 服务端与底层引擎 (Server, Reactor, Proactor)
+    // 2. 传输层会话与队列 (Connection, Datagram)
+    // 3. 传输安全 (Security)
+    // 4. 应用层协议与代理 (Http1, Http2, Http3, Proxy)
+    // =========================================================================
 
     /**
      * @brief 原子发布新的全局网络配置
@@ -475,23 +687,10 @@ namespace mynet
     }
 
     /**
-     * @brief 原子发布新的 HTTP/2 多路复用器配置
-     */
-    inline void publishMultiplexerConfig(MultiplexerConfig cfg)
-    {
-        auto netCfg = getNetConfig();
-        netCfg.multiplexer = std::move(cfg);
-        publishNetConfig(std::move(netCfg));
-    }
-
-    /**
      * @brief 原子发布新的 Reactor 引擎专属配置
      */
     inline void publishReactorConfig(ReactorConfig cfg)
     {
-        // 公开的发布入口同样守着"只有可运行配置才允许进入全局快照"这条线：
-        // 钳位只在解析期做，绕过解析直接发布非法值必须当场失败，而不是等到
-        // 某个引擎启动时才发现。
         contract_assert(validReactorConfig(cfg));
         auto netCfg = getNetConfig();
         netCfg.reactor = std::move(cfg);
@@ -514,6 +713,7 @@ namespace mynet
      */
     inline void publishConnectionConfig(ConnectionConfig cfg)
     {
+        contract_assert(validConnectionConfig(cfg));
         auto netCfg = getNetConfig();
         netCfg.connection = std::move(cfg);
         publishNetConfig(std::move(netCfg));
@@ -524,8 +724,70 @@ namespace mynet
      */
     inline void publishDatagramConfig(DatagramConfig cfg)
     {
+        contract_assert(validDatagramConfig(cfg));
         auto netCfg = getNetConfig();
         netCfg.datagram = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的 TLS 安全专属配置
+     */
+    inline void publishSecurityConfig(SecurityConfig cfg)
+    {
+        contract_assert(validSecurityConfig(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.security = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的 HTTP/1.x 专属配置
+     */
+    inline void publishHttp1Config(Http1Config cfg)
+    {
+        contract_assert(validHttp1Config(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.http1 = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的 HTTP/2 协议配置
+     */
+    inline void publishHttp2Config(Http2Config cfg)
+    {
+        contract_assert(validHttp2Config(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.http2 = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /// 历史别名兼容
+    inline void publishMultiplexerConfig(Http2Config cfg)
+    {
+        publishHttp2Config(std::move(cfg));
+    }
+
+    /**
+     * @brief 原子发布新的 HTTP/3 专属配置
+     */
+    inline void publishHttp3Config(Http3Config cfg)
+    {
+        contract_assert(validHttp3Config(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.http3 = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的代理专属配置
+     */
+    inline void publishProxyConfig(ProxyConfig cfg)
+    {
+        contract_assert(validProxyConfig(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.proxy = std::move(cfg);
         publishNetConfig(std::move(netCfg));
     }
 

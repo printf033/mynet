@@ -5,7 +5,7 @@
  * @brief 沙箱化 Lua 配置加载与热重载引擎（loadServerSection / reloadConfig）。
  *
  * 把 config.lua 中的 server / reactor / connection / datagram / proactor /
- * multiplexer / security 各段解析进 configHolder.hpp 定义的配置结构体，并提供
+ * http2 / security 各段解析进 configHolder.hpp 定义的配置结构体，并提供
  * reloadConfig() 在信号或 mylog 热重载时重新装载。
  */
 
@@ -192,6 +192,16 @@ namespace mynet
                 cfg.enableSplice = flag;
             }
 
+            if (readBoolField(L, idx, "reuseAddr", flag, valid))
+            {
+                cfg.reuseAddr = flag;
+            }
+
+            if (readBoolField(L, idx, "reusePort", flag, valid))
+            {
+                cfg.reusePort = flag;
+            }
+
             return valid;
         }
 
@@ -210,77 +220,6 @@ namespace mynet
             {
                 const lua_Integer v = clampValue<lua_Integer>(num, 10, 60'000);
                 cfg.idleSweepIntervalMs = static_cast<int>(v);
-            }
-
-            return valid;
-        }
-
-        inline bool loadConnectionSection(lua_State *L, int idx, ConnectionConfig &cfg)
-        {
-            bool valid = true;
-            lua_Integer num = 0;
-
-            if (readNumberField(L, idx, "responseCapacity", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1, 65536);
-                cfg.responseCapacity = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "readChunkSize", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 256, 16 << 20);
-                cfg.readChunkSize = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "maxRequestBytes", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
-                cfg.maxRequestBytes = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "writeHighWaterMark", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
-                cfg.writeHighWaterMark = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "writeHardCapFactor", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1, 64);
-                cfg.writeHardCapFactor = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "spliceChunkSize", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 16 << 20);
-                cfg.spliceChunkSize = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "maxWriteIov", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 1, 64);
-                cfg.maxWriteIov = static_cast<size_t>(v);
-            }
-
-            return valid;
-        }
-
-        inline bool loadDatagramSection(lua_State *L, int idx, DatagramConfig &cfg)
-        {
-            bool valid = true;
-            lua_Integer num = 0;
-
-            if (readNumberField(L, idx, "maxDatagramBytes", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 512, 65535);
-                cfg.maxDatagramBytes = static_cast<size_t>(v);
-            }
-
-            if (readNumberField(L, idx, "maxPendingOutgoing", num, valid) ||
-                readNumberField(L, idx, "maxPendingReplies", num, valid))
-            {
-                const lua_Integer v = clampValue<lua_Integer>(num, 16, 65536);
-                cfg.maxPendingOutgoing = static_cast<size_t>(v);
             }
 
             return valid;
@@ -362,7 +301,204 @@ namespace mynet
             return valid;
         }
 
-        inline bool loadMultiplexerSection(lua_State *L, int idx, MultiplexerConfig &cfg)
+        inline bool loadConnectionSection(lua_State *L, int idx, ConnectionConfig &cfg)
+        {
+            bool valid = true;
+            lua_Integer num = 0;
+
+            if (readNumberField(L, idx, "responseCapacity", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 65536);
+                cfg.responseCapacity = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "readChunkSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 256, 16 << 20);
+                cfg.readChunkSize = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxRequestBytes", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.maxRequestBytes = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "writeHighWaterMark", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.writeHighWaterMark = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "writeHardCapFactor", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 64);
+                cfg.writeHardCapFactor = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "spliceChunkSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 16 << 20);
+                cfg.spliceChunkSize = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxWriteIov", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 64);
+                cfg.maxWriteIov = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "readHighWaterMark", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.readHighWaterMark = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxDrainRounds", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 1024);
+                cfg.maxDrainRounds = static_cast<size_t>(v);
+            }
+
+            return valid;
+        }
+
+        inline bool loadDatagramSection(lua_State *L, int idx, DatagramConfig &cfg)
+        {
+            bool valid = true;
+            lua_Integer num = 0;
+
+            if (readNumberField(L, idx, "maxDatagramBytes", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 512, 65535);
+                cfg.maxDatagramBytes = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxPendingOutgoing", num, valid) ||
+                readNumberField(L, idx, "maxPendingReplies", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 16, 65536);
+                cfg.maxPendingOutgoing = static_cast<size_t>(v);
+            }
+
+            return valid;
+        }
+
+        inline bool loadSecuritySection(lua_State *L, int idx, SecurityConfig &cfg)
+        {
+            bool valid = true;
+            std::string text;
+            lua_Integer num = 0;
+            bool flag = false;
+
+            if (readStringField(L, idx, "certFile", text, valid))
+            {
+                cfg.certFile = std::move(text);
+            }
+
+            if (readStringField(L, idx, "keyFile", text, valid))
+            {
+                cfg.keyFile = std::move(text);
+            }
+
+            if (readStringField(L, idx, "caFile", text, valid))
+            {
+                cfg.caFile = std::move(text);
+            }
+
+            if (readStringField(L, idx, "ciphers", text, valid))
+            {
+                cfg.ciphers = std::move(text);
+            }
+
+            if (readStringField(L, idx, "tls13CipherSuites", text, valid))
+            {
+                cfg.tls13CipherSuites = std::move(text);
+            }
+
+            if (readStringField(L, idx, "alpnProtocols", text, valid))
+            {
+                cfg.alpnProtocols = std::move(text);
+            }
+
+            if (readNumberField(L, idx, "minVersion", num, valid))
+            {
+                cfg.minVersion = static_cast<int>(num);
+            }
+
+            if (readNumberField(L, idx, "maxVersion", num, valid))
+            {
+                cfg.maxVersion = static_cast<int>(num);
+            }
+
+            if (readNumberField(L, idx, "sessionTimeout", num, valid))
+            {
+                cfg.sessionTimeout = static_cast<long>(num);
+            }
+
+            if (readBoolField(L, idx, "enableSessionTickets", flag, valid))
+            {
+                cfg.enableSessionTickets = flag;
+            }
+
+            if (readNumberField(L, idx, "numTickets", num, valid))
+            {
+                cfg.numTickets = static_cast<size_t>(num);
+            }
+
+            if (readStringField(L, idx, "sessionIdContext", text, valid))
+            {
+                cfg.sessionIdContext = std::move(text);
+            }
+
+            return valid;
+        }
+
+        inline bool loadHttp1Section(lua_State *L, int idx, Http1Config &cfg)
+        {
+            bool valid = true;
+            lua_Integer num = 0;
+
+            if (readNumberField(L, idx, "maxUrlLength", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 256, 1 << 20);
+                cfg.maxUrlLength = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxHeadersCount", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 10000);
+                cfg.maxHeadersCount = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxHeaderFieldLength", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 64, 1 << 20);
+                cfg.maxHeaderFieldLength = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxHeaderValueLength", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 64, 1 << 20);
+                cfg.maxHeaderValueLength = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxTotalHeadersLength", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 256, 16 << 20);
+                cfg.maxTotalHeadersLength = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "maxBodyLength", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.maxBodyLength = static_cast<size_t>(v);
+            }
+
+            return valid;
+        }
+
+        inline bool loadHttp2Section(lua_State *L, int idx, Http2Config &cfg)
         {
             bool valid = true;
             lua_Integer num = 0;
@@ -385,37 +521,72 @@ namespace mynet
                 cfg.maxFrameSize = static_cast<size_t>(v);
             }
 
+            if (readNumberField(L, idx, "maxHeaderListSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 16 << 20);
+                cfg.maxHeaderListSize = static_cast<size_t>(v);
+            }
+
+            if (readNumberField(L, idx, "headerTableSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 0, 1 << 20);
+                cfg.headerTableSize = static_cast<size_t>(v);
+            }
+
             return valid;
         }
 
-        inline bool loadSecuritySection(lua_State *L, int idx, SecurityConfig &cfg)
+        inline bool loadMultiplexerSection(lua_State *L, int idx, Http2Config &cfg)
+        {
+            return loadHttp2Section(L, idx, cfg);
+        }
+
+        inline bool loadHttp3Section(lua_State *L, int idx, Http3Config &cfg)
         {
             bool valid = true;
-            std::string text;
+            lua_Integer num = 0;
 
-            if (readStringField(L, idx, "certFile", text, valid))
+            if (readNumberField(L, idx, "maxRequestBodyBytes", num, valid))
             {
-                cfg.certFile = std::move(text);
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.maxRequestBodyBytes = static_cast<size_t>(v);
             }
 
-            if (readStringField(L, idx, "keyFile", text, valid))
+            if (readNumberField(L, idx, "maxStreamBufferBytes", num, valid))
             {
-                cfg.keyFile = std::move(text);
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 1024 << 20);
+                cfg.maxStreamBufferBytes = static_cast<size_t>(v);
             }
 
-            if (readStringField(L, idx, "caFile", text, valid))
+            if (readNumberField(L, idx, "maxHeaderBlockBytes", num, valid))
             {
-                cfg.caFile = std::move(text);
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 16 << 20);
+                cfg.maxHeaderBlockBytes = static_cast<size_t>(v);
             }
 
-            if (readStringField(L, idx, "ciphers", text, valid))
+            if (readNumberField(L, idx, "maxHeaderEntries", num, valid))
             {
-                cfg.ciphers = std::move(text);
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 10000);
+                cfg.maxHeaderEntries = static_cast<size_t>(v);
             }
 
-            if (readStringField(L, idx, "alpnProtocols", text, valid))
+            if (readNumberField(L, idx, "port", num, valid))
             {
-                cfg.alpnProtocols = std::move(text);
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 65535);
+                cfg.port = static_cast<uint16_t>(v);
+            }
+
+            return valid;
+        }
+
+        inline bool loadProxySection(lua_State *L, int idx, ProxyConfig &cfg)
+        {
+            bool valid = true;
+            bool flag = false;
+
+            if (readBoolField(L, idx, "autoReplyConnectSuccess", flag, valid))
+            {
+                cfg.autoReplyConnectSuccess = flag;
             }
 
             return valid;
@@ -430,7 +601,7 @@ namespace mynet
      * 1. 创建沙箱化隔离 Lua 虚拟机（luaL_newstate() 零加载标准库，杜绝 os、io、package 等任何系统级库与任意代码执行）；
      * 2. 设置单次执行指令配额（50,000,000 条指令）以防死循环拒绝服务；
      * 3. 强制使用 "t" 模式加载文本脚本，杜绝恶意二进制字节码；
-     * 4. 解析校验 server、reactor、connection、datagram、proactor、multiplexer、security 等各配置节；
+     * 4. 解析校验 server、reactor、connection、datagram、proactor、http2、security 等各配置节；
      * 5. 若配置脚本包含 logger 或 fileManager 配置节，自动联合重新加载 mylog 日志配置；
      * 6. 校验全部通过后，原子发布到 NetConfigHolder；若失败则保持运行中配置不发生任何部分修改（All-or-Nothing）。
      *
@@ -498,6 +669,22 @@ namespace mynet
         }
         lua_pop(L, 1);
 
+        lua_getglobal(L, "proactor");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadProactorSection(L, idx, newCfg.proactor))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'proactor' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
         lua_getglobal(L, "connection");
         if (lua_istable(L, -1))
         {
@@ -530,38 +717,6 @@ namespace mynet
         }
         lua_pop(L, 1);
 
-        lua_getglobal(L, "proactor");
-        if (lua_istable(L, -1))
-        {
-            const int idx = lua_gettop(L);
-            if (!detail::loadProactorSection(L, idx, newCfg.proactor))
-            {
-                valid = false;
-            }
-        }
-        else if (lua_type(L, -1) != LUA_TNIL)
-        {
-            detail::printError("global 'proactor' must be a table");
-            valid = false;
-        }
-        lua_pop(L, 1);
-
-        lua_getglobal(L, "multiplexer");
-        if (lua_istable(L, -1))
-        {
-            const int idx = lua_gettop(L);
-            if (!detail::loadMultiplexerSection(L, idx, newCfg.multiplexer))
-            {
-                valid = false;
-            }
-        }
-        else if (lua_type(L, -1) != LUA_TNIL)
-        {
-            detail::printError("global 'multiplexer' must be a table");
-            valid = false;
-        }
-        lua_pop(L, 1);
-
         lua_getglobal(L, "security");
         if (lua_istable(L, -1))
         {
@@ -574,6 +729,75 @@ namespace mynet
         else if (lua_type(L, -1) != LUA_TNIL)
         {
             detail::printError("global 'security' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "http1");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadHttp1Section(L, idx, newCfg.http1))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'http1' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "http2");
+        if (lua_isnil(L, -1))
+        {
+            lua_pop(L, 1);
+            lua_getglobal(L, "multiplexer"); // 兼容旧配置表名
+        }
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadHttp2Section(L, idx, newCfg.http2))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'http2' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "http3");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadHttp3Section(L, idx, newCfg.http3))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'http3' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "proxy");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadProxySection(L, idx, newCfg.proxy))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'proxy' must be a table");
             valid = false;
         }
         lua_pop(L, 1);

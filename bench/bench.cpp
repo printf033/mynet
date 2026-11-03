@@ -297,7 +297,7 @@ namespace
 
     // ---- HTTP/2 多路复用器 (HandlerHttp2) 基准测试 ----
 
-    void benchMultiplexerRoundTrip()
+    void benchHttp2RoundTrip()
     {
         class NoopMux : public HandlerHttp2<HandlerConnection>
         {
@@ -383,7 +383,7 @@ int main()
     benchBigEndian();
     benchObjectPool();
     benchHandlerQueue();
-    benchMultiplexerRoundTrip();
+    benchHttp2RoundTrip();
 
     std::printf("\nns/op is the median of %d runs of the same body; 'best' is the fastest of them.\n", kRepeats);
     std::printf("Log lines go to stderr: run ./bench 2>/dev/null for a clean report.\n");

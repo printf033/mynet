@@ -2,7 +2,7 @@
 #include "error.hpp"
 #include "http/v3/handler.hpp"
 #include "log_config.hpp"
-#include "proactor.hpp"
+#include "proactor/proactor.hpp"
 
 // io_uring 驱动的 HTTP/3 (QUIC over UDP) 服务端。用法：
 //
@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     http::v3::HandlerHttp3 handler;
-    if (auto res = Proactor<EventSocket<http::v3::HandlerHttp3>>().runUdp(listen.ip, listen.port(), handler); !res)
+    if (auto res = Proactor<AcceptorSocket<http::v3::HandlerHttp3>>().runUdp(listen.ip, listen.port(), handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

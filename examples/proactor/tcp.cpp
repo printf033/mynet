@@ -2,7 +2,7 @@
 #include "common/handlers.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proactor.hpp"
+#include "proactor/proactor.hpp"
 
 // io_uring 驱动的流式回显服务端。用法：
 //
@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (tcp, proactor)", listen.text);
 
     using namespace mynet;
-    if (auto res = Proactor<EventSocket<example::SpliceEchoHandler>>().runTcp(listen.ip, listen.port()); !res)
+    if (auto res = Proactor<AcceptorSocket<example::SpliceEchoHandler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

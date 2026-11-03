@@ -47,9 +47,13 @@ namespace mynet
         class ServerHttp3
         {
         public:
-            ServerHttp3(std::string certPath = "certs/ser.crt", std::string keyPath = "certs/ser.key") noexcept
-                : certPath_(std::move(certPath)),
-                  keyPath_(std::move(keyPath))
+            ServerHttp3(std::string certPath = "", std::string keyPath = "") noexcept
+                : certPath_(certPath.empty()
+                                ? (getSecurityConfig().certFile.empty() ? "certs/ser.crt" : getSecurityConfig().certFile)
+                                : std::move(certPath)),
+                  keyPath_(keyPath.empty()
+                               ? (getSecurityConfig().keyFile.empty() ? "certs/ser.key" : getSecurityConfig().keyFile)
+                               : std::move(keyPath))
             {
             }
 
@@ -88,9 +92,9 @@ namespace mynet
             {
                 stopRequested_.store(false, std::memory_order_relaxed);
 
-                TlsOptions tlsOpt{};
-                tlsOpt.alpnProtocols = {"h3"};
-                auto ctxRes = detail::createServerContext(certPath_.c_str(), keyPath_.c_str(), tlsOpt,
+                SecurityConfig security{};
+                security.alpnProtocols = "h3";
+                auto ctxRes = detail::createServerContext(certPath_.c_str(), keyPath_.c_str(), security, nullptr,
                                                           TlsProtocolType::DatagramQuic);
                 if (!ctxRes) [[unlikely]]
                 {
@@ -390,6 +394,17 @@ namespace mynet
                 detail::freeContext(ctx);
                 ::close(fd);
                 return {};
+            }
+
+            [[nodiscard]] Result<> run(HandlerHttp3 &handler)
+            {
+                return run(getServerConfig().host.c_str(), static_cast<int>(getHttp3Config().port), handler);
+            }
+
+            [[nodiscard]] Result<> run()
+            {
+                HandlerHttp3 defaultHandler;
+                return run(defaultHandler);
             }
 
             [[nodiscard]] Result<> run(const char *ip, int port)

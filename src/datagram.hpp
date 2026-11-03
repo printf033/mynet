@@ -272,7 +272,7 @@ namespace mynet
      *   派发，再用 flushTo() 把外发报文排空。
      *
      * 与 Connection<H> 的差异源于传输语义本身：UDP 无连接，所以本类不持有 fd
-     * （fd 归 EventBase，生命周期比会话更长），也不持有对端地址（每条报文自带），
+     * （fd 归 AcceptorBase，生命周期比会话更长），也不持有对端地址（每条报文自带），
      * 因此没有握手、状态机、写队列与读信用背压——那些是流式传输才需要的。
      * 省下来的开销全部投给了报文路径最关心的两件事：定容接收窗口（一次分配、
      * 永不重分配）与可统计的截断/丢发。
@@ -411,15 +411,6 @@ namespace mynet
             handler_->onDatagram(peer, data, n);
         }
 
-        /**
-         * @brief 排空处理器积压的回复队列
-         *
-         * @param fd 已绑定的 UDP 套接字描述符
-         * @return 本次成功发出的报文条数（累计值见 sentDatagrams()）
-         *
-         * 刻意不加 [[nodiscard]]：这是以副作用为主的操作，返回值只是附带观测，
-         * 而引擎的流式路径也会实例化到这个调用点（经空壳 NoDatagram）。
-         */
         /**
          * @brief 排空处理器积压的待发报文队列（包含 EAGAIN/EWOULDBLOCK 时未发出的暂存报文）
          *

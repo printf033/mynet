@@ -2,7 +2,7 @@
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "reactor.hpp"
+#include "reactor/reactor.hpp"
 
 // epoll 驱动的 TLS 回显服务端。用法：
 //
@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (tls, reactor)", listen.text);
 
     using namespace mynet;
-    if (auto res = Reactor<EventSsl<HandlerConnection>>().runSsl(listen.ip, listen.port(), crt, key); !res)
+    if (auto res = Reactor<AcceptorSsl<HandlerConnection>>().runSsl(listen.ip, listen.port(), crt, key); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

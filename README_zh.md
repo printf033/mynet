@@ -133,7 +133,7 @@ flowchart TD
 - **流水线安全**：发送队列采用定容响应队列 `ResponseQueue`，每个响应完整保存在独立字符串中，入队与出队热路径彻底杜绝动态堆分配，支持 HTTP/1.1 Pipelining 在单次读取产生多个响应时不会互相破坏缓冲区。
 - **背压控制（Backpressure）**：内置高水位标记监测，当发送积压超出限额时自动触发 `readCredit()` 暂停接收端读取，避免发送队列无序膨胀引发内存溢出。
 - **Proactor 会话生命周期保护**：在 `Proactor` 引擎中，每个连接被封装于 `Session` 中并严格统计内核在途操作（`inFlight`）。只有在会话被标记为终止且所有在途读写全部完成后，会话才会被安全回收到对象池。
-- **处理器分层**：`HandlerConnection`（`connection.hpp`）与 `HandlerDatagram`（`datagram.hpp`）是两个并列的处理器基类，彼此没有共同祖先：前者持有流式会话的请求缓冲、响应队列与读信用背压，后者持有无连接数据报的对端回复队列。协议处理器（`HandlerHttp`、`HandlerHttp2`、`HandlerHttp3`）继承对应基类；需要双传输的处理器（`HandlerHttp3`）同时继承两者，由于两个基类都不是虚基类，成员访问是直接偏移，不存在虚基类间接寻址与共享子对象记账。原公共根类的基础契约（`reset`、`onMessageComplete`、`onParseError`）分别落在两个基类上，并以传输无关的方式表达为 `HandlerConstraint` 概念（`constraints.hpp`）——事件槽位只依赖这一份最小契约（对象池只需要其中的 `Resettable`）。两个引擎契约为各自的传输通道命名，含义就是「该通道真正会调用的必需方法集合」：`MandatoryMethodConnection`（`connection.hpp`）与 `MandatoryMethodDatagram`（`datagram.hpp`）。二者各自紧邻其基类定义，使 `std::derived_from` 始终看到完整类型；同时都要求派生并逐项校验引擎经处理器类型本身调用的签名。纯报文处理器只需派生 `HandlerDatagram`：引擎把非流式处理器映射到无状态的 `NoConnection` 槽位（`ConnectionSlot`），把纯流式处理器映射到 `NoDatagram` 槽位（`DatagramSlot`），两条路径都不会实例化对方的传输设施。
+- **处理器分层**：`HandlerConnection`（`connection.hpp`）与 `HandlerDatagram`（`datagram.hpp`）是两个并列的处理器基类，彼此没有共同祖先：前者持有流式会话的请求缓冲、响应队列与读信用背压，后者持有无连接数据报的对端回复队列。协议处理器（`HandlerHttp`、`HandlerHttp2`、`HandlerHttp3`）继承对应基类；需要双传输的处理器（`HandlerHttp3`）同时继承两者，由于两个基类都不是虚基类，成员访问是直接偏移，不存在虚基类间接寻址与共享子对象记账。原公共根类的基础契约（`reset`、`onMessageComplete`、`onParseError`）分别落在两个基类上，并以传输无关的方式表达为 `HandlerConstraint` 概念（`constraints.hpp`）——接收器槽位只依赖这一份最小契约（对象池只需要其中的 `Resettable`）。两个引擎契约为各自的传输通道命名，含义就是「该通道真正会调用的必需方法集合」：`MandatoryMethodConnection`（`connection.hpp`）与 `MandatoryMethodDatagram`（`datagram.hpp`）。二者各自紧邻其基类定义，使 `std::derived_from` 始终看到完整类型；同时都要求派生并逐项校验引擎经处理器类型本身调用的签名。纯报文处理器只需派生 `HandlerDatagram`：引擎把非流式处理器映射到无状态的 `NoConnection` 槽位（`ConnectionSlot`），把纯流式处理器映射到 `NoDatagram` 槽位（`DatagramSlot`），两条路径都不会实例化对方的传输设施。
 
 ### 3. 热路径零堆分配内存架构
 
@@ -212,7 +212,7 @@ tlsServer.runSsl();
 | `proactor` | `sqEntries`、`cqEntries`、`maxAcceptEvents`、`bufEntries`、`bufSize`、`udpBufSize`、`bufRingAlignment`、`cqeWaitMs` | 启动 |
 | `connection` | `responseCapacity`、`readChunkSize`、`maxRequestBytes`、`writeHighWaterMark`、`writeHardCapFactor`、`spliceChunkSize`、`maxWriteIov` | 热 |
 | `datagram` | `maxDatagramBytes`、`maxPendingOutgoing` | 热 |
-| `multiplexer` | `maxConcurrentStreams`、`initialWindowSize`、`maxFrameSize` | 热 |
+| `http2` | `maxConcurrentStreams`、`initialWindowSize`、`maxFrameSize` | 热 |
 | `security` | `certFile`、`keyFile`、`caFile`、`ciphers`、`alpnProtocols` | 启动 |
 
 `server.maxConnections` 是容量的唯一真源：Reactor 用它做连接池槽位数，Proactor 用它做会话池槽位数。`server.host`/`port` 由无参的 `runTcp()` / `runSsl()` 消费，`security.certFile`/`keyFile` 由不带路径参数的 `runSsl()` 消费——那个重载在路径未配置时会直接拒绝启动，而不是悄悄降级成明文。
@@ -331,7 +331,7 @@ docker run --rm -it -p 8888:8888 mynet:latest
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "reactor.hpp"
+#include "reactor/reactor.hpp"
 
 using namespace mynet;
 
@@ -339,7 +339,7 @@ int main() {
     mynet::log::init(); // 初始化日志并重定向至 stderr
 
     // 创建普通 TCP 套接字与 Echo 回显处理器的 Reactor 实例
-    Reactor<EventSocket<HandlerConnection>> server;
+    Reactor<AcceptorSocket<HandlerConnection>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("服务端启动失败: {}", toString(res.error()));
@@ -355,7 +355,7 @@ int main() {
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proactor.hpp"
+#include "proactor/proactor.hpp"
 
 using namespace mynet;
 
@@ -363,7 +363,7 @@ int main() {
     mynet::log::init();
 
     // 创建基于 io_uring 的 Proactor 前摄器服务端
-    Proactor<EventSocket<HandlerConnection>> server;
+    Proactor<AcceptorSocket<HandlerConnection>> server;
 
     // 调优参数统一放在 config.lua 的 server / proactor 段，经 ConfigHolder 发布；
     // 引擎自身不再保留硬编码默认值。
@@ -381,7 +381,7 @@ int main() {
 #include "connection.hpp"
 #include "error.hpp"
 #include "http/v2/handler.hpp"
-#include "reactor.hpp"
+#include "reactor/reactor.hpp"
 
 using namespace mynet;
 
@@ -389,7 +389,7 @@ int main() {
     mynet::log::init();
 
     // 组合调用栈：Reactor -> Socket -> HandlerHttp2 (HTTP/2 协议帧多路复用) -> 每条流的处理器
-    Reactor<EventSocket<HandlerHttp2<HandlerConnection>>> server;
+    Reactor<AcceptorSocket<HandlerHttp2<HandlerConnection>>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("HTTP/2 服务端启动失败: {}", toString(res.error()));
@@ -431,11 +431,15 @@ mynet/
 │   ├── requestBuffer.hpp       # 滑动窗口自收缩低开销字节缓冲区
 │   ├── responseQueue.hpp       # 零分配定容循环响应队列
 │   ├── objectPool.hpp          # 地址稳定的固定容量对象池
-│   ├── timer.hpp               # 惰性删除的高效二叉最小堆定时器队列
-│   ├── loop.hpp                # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
-│   ├── event.hpp               # 监听通道根类 EventBase + 套接字及 SSL 通道
+│   ├── acceptor.hpp            # 监听通道根类 AcceptorBase + 套接字及 SSL 通道
 │   ├── connection.hpp          # TCP/TLS 传输层核心 + 连接处理器特化（HandlerConnection）
 │   ├── datagram.hpp            # UDP 传输层 Datagram<H> + 报文处理器基类 HandlerDatagram
+│   ├── reactor/                # 边缘触发模式 Reactor 反应器引擎
+│   │   ├── timer.hpp           # 惰性删除的高效二叉最小堆定时器队列
+│   │   ├── loop.hpp            # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
+│   │   └── reactor.hpp         # Reactor 引擎核心
+│   ├── proactor/               # 基于 io_uring 完成态的 Proactor 前摄器引擎
+│   │   └── proactor.hpp        # Proactor 引擎核心
 │   ├── http/                   # HTTP 协议族实现
 │   │   ├── v1/
 │   │   │   └── handler.hpp     # 基于 llhttp 的 HTTP/1.x 协议处理器（HandlerHttp）
@@ -450,8 +454,6 @@ mynet/
 │   │       ├── quic.hpp        # RFC 9000 QUIC 1-RTT 短首部报文与 STREAM 传输帧
 │   │       ├── streamTable.hpp # HTTP/3 逻辑流表与状态跟踪
 │   │       └── handler.hpp     # 统一 HTTP/3 协议处理器（HandlerHttp3）
-│   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎
-│   └── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎
 │
 ├── config/                     # 运行时配置
 │   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）
@@ -484,7 +486,7 @@ mynet/
 │   ├── test_frame.cpp          # 协议帧拆装包测试
 │   ├── test_handler.cpp        # 处理器状态流转测试
 │   ├── test_http3.cpp          # HTTP/3 变长整数、分帧、QPACK 与 QUIC 报文测试
-│   ├── test_multiplexer.cpp    # 流多路复用状态机与流控测试
+│   ├── test_http2.cpp          # HTTP/2 流多路复用状态机与流控测试
 │   ├── test_object_pool.cpp    # 对象池生命周期与指针稳定性测试
 │   └── test_timer.cpp          # 定时器精度与取消测试
 │
@@ -525,8 +527,8 @@ Test project /home/aaa/code/mynet/build
  6/12 Test  #6: test_handler .....................   Passed    0.03 sec
       Start  7: test_http3
  7/12 Test  #7: test_http3 .......................   Passed    0.02 sec
-      Start  8: test_multiplexer
- 8/12 Test  #8: test_multiplexer .................   Passed    0.10 sec
+      Start  8: test_http2
+ 8/12 Test  #8: test_http2 .......................   Passed    0.10 sec
       Start  9: test_object_pool
  9/12 Test  #9: test_object_pool .................   Passed    0.02 sec
       Start 10: test_timer

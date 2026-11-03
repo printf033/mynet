@@ -793,3 +793,38 @@ TEST(HandlerHttp, SpliceTunnelApis)
     EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
     EXPECT_EQ(handler.spliceTarget(), -1);
 }
+
+class StreamTestHttpHandler : public http::v1::HandlerHttp<HTTP_MODE::REQUEST>
+{
+public:
+    std::vector<std::string> chunks;
+    void onBodyChunk(std::string_view chunk) noexcept override
+    {
+        chunks.emplace_back(chunk);
+    }
+};
+
+TEST(HandlerHttp, StreamingBodyPassThroughZeroCopy)
+{
+    StreamTestHttpHandler handler;
+    handler.enableStreamingBody(true);
+    EXPECT_TRUE(handler.isStreamingBody());
+
+    std::string req1 = "POST /upload HTTP/1.1\r\nContent-Length: 10\r\n\r\n12345";
+    feed(handler, req1);
+    handler.process();
+
+    EXPECT_EQ(handler.chunks.size(), 1u);
+    EXPECT_EQ(handler.chunks[0], "12345");
+    // 关键验证：开启 streaming 后，body_ 保持为空，杜绝堆累积硬拷贝
+    EXPECT_TRUE(handler.body().empty());
+
+    // 第二段数据到达
+    std::string req2 = "67890";
+    feed(handler, req2);
+    handler.process();
+
+    EXPECT_EQ(handler.chunks.size(), 2u);
+    EXPECT_EQ(handler.chunks[1], "67890");
+    EXPECT_TRUE(handler.body().empty());
+}

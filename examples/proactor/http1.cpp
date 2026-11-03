@@ -2,7 +2,7 @@
 #include "error.hpp"
 #include "http/v1/handler.hpp"
 #include "log_config.hpp"
-#include "proactor.hpp"
+#include "proactor/proactor.hpp"
 
 // io_uring 驱动的 HTTP/1.x 服务端。用法：
 //
@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     using Handler = http::v1::HandlerHttp<http::v1::HTTP_MODE::REQUEST>;
-    if (auto res = Proactor<EventSocket<Handler>>().runTcp(listen.ip, listen.port()); !res)
+    if (auto res = Proactor<AcceptorSocket<Handler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

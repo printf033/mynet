@@ -104,6 +104,32 @@ TEST(ProxyAddressTest, IPv6Codec)
 
 // ---- HandlerSocks5 测试 ----
 
+TEST(HandlerSocks5Test, ProxyConfigConstruction)
+{
+    ProxyConfig cfg;
+    cfg.autoReplyConnectSuccess = false;
+    HandlerSocks5 handler(cfg);
+
+    // 握手
+    feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
+    handler.process();
+    EXPECT_EQ(handler.stage(), Socks5Stage::REQUEST);
+    [[maybe_unused]] auto _ = handler.takeResponse();
+
+    // CONNECT 请求
+    std::vector<uint8_t> req = {0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0x00, 80};
+    feed(handler, req);
+    handler.process();
+
+    EXPECT_EQ(handler.stage(), Socks5Stage::STREAMING);
+    // 因为设置了 autoReplyConnectSuccess = false，此时不应自动向客户端回送响应
+    EXPECT_FALSE(handler.hasResponse());
+
+    // 重新应用配置
+    cfg.autoReplyConnectSuccess = true;
+    handler.configure(cfg);
+}
+
 TEST(HandlerSocks5Test, NoAuthConnectIPv4Success)
 {
     HandlerSocks5 handler;
@@ -321,4 +347,31 @@ TEST(HandlerSocks5Test, ResetAndReuse)
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
     handler.process();
     EXPECT_EQ(handler.stage(), Socks5Stage::REQUEST);
+}
+
+TEST(HandlerSocks5Test, SpliceForwardApis)
+{
+    HandlerSocks5 handler;
+    static_assert(HandlerSocks5::kEnableSplice, "HandlerSocks5 must declare kEnableSplice = true");
+
+    EXPECT_FALSE(handler.isSpliceForwardActive());
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
+
+    handler.enableSpliceForward(200);
+    EXPECT_TRUE(handler.isSpliceForwardActive());
+    EXPECT_EQ(handler.spliceTarget(), 200);
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
+
+    handler.disableSpliceForward();
+    EXPECT_FALSE(handler.isSpliceForwardActive());
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
+
+    handler.enableSpliceForward(201);
+    EXPECT_TRUE(handler.isSpliceForwardActive());
+    handler.reset();
+    EXPECT_FALSE(handler.isSpliceForwardActive());
+    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
+    EXPECT_EQ(handler.spliceTarget(), -1);
 }

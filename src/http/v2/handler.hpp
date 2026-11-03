@@ -34,10 +34,6 @@ namespace mynet
 {
 
     /**
-     * @namespace mux
-     * @brief 流多路复用的协议常量与设置项标识符。
-     */
-    /**
      * @brief HTTP/2 SETTINGS 帧参数标识符枚举 (RFC 7540 Section 6.5.2)
      */
     enum class SETTINGS_ID : uint16_t
@@ -50,6 +46,10 @@ namespace mynet
         MAX_HEADER_LIST_SIZE = 0x6
     };
 
+    /**
+     * @namespace mux
+     * @brief 流多路复用的协议常量与设置项标识符。
+     */
     namespace mux
     {
         inline constexpr uint32_t kInitialWindowSize = (64 << 10) - 1;
@@ -265,18 +265,18 @@ namespace mynet
         void onConnect(int fd) noexcept override
         {
             HandlerConnection::onConnect(fd);
-            applyMultiplexerConfig();
+            applyHttp2Config();
         }
 
         /**
-         * @brief 从 multiplexer 与 connection 配置段刷新本连接的流并发、窗口与请求缓冲上限。
+         * @brief 从 http2 与 connection 配置段刷新本连接的流并发、窗口与请求缓冲上限。
          *
          * 必须在每个新连接上调用（而不是只在构造时读一次），这样 reloadConfig()
-         * 之后建立的新连接立刻采用新值——这正是 multiplexer 与 connection 段被归类为"热"的依据。
+         * 之后建立的新连接立刻采用新值——这正是 http2 与 connection 段被归类为"热"的依据。
          */
-        inline void applyMultiplexerConfig() noexcept
+        inline void applyHttp2Config() noexcept
         {
-            const MultiplexerConfig &cfg = getMultiplexerConfig();
+            const Http2Config &cfg = getHttp2Config();
             setMaxConcurrentStreams(cfg.maxConcurrentStreams);
             setMaxRequestBytes(getConnectionConfig().maxRequestBytes);
             // SETTINGS_MAX_FRAME_SIZE 只约束本端愿意接收的帧（对端据此分片），
@@ -302,6 +302,9 @@ namespace mynet
             connSendWindow_ = static_cast<int64_t>(mux::kInitialWindowSize);
             connRecvWindow_ = connRecvLimit_;
         }
+
+        /// 历史别名兼容
+        inline void applyMultiplexerConfig() noexcept { applyHttp2Config(); }
 
         /**
          * @brief 适配 Connection::echo 契约：遍历当前活跃流表，驱动每条流上的处理器执行 echo() 并泵送响应
@@ -569,7 +572,7 @@ namespace mynet
                     return;
                 }
 
-                std::expected<std::optional<Frame>, FRAME_ERROR> parsed = decoder_.next(requestBuffer_);
+                std::expected<std::optional<FrameView>, FRAME_ERROR> parsed = decoder_.nextView(requestBuffer_);
                 if (!parsed) [[unlikely]]
                 {
                     protocolFailure(STREAM_ERROR::PROTOCOL_ERROR, toString(parsed.error()));
@@ -578,9 +581,10 @@ namespace mynet
                 if (!parsed->has_value())
                 {
                     pendingDecode_ = false;
+                    requestBuffer_.maybeCompact();
                     return; // 帧不完整，等待后续更多网络数据到达
                 }
-                handleFrame(std::move(parsed->value()));
+                handleFrame(parsed->value());
                 if (closeAfterResponse_) [[unlikely]]
                 {
                     return;
@@ -655,7 +659,7 @@ namespace mynet
 
         // ---- 帧分发处理 ----
 
-        inline void handleFrame(Frame frame)
+        inline void handleFrame(const FrameView &frame)
         {
             LOG_DEBUG("HandlerHttp2: frame type {} flags {} on stream {} ({} payload byte(s))",
                       std::to_underlying(frame.type), frame.flags, frame.streamId, frame.payload.size());
@@ -724,7 +728,7 @@ namespace mynet
             }
         }
 
-        inline void handleHeaders(Frame &frame)
+        inline void handleHeaders(const FrameView &frame)
         {
             // 流标识合法性必须在进入分片等待之前判定：否则一条必然被拒的连接可以
             // 先堆满重组缓冲（甚至让 stream 0 的 CONTINUATION 被接受），才拿到错误。
@@ -781,7 +785,7 @@ namespace mynet
          * 统一交给 completeHeaderBlock() 解码——无论该流是否会被接纳，都必须执行
          * 解码以保持连接级 HPACK 动态表与对端同步。
          */
-        inline void handleContinuation(Frame &frame)
+        inline void handleContinuation(const FrameView &frame)
         {
             if ((frame.flags & ~FrameFlags::kEndHeaders) != 0) [[unlikely]]
             {
@@ -930,7 +934,7 @@ namespace mynet
             }
         }
 
-        inline void handleData(Frame &frame)
+        inline void handleData(const FrameView &frame)
         {
             if (frame.streamId == 0) [[unlikely]]
             {
@@ -1024,14 +1028,21 @@ namespace mynet
             }
 
             onStreamData(frame.streamId, bytes);
-            if (auto res = slot->handler->appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size())); !res)
-                [[unlikely]]
+            if constexpr (requires { slot->handler->onData(bytes, frame.hasFlag(FrameFlags::kEndStream)); })
             {
-                LOG_ERROR("HandlerHttp2: stream {} appendRequest failed: {}", frame.streamId, toString(res.error()));
-                creditConnectionWindow();
-                sendResetStream(frame.streamId, STREAM_ERROR::INTERNAL_ERROR);
-                closeStream(frame.streamId);
-                return;
+                slot->handler->onData(bytes, frame.hasFlag(FrameFlags::kEndStream));
+            }
+            else
+            {
+                if (auto res = slot->handler->appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size())); !res)
+                    [[unlikely]]
+                {
+                    LOG_ERROR("HandlerHttp2: stream {} appendRequest failed: {}", frame.streamId, toString(res.error()));
+                    creditConnectionWindow();
+                    sendResetStream(frame.streamId, STREAM_ERROR::INTERNAL_ERROR);
+                    closeStream(frame.streamId);
+                    return;
+                }
             }
             if constexpr (requires { slot->handler->process(); })
             {
@@ -1055,7 +1066,7 @@ namespace mynet
             }
         }
 
-        inline void handleSettings(Frame &frame)
+        inline void handleSettings(const FrameView &frame)
         {
             if (frame.streamId != 0) [[unlikely]]
             {
@@ -1135,7 +1146,7 @@ namespace mynet
             sendSettingsAck();
         }
 
-        inline void handlePing(Frame &frame)
+        inline void handlePing(const FrameView &frame)
         {
             if (frame.streamId != 0) [[unlikely]]
             {
@@ -1163,15 +1174,15 @@ namespace mynet
                                 "excessive PING frames without peer activity (ping flood)");
                 return;
             }
-            Frame ack;
+            FrameView ack;
             ack.type = FRAME_TYPE::PING;
             ack.flags = FrameFlags::kAck;
             ack.payload = frame.payload;
             appendFrame(outScratch_, ack);
-            flushOut();
+            (void)flushOut();
         }
 
-        inline void handleWindowUpdate(Frame &frame)
+        inline void handleWindowUpdate(const FrameView &frame)
         {
             if (frame.payload.size() != 4) [[unlikely]]
             {
@@ -1247,7 +1258,7 @@ namespace mynet
             }
         }
 
-        inline void handleReset(Frame &frame)
+        inline void handleReset(const FrameView &frame)
         {
             if (frame.payload.size() != 4) [[unlikely]]
             {
@@ -1275,7 +1286,7 @@ namespace mynet
             closeStream(frame.streamId);
         }
 
-        inline void handleGoaway(Frame &frame)
+        inline void handleGoaway(const FrameView &frame)
         {
             if (frame.streamId != 0) [[unlikely]]
             {
@@ -1417,10 +1428,12 @@ namespace mynet
                 {
                     return;
                 }
-                Frame frame;
-                frame.streamId = id;
-                frame.type = FRAME_TYPE::DATA;
-                frame.payload.assign(chunkData, allowed);
+                FrameView frame{
+                    .streamId = id,
+                    .type = FRAME_TYPE::DATA,
+                    .flags = 0,
+                    .payload = std::string_view(chunkData, allowed)
+                };
                 appendFrame(outScratch_, frame);
                 if (!flushOut()) [[unlikely]]
                 {
@@ -1560,15 +1573,21 @@ namespace mynet
 
         inline void sendSettings()
         {
-            Frame frame;
-            frame.type = FRAME_TYPE::SETTINGS;
-            appendSetting(frame.payload, mux::kSettingMaxConcurrentStreams, static_cast<uint32_t>(maxStreams_));
-            appendSetting(frame.payload, mux::kSettingInitialWindowSize, static_cast<uint32_t>(initialWindow_));
-            appendSetting(frame.payload, mux::kSettingMaxFrameSize, recvMaxFrameSize_);
+            std::string payload;
+            payload.reserve(32);
+            appendSetting(payload, mux::kSettingMaxConcurrentStreams, static_cast<uint32_t>(maxStreams_));
+            appendSetting(payload, mux::kSettingInitialWindowSize, static_cast<uint32_t>(initialWindow_));
+            appendSetting(payload, mux::kSettingMaxFrameSize, recvMaxFrameSize_);
             // 宣告我们能接受的首部列表上限：既是给对端的配额提示，也让"超限"
             // 成为可预期的流级错误，而不是让对方在解到一半时才失败。
-            appendSetting(frame.payload, mux::kSettingMaxHeaderListSize,
-                          static_cast<uint32_t>(http::v2::hpack::kMaxHeaderListBytes));
+            appendSetting(payload, mux::kSettingMaxHeaderListSize,
+                          static_cast<uint32_t>(getHttp2Config().maxHeaderListSize));
+            FrameView frame{
+                .streamId = 0,
+                .type = FRAME_TYPE::SETTINGS,
+                .flags = 0,
+                .payload = payload
+            };
             appendFrame(outScratch_, frame);
 
             // SETTINGS_INITIAL_WINDOW_SIZE 只改变 **stream 级**接收窗口；connection 级
@@ -1577,11 +1596,16 @@ namespace mynet
             // 的实际可用额度不一致，声称的大窗口根本不存在。
             if (connRecvLimit_ > mux::kInitialWindowSize)
             {
-                Frame update;
-                update.type = FRAME_TYPE::WINDOW_UPDATE;
-                update.streamId = 0;
                 const uint32_t increment = static_cast<uint32_t>(connRecvLimit_ - mux::kInitialWindowSize);
-                frame::appendBigEndian32(update.payload, increment & frame::kStreamIdMask);
+                char updPayload[4];
+                const uint32_t beVal = std::byteswap(increment & frame::kStreamIdMask);
+                std::memcpy(updPayload, &beVal, sizeof(beVal));
+                FrameView update{
+                    .streamId = 0,
+                    .type = FRAME_TYPE::WINDOW_UPDATE,
+                    .flags = 0,
+                    .payload = std::string_view(updPayload, sizeof(updPayload))
+                };
                 appendFrame(outScratch_, update);
             }
             (void)flushOut();
@@ -1590,9 +1614,12 @@ namespace mynet
 
         inline void sendSettingsAck()
         {
-            Frame frame;
-            frame.type = FRAME_TYPE::SETTINGS;
-            frame.flags = FrameFlags::kAck;
+            FrameView frame{
+                .streamId = 0,
+                .type = FRAME_TYPE::SETTINGS,
+                .flags = FrameFlags::kAck,
+                .payload = {}
+            };
             appendFrame(outScratch_, frame);
             (void)flushOut();
         }
@@ -1612,15 +1639,13 @@ namespace mynet
             {
                 const size_t chunk = std::min(limit, block.size() - offset);
                 const bool last = offset + chunk == block.size();
-                Frame frame;
-                frame.streamId = id;
-                frame.type = offset == 0 ? FRAME_TYPE::HEADERS : FRAME_TYPE::CONTINUATION;
-                frame.flags = last ? FrameFlags::kEndHeaders : 0;
-                if (offset == 0 && endStream)
-                {
-                    frame.flags |= FrameFlags::kEndStream;
-                }
-                frame.payload.assign(block.substr(offset, chunk));
+                FrameView frame{
+                    .streamId = id,
+                    .type = offset == 0 ? FRAME_TYPE::HEADERS : FRAME_TYPE::CONTINUATION,
+                    .flags = static_cast<uint8_t>((last ? FrameFlags::kEndHeaders : 0) |
+                                                  ((offset == 0 && endStream) ? FrameFlags::kEndStream : 0)),
+                    .payload = block.substr(offset, chunk)
+                };
                 appendFrame(outScratch_, frame);
                 offset += chunk;
             } while (offset < block.size());
@@ -1628,20 +1653,30 @@ namespace mynet
 
         inline void sendWindowUpdate(uint32_t id, uint32_t increment)
         {
-            Frame frame;
-            frame.type = FRAME_TYPE::WINDOW_UPDATE;
-            frame.streamId = id;
-            frame::appendBigEndian32(frame.payload, increment & frame::kStreamIdMask);
+            char payload[4];
+            const uint32_t val = std::byteswap(increment & frame::kStreamIdMask);
+            std::memcpy(payload, &val, sizeof(val));
+            FrameView frame{
+                .streamId = id,
+                .type = FRAME_TYPE::WINDOW_UPDATE,
+                .flags = 0,
+                .payload = std::string_view(payload, sizeof(payload))
+            };
             appendFrame(outScratch_, frame);
             (void)flushOut();
         }
 
         inline void sendResetStream(uint32_t id, STREAM_ERROR code)
         {
-            Frame frame;
-            frame.type = FRAME_TYPE::RESET;
-            frame.streamId = id;
-            frame::appendBigEndian32(frame.payload, std::to_underlying(code));
+            char payload[4];
+            const uint32_t val = std::byteswap(static_cast<uint32_t>(std::to_underlying(code)));
+            std::memcpy(payload, &val, sizeof(val));
+            FrameView frame{
+                .streamId = id,
+                .type = FRAME_TYPE::RESET,
+                .flags = 0,
+                .payload = std::string_view(payload, sizeof(payload))
+            };
             appendFrame(outScratch_, frame);
             (void)flushOut();
         }
@@ -1653,11 +1688,23 @@ namespace mynet
                 return;
             }
             LOG_ERROR("HandlerHttp2: protocol error on stream {}: {}", lastPeerStreamId_, why);
-            Frame frame;
-            frame.type = FRAME_TYPE::GOAWAY;
-            frame::appendBigEndian32(frame.payload, lastPeerStreamId_ & frame::kStreamIdMask);
-            frame::appendBigEndian32(frame.payload, std::to_underlying(code));
-            frame.payload.append(why);
+            char payloadHdr[8];
+            const uint32_t lastId = std::byteswap(lastPeerStreamId_ & frame::kStreamIdMask);
+            const uint32_t errCode = std::byteswap(static_cast<uint32_t>(std::to_underlying(code)));
+            std::memcpy(payloadHdr, &lastId, 4);
+            std::memcpy(payloadHdr + 4, &errCode, 4);
+
+            std::string payload;
+            payload.reserve(8 + why.size());
+            payload.append(payloadHdr, 8);
+            payload.append(why);
+
+            FrameView frame{
+                .streamId = 0,
+                .type = FRAME_TYPE::GOAWAY,
+                .flags = 0,
+                .payload = payload
+            };
             appendFrame(outScratch_, frame);
             (void)flushOut();
             closeAfterResponse_ = true;
@@ -1665,7 +1712,7 @@ namespace mynet
         }
 
         /**
-         * @brief 把累积的出站帧推入连接响应队列
+         * @brief 把累积的出站帧推入连接响应队列并尝试回收 spare_ 缓冲区
          *
          * @return false 表示响应队列已满、字节**保留在 outScratch_ 中**待下一轮重试。
          *         绝不能丢弃：丢一个 DATA 帧就毁掉整条流（对端拿到错误长度或超时），
@@ -1681,6 +1728,10 @@ namespace mynet
             {
                 return false; // push 失败不移动实参，outScratch_ 内容完整保留
             }
+            if (spare_.capacity() > 0)
+            {
+                outScratch_ = std::move(spare_);
+            }
             outScratch_.clear();
             return true;
         }
@@ -1692,7 +1743,7 @@ namespace mynet
             frame::appendBigEndian32(out, value);
         }
 
-        inline bool unframePayload(Frame &frame, std::string_view &out)
+        inline bool unframePayload(const FrameView &frame, std::string_view &out)
         {
             std::string_view body(frame.payload);
             if (frame.hasFlag(FrameFlags::kPadded))
@@ -1807,7 +1858,7 @@ namespace mynet
         size_t initialWindow_ = mux::kInitialWindowSize;
         /// 连接级接收窗口的真值：至少协议默认 65535，可被配置抬高，不可降低。
         uint32_t connRecvLimit_ = mux::kInitialWindowSize;
-        /// 流级接收窗口的真值：同样不低于协议默认 65535，理由见 applyMultiplexerConfig。
+        /// 流级接收窗口的真值：同样不低于协议默认 65535，理由见 applyHttp2Config。
         uint32_t streamRecvLimit_ = mux::kInitialWindowSize;
         /// 本端 SETTINGS 宣告的流级窗口：对端实际可注入的额度，也是回补判据的基准。
         uint32_t streamCreditUnit_ = mux::kInitialWindowSize;

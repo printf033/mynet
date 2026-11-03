@@ -72,10 +72,26 @@ namespace mynet
                 currentField_.clear();
                 currentValue_.clear();
                 totalHeaderBytes_ = 0;
+                streamedBodyBytes_ = 0;
                 HandlerConnection::reset();
             }
 
             void onConnect(int fd) noexcept override { HandlerConnection::onConnect(fd); }
+
+            /**
+             * @brief 开启或关闭流式 Body 零拷贝直通模式
+             *
+             * 开启后，HTTP 请求/响应体不再累积分段至 body_ 堆字符串中，而是直接通过
+             * onBodyChunk(std::string_view) 钩子提供直通零拷贝切片。
+             */
+            inline void enableStreamingBody(bool enable = true) noexcept { streamingBody_ = enable; }
+            [[nodiscard]] inline bool isStreamingBody() const noexcept { return streamingBody_; }
+
+            /**
+             * @brief 流式 Body 数据到达钩子（在 streamingBody_ 开启时由 llhttp cbBody 触发）
+             * @param chunk 当前直接指向接收缓冲区的零拷贝数据切片
+             */
+            virtual void onBodyChunk([[maybe_unused]] std::string_view chunk) noexcept {}
 
             /**
              * @brief 开启零拷贝反向代理或升级隧道（直接复用 Connection 零拷贝管道）
@@ -288,12 +304,10 @@ namespace mynet
             }
 
         private:
-            static constexpr size_t kMaxUrlLength = 8192;
-            static constexpr size_t kMaxHeadersCount = 100;
-            static constexpr size_t kMaxHeaderFieldLength = 4096;
-            static constexpr size_t kMaxHeaderValueLength = 16384;
-            static constexpr size_t kMaxTotalHeadersLength = 65536;    // 64 KiB
-            static constexpr size_t kMaxBodyLength = 16 * 1024 * 1024; // 16 MiB
+            [[nodiscard]] static inline const Http1Config &http1Config() noexcept
+            {
+                return getHttp1Config();
+            }
 
             llhttp_t parser_{};
             llhttp_settings_t settings_{};
@@ -304,6 +318,8 @@ namespace mynet
             std::string currentField_;
             std::string currentValue_;
             size_t totalHeaderBytes_ = 0;
+            bool streamingBody_{false};
+            size_t streamedBodyBytes_{0};
 
             static constexpr llhttp_type_t parserType() noexcept
             {
@@ -325,6 +341,7 @@ namespace mynet
                 self->currentField_.clear();
                 self->currentValue_.clear();
                 self->totalHeaderBytes_ = 0;
+                self->streamedBodyBytes_ = 0;
                 return HPE_OK;
             }
 
@@ -333,7 +350,7 @@ namespace mynet
                 auto *self = static_cast<HandlerHttp *>(p->data);
                 if (self != nullptr) [[likely]]
                 {
-                    if (self->url_.size() + len > kMaxUrlLength) [[unlikely]]
+                    if (self->url_.size() + len > http1Config().maxUrlLength) [[unlikely]]
                     {
                         return HPE_USER;
                     }
@@ -349,7 +366,7 @@ namespace mynet
                 {
                     return HPE_OK;
                 }
-                if (self->currentField_.size() + len > kMaxHeaderFieldLength) [[unlikely]]
+                if (self->currentField_.size() + len > http1Config().maxHeaderFieldLength) [[unlikely]]
                 {
                     return HPE_USER;
                 }
@@ -364,7 +381,7 @@ namespace mynet
                 {
                     return HPE_OK;
                 }
-                if (self->currentValue_.size() + len > kMaxHeaderValueLength) [[unlikely]]
+                if (self->currentValue_.size() + len > http1Config().maxHeaderValueLength) [[unlikely]]
                 {
                     return HPE_USER;
                 }
@@ -379,12 +396,13 @@ namespace mynet
                 {
                     return HPE_OK;
                 }
-                if (self->headers_.size() >= kMaxHeadersCount) [[unlikely]]
+                const auto &cfg = http1Config();
+                if (self->headers_.size() >= cfg.maxHeadersCount) [[unlikely]]
                 {
                     return HPE_USER;
                 }
                 self->totalHeaderBytes_ += self->currentField_.size() + self->currentValue_.size();
-                if (self->totalHeaderBytes_ > kMaxTotalHeadersLength) [[unlikely]]
+                if (self->totalHeaderBytes_ > cfg.maxTotalHeadersLength) [[unlikely]]
                 {
                     return HPE_USER;
                 }
@@ -403,12 +421,13 @@ namespace mynet
                 }
                 if (!self->currentField_.empty())
                 {
-                    if (self->headers_.size() >= kMaxHeadersCount) [[unlikely]]
+                    const auto &cfg = http1Config();
+                    if (self->headers_.size() >= cfg.maxHeadersCount) [[unlikely]]
                     {
                         return HPE_USER;
                     }
                     self->totalHeaderBytes_ += self->currentField_.size() + self->currentValue_.size();
-                    if (self->totalHeaderBytes_ > kMaxTotalHeadersLength) [[unlikely]]
+                    if (self->totalHeaderBytes_ > cfg.maxTotalHeadersLength) [[unlikely]]
                     {
                         return HPE_USER;
                     }
@@ -424,7 +443,17 @@ namespace mynet
                 auto *self = static_cast<HandlerHttp *>(p->data);
                 if (self != nullptr) [[likely]]
                 {
-                    if (self->body_.size() + len > kMaxBodyLength) [[unlikely]]
+                    if (self->streamingBody_)
+                    {
+                        if (self->streamedBodyBytes_ + len > http1Config().maxBodyLength) [[unlikely]]
+                        {
+                            return HPE_USER;
+                        }
+                        self->streamedBodyBytes_ += len;
+                        self->onBodyChunk(std::string_view(at, len));
+                        return HPE_OK;
+                    }
+                    if (self->body_.size() + len > http1Config().maxBodyLength) [[unlikely]]
                     {
                         return HPE_USER;
                     }

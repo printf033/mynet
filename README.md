@@ -133,7 +133,7 @@ flowchart TD
 - **Pipelining Safety**: Responses reside in an internal fixed-capacity `ResponseQueue` write queue by value. Multiple responses generated from a single batch read are guaranteed to arrive in-order without dynamic allocations during enqueuing or overwriting shared buffers.
 - **Backpressure**: Integrated high-watermark inspection and `readCredit()` hooks pause reads when downstream consumer queues become saturated.
 - **Reference-Counted Lifetime in Proactor**: In `Proactor`, connections are wrapped inside `Session` structs tracking `inFlight` ring operations. Connections are never returned to the pool while the kernel has outstanding writes or reads.
-- **Handler Layering**: `HandlerConnection` (`connection.hpp`) and `HandlerDatagram` (`datagram.hpp`) are two peer base classes with no shared ancestor: the former owns the request buffer, response queue and read-credit backpressure for stream sessions, the latter the peer-tagged reply queue for connectionless datagrams. Protocol handlers (`HandlerHttp`, `HandlerHttp2`, `HandlerHttp3`) derive from these; a handler that needs both transports (`HandlerHttp3`) inherits both, and since neither base is virtual there is no virtual-base indirection or shared subobject bookkeeping on member access. The contract that used to sit in a common root — `reset`, `onMessageComplete`, `onParseError` — now lives on each base class and, transport-agnostically, in the `HandlerConstraint` concept (`constraints.hpp`), which is all the event slots require (the object pool needs only `Resettable`). The two engine contracts are named for what they are — the mandatory method set each transport actually calls: `MandatoryMethodConnection` (`connection.hpp`) and `MandatoryMethodDatagram` (`datagram.hpp`). Each lives beside its own base class so `std::derived_from` always sees a complete type, and each requires derivation plus validates the signatures the engine calls through the handler type itself. A datagram-only handler needs `HandlerDatagram` alone: the engines map non-streaming handlers to a stateless `NoConnection` slot (`ConnectionSlot`) and stream-only handlers to a `NoDatagram` slot (`DatagramSlot`), so neither path instantiates the other transport's machinery.
+- **Handler Layering**: `HandlerConnection` (`connection.hpp`) and `HandlerDatagram` (`datagram.hpp`) are two peer base classes with no shared ancestor: the former owns the request buffer, response queue and read-credit backpressure for stream sessions, the latter the peer-tagged reply queue for connectionless datagrams. Protocol handlers (`HandlerHttp`, `HandlerHttp2`, `HandlerHttp3`) derive from these; a handler that needs both transports (`HandlerHttp3`) inherits both, and since neither base is virtual there is no virtual-base indirection or shared subobject bookkeeping on member access. The contract that used to sit in a common root — `reset`, `onMessageComplete`, `onParseError` — now lives on each base class and, transport-agnostically, in the `HandlerConstraint` concept (`constraints.hpp`), which is all the acceptor slots require (the object pool needs only `Resettable`). The two engine contracts are named for what they are — the mandatory method set each transport actually calls: `MandatoryMethodConnection` (`connection.hpp`) and `MandatoryMethodDatagram` (`datagram.hpp`). Each lives beside its own base class so `std::derived_from` always sees a complete type, and each requires derivation plus validates the signatures the engine calls through the handler type itself. A datagram-only handler needs `HandlerDatagram` alone: the engines map non-streaming handlers to a stateless `NoConnection` slot (`ConnectionSlot`) and stream-only handlers to a `NoDatagram` slot (`DatagramSlot`), so neither path instantiates the other transport's machinery.
 
 ### 3. Zero-Allocation Memory Architecture
 
@@ -211,7 +211,7 @@ Every field also declares **when** it takes effect, and that declaration is data
 | `proactor` | `sqEntries`, `cqEntries`, `maxAcceptEvents`, `bufEntries`, `bufSize`, `udpBufSize`, `bufRingAlignment`, `cqeWaitMs` | Startup |
 | `connection` | `responseCapacity`, `readChunkSize`, `maxRequestBytes`, `writeHighWaterMark`, `writeHardCapFactor`, `spliceChunkSize`, `maxWriteIov` | Hot |
 | `datagram` | `maxDatagramBytes`, `maxPendingOutgoing` | Hot |
-| `multiplexer` | `maxConcurrentStreams`, `initialWindowSize`, `maxFrameSize` | Hot |
+| `http2` | `maxConcurrentStreams`, `initialWindowSize`, `maxFrameSize` | Hot |
 | `security` | `certFile`, `keyFile`, `caFile`, `ciphers`, `alpnProtocols` | Startup |
 
 `server.maxConnections` is the single source of truth for capacity: the Reactor sizes its connection pool from it and the Proactor its session pool. `server.host`/`port` are consumed by the zero-argument `runTcp()` / `runSsl()`, and `security.certFile`/`keyFile` by `runSsl()` with no path arguments — that overload refuses to start rather than silently falling back to plaintext when the paths are unset.
@@ -330,15 +330,15 @@ docker run --rm -it -p 8888:8888 mynet:latest
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "reactor.hpp"
+#include "reactor/reactor.hpp"
 
 using namespace mynet;
 
 int main() {
     mynet::log::init(); // Directs logs to stderr
 
-    // Instantiate a Reactor with plain socket events and an echo handler
-    Reactor<EventSocket<HandlerConnection>> server;
+    // Instantiate a Reactor with plain socket acceptor and an echo handler
+    Reactor<AcceptorSocket<HandlerConnection>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("Server failed: {}", toString(res.error()));
@@ -354,7 +354,7 @@ int main() {
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proactor.hpp"
+#include "proactor/proactor.hpp"
 
 using namespace mynet;
 
@@ -362,7 +362,7 @@ int main() {
     mynet::log::init();
 
     // Instantiate a Proactor using io_uring multishot accept & multishot recv
-    Proactor<EventSocket<HandlerConnection>> server;
+    Proactor<AcceptorSocket<HandlerConnection>> server;
 
     // Tuning lives in config.lua (server / proactor sections) and is published
     // through ConfigHolder; the engine keeps no hard-coded defaults of its own.
@@ -380,7 +380,7 @@ int main() {
 #include "connection.hpp"
 #include "error.hpp"
 #include "http/v2/handler.hpp"
-#include "reactor.hpp"
+#include "reactor/reactor.hpp"
 
 using namespace mynet;
 
@@ -388,7 +388,7 @@ int main() {
     mynet::log::init();
 
     // Stack: Reactor -> Socket -> HandlerHttp2 (framing + flow control) -> per-stream handler
-    Reactor<EventSocket<HandlerHttp2<HandlerConnection>>> server;
+    Reactor<AcceptorSocket<HandlerHttp2<HandlerConnection>>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("HTTP/2 server failed: {}", toString(res.error()));
@@ -430,11 +430,15 @@ mynet/
 │   ├── requestBuffer.hpp       # Low-allocation auto-compacting byte buffer
 │   ├── responseQueue.hpp       # Zero-allocation fixed-capacity circular response queue
 │   ├── objectPool.hpp          # Fixed-capacity stable-pointer object pool
-│   ├── timer.hpp               # Lazy-cancellation binary min-heap timer queue
-│   ├── loop.hpp                # epoll EventLoop with eventfd wakeups
-│   ├── event.hpp               # Listener root (EventBase) + socket & SSL channels
+│   ├── acceptor.hpp            # Listener root (AcceptorBase) + socket & SSL channels
 │   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection
 │   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram
+│   ├── reactor/                # epoll-based Edge-Triggered Reactor engine
+│   │   ├── timer.hpp           # Lazy-cancellation binary min-heap timer queue
+│   │   ├── loop.hpp            # epoll EventLoop with eventfd wakeups
+│   │   └── reactor.hpp         # Reactor engine core
+│   ├── proactor/               # io_uring-based completion Proactor engine
+│   │   └── proactor.hpp        # Proactor engine core
 │   ├── http/                   # HTTP protocol implementations
 │   │   ├── v1/
 │   │   │   └── handler.hpp     # HTTP/1.x protocol handler (HandlerHttp)
@@ -449,8 +453,6 @@ mynet/
 │   │       ├── quic.hpp        # RFC 9000 QUIC short-header packet & STREAM frames
 │   │       ├── streamTable.hpp # HTTP/3 logical stream table and state tracker
 │   │       └── handler.hpp     # Unified HTTP/3 protocol handler (HandlerHttp3)
-│   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine
-│   └── proactor.hpp            # io_uring-based completion Proactor engine
 │
 ├── config/                     # Runtime configuration
 │   └── config.lua              # Documented sandboxed Lua configuration (all sections)
@@ -483,7 +485,7 @@ mynet/
 │   ├── test_frame.cpp
 │   ├── test_handler.cpp
 │   ├── test_http3.cpp
-│   ├── test_multiplexer.cpp
+│   ├── test_http2.cpp
 │   ├── test_object_pool.cpp
 │   └── test_timer.cpp
 │
@@ -524,8 +526,8 @@ Test project /home/aaa/code/mynet/build
  6/12 Test  #6: test_handler .....................   Passed    0.03 sec
       Start  7: test_http3
  7/12 Test  #7: test_http3 .......................   Passed    0.02 sec
-      Start  8: test_multiplexer
- 8/12 Test  #8: test_multiplexer .................   Passed    0.10 sec
+      Start  8: test_http2
+ 8/12 Test  #8: test_http2 .......................   Passed    0.10 sec
       Start  9: test_object_pool
  9/12 Test  #9: test_object_pool .................   Passed    0.02 sec
       Start 10: test_timer

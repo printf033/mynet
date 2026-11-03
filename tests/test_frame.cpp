@@ -241,3 +241,36 @@ TEST(FrameType, ContinuationFrameTypeIsNine)
 {
     EXPECT_EQ(std::to_underlying(FRAME_TYPE::CONTINUATION), 0x9);
 }
+
+TEST(FrameView, NextViewReturnsDirectSliceOfInputBuffer)
+{
+    FrameDecoder decoder;
+    const std::string payload = "zero_copy_payload_data";
+    const std::string bytes = makeHeader(payload.size(), FRAME_TYPE::DATA, FrameFlags::kEndStream, 5) + payload;
+    RequestBuffer in = bufferOf(bytes);
+
+    const char *origBufferPtr = in.readableBegin();
+    auto result = decoder.nextView(in);
+    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result->has_value());
+
+    const FrameView &fv = **result;
+    EXPECT_EQ(fv.streamId, 5u);
+    EXPECT_EQ(fv.type, FRAME_TYPE::DATA);
+    EXPECT_TRUE(fv.hasFlag(FrameFlags::kEndStream));
+    EXPECT_EQ(fv.payload, payload);
+
+    // 零拷贝关键验证：payload.data() 必须直接指向 in 原存储区域（偏移 9 字节帧头），绝非新分配副本
+    EXPECT_EQ(fv.payload.data(), origBufferPtr + frame::kHeaderBytes);
+
+    // 验证隐式转 Frame 聚合功能
+    Frame owned = fv;
+    EXPECT_EQ(owned.streamId, 5u);
+    EXPECT_EQ(owned.type, FRAME_TYPE::DATA);
+    EXPECT_EQ(owned.payload, payload);
+
+    // 验证 appendFrame 视图重载
+    std::string out;
+    appendFrame(out, fv);
+    EXPECT_EQ(out, bytes);
+}

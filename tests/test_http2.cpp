@@ -488,14 +488,14 @@ TEST(HandlerHttp2, ResetOnAFinishedStreamIsOnlyAReset)
 TEST(HandlerHttp2, DataBiggerThanTheReceiveWindowIsAFlowControlError)
 {
     // SETTINGS_MAX_FRAME_SIZE 只约束本端出站分片。要注入超过默认 16 KiB 的
-    // 入站帧，必须抬高本端的接收上限（配置 -> applyMultiplexerConfig）。
+    // 入站帧，必须抬高本端的接收上限（配置 -> applyHttp2Config）。
     const mynet::NetConfig saved = mynet::getNetConfig();
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.maxFrameSize = 1 << 20;
+    cfg.http2.maxFrameSize = 1 << 20;
     mynet::publishNetConfig(cfg);
 
     ProbeMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.warmUp();
 
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, kGetHeadersBlock));
@@ -1314,11 +1314,11 @@ TEST(HandlerHttp2, SlowReaderPausesStreamLevelWindowCredit)
     // 会被（正确地）判为超长帧。对端 SETTINGS 只影响本端出站分片。
     const mynet::NetConfig saved = mynet::getNetConfig();
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.maxFrameSize = 1 << 20;
+    cfg.http2.maxFrameSize = 1 << 20;
     mynet::publishNetConfig(cfg);
 
     BigReplyMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.warmUp();
 
     // 对端宣告 1 MiB 的接收上限，允许本端以单帧发出 69632 字节响应。
@@ -1370,11 +1370,11 @@ TEST(HandlerHttp2, DrainingOutboundRestoresPausedStreamWindow)
     // 会被（正确地）判为超长帧。对端 SETTINGS 只影响本端出站分片。
     const mynet::NetConfig saved = mynet::getNetConfig();
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.maxFrameSize = 1 << 20;
+    cfg.http2.maxFrameSize = 1 << 20;
     mynet::publishNetConfig(cfg);
 
     BigReplyMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.warmUp();
 
     mux.push(makeFrame(FRAME_TYPE::SETTINGS, 0, 0, setting(mux::kSettingMaxFrameSize, 1 << 20)));
@@ -1518,7 +1518,7 @@ TEST(HandlerHttp2, EchoMultiStream)
     EXPECT_EQ((*parsed)->payload, "echo-test-bytes");
 }
 
-TEST(Multiplexer, ConfiguredInitialWindowIsAdvertisedAndApplied)
+TEST(HandlerHttp2, ConfiguredInitialWindowIsAdvertisedAndApplied)
 {
     // initialWindowSize 不是"配了就算"：它必须同时出现在 SETTINGS 里、
     // 真正提升 connection 级接收窗口、并成为新流的接收窗口初值。
@@ -1526,11 +1526,11 @@ TEST(Multiplexer, ConfiguredInitialWindowIsAdvertisedAndApplied)
     const mynet::NetConfig saved = mynet::getNetConfig();
 
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.initialWindowSize = 131072;
+    cfg.http2.initialWindowSize = 131072;
     mynet::publishNetConfig(cfg);
 
     WindowMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.process();
     const std::vector<Frame> frames = mux.takeFrames();
 
@@ -1572,25 +1572,25 @@ TEST(Multiplexer, ConfiguredInitialWindowIsAdvertisedAndApplied)
     mynet::publishNetConfig(saved);
 }
 
-TEST(Multiplexer, ConfiguredInitialWindowDoesNotInflateTheSendWindow)
+TEST(HandlerHttp2, ConfiguredInitialWindowDoesNotInflateTheSendWindow)
 {
     // connSendWindow_ 是对端给我们的额度，connection 级只受 WINDOW_UPDATE 影响。
     // 用本端接收配置去初始化它，会让服务器越过对端窗口直接触发 FLOW_CONTROL_ERROR。
     const mynet::NetConfig saved = mynet::getNetConfig();
 
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.initialWindowSize = 131072;
+    cfg.http2.initialWindowSize = 131072;
     mynet::publishNetConfig(cfg);
 
     WindowMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     EXPECT_EQ(mux.connectionSendWindow(), mux::kInitialWindowSize)
         << "outbound credit must start from the protocol default, not our receive configuration";
 
     mynet::publishNetConfig(saved);
 }
 
-TEST(Multiplexer, SmallInitialWindowDoesNotShrinkConnectionLevelCredit)
+TEST(HandlerHttp2, SmallInitialWindowDoesNotShrinkConnectionLevelCredit)
 {
     // connection 级窗口在 RFC 9113 里无法被"缩小"：对端始终以 65535 起算，
     // SETTINGS_INITIAL_WINDOW_SIZE 只作用于 stream 级。若本端把连接级记账值
@@ -1598,11 +1598,11 @@ TEST(Multiplexer, SmallInitialWindowDoesNotShrinkConnectionLevelCredit)
     const mynet::NetConfig saved = mynet::getNetConfig();
 
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.initialWindowSize = 4096;
+    cfg.http2.initialWindowSize = 4096;
     mynet::publishNetConfig(cfg);
 
     WindowMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.process();
     const std::vector<Frame> frames = mux.takeFrames();
 
@@ -1638,7 +1638,7 @@ TEST(Multiplexer, SmallInitialWindowDoesNotShrinkConnectionLevelCredit)
     mynet::publishNetConfig(saved);
 }
 
-TEST(Multiplexer, SmallInitialWindowDoesNotRejectCompliantPeerDataFrames)
+TEST(HandlerHttp2, SmallInitialWindowDoesNotRejectCompliantPeerDataFrames)
 {
     // SETTINGS_INITIAL_WINDOW_SIZE 可以调小，但只在对端**收到并处理我们的 SETTINGS**
     // 之后生效。在此之前对端仍按协议默认 65535 发送；若本地流级窗口一开始就是
@@ -1646,11 +1646,11 @@ TEST(Multiplexer, SmallInitialWindowDoesNotRejectCompliantPeerDataFrames)
     const mynet::NetConfig saved = mynet::getNetConfig();
 
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.initialWindowSize = 4096;
+    cfg.http2.initialWindowSize = 4096;
     mynet::publishNetConfig(cfg);
 
     ProbeMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.warmUp();
 
     EXPECT_EQ(mux.streamRecvLimit(), mux::kInitialWindowSize)
@@ -1818,7 +1818,7 @@ TEST(HandlerHttp2, OversizedStreamRequestBodyIsRefused)
     mynet::publishNetConfig(cfg);
 
     ProbeMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.warmUp();
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, kGetHeadersBlock));
     mux.takeFrames();
@@ -1889,7 +1889,7 @@ TEST(HandlerHttp2, AggregateStreamRequestBodyLimitIsEnforced)
     mynet::publishNetConfig(cfg);
 
     BufferedProbeMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.warmUp();
 
     // 流 1：打开并写入 1200 字节（单流合规：1200 <= 2048；聚合合规：1200 <= 2048）
@@ -1951,11 +1951,11 @@ TEST(HandlerHttp2, SmallAdvertisedWindowStillGrantsCredit)
     // 记账基准 65535 的一半计算，窗口会停在 49151 且永不再涨，上传直接挂死。
     const mynet::NetConfig saved = mynet::getNetConfig();
     mynet::NetConfig cfg = saved;
-    cfg.multiplexer.initialWindowSize = 16384;
+    cfg.http2.initialWindowSize = 16384;
     mynet::publishNetConfig(cfg);
 
     ProbeMux mux;
-    mux.applyMultiplexerConfig();
+    mux.applyHttp2Config();
     mux.warmUp();
     mux.push(makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, kGetHeadersBlock));
     mux.takeFrames();

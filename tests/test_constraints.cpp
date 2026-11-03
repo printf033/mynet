@@ -2,11 +2,11 @@
 #include "connection.hpp"
 #include "constraints.hpp"
 #include "datagram.hpp"
-#include "event.hpp"
+#include "acceptor.hpp"
 #include "http/v1/handler.hpp"
 #include "http/v3/handler.hpp"
-#include "proactor.hpp"
-#include "reactor.hpp"
+#include "proactor/proactor.hpp"
+#include "reactor/reactor.hpp"
 #include <gtest/gtest.h>
 #include <type_traits>
 #include <version>
@@ -238,9 +238,9 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<ResponseQueue>);
     static_assert(Resettable<HandlerConnection>);
     static_assert(Resettable<HandlerDatagram>);
-    static_assert(Resettable<EventBase<HandlerConnection>>);
-    static_assert(Resettable<EventSocket<HandlerConnection>>);
-    static_assert(Resettable<EventSsl<HandlerDatagram>>);
+    static_assert(Resettable<AcceptorBase<HandlerConnection>>);
+    static_assert(Resettable<AcceptorSocket<HandlerConnection>>);
+    static_assert(Resettable<AcceptorSsl<HandlerDatagram>>);
 
     static_assert(!Resettable<NonNoexceptReset>);
     static_assert(!Resettable<NonVoidReset>);
@@ -408,33 +408,33 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
     EXPECT_FALSE(MandatoryMethodDatagram<DatagramContractWithoutDerivation>);
 }
 
-TEST(Constraints, EventConceptsEvaluationOnCompleteTypes)
+TEST(Constraints, AcceptorConceptsEvaluationOnCompleteTypes)
 {
-    using BaseEv = EventBase<HandlerConnection>;
-    using SockEv = EventSocket<HandlerConnection>;
-    using SslEv = EventSsl<HandlerDatagram>;
+    using BaseAcc = AcceptorBase<HandlerConnection>;
+    using SockAcc = AcceptorSocket<HandlerConnection>;
+    using SslAcc = AcceptorSsl<HandlerDatagram>;
 
-    // 概念约束测试：DerivedFromEventBase
-    static_assert(DerivedFromEventBase<BaseEv>);
-    static_assert(DerivedFromEventBase<SockEv>);
-    static_assert(DerivedFromEventBase<SslEv>);
-    static_assert(!DerivedFromEventBase<HandlerConnection>);
+    // 概念约束测试：DerivedFromAcceptorBase
+    static_assert(DerivedFromAcceptorBase<BaseAcc>);
+    static_assert(DerivedFromAcceptorBase<SockAcc>);
+    static_assert(DerivedFromAcceptorBase<SslAcc>);
+    static_assert(!DerivedFromAcceptorBase<HandlerConnection>);
 
-    // 概念约束测试：SocketEvent
-    static_assert(SocketEvent<SockEv>);
-    static_assert(!SocketEvent<BaseEv>);
-    static_assert(!SocketEvent<SslEv>);
+    // 概念约束测试：SocketAcceptor
+    static_assert(SocketAcceptor<SockAcc>);
+    static_assert(!SocketAcceptor<BaseAcc>);
+    static_assert(!SocketAcceptor<SslAcc>);
 
-    // 概念约束测试：SslEvent
-    static_assert(SslEvent<SslEv>);
-    static_assert(!SslEvent<BaseEv>);
-    static_assert(!SslEvent<SockEv>);
+    // 概念约束测试：SslAcceptor
+    static_assert(SslAcceptor<SslAcc>);
+    static_assert(!SslAcceptor<BaseAcc>);
+    static_assert(!SslAcceptor<SockAcc>);
 
-    EXPECT_TRUE(DerivedFromEventBase<BaseEv>);
-    EXPECT_TRUE(SocketEvent<SockEv>);
-    EXPECT_TRUE(SslEvent<SslEv>);
-    EXPECT_FALSE(SocketEvent<SslEv>);
-    EXPECT_FALSE(SslEvent<SockEv>);
+    EXPECT_TRUE(DerivedFromAcceptorBase<BaseAcc>);
+    EXPECT_TRUE(SocketAcceptor<SockAcc>);
+    EXPECT_TRUE(SslAcceptor<SslAcc>);
+    EXPECT_FALSE(SocketAcceptor<SslAcc>);
+    EXPECT_FALSE(SslAcceptor<SockAcc>);
 }
 
 TEST(Constraints, EnginesAcceptPureDatagramHandlers)
@@ -442,8 +442,8 @@ TEST(Constraints, EnginesAcceptPureDatagramHandlers)
     // 回归防线：引擎曾声称接受 DerivedFromHandlerDatagram，但内部无条件用
     // Connection<H> 作为成员类型，导致纯报文处理器通过约束后依然编译失败。
     // 现在非流式处理器映射到 NoConnection，UDP 路径不再需要流式设施。
-    using PureEv = EventSocket<PureDatagramHandler>;
-    using StreamEv = EventSocket<HandlerConnection>;
+    using PureAcc = AcceptorSocket<PureDatagramHandler>;
+    using StreamAcc = AcceptorSocket<HandlerConnection>;
 
     static_assert(!MandatoryMethodConnection<PureDatagramHandler>);
     static_assert(DerivedFromHandlerDatagram<PureDatagramHandler>);
@@ -451,15 +451,15 @@ TEST(Constraints, EnginesAcceptPureDatagramHandlers)
     static_assert(std::same_as<typename ConnectionSlot<HandlerConnection>::Type, Connection<HandlerConnection>>);
 
     // 引擎仍可两两实例化（这是之前失败的编译点）
-    static_assert(!Reactor<PureEv>::kStreaming);
-    static_assert(!Proactor<PureEv>::kStreaming);
-    static_assert(Reactor<StreamEv>::kStreaming);
-    static_assert(Proactor<StreamEv>::kStreaming);
+    static_assert(!Reactor<PureAcc>::kStreaming);
+    static_assert(!Proactor<PureAcc>::kStreaming);
+    static_assert(Reactor<StreamAcc>::kStreaming);
+    static_assert(Proactor<StreamAcc>::kStreaming);
 
-    Reactor<PureEv> reactorUdp;
-    Proactor<PureEv> proactorUdp;
-    Reactor<StreamEv> reactorTcp;
-    Proactor<StreamEv> proactorTcp;
+    Reactor<PureAcc> reactorUdp;
+    Proactor<PureAcc> proactorUdp;
+    Reactor<StreamAcc> reactorTcp;
+    Proactor<StreamAcc> proactorTcp;
     (void)reactorUdp;
     (void)proactorUdp;
     (void)reactorTcp;
@@ -468,23 +468,23 @@ TEST(Constraints, EnginesAcceptPureDatagramHandlers)
     // 流式入口的可用性边界：纯报文处理器只能走 runUdp。
     // 若漏加 kStreaming，runTcp 会对纯报文处理器开一个口子，在运行期落到
     // datagram 分支并在 TCP fd 上零长 recvmsg 自旋（Proactor 曾遗漏此约束）。
-    static_assert(CanRunUdp<Reactor<PureEv>, PureDatagramHandler>);
-    static_assert(CanRunUdp<Proactor<PureEv>, PureDatagramHandler>);
-    static_assert(!CanRunTcp<Reactor<PureEv>>);
-    static_assert(!CanRunTcp<Proactor<PureEv>>);
+    static_assert(CanRunUdp<Reactor<PureAcc>, PureDatagramHandler>);
+    static_assert(CanRunUdp<Proactor<PureAcc>, PureDatagramHandler>);
+    static_assert(!CanRunTcp<Reactor<PureAcc>>);
+    static_assert(!CanRunTcp<Proactor<PureAcc>>);
 
     // 流式处理器两条路径都可用
-    static_assert(CanRunTcp<Reactor<StreamEv>>);
-    static_assert(CanRunTcp<Proactor<StreamEv>>);
+    static_assert(CanRunTcp<Reactor<StreamAcc>>);
+    static_assert(CanRunTcp<Proactor<StreamAcc>>);
 
     // 反向边界：纯流式处理器不得走 UDP 入口。
     // 这条锁住的是 runUdp 上的约束本身：一旦该 requires 被删掉，
     // 纯流式处理器就会静默流入 UDP 路径（运行期缺 onDatagram 行为）。
-    static_assert(!CanRunUdp<Reactor<StreamEv>, HandlerConnection>);
-    static_assert(!CanRunUdp<Proactor<StreamEv>, HandlerConnection>);
+    static_assert(!CanRunUdp<Reactor<StreamAcc>, HandlerConnection>);
+    static_assert(!CanRunUdp<Proactor<StreamAcc>, HandlerConnection>);
 
-    EXPECT_FALSE(Reactor<PureEv>::kStreaming);
-    EXPECT_TRUE(Reactor<StreamEv>::kStreaming);
+    EXPECT_FALSE(Reactor<PureAcc>::kStreaming);
+    EXPECT_TRUE(Reactor<StreamAcc>::kStreaming);
 }
 
 // ---------------------------------------------------------------------------
@@ -553,13 +553,13 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     poison.server.port = 1;
     mynet::publishNetConfig(poison);
 
-    mynet::Reactor<mynet::EventSocket<mynet::HandlerConnection>> reactorStream;
-    mynet::Reactor<mynet::EventSocket<mynet::HandlerDatagram>> reactorDatagram;
-    mynet::Proactor<mynet::EventSocket<mynet::HandlerConnection>> proactorStream;
-    mynet::Proactor<mynet::EventSocket<mynet::HandlerDatagram>> proactorDatagram;
+    mynet::Reactor<mynet::AcceptorSocket<mynet::HandlerConnection>> reactorStream;
+    mynet::Reactor<mynet::AcceptorSocket<mynet::HandlerDatagram>> reactorDatagram;
+    mynet::Proactor<mynet::AcceptorSocket<mynet::HandlerConnection>> proactorStream;
+    mynet::Proactor<mynet::AcceptorSocket<mynet::HandlerDatagram>> proactorDatagram;
 
-    mynet::Reactor<mynet::EventSsl<mynet::HandlerConnection>> reactorTls;
-    mynet::Proactor<mynet::EventSsl<mynet::HandlerConnection>> proactorTls;
+    mynet::Reactor<mynet::AcceptorSsl<mynet::HandlerConnection>> reactorTls;
+    mynet::Proactor<mynet::AcceptorSsl<mynet::HandlerConnection>> proactorTls;
 
     // 每次调用都会立刻失败（监听/加载证书），因此不会真的进入事件循环。
     [[maybe_unused]] auto r1 = reactorStream.runTcp("1.2.3.4", 0);

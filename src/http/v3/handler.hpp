@@ -246,7 +246,7 @@ namespace mynet
                     }
                     else if (frame.type == std::to_underlying(FRAME_TYPE::DATA))
                     {
-                        if (slot->requestBody.size() + frame.payload.size() <= kMaxRequestBodyBytes)
+                        if (slot->requestBody.size() + frame.payload.size() <= maxRequestBodyBytes())
                         {
                             slot->requestBody.append(frame.payload);
                         }
@@ -331,7 +331,7 @@ namespace mynet
                     }
                     else if (frame.type == std::to_underlying(FRAME_TYPE::DATA))
                     {
-                        if (slot->requestBody.size() + frame.payload.size() <= kMaxRequestBodyBytes)
+                        if (slot->requestBody.size() + frame.payload.size() <= maxRequestBodyBytes())
                         {
                             slot->requestBody.append(frame.payload);
                         }
@@ -574,7 +574,7 @@ namespace mynet
                             continue;
                         }
 
-                        if (slot->inBuffer.readableBytes() + sf.data.size() > kMaxStreamBufferBytes) [[unlikely]]
+                        if (slot->inBuffer.readableBytes() + sf.data.size() > maxStreamBufferBytes()) [[unlikely]]
                         {
                             LOG_WARN("HandlerHttp3: stream {} buffer exceeded maximum limit", sf.streamId);
                             session.streamTable.close(sf.streamId);
@@ -607,7 +607,7 @@ namespace mynet
                             }
                             else if (h3Frame.type == std::to_underlying(FRAME_TYPE::DATA))
                             {
-                                if (slot->requestBody.size() + h3Frame.payload.size() <= kMaxRequestBodyBytes)
+                                if (slot->requestBody.size() + h3Frame.payload.size() <= maxRequestBodyBytes())
                                 {
                                     slot->requestBody.append(h3Frame.payload);
                                 }
@@ -643,8 +643,14 @@ namespace mynet
                 }
             }
 
-            static constexpr size_t kMaxRequestBodyBytes = 16 << 20;  // 16 MiB
-            static constexpr size_t kMaxStreamBufferBytes = 16 << 20; // 16 MiB
+            [[nodiscard]] static inline size_t maxRequestBodyBytes() noexcept
+            {
+                return getHttp3Config().maxRequestBodyBytes;
+            }
+            [[nodiscard]] static inline size_t maxStreamBufferBytes() noexcept
+            {
+                return getHttp3Config().maxStreamBufferBytes;
+            }
 
             size_t maxStreams_ = 128;
             size_t maxSessions_ = 1024;

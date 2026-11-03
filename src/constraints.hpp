@@ -34,7 +34,7 @@ namespace mynet
     };
 
     // 基类与其派生约束分散在各自头文件：HandlerConnection / HandlerDatagram 及
-    // 其概念在 connection.hpp、datagram.hpp，EventBase 及其概念在 event.hpp。
-    // 传输无关的通用契约集中在本文件，避免事件层反向依赖具体传输。
+    // 其概念在 connection.hpp、datagram.hpp，AcceptorBase 及其概念在 acceptor.hpp。
+    // 传输无关的通用契约集中在本文件，避免监听层反向依赖具体传输。
 
 } // namespace mynet

@@ -108,6 +108,7 @@ namespace mynet
         explicit HandlerConnection(const ConnectionConfig &config) noexcept
             : maxRequestBytes_(config.maxRequestBytes)
         {
+            requestBuffer_.setHighWaterMark(config.readHighWaterMark);
             [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
         }
 
@@ -128,6 +129,7 @@ namespace mynet
         virtual void reset() noexcept
         {
             requestBuffer_.reset();
+            requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
             responseQueue_.reset();
             spare_.clear();
             closeAfterResponse_ = false;
@@ -643,8 +645,8 @@ namespace mynet
         }
         [[nodiscard]] inline const sockaddr_in &addr() const noexcept { return addr_; }
         [[nodiscard]] inline sockaddr_in &addr() noexcept { return addr_; }
-        [[nodiscard]] inline HandlerType &handler() noexcept { return handler_; }
-        [[nodiscard]] inline const HandlerType &handler() const noexcept { return handler_; }
+        [[nodiscard]] inline Handler &handler() noexcept { return handler_; }
+        [[nodiscard]] inline const Handler &handler() const noexcept { return handler_; }
         [[nodiscard]] inline SSL *ssl() const noexcept { return ssl_; }
         [[nodiscard]] inline CONN_STATE state() const noexcept { return state_; }
         [[nodiscard]] inline uint32_t events() const noexcept { return events_; }
@@ -685,10 +687,10 @@ namespace mynet
 #endif
             }
             if constexpr (requires {
-                              { HandlerType::kEnableSplice } -> std::convertible_to<bool>;
+                              { Handler::kEnableSplice } -> std::convertible_to<bool>;
                           })
             {
-                if constexpr (HandlerType::kEnableSplice)
+                if constexpr (Handler::kEnableSplice)
                 {
                     return handler_.isSpliceActive() ||
                            (handler_.spliceControl() == SPLICE_CONTROL::DRAINING && pipePending_ > 0);
@@ -1523,8 +1525,8 @@ namespace mynet
                 // 上界 + 进展检测：任何"声称需要推进却推不动"的退化路径（例如响应
                 // 队列容量为 0、初始化失败）都只是把驱动推迟到下一个事件，绝不能在
                 // 事件循环里空转。
-                constexpr size_t kMaxDrainRounds = 64;
-                for (size_t round = 0; round < kMaxDrainRounds; ++round)
+                const size_t maxDrainRounds = getConnectionConfig().maxDrainRounds;
+                for (size_t round = 0; round < maxDrainRounds; ++round)
                 {
                     if (!handler_.needsProcess() || pendingBytes_ >= writeHighWaterMark_ || closeAfterWrite_ ||
                         peerGone_)
@@ -1627,7 +1629,7 @@ namespace mynet
         bool ktlsRx_ = false;
         bool ktlsTx_ = false;
 #endif
-        HandlerType handler_{};
+        Handler handler_{};
 
         std::deque<std::string> writeQueue_;
         size_t writeOffset_ = 0;

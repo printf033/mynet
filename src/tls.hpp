@@ -29,28 +29,11 @@ namespace mynet
     };
 
     /**
-     * @brief Standard TLS negotiation settings.
+     * @brief Standard TLS negotiation settings alias.
      *
-     * These options configure protocol policy and ALPN; they do not control
-     * ClientHello extension ordering or emulate another TLS implementation.
+     * 统一收拢至 configHolder.hpp 中的 SecurityConfig，消除重复定义。
      */
-    struct TlsOptions
-    {
-        int minVersion = TLS1_2_VERSION;
-        int maxVersion = 0;
-        std::string cipherList{};
-        std::string tls13CipherSuites{};
-        std::vector<std::string> alpnProtocols{};
-        /// 服务端 CA 根证书束路径。非空时要求客户端出示证书并对其做校验
-        /// （mTLS）；空表示不启用客户端认证。
-        std::string caFile{};
-        /// 服务端 TLS 会话缓存超时时间（秒），默认 3600 秒（1 小时）
-        long sessionTimeout = 3600;
-        /// 是否启用 TLS 会话凭证（Session Tickets，用于加速重连与会话恢复）
-        bool enableSessionTickets = true;
-        /// TLS 1.3 握手后发送的会话票据数量（OpenSSL 默认 2）
-        size_t numTickets = 2;
-    };
+    using TlsOptions = SecurityConfig;
 
     namespace detail
     {
@@ -99,35 +82,21 @@ namespace mynet
          * security.ciphers / security.alpnProtocols 成为唯一默认真相来源，
          * 而不是在引擎头文件里另写一份默认值。
          */
-        [[nodiscard]] inline TlsOptions tlsOptionsFrom(const SecurityConfig &security)
+        [[nodiscard]] inline SecurityConfig tlsOptionsFrom(const SecurityConfig &security)
         {
-            TlsOptions options{};
-            options.caFile = security.caFile;
-            // "DEFAULT" 与空串都归一为"不调用 SSL_CTX_set_cipher_list"。
-            //
-            // 这不是等价变换的偷懒，而是为了保住一条容易被忽略的性质：
-            // 显式设置 "DEFAULT" 会**覆盖** libssl 从 openssl.cnf 读到的
-            // system_default CipherString，把加固部署的套件策略顶掉；而不调用
-            // 则让那些策略继续生效。重构前的 runSsl 默认走的就是"不调用"，
-            // 这里保持逐项等价。
-            if (!security.ciphers.empty() && security.ciphers != "DEFAULT")
-            {
-                options.cipherList = security.ciphers;
-            }
-            options.alpnProtocols = splitAlpnList(security.alpnProtocols);
-            return options;
+            return security;
         }
 
-        [[nodiscard]] inline bool validTlsOptions(const TlsOptions &options) noexcept
+        [[nodiscard]] inline bool validTlsOptions(const SecurityConfig &options) noexcept
         {
-            if (options.minVersion < TLS1_2_VERSION ||
-                (options.maxVersion != 0 && options.maxVersion < options.minVersion))
+            if (!validSecurityConfig(options))
             {
                 return false;
             }
 
+            const auto alpnList = splitAlpnList(options.alpnProtocols);
             size_t wireBytes = 0;
-            for (const std::string &protocol : options.alpnProtocols)
+            for (const std::string &protocol : alpnList)
             {
                 if (protocol.empty() || protocol.size() > 255 || wireBytes > 65535 - protocol.size() - 1)
                 {
@@ -142,7 +111,11 @@ namespace mynet
                                     const unsigned char *clientProtocols, unsigned int clientLength,
                                     void *argument) noexcept
         {
-            const auto &serverProtocols = *static_cast<const TlsOptions *>(argument);
+            if (argument == nullptr) [[unlikely]]
+            {
+                return SSL_TLSEXT_ERR_NOACK;
+            }
+            const auto &alpnList = *static_cast<const std::vector<std::string> *>(argument);
             unsigned int offset = 0;
             while (offset < clientLength)
             {
@@ -154,7 +127,7 @@ namespace mynet
                 offset += length;
             }
 
-            for (const std::string &serverProtocol : serverProtocols.alpnProtocols)
+            for (const std::string &serverProtocol : alpnList)
             {
                 offset = 0;
                 while (offset < clientLength)
@@ -173,19 +146,20 @@ namespace mynet
             return SSL_TLSEXT_ERR_NOACK;
         }
 
-        [[nodiscard]] inline Result<> configureTlsContext(SSL_CTX *ctx, TlsOptions &options, bool server,
+        [[nodiscard]] inline Result<> configureTlsContext(SSL_CTX *ctx, SecurityConfig &options, bool server,
+                                                          const std::vector<std::string> *alpnList = nullptr,
                                                           TlsProtocolType proto = TlsProtocolType::StreamTcp) noexcept
         {
             if (proto == TlsProtocolType::DatagramQuic)
             {
                 // RFC 9001: QUIC 强制要求 TLS 1.3
-                if (options.minVersion < TLS1_3_VERSION)
+                if (options.minVersion < 0x0304)
                 {
-                    options.minVersion = TLS1_3_VERSION;
+                    options.minVersion = 0x0304;
                 }
                 if (options.alpnProtocols.empty())
                 {
-                    options.alpnProtocols = {"h3"};
+                    options.alpnProtocols = "h3";
                 }
             }
 
@@ -202,8 +176,9 @@ namespace mynet
 
                 // 开启服务端会话缓存与 Session ID 上下文（支持 Session Resumption 会话恢复）
                 SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_SERVER);
-                constexpr unsigned char sSessionIdContext[] = "mynet";
-                SSL_CTX_set_session_id_context(ctx, sSessionIdContext, sizeof(sSessionIdContext) - 1);
+                const std::string_view sidCtx = options.sessionIdContext.empty() ? "mynet" : options.sessionIdContext;
+                SSL_CTX_set_session_id_context(ctx, reinterpret_cast<const unsigned char *>(sidCtx.data()),
+                                               static_cast<unsigned int>(sidCtx.size()));
                 if (options.sessionTimeout > 0)
                 {
                     SSL_CTX_set_timeout(ctx, options.sessionTimeout);
@@ -219,15 +194,16 @@ namespace mynet
 #endif
                 }
             }
-            if ((!options.cipherList.empty() && SSL_CTX_set_cipher_list(ctx, options.cipherList.c_str()) != 1) ||
+            if ((!options.ciphers.empty() && options.ciphers != "DEFAULT" &&
+                 SSL_CTX_set_cipher_list(ctx, options.ciphers.c_str()) != 1) ||
                 (!options.tls13CipherSuites.empty() &&
                  SSL_CTX_set_ciphersuites(ctx, options.tls13CipherSuites.c_str()) != 1))
             {
                 return std::unexpected(ERR::SSL_CONFIG_FAILED);
             }
-            if (server && !options.alpnProtocols.empty())
+            if (server && alpnList != nullptr && !alpnList->empty())
             {
-                SSL_CTX_set_alpn_select_cb(ctx, selectServerAlpn, &options);
+                SSL_CTX_set_alpn_select_cb(ctx, selectServerAlpn, const_cast<std::vector<std::string> *>(alpnList));
             }
             // 服务端 CA：配置了就启用双向认证。此时客户端必须出示由该 CA 签发的证书，
             // 否则握手直接失败——这比"配置了 CA 但只是摆设"安全得多。
@@ -261,7 +237,8 @@ namespace mynet
          * 支持 TCP Stream TLS 与 QUIC (HTTP/3) Datagram TLS。
          */
         [[nodiscard]] inline Result<SSL_CTX *>
-        createServerContext(const char *crt, const char *key, TlsOptions &options,
+        createServerContext(const char *crt, const char *key, SecurityConfig &options,
+                            const std::vector<std::string> *alpnList = nullptr,
                             TlsProtocolType proto = TlsProtocolType::StreamTcp) noexcept
         {
             if (crt == nullptr || crt[0] == '\0' || key == nullptr || key[0] == '\0') [[unlikely]]
@@ -289,7 +266,7 @@ namespace mynet
                 LOG_ERROR("createServerContext: SSL_CTX_new() failed: {}", sslText());
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
-            if (auto err = configureTlsContext(ctx, options, true, proto); !err) [[unlikely]]
+            if (auto err = configureTlsContext(ctx, options, true, alpnList, proto); !err) [[unlikely]]
             {
                 LOG_ERROR("createServerContext: invalid TLS options: {}", sslText());
                 SSL_CTX_free(ctx);
@@ -318,6 +295,13 @@ namespace mynet
             return ctx;
         }
 
+        [[nodiscard]] inline Result<SSL_CTX *>
+        createServerContext(const char *crt, const char *key, SecurityConfig &options,
+                            TlsProtocolType proto) noexcept
+        {
+            return createServerContext(crt, key, options, nullptr, proto);
+        }
+
     } // namespace detail
 
     /**
@@ -332,6 +316,12 @@ namespace mynet
     class SniCertificateManager
     {
     public:
+        struct DomainEntry
+        {
+            SSL_CTX *ctx = nullptr;
+            std::vector<std::string> alpnList{};
+        };
+
         SniCertificateManager() noexcept = default;
 
         ~SniCertificateManager() noexcept { clear(); }
@@ -396,27 +386,30 @@ namespace mynet
          * @param domain 域名（支持精确如 "api.example.com" 或泛域名 "*.example.com"）
          * @param crt 证书文件路径
          * @param key 私钥文件路径
-         * @param options TLS 协商选项
+         * @param options TLS 安全传输配置
          * @return 成功返回 {}，失败返回 ERR
          */
-        [[nodiscard]] Result<> addDomain(std::string_view domain, const char *crt, const char *key, TlsOptions &options)
+        [[nodiscard]] Result<> addDomain(std::string_view domain, const char *crt, const char *key,
+                                         SecurityConfig &options)
         {
-            auto res = detail::createServerContext(crt, key, options);
+            DomainEntry entry;
+            entry.alpnList = detail::splitAlpnList(options.alpnProtocols);
+            auto res = detail::createServerContext(crt, key, options, &entry.alpnList);
             if (!res) [[unlikely]]
             {
                 return std::unexpected(res.error());
             }
-            SSL_CTX *ctx = *res;
+            entry.ctx = *res;
             std::unique_lock lock(rwLock_);
             auto it = contexts_.find(std::string(domain));
             if (it != contexts_.end())
             {
-                detail::freeContext(it->second);
-                it->second = ctx;
+                detail::freeContext(it->second.ctx);
+                it->second = std::move(entry);
             }
             else
             {
-                contexts_.emplace(std::string(domain), ctx);
+                contexts_.emplace(std::string(domain), std::move(entry));
             }
             return {};
         }
@@ -425,7 +418,7 @@ namespace mynet
          * @brief 在线热重载 / 替换指定域名的证书与私钥（原子性指针替换，不中断服务）
          */
         [[nodiscard]] Result<> reloadDomain(std::string_view domain, const char *crt, const char *key,
-                                            TlsOptions &options)
+                                            SecurityConfig &options)
         {
             return addDomain(domain, crt, key, options);
         }
@@ -450,7 +443,7 @@ namespace mynet
             auto it = contexts_.find(std::string(serverName));
             if (it != contexts_.end())
             {
-                return it->second;
+                return it->second.ctx;
             }
 
             // 2. 泛域名匹配（查找一级前缀后的通配形式，如 foo.example.com -> *.example.com）
@@ -462,7 +455,7 @@ namespace mynet
                 auto wit = contexts_.find(wildcard);
                 if (wit != contexts_.end())
                 {
-                    return wit->second;
+                    return wit->second.ctx;
                 }
             }
 
@@ -489,9 +482,9 @@ namespace mynet
         void clear() noexcept
         {
             std::unique_lock lock(rwLock_);
-            for (auto &[domain, ctx] : contexts_)
+            for (auto &[domain, entry] : contexts_)
             {
-                detail::freeContext(ctx);
+                detail::freeContext(entry.ctx);
             }
             contexts_.clear();
             if (ownsDefaultCtx_ && defaultCtx_ != nullptr)
@@ -530,7 +523,7 @@ namespace mynet
         }
 
         mutable std::shared_mutex rwLock_{};
-        std::unordered_map<std::string, SSL_CTX *> contexts_{};
+        std::unordered_map<std::string, DomainEntry> contexts_{};
         SSL_CTX *defaultCtx_{nullptr};
         bool ownsDefaultCtx_{false};
     };

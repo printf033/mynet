@@ -49,6 +49,8 @@ namespace mynet::proxy
         inline constexpr uint8_t kRepAddressTypeNotSupported = 0x08;
     } // namespace socks5
 
+    using ProxyConfig = mynet::ProxyConfig;
+
     /**
      * @brief SOCKS5 会话状态
      */
@@ -73,6 +75,22 @@ namespace mynet::proxy
         using AuthCallback = std::function<bool(std::string_view username, std::string_view password)>;
         using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
 
+        /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝（SOCKS5 转发管道）
+        static constexpr bool kEnableSplice = true;
+
+        /**
+         * @brief 开启零拷贝 SOCKS5 转发管道（直接复用 Connection 零拷贝管道）
+         *
+         * 在 CONNECT 握手完成进入 STREAMING 状态后调用，将客户端与目标套接字直连，
+         * 避免在用户态搬运数据载荷。
+         *
+         * @param targetFd 目标远端套接字描述符
+         */
+        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
+        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
+        inline void disableSpliceForward() noexcept { disableSplice(); }
+        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
+
     private:
         Socks5Stage stage_{Socks5Stage::METHOD_SELECT};
         AuthCallback authCallback_{nullptr};
@@ -84,7 +102,11 @@ namespace mynet::proxy
         bool autoReplyConnectSuccess_{true};
 
     public:
-        HandlerSocks5() noexcept = default;
+        HandlerSocks5() noexcept : autoReplyConnectSuccess_(getProxyConfig().autoReplyConnectSuccess) {}
+        explicit HandlerSocks5(const ProxyConfig &cfg) noexcept
+            : autoReplyConnectSuccess_(cfg.autoReplyConnectSuccess)
+        {
+        }
         ~HandlerSocks5() noexcept override = default;
 
         HandlerSocks5(const HandlerSocks5 &) = delete;
@@ -108,6 +130,14 @@ namespace mynet::proxy
          */
         void setAutoReplyConnectSuccess(bool autoReply) noexcept { autoReplyConnectSuccess_ = autoReply; }
 
+        /**
+         * @brief 应用 SOCKS5 代理配置
+         */
+        void configure(const ProxyConfig &cfg) noexcept
+        {
+            autoReplyConnectSuccess_ = cfg.autoReplyConnectSuccess;
+        }
+
         [[nodiscard]] Socks5Stage stage() const noexcept { return stage_; }
         [[nodiscard]] uint8_t command() const noexcept { return command_; }
         [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
@@ -122,6 +152,7 @@ namespace mynet::proxy
             selectedMethod_ = socks5::kMethodNoAcceptable;
             command_ = 0;
             targetAddress_.reset();
+            autoReplyConnectSuccess_ = getProxyConfig().autoReplyConnectSuccess;
             HandlerConnection::reset();
         }
 

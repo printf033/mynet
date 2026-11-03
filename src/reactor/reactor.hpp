@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file reactor.hpp
+ * @file reactor/reactor.hpp
  * @brief 基于 epoll 的高性能反应器（Reactor）事件解复用器与服务器事件循环。
  */
 
@@ -9,7 +9,7 @@
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
-#include "event.hpp"
+#include "acceptor.hpp"
 #include "log_config.hpp"
 #include "loop.hpp"
 #include "objectPool.hpp"
@@ -35,16 +35,16 @@ namespace mynet
      *
      * 采用边沿触发（EPOLLET）模式驱动新连接接入、SSL 握手与 UDP 数据报收发。
      *
-     * @tparam Event 满足 DerivedFromEventBase 与 Resettable 约束的套接字事件包装类型。
+     * @tparam Acceptor 满足 DerivedFromAcceptorBase 与 Resettable 约束的套接字接收器包装类型。
      */
-    template <typename Event>
-        requires DerivedFromEventBase<Event> && Resettable<Event> &&
-                 (MandatoryMethodConnection<typename Event::Handler> ||
-                  MandatoryMethodDatagram<typename Event::Handler>)
+    template <typename Acceptor>
+        requires DerivedFromAcceptorBase<Acceptor> && Resettable<Acceptor> &&
+                 (MandatoryMethodConnection<typename Acceptor::Handler> ||
+                  MandatoryMethodDatagram<typename Acceptor::Handler>)
     class Reactor
     {
     public:
-        using Handler = typename Event::Handler;
+        using Handler = typename Acceptor::Handler;
         using Conn = typename ConnectionSlot<Handler>::Type;
 
         ///
@@ -86,16 +86,11 @@ namespace mynet
         inline void quit() noexcept { loop_.quit(); }
 
         /**
-         * @brief 以全局配置（server + reactor 段）运行 TCP 服务器，直至被请求停止。
-         * @param ip 监听 IPv4 地址字面量。
-         * @param port 监听端口。
+         * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
-        /**
-         * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
-         */
         [[nodiscard]] Result<> runTcp()
-            requires SocketEvent<Event> && kStreaming
+            requires SocketAcceptor<Acceptor> && kStreaming
         {
             // 深拷贝一份：get*Config() 返回的是 thread_local 快照的引用，并发的
             // reloadConfig() 会重新赋值该快照，令 host.c_str() 在调用栈更深处悬垂。
@@ -104,8 +99,14 @@ namespace mynet
             return runTcp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.server, cfg.reactor);
         }
 
+        /**
+         * @brief 以全局配置（server + reactor 段）运行 TCP 服务器，直至被请求停止。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
         [[nodiscard]] Result<> runTcp(const char *ip, int port)
-            requires SocketEvent<Event> && kStreaming
+            requires SocketAcceptor<Acceptor> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
             return runTcp(ip, port, cfg.server, cfg.reactor);
@@ -125,11 +126,11 @@ namespace mynet
          */
         [[nodiscard]] Result<> runTcp(const char *ip, int port, const ServerConfig &server,
                                       const ReactorConfig &reactor)
-            requires SocketEvent<Event> && kStreaming
+            requires SocketAcceptor<Acceptor> && kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validReactorConfig(reactor));
-            if (auto err = listener_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err) [[unlikely]]
             {
                 reset();
                 return err;
@@ -140,21 +141,14 @@ namespace mynet
         }
 
         /**
-         * @brief 以全局配置运行 TLS/SSL 服务器，TLS 协商参数取自 security 段。
-         * @param ip 监听 IPv4 地址字面量。
-         * @param port 监听端口。
-         * @param crt PEM 格式证书文件路径。
-         * @param key PEM 格式私钥文件路径。
-         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
-         */
-        /**
          * @brief 完全以全局配置运行 TLS 服务器：监听地址与证书路径都取自配置段。
          *
          * 证书与私钥取自 security.certFile / security.keyFile；任一为空表示"未配置"，
          * 直接失败而不是悄悄降级成明文——TLS 服务端不应在配置缺失时静默裸奔。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl()
-            requires SslEvent<Event> && kStreaming
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
             if (cfg.security.certFile.empty() || cfg.security.keyFile.empty()) [[unlikely]]
@@ -164,25 +158,33 @@ namespace mynet
                 return std::unexpected(ERR::SSL_CERT_FAILED);
             }
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.security.certFile.c_str(),
-                          cfg.security.keyFile.c_str(), cfg.server, cfg.reactor, detail::tlsOptionsFrom(cfg.security));
+                          cfg.security.keyFile.c_str(), cfg.server, cfg.reactor, cfg.security);
         }
 
         /**
          * @brief 以全局配置的监听地址 + 显式证书路径运行 TLS 服务器。
          */
         [[nodiscard]] Result<> runSsl(const char *crt, const char *key)
-            requires SslEvent<Event> && kStreaming
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), crt, key, cfg.server, cfg.reactor,
-                          detail::tlsOptionsFrom(cfg.security));
+                          cfg.security);
         }
 
+        /**
+         * @brief 以全局配置运行 TLS/SSL 服务器，TLS 协商参数取自 security 段。
+         * @param ip 监听 IPv4 地址字面量。
+         * @param port 监听端口。
+         * @param crt PEM 格式证书文件路径。
+         * @param key PEM 格式私钥文件路径。
+         * @return 正常停止返回 {}，启动或运行时失败返回错误码。
+         */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key)
-            requires SslEvent<Event> && kStreaming
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
-            return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, detail::tlsOptionsFrom(cfg.security));
+            return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, cfg.security);
         }
 
         /**
@@ -191,15 +193,15 @@ namespace mynet
          * @param port 监听端口。
          * @param crt PEM 格式证书文件路径。
          * @param key PEM 格式私钥文件路径。
-         * @param tlsOptions TLS 版本、密码套件与 ALPN 协商选项。
+         * @param security TLS 安全与协议协商配置。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
-                                      const TlsOptions &tlsOptions)
-            requires SslEvent<Event> && kStreaming
+                                      const SecurityConfig &security)
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
-            return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, tlsOptions);
+            return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, security);
         }
 
         /**
@@ -210,23 +212,24 @@ namespace mynet
          * @param key PEM 格式私钥文件路径。
          * @param server 服务端传输配置。
          * @param reactor 反应器运行时配置。
-         * @param tlsOptions TLS 协商选项。
+         * @param security TLS 安全配置。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
                                       const ServerConfig &server, const ReactorConfig &reactor,
-                                      const TlsOptions &tlsOptions)
-            requires SslEvent<Event> && kStreaming
+                                      const SecurityConfig &security)
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validReactorConfig(reactor));
-            if (auto err = listener_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err) [[unlikely]]
             {
                 reset();
                 return err;
             }
-            tlsOptions_ = tlsOptions;
-            auto ctxRes = detail::createServerContext(crt, key, tlsOptions_);
+            security_ = security;
+            alpnList_ = detail::splitAlpnList(security_.alpnProtocols);
+            auto ctxRes = detail::createServerContext(crt, key, security_, &alpnList_);
             if (!ctxRes) [[unlikely]]
             {
                 reset();
@@ -243,11 +246,11 @@ namespace mynet
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager,
                                       const ServerConfig &server, const ReactorConfig &reactor)
-            requires SslEvent<Event> && kStreaming
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validReactorConfig(reactor));
-            if (auto err = listener_.listenTcp(ip, port, server.backlog); !err) [[unlikely]]
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err) [[unlikely]]
             {
                 reset();
                 return err;
@@ -266,14 +269,14 @@ namespace mynet
         }
 
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager)
-            requires SslEvent<Event> && kStreaming
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
             return runSsl(ip, port, sniManager, cfg.server, cfg.reactor);
         }
 
         [[nodiscard]] Result<> runSsl(SniCertificateManager &sniManager)
-            requires SslEvent<Event> && kStreaming
+            requires SslAcceptor<Acceptor> && kStreaming
         {
             const NetConfig cfg = getNetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), sniManager, cfg.server,
@@ -318,7 +321,7 @@ namespace mynet
             requires MandatoryMethodDatagram<Handler>
         {
             contract_assert(validReactorConfig(reactor));
-            if (auto err = listener_.listenUdp(ip, port); !err) [[unlikely]]
+            if (auto err = acceptor_.listenUdp(ip, port); !err) [[unlikely]]
             {
                 reset();
                 return err;
@@ -402,9 +405,9 @@ namespace mynet
             }
             sweepScratch_.reserve(connSlots);
             loop_.setEventCallback([this](uint32_t events, void *ptr) { onEvent(events, ptr); });
-            if (auto res = loop_.addFd(listener_.fd, EPOLLIN | EPOLLET, &listener_); !res) [[unlikely]]
+            if (auto res = loop_.addFd(acceptor_.fd, EPOLLIN | EPOLLET, &acceptor_); !res) [[unlikely]]
             {
-                LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", listener_.fd, errnoText(errno));
+                LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", acceptor_.fd, errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
             if (server.idleTimeoutSecs > 0)
@@ -429,9 +432,9 @@ namespace mynet
             }
             loop_.setEventCapacity(static_cast<size_t>(reactor.maxEvents));
             loop_.setEventCallback([this](uint32_t events, void *ptr) { onEvent(events, ptr); });
-            if (auto res = loop_.addFd(listener_.fd, EPOLLIN | EPOLLET, &listener_); !res) [[unlikely]]
+            if (auto res = loop_.addFd(acceptor_.fd, EPOLLIN | EPOLLET, &acceptor_); !res) [[unlikely]]
             {
-                LOG_ERROR("Reactor::serveDatagram: adding datagram fd {} to loop failed: {}", listener_.fd,
+                LOG_ERROR("Reactor::serveDatagram: adding datagram fd {} to loop failed: {}", acceptor_.fd,
                           errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
@@ -448,9 +451,9 @@ namespace mynet
                 [[maybe_unused]] auto _ = loop_.cancelTimer(idleTimerId_);
                 idleTimerId_ = 0;
             }
-            if (listener_.fd != -1)
+            if (acceptor_.fd != -1)
             {
-                [[maybe_unused]] auto _ = loop_.delFd(listener_.fd);
+                [[maybe_unused]] auto _ = loop_.delFd(acceptor_.fd);
             }
             for (auto &entry : index_)
             {
@@ -460,14 +463,15 @@ namespace mynet
             index_.clear();
             connPool_.reset();
             loop_.setEventCallback({});
-            if constexpr (SslEvent<Event>)
+            if constexpr (SslAcceptor<Acceptor>)
             {
                 detail::freeContext(protocol_.ctx);
             }
-            listener_.reset();
+            acceptor_.reset();
             datagram_.reset();
             idleTimeout_ = std::chrono::seconds(0);
-            tlsOptions_ = {};
+            security_ = {};
+            alpnList_.clear();
         }
 
     private:
@@ -477,17 +481,17 @@ namespace mynet
             {
                 return;
             }
-            if (ptr == &listener_)
+            if (ptr == &acceptor_)
             {
                 if (datagram_.bound())
                 {
                     if (events & EPOLLIN)
                     {
-                        [[maybe_unused]] auto _ = datagram_.handleRead(listener_.fd);
+                        [[maybe_unused]] auto _ = datagram_.handleRead(acceptor_.fd);
                     }
                     if (events & EPOLLOUT)
                     {
-                        [[maybe_unused]] auto _ = datagram_.handleWrite(listener_.fd);
+                        [[maybe_unused]] auto _ = datagram_.handleWrite(acceptor_.fd);
                     }
                     return;
                 }
@@ -655,7 +659,7 @@ namespace mynet
                 sockaddr_in addr{};
                 socklen_t len = sizeof(addr);
                 int fd =
-                    ::accept4(listener_.fd, reinterpret_cast<sockaddr *>(&addr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                    ::accept4(acceptor_.fd, reinterpret_cast<sockaddr *>(&addr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
                 if (fd < 0)
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -670,7 +674,7 @@ namespace mynet
                     {
                         return {};
                     }
-                    LOG_ERROR("Reactor::acceptAll: accept4() on fd {} failed: {}", listener_.fd, errnoText(errno));
+                    LOG_ERROR("Reactor::acceptAll: accept4() on fd {} failed: {}", acceptor_.fd, errnoText(errno));
                     return std::unexpected(ERR::ACCEPT_FAILED);
                 }
                 onNewConnection(fd, addr);
@@ -690,7 +694,7 @@ namespace mynet
             conn->setFd(fd);
             conn->addr() = addr;
             conn->touch();
-            if constexpr (SslEvent<Event>)
+            if constexpr (SslAcceptor<Acceptor>)
             {
                 if (protocol_.ctx != nullptr && !conn->startTLS(protocol_.ctx)) [[unlikely]]
                 {
@@ -727,7 +731,7 @@ namespace mynet
             connPool_.release(conn);
         }
 
-        inline void drainDatagrams() { [[maybe_unused]] auto _ = datagram_.handleRead(listener_.fd); }
+        inline void drainDatagrams() { [[maybe_unused]] auto _ = datagram_.handleRead(acceptor_.fd); }
 
         inline void sweepIdle()
             requires kStreaming
@@ -751,14 +755,15 @@ namespace mynet
             }
         }
 
-        Event listener_;
+        Acceptor acceptor_;
         EventLoop loop_;
-        Protocol<Event> protocol_{};
+        Protocol<Acceptor> protocol_{};
         ObjectPool<Conn> connPool_{};
         std::unordered_map<int, Conn *> index_{};
         std::vector<Conn *> sweepScratch_{};
         typename DatagramSlot<Handler>::Type datagram_{};
-        TlsOptions tlsOptions_{};
+        SecurityConfig security_{};
+        std::vector<std::string> alpnList_{};
         std::chrono::seconds idleTimeout_{0};
         uint64_t idleTimerId_ = 0;
     };

@@ -120,23 +120,33 @@ namespace mynet
         [[nodiscard]] inline bool empty() const noexcept { return readIndex_ == writeIndex_; }
 
         /**
-         * @brief 步进消费 n 个字节
+         * @brief 消费前缀字节但不触发就地内存压缩
          *
-         * 若已消费字节超过回收阈值，则自动进行内存紧凑整理。
-         *
-         * @warning 压缩可能移动底层存储：此前取得的 readableBegin()/readableView()/
-         *          readableSpan() 指针与视图在调用后立即失效，必须重新获取。
+         * 用于零拷贝视图场景（如 FrameView）：保证在消费游标推进后，底层存储地址绝不移动，
+         * 之前获取的视图生命周期在下一次写入或显式压缩前保持有效。
          *
          * @param n 需消费的字节数量
          */
-        inline void retrieve(size_t n) noexcept
+        inline void retrieveNoCompact(size_t n) noexcept
         {
             if (n >= readableBytes())
+            {
+                readIndex_ = writeIndex_;
+                return;
+            }
+            readIndex_ += n;
+        }
+
+        /**
+         * @brief 尝试紧凑整理已消费前缀内存（仅当超过回收阈值或已排空时收缩）
+         */
+        inline void maybeCompact() noexcept
+        {
+            if (readIndex_ == writeIndex_)
             {
                 reset();
                 return;
             }
-            readIndex_ += n;
             // 当失效前缀膨胀到 >= 4 KiB 且已超过总大小一半时触发压缩收缩
             if (readIndex_ >= (4 << 10) && (readIndex_ * 2) >= writeIndex_) [[unlikely]]
             {
@@ -148,6 +158,22 @@ namespace mynet
                 readIndex_ = 0;
                 writeIndex_ = live;
             }
+        }
+
+        /**
+         * @brief 步进消费 n 个字节
+         *
+         * 若已消费字节超过回收阈值，则自动进行内存紧凑整理。
+         *
+         * @warning 压缩可能移动底层存储：此前取得的 readableBegin()/readableView()/
+         *          readableSpan() 指针与视图在调用后立即失效，必须重新获取。
+         *
+         * @param n 需消费的字节数量
+         */
+        inline void retrieve(size_t n) noexcept
+        {
+            retrieveNoCompact(n);
+            maybeCompact();
         }
 
         // ---- 写入侧接口 (Write Side) ----

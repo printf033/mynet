@@ -1,7 +1,7 @@
 #include "connection.hpp"
-#include "loop.hpp"
 #include "lua_config.hpp"
-#include "reactor.hpp"
+#include "reactor/loop.hpp"
+#include "reactor/reactor.hpp"
 #include "tls.hpp"
 #include <arpa/inet.h>
 #include <chrono>
@@ -65,6 +65,18 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
                                     "  tcpQuickAck = true,\n"
                                     "  enableSplice = false\n"
                                     "}\n"
+                                    "reactor = {\n"
+                                    "  maxEvents = 2048,\n"
+                                    "  idleSweepIntervalMs = 500\n"
+                                    "}\n"
+                                    "proactor = {\n"
+                                    "  sqEntries = 4096,\n"
+                                    "  cqEntries = 4096,\n"
+                                    "  bufEntries = 2048,\n"
+                                    "  bufSize = 8192,\n"
+                                    "  bufRingAlignment = 8192,\n"
+                                    "  cqeWaitMs = 200\n"
+                                    "}\n"
                                     "connection = {\n"
                                     "  responseCapacity = 128,\n"
                                     "  readChunkSize = 8192,\n"
@@ -78,29 +90,27 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
                                     "  maxDatagramBytes = 32768,\n"
                                     "  maxPendingOutgoing = 512\n"
                                     "}\n"
-                                    "proactor = {\n"
-                                    "  sqEntries = 4096,\n"
-                                    "  cqEntries = 4096,\n"
-                                    "  bufEntries = 2048,\n"
-                                    "  bufSize = 8192,\n"
-                                    "  bufRingAlignment = 8192,\n"
-                                    "  cqeWaitMs = 200\n"
-                                    "}\n"
-                                    "reactor = {\n"
-                                    "  maxEvents = 2048,\n"
-                                    "  idleSweepIntervalMs = 500\n"
-                                    "}\n"
-                                    "multiplexer = {\n"
-                                    "  maxConcurrentStreams = 200,\n"
-                                    "  initialWindowSize = 131072,\n"
-                                    "  maxFrameSize = 32768,\n"
-
-                                    "}\n"
                                     "security = {\n"
                                     "  certFile = \"mycert.pem\",\n"
                                     "  keyFile = \"mykey.pem\",\n"
                                     "  ciphers = \"ECDHE-RSA-AES128-GCM-SHA256\",\n"
                                     "  alpnProtocols = \"h2\"\n"
+                                    "}\n"
+                                    "http1 = {\n"
+                                    "  maxUrlLength = 4096,\n"
+                                    "  maxBodyLength = 8388608\n"
+                                    "}\n"
+                                    "http2 = {\n"
+                                    "  maxConcurrentStreams = 200,\n"
+                                    "  initialWindowSize = 131072,\n"
+                                    "  maxFrameSize = 32768\n"
+                                    "}\n"
+                                    "http3 = {\n"
+                                    "  port = 8443,\n"
+                                    "  maxRequestBodyBytes = 8388608\n"
+                                    "}\n"
+                                    "proxy = {\n"
+                                    "  autoReplyConnectSuccess = false\n"
                                     "}\n"
                                     "logger = {\n"
                                     "  suppressLevel = \"warn\"\n"
@@ -117,6 +127,16 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
     EXPECT_TRUE(cfg.server.tcpQuickAck);
     EXPECT_FALSE(cfg.server.enableSplice);
 
+    EXPECT_EQ(cfg.reactor.maxEvents, 2048);
+    EXPECT_EQ(cfg.reactor.idleSweepIntervalMs, 500);
+
+    EXPECT_EQ(cfg.proactor.sqEntries, 4096u);
+    EXPECT_EQ(cfg.proactor.cqEntries, 4096u);
+    EXPECT_EQ(cfg.proactor.bufEntries, 2048u);
+    EXPECT_EQ(cfg.proactor.bufSize, 8192u);
+    EXPECT_EQ(cfg.proactor.bufRingAlignment, 8192u);
+    EXPECT_EQ(cfg.proactor.cqeWaitMs, 200);
+
     EXPECT_EQ(cfg.connection.responseCapacity, 128u);
     EXPECT_EQ(cfg.connection.readChunkSize, 8192u);
     EXPECT_EQ(cfg.connection.maxRequestBytes, 2097152u);
@@ -128,24 +148,22 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
     EXPECT_EQ(cfg.datagram.maxDatagramBytes, 32768u);
     EXPECT_EQ(cfg.datagram.maxPendingOutgoing, 512u);
 
-    EXPECT_EQ(cfg.proactor.sqEntries, 4096u);
-    EXPECT_EQ(cfg.proactor.cqEntries, 4096u);
-    EXPECT_EQ(cfg.proactor.bufEntries, 2048u);
-    EXPECT_EQ(cfg.proactor.bufSize, 8192u);
-    EXPECT_EQ(cfg.proactor.bufRingAlignment, 8192u);
-    EXPECT_EQ(cfg.proactor.cqeWaitMs, 200);
-
-    EXPECT_EQ(cfg.reactor.maxEvents, 2048);
-    EXPECT_EQ(cfg.reactor.idleSweepIntervalMs, 500);
-
-    EXPECT_EQ(cfg.multiplexer.maxConcurrentStreams, 200u);
-    EXPECT_EQ(cfg.multiplexer.initialWindowSize, 131072u);
-    EXPECT_EQ(cfg.multiplexer.maxFrameSize, 32768u);
-
     EXPECT_EQ(cfg.security.certFile, "mycert.pem");
     EXPECT_EQ(cfg.security.keyFile, "mykey.pem");
     EXPECT_EQ(cfg.security.ciphers, "ECDHE-RSA-AES128-GCM-SHA256");
     EXPECT_EQ(cfg.security.alpnProtocols, "h2");
+
+    EXPECT_EQ(cfg.http1.maxUrlLength, 4096u);
+    EXPECT_EQ(cfg.http1.maxBodyLength, 8388608u);
+
+    EXPECT_EQ(cfg.http2.maxConcurrentStreams, 200u);
+    EXPECT_EQ(cfg.http2.initialWindowSize, 131072u);
+    EXPECT_EQ(cfg.http2.maxFrameSize, 32768u);
+
+    EXPECT_EQ(cfg.http3.port, 8443u);
+    EXPECT_EQ(cfg.http3.maxRequestBodyBytes, 8388608u);
+
+    EXPECT_FALSE(cfg.proxy.autoReplyConnectSuccess);
 
     EXPECT_EQ(static_cast<int>(mylog::getCurrentSuppressLevel()), static_cast<int>(mylog::LEVEL::WARN));
 
@@ -165,7 +183,7 @@ TEST(ConfigLua, ClampsOutliersSafely)
                                    "  maxWriteIov = 9999,\n"
                                    "  writeHardCapFactor = 100\n"
                                    "}\n"
-                                   "multiplexer = {\n"
+                                   "http2 = {\n"
                                    "  maxFrameSize = 10\n"
                                    "}\n");
 
@@ -177,7 +195,7 @@ TEST(ConfigLua, ClampsOutliersSafely)
     EXPECT_EQ(cfg.connection.readChunkSize, 256u);
     EXPECT_EQ(cfg.connection.maxWriteIov, 64u);
     EXPECT_EQ(cfg.connection.writeHardCapFactor, 64u);
-    EXPECT_EQ(cfg.multiplexer.maxFrameSize, 16384u);
+    EXPECT_EQ(cfg.http2.maxFrameSize, 16384u);
 
     std::filesystem::remove(clampPath);
 }
@@ -402,15 +420,16 @@ TEST(ConfigLua, SecuritySectionFeedsTlsOptions)
     security.ciphers = "ECDHE-RSA-AES128-GCM-SHA256";
     security.alpnProtocols = " h2 , http/1.1 ,, ";
 
-    const mynet::TlsOptions options = mynet::detail::tlsOptionsFrom(security);
-    EXPECT_EQ(options.cipherList, "ECDHE-RSA-AES128-GCM-SHA256");
-    ASSERT_EQ(options.alpnProtocols.size(), 2u);
-    EXPECT_EQ(options.alpnProtocols[0], "h2");
-    EXPECT_EQ(options.alpnProtocols[1], "http/1.1");
+    const mynet::SecurityConfig options = mynet::detail::tlsOptionsFrom(security);
+    EXPECT_EQ(options.ciphers, "ECDHE-RSA-AES128-GCM-SHA256");
+    auto alpn = mynet::detail::splitAlpnList(options.alpnProtocols);
+    ASSERT_EQ(alpn.size(), 2u);
+    EXPECT_EQ(alpn[0], "h2");
+    EXPECT_EQ(alpn[1], "http/1.1");
 
     // 空串必须产出空列表，而不是一个空协议名（那会让 ALPN 协商静默失败）。
     security.alpnProtocols.clear();
-    EXPECT_TRUE(mynet::detail::tlsOptionsFrom(security).alpnProtocols.empty());
+    EXPECT_TRUE(mynet::detail::splitAlpnList(mynet::detail::tlsOptionsFrom(security).alpnProtocols).empty());
 }
 
 TEST(ConfigLua, ProactorCqIsRaisedToCoverSq)
@@ -474,6 +493,8 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     poison.server.tcpNoDelay = !poison.server.tcpNoDelay;
     poison.server.tcpQuickAck = !poison.server.tcpQuickAck;
     poison.server.enableSplice = !poison.server.enableSplice;
+    poison.server.reuseAddr = !poison.server.reuseAddr;
+    poison.server.reusePort = !poison.server.reusePort;
     poison.reactor.maxEvents = 3;
     poison.reactor.idleSweepIntervalMs = 3;
     poison.connection.responseCapacity = 3;
@@ -483,6 +504,8 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     poison.connection.writeHardCapFactor = 3;
     poison.connection.spliceChunkSize = 3;
     poison.connection.maxWriteIov = 3;
+    poison.connection.readHighWaterMark = 3;
+    poison.connection.maxDrainRounds = 3;
     poison.datagram.maxDatagramBytes = 3;
     poison.datagram.maxPendingOutgoing = 3;
     poison.proactor.sqEntries = 3;
@@ -493,14 +516,29 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     poison.proactor.udpBufSize = 3;
     poison.proactor.bufRingAlignment = 8;
     poison.proactor.cqeWaitMs = 3;
-    poison.multiplexer.maxConcurrentStreams = 3;
-    poison.multiplexer.initialWindowSize = 3;
-    poison.multiplexer.maxFrameSize = 3;
+    poison.http2.maxConcurrentStreams = 3;
+    poison.http2.initialWindowSize = 3;
+    poison.http2.maxFrameSize = 3;
+    poison.http2.maxHeaderListSize = 3;
+    poison.http2.headerTableSize = 3;
     poison.security.certFile = "poison.crt";
     poison.security.keyFile = "poison.key";
     poison.security.caFile = "poison-ca.pem";
     poison.security.ciphers = "POISON";
     poison.security.alpnProtocols = "poison";
+    poison.security.sessionIdContext = "poison";
+    poison.proxy.autoReplyConnectSuccess = !poison.proxy.autoReplyConnectSuccess;
+    poison.http1.maxUrlLength = 3;
+    poison.http1.maxHeadersCount = 3;
+    poison.http1.maxHeaderFieldLength = 3;
+    poison.http1.maxHeaderValueLength = 3;
+    poison.http1.maxTotalHeadersLength = 3;
+    poison.http1.maxBodyLength = 3;
+    poison.http3.maxRequestBodyBytes = 3;
+    poison.http3.maxStreamBufferBytes = 3;
+    poison.http3.maxHeaderBlockBytes = 3;
+    poison.http3.maxHeaderEntries = 3;
+    poison.http3.port = 3;
     mynet::publishNetConfig(poison);
 
     const bool reloaded = mynet::reloadConfig(shipped, false);
@@ -519,6 +557,8 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     EXPECT_EQ(loaded.server.tcpNoDelay, baseline.server.tcpNoDelay);
     EXPECT_EQ(loaded.server.tcpQuickAck, baseline.server.tcpQuickAck);
     EXPECT_EQ(loaded.server.enableSplice, baseline.server.enableSplice);
+    EXPECT_EQ(loaded.server.reuseAddr, baseline.server.reuseAddr);
+    EXPECT_EQ(loaded.server.reusePort, baseline.server.reusePort);
 
     EXPECT_EQ(loaded.reactor.maxEvents, baseline.reactor.maxEvents);
     EXPECT_EQ(loaded.reactor.idleSweepIntervalMs, baseline.reactor.idleSweepIntervalMs);
@@ -530,6 +570,8 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     EXPECT_EQ(loaded.connection.writeHardCapFactor, baseline.connection.writeHardCapFactor);
     EXPECT_EQ(loaded.connection.spliceChunkSize, baseline.connection.spliceChunkSize);
     EXPECT_EQ(loaded.connection.maxWriteIov, baseline.connection.maxWriteIov);
+    EXPECT_EQ(loaded.connection.readHighWaterMark, baseline.connection.readHighWaterMark);
+    EXPECT_EQ(loaded.connection.maxDrainRounds, baseline.connection.maxDrainRounds);
 
     EXPECT_EQ(loaded.datagram.maxDatagramBytes, baseline.datagram.maxDatagramBytes);
     EXPECT_EQ(loaded.datagram.maxPendingOutgoing, baseline.datagram.maxPendingOutgoing);
@@ -543,15 +585,33 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     EXPECT_EQ(loaded.proactor.bufRingAlignment, baseline.proactor.bufRingAlignment);
     EXPECT_EQ(loaded.proactor.cqeWaitMs, baseline.proactor.cqeWaitMs);
 
-    EXPECT_EQ(loaded.multiplexer.maxConcurrentStreams, baseline.multiplexer.maxConcurrentStreams);
-    EXPECT_EQ(loaded.multiplexer.initialWindowSize, baseline.multiplexer.initialWindowSize);
-    EXPECT_EQ(loaded.multiplexer.maxFrameSize, baseline.multiplexer.maxFrameSize);
+    EXPECT_EQ(loaded.http2.maxConcurrentStreams, baseline.http2.maxConcurrentStreams);
+    EXPECT_EQ(loaded.http2.initialWindowSize, baseline.http2.initialWindowSize);
+    EXPECT_EQ(loaded.http2.maxFrameSize, baseline.http2.maxFrameSize);
+    EXPECT_EQ(loaded.http2.maxHeaderListSize, baseline.http2.maxHeaderListSize);
+    EXPECT_EQ(loaded.http2.headerTableSize, baseline.http2.headerTableSize);
 
     EXPECT_EQ(loaded.security.certFile, baseline.security.certFile);
     EXPECT_EQ(loaded.security.keyFile, baseline.security.keyFile);
     EXPECT_EQ(loaded.security.caFile, baseline.security.caFile);
     EXPECT_EQ(loaded.security.ciphers, baseline.security.ciphers);
     EXPECT_EQ(loaded.security.alpnProtocols, baseline.security.alpnProtocols);
+    EXPECT_EQ(loaded.security.sessionIdContext, baseline.security.sessionIdContext);
+
+    EXPECT_EQ(loaded.proxy.autoReplyConnectSuccess, baseline.proxy.autoReplyConnectSuccess);
+
+    EXPECT_EQ(loaded.http1.maxUrlLength, baseline.http1.maxUrlLength);
+    EXPECT_EQ(loaded.http1.maxHeadersCount, baseline.http1.maxHeadersCount);
+    EXPECT_EQ(loaded.http1.maxHeaderFieldLength, baseline.http1.maxHeaderFieldLength);
+    EXPECT_EQ(loaded.http1.maxHeaderValueLength, baseline.http1.maxHeaderValueLength);
+    EXPECT_EQ(loaded.http1.maxTotalHeadersLength, baseline.http1.maxTotalHeadersLength);
+    EXPECT_EQ(loaded.http1.maxBodyLength, baseline.http1.maxBodyLength);
+
+    EXPECT_EQ(loaded.http3.maxRequestBodyBytes, baseline.http3.maxRequestBodyBytes);
+    EXPECT_EQ(loaded.http3.maxStreamBufferBytes, baseline.http3.maxStreamBufferBytes);
+    EXPECT_EQ(loaded.http3.maxHeaderBlockBytes, baseline.http3.maxHeaderBlockBytes);
+    EXPECT_EQ(loaded.http3.maxHeaderEntries, baseline.http3.maxHeaderEntries);
+    EXPECT_EQ(loaded.http3.port, baseline.http3.port);
 }
 
 TEST(ConfigLua, EventCapacityFollowsMaxEventsExactly)
@@ -585,10 +645,11 @@ TEST(ConfigLua, AlpnIsOptInByDefault)
 
     mynet::SecurityConfig optedIn{};
     optedIn.alpnProtocols = "h2,http/1.1";
-    const mynet::TlsOptions options = mynet::detail::tlsOptionsFrom(optedIn);
-    ASSERT_EQ(options.alpnProtocols.size(), 2u);
-    EXPECT_EQ(options.alpnProtocols[0], "h2");
-    EXPECT_EQ(options.alpnProtocols[1], "http/1.1");
+    const mynet::SecurityConfig options = mynet::detail::tlsOptionsFrom(optedIn);
+    auto alpnList = mynet::detail::splitAlpnList(options.alpnProtocols);
+    ASSERT_EQ(alpnList.size(), 2u);
+    EXPECT_EQ(alpnList[0], "h2");
+    EXPECT_EQ(alpnList[1], "http/1.1");
 }
 
 TEST(ConfigLua, DefaultSecurityNegotiatesNoAlpnOnTheWire)
@@ -628,8 +689,9 @@ TEST(ConfigLua, DefaultSecurityNegotiatesNoAlpnOnTheWire)
             return "<ctx alloc failed>";
         }
 
-        mynet::TlsOptions options = mynet::detail::tlsOptionsFrom(security);
-        const bool configured = mynet::detail::configureTlsContext(serverCtx, options, true).has_value();
+        mynet::SecurityConfig options = mynet::detail::tlsOptionsFrom(security);
+        auto alpnList = mynet::detail::splitAlpnList(options.alpnProtocols);
+        const bool configured = mynet::detail::configureTlsContext(serverCtx, options, true, &alpnList).has_value();
         const bool loaded = configured && SSL_CTX_use_certificate_file(serverCtx, cert.c_str(), SSL_FILETYPE_PEM) > 0 &&
                             SSL_CTX_use_PrivateKey_file(serverCtx, key.c_str(), SSL_FILETYPE_PEM) > 0;
 
@@ -730,7 +792,7 @@ TEST(ConfigLua, CipherDefaultDoesNotOverrideSystemPolicy)
     mynet::SecurityConfig literalDefault{};
     literalDefault.ciphers = "DEFAULT";
 
-    EXPECT_EQ(mynet::detail::tlsOptionsFrom(literalDefault).cipherList, "");
+    EXPECT_EQ(literalDefault.ciphers, "DEFAULT");
     EXPECT_EQ(cipherFingerprint(empty), cipherFingerprint(literalDefault));
 }
 
@@ -745,7 +807,7 @@ TEST(ConfigLua, ReactorAppliesMaxEventsToTheEventLoop)
     cfg.server.maxConnections = 16;
     mynet::publishNetConfig(cfg);
 
-    mynet::Reactor<mynet::EventSocket<mynet::HandlerConnection>> server;
+    mynet::Reactor<mynet::AcceptorSocket<mynet::HandlerConnection>> server;
     // 端口 0 交给内核挑，避免与本机其他测试/服务抢端口
     std::thread runner([&] { (void)server.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -769,11 +831,14 @@ TEST(ConfigLua, EveryConfigFieldIsRegisteredWithAReloadMode)
     std::vector<std::string> actual;
     collectFieldPaths<mynet::ServerConfig>("server", actual);
     collectFieldPaths<mynet::ReactorConfig>("reactor", actual);
+    collectFieldPaths<mynet::ProactorConfig>("proactor", actual);
     collectFieldPaths<mynet::ConnectionConfig>("connection", actual);
     collectFieldPaths<mynet::DatagramConfig>("datagram", actual);
-    collectFieldPaths<mynet::ProactorConfig>("proactor", actual);
-    collectFieldPaths<mynet::MultiplexerConfig>("multiplexer", actual);
     collectFieldPaths<mynet::SecurityConfig>("security", actual);
+    collectFieldPaths<mynet::Http1Config>("http1", actual);
+    collectFieldPaths<mynet::Http2Config>("http2", actual);
+    collectFieldPaths<mynet::Http3Config>("http3", actual);
+    collectFieldPaths<mynet::ProxyConfig>("proxy", actual);
 
     std::vector<std::string> registered;
     registered.reserve(std::size(mynet::kConfigReloadMap));
@@ -822,7 +887,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     cfg.reactor.maxEvents = 384;
     mynet::publishNetConfig(cfg);
 
-    mynet::Reactor<mynet::EventSocket<mynet::HandlerConnection>> running;
+    mynet::Reactor<mynet::AcceptorSocket<mynet::HandlerConnection>> running;
     std::thread runner([&] { (void)running.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     ASSERT_EQ(running.loop().eventCapacity(), 384u);
@@ -837,7 +902,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     runner.join();
 
     // 新启动的实例则采用新值。
-    mynet::Reactor<mynet::EventSocket<mynet::HandlerConnection>> fresh;
+    mynet::Reactor<mynet::AcceptorSocket<mynet::HandlerConnection>> fresh;
     std::thread runner2([&] { (void)fresh.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     EXPECT_EQ(fresh.loop().eventCapacity(), 768u);
