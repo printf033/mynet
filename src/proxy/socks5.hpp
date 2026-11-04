@@ -102,7 +102,10 @@ namespace mynet::proxy
         bool autoReplyConnectSuccess_{true};
 
     public:
-        HandlerSocks5() noexcept : autoReplyConnectSuccess_(getProxyConfig().autoReplyConnectSuccess) {}
+        HandlerSocks5() noexcept
+            : autoReplyConnectSuccess_(getProxyConfig().autoReplyConnectSuccess)
+        {
+        }
         explicit HandlerSocks5(const ProxyConfig &cfg) noexcept
             : autoReplyConnectSuccess_(cfg.autoReplyConnectSuccess)
         {
@@ -133,10 +136,7 @@ namespace mynet::proxy
         /**
          * @brief 应用 SOCKS5 代理配置
          */
-        void configure(const ProxyConfig &cfg) noexcept
-        {
-            autoReplyConnectSuccess_ = cfg.autoReplyConnectSuccess;
-        }
+        void configure(const ProxyConfig &cfg) noexcept { autoReplyConnectSuccess_ = cfg.autoReplyConnectSuccess; }
 
         [[nodiscard]] Socks5Stage stage() const noexcept { return stage_; }
         [[nodiscard]] uint8_t command() const noexcept { return command_; }

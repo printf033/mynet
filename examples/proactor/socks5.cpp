@@ -1,8 +1,8 @@
+#include "proxy/socks5.hpp"
 #include "common/endpoint.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
 #include "proactor/proactor.hpp"
-#include "proxy/socks5.hpp"
 #include <string>
 #include <string_view>
 
@@ -24,9 +24,7 @@ namespace mynet::example
         {
             if (!g_user.empty())
             {
-                setAuthenticator([](std::string_view u, std::string_view p) {
-                    return u == g_user && p == g_pass;
-                });
+                setAuthenticator([](std::string_view u, std::string_view p) { return u == g_user && p == g_pass; });
             }
         }
 
@@ -36,7 +34,8 @@ namespace mynet::example
             if (stage() == proxy::Socks5Stage::STREAMING && requestBytes() > 0)
             {
                 std::string_view req(requestBegin(), requestBytes());
-                if (req.starts_with("GET ") || req.starts_with("POST ") || req.starts_with("HEAD ") || req.starts_with("PUT "))
+                if (req.starts_with("GET ") || req.starts_with("POST ") || req.starts_with("HEAD ") ||
+                    req.starts_with("PUT "))
                 {
                     std::string body = "Hello from mynet SOCKS5 proxy tunnel!\n";
                     std::string resp = "HTTP/1.1 200 OK\r\n"
@@ -64,9 +63,7 @@ namespace mynet::example
             proxy::HandlerSocks5::reset();
             if (!g_user.empty())
             {
-                setAuthenticator([](std::string_view u, std::string_view p) {
-                    return u == g_user && p == g_pass;
-                });
+                setAuthenticator([](std::string_view u, std::string_view p) { return u == g_user && p == g_pass; });
             }
         }
     };

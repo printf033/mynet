@@ -121,7 +121,7 @@ namespace mynet
         HandlerConnection(HandlerConnection &&) =
             delete ("a connection handler holds parser state bound to one connection");
         HandlerConnection &
-        operator=(HandlerConnection &&) = delete("a connection handler holds parser state bound to one connection");
+        operator=(HandlerConnection &&) = delete ("a connection handler holds parser state bound to one connection");
 
         /**
          * @brief 重置处理器状态（派生类重置专属解析器后应调用本实现）

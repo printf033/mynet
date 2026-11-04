@@ -28,6 +28,7 @@ mynet_unit_test(test_object_pool)
 mynet_unit_test(test_timer)
 mynet_unit_test(test_tls)
 mynet_unit_test(test_socks5)
+mynet_unit_test(test_proxy_protocols)
 mynet_unit_test(test_log_config)
 
 if(MYNET_ENABLE_LUA)

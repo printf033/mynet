@@ -105,10 +105,10 @@ namespace mynet
         HandlerHttp2(const HandlerHttp2 &) =
             delete ("an http2 handler owns the stream table and the frames bound to it");
         HandlerHttp2 &
-        operator=(const HandlerHttp2 &) = delete("an http2 handler owns the stream table and the frames bound to it");
-        HandlerHttp2(HandlerHttp2 &&) = delete("an http2 handler owns the stream table and the frames bound to it");
+        operator=(const HandlerHttp2 &) = delete ("an http2 handler owns the stream table and the frames bound to it");
+        HandlerHttp2(HandlerHttp2 &&) = delete ("an http2 handler owns the stream table and the frames bound to it");
         HandlerHttp2 &
-        operator=(HandlerHttp2 &&) = delete("an http2 handler owns the stream table and the frames bound to it");
+        operator=(HandlerHttp2 &&) = delete ("an http2 handler owns the stream table and the frames bound to it");
 
         /**
          * @brief 设置允许的最大并发活跃流数量。
@@ -1037,7 +1037,8 @@ namespace mynet
                 if (auto res = slot->handler->appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size())); !res)
                     [[unlikely]]
                 {
-                    LOG_ERROR("HandlerHttp2: stream {} appendRequest failed: {}", frame.streamId, toString(res.error()));
+                    LOG_ERROR("HandlerHttp2: stream {} appendRequest failed: {}", frame.streamId,
+                              toString(res.error()));
                     creditConnectionWindow();
                     sendResetStream(frame.streamId, STREAM_ERROR::INTERNAL_ERROR);
                     closeStream(frame.streamId);
@@ -1428,12 +1429,10 @@ namespace mynet
                 {
                     return;
                 }
-                FrameView frame{
-                    .streamId = id,
-                    .type = FRAME_TYPE::DATA,
-                    .flags = 0,
-                    .payload = std::string_view(chunkData, allowed)
-                };
+                FrameView frame{.streamId = id,
+                                .type = FRAME_TYPE::DATA,
+                                .flags = 0,
+                                .payload = std::string_view(chunkData, allowed)};
                 appendFrame(outScratch_, frame);
                 if (!flushOut()) [[unlikely]]
                 {
@@ -1582,12 +1581,7 @@ namespace mynet
             // 成为可预期的流级错误，而不是让对方在解到一半时才失败。
             appendSetting(payload, mux::kSettingMaxHeaderListSize,
                           static_cast<uint32_t>(getHttp2Config().maxHeaderListSize));
-            FrameView frame{
-                .streamId = 0,
-                .type = FRAME_TYPE::SETTINGS,
-                .flags = 0,
-                .payload = payload
-            };
+            FrameView frame{.streamId = 0, .type = FRAME_TYPE::SETTINGS, .flags = 0, .payload = payload};
             appendFrame(outScratch_, frame);
 
             // SETTINGS_INITIAL_WINDOW_SIZE 只改变 **stream 级**接收窗口；connection 级
@@ -1600,12 +1594,10 @@ namespace mynet
                 char updPayload[4];
                 const uint32_t beVal = std::byteswap(increment & frame::kStreamIdMask);
                 std::memcpy(updPayload, &beVal, sizeof(beVal));
-                FrameView update{
-                    .streamId = 0,
-                    .type = FRAME_TYPE::WINDOW_UPDATE,
-                    .flags = 0,
-                    .payload = std::string_view(updPayload, sizeof(updPayload))
-                };
+                FrameView update{.streamId = 0,
+                                 .type = FRAME_TYPE::WINDOW_UPDATE,
+                                 .flags = 0,
+                                 .payload = std::string_view(updPayload, sizeof(updPayload))};
                 appendFrame(outScratch_, update);
             }
             (void)flushOut();
@@ -1614,12 +1606,7 @@ namespace mynet
 
         inline void sendSettingsAck()
         {
-            FrameView frame{
-                .streamId = 0,
-                .type = FRAME_TYPE::SETTINGS,
-                .flags = FrameFlags::kAck,
-                .payload = {}
-            };
+            FrameView frame{.streamId = 0, .type = FRAME_TYPE::SETTINGS, .flags = FrameFlags::kAck, .payload = {}};
             appendFrame(outScratch_, frame);
             (void)flushOut();
         }
@@ -1639,13 +1626,12 @@ namespace mynet
             {
                 const size_t chunk = std::min(limit, block.size() - offset);
                 const bool last = offset + chunk == block.size();
-                FrameView frame{
-                    .streamId = id,
-                    .type = offset == 0 ? FRAME_TYPE::HEADERS : FRAME_TYPE::CONTINUATION,
-                    .flags = static_cast<uint8_t>((last ? FrameFlags::kEndHeaders : 0) |
-                                                  ((offset == 0 && endStream) ? FrameFlags::kEndStream : 0)),
-                    .payload = block.substr(offset, chunk)
-                };
+                FrameView frame{.streamId = id,
+                                .type = offset == 0 ? FRAME_TYPE::HEADERS : FRAME_TYPE::CONTINUATION,
+                                .flags =
+                                    static_cast<uint8_t>((last ? FrameFlags::kEndHeaders : 0) |
+                                                         ((offset == 0 && endStream) ? FrameFlags::kEndStream : 0)),
+                                .payload = block.substr(offset, chunk)};
                 appendFrame(outScratch_, frame);
                 offset += chunk;
             } while (offset < block.size());
@@ -1656,12 +1642,10 @@ namespace mynet
             char payload[4];
             const uint32_t val = std::byteswap(increment & frame::kStreamIdMask);
             std::memcpy(payload, &val, sizeof(val));
-            FrameView frame{
-                .streamId = id,
-                .type = FRAME_TYPE::WINDOW_UPDATE,
-                .flags = 0,
-                .payload = std::string_view(payload, sizeof(payload))
-            };
+            FrameView frame{.streamId = id,
+                            .type = FRAME_TYPE::WINDOW_UPDATE,
+                            .flags = 0,
+                            .payload = std::string_view(payload, sizeof(payload))};
             appendFrame(outScratch_, frame);
             (void)flushOut();
         }
@@ -1671,12 +1655,10 @@ namespace mynet
             char payload[4];
             const uint32_t val = std::byteswap(static_cast<uint32_t>(std::to_underlying(code)));
             std::memcpy(payload, &val, sizeof(val));
-            FrameView frame{
-                .streamId = id,
-                .type = FRAME_TYPE::RESET,
-                .flags = 0,
-                .payload = std::string_view(payload, sizeof(payload))
-            };
+            FrameView frame{.streamId = id,
+                            .type = FRAME_TYPE::RESET,
+                            .flags = 0,
+                            .payload = std::string_view(payload, sizeof(payload))};
             appendFrame(outScratch_, frame);
             (void)flushOut();
         }
@@ -1699,12 +1681,7 @@ namespace mynet
             payload.append(payloadHdr, 8);
             payload.append(why);
 
-            FrameView frame{
-                .streamId = 0,
-                .type = FRAME_TYPE::GOAWAY,
-                .flags = 0,
-                .payload = payload
-            };
+            FrameView frame{.streamId = 0, .type = FRAME_TYPE::GOAWAY, .flags = 0, .payload = payload};
             appendFrame(outScratch_, frame);
             (void)flushOut();
             closeAfterResponse_ = true;

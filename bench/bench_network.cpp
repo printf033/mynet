@@ -625,10 +625,7 @@ namespace
         class BenchHttp2Mux : public HandlerHttp2<QuietEchoStream>
         {
         public:
-            void onStreamEnd(uint32_t id) noexcept override
-            {
-                sendResponse(id, 200, "ok");
-            }
+            void onStreamEnd(uint32_t id) noexcept override { sendResponse(id, 200, "ok"); }
         };
         BenchHttp2Mux mux;
         [[maybe_unused]] auto _ = mux.appendRequest(BenchHttp2Mux::kClientPreface);
@@ -692,10 +689,7 @@ namespace
                 requestConsume(requestBytes());
             }
         }
-        void reset() noexcept override
-        {
-            proxy::HandlerSocks5::reset();
-        }
+        void reset() noexcept override { proxy::HandlerSocks5::reset(); }
     };
 
     template <template <typename> class EngineType>

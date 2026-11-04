@@ -1,7 +1,7 @@
+#include "proxy/socks5.hpp"
 #include "common/endpoint.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proxy/socks5.hpp"
 #include "reactor/reactor.hpp"
 #include <string>
 #include <string_view>
@@ -29,9 +29,7 @@ namespace mynet::example
         {
             if (!g_user.empty())
             {
-                setAuthenticator([](std::string_view u, std::string_view p) {
-                    return u == g_user && p == g_pass;
-                });
+                setAuthenticator([](std::string_view u, std::string_view p) { return u == g_user && p == g_pass; });
             }
         }
         void process()
@@ -41,7 +39,8 @@ namespace mynet::example
             {
                 std::string_view req(requestBegin(), requestBytes());
                 // 若对端发起 HTTP 请求，返回 200 OK 供 curl 读取
-                if (req.starts_with("GET ") || req.starts_with("POST ") || req.starts_with("HEAD ") || req.starts_with("PUT "))
+                if (req.starts_with("GET ") || req.starts_with("POST ") || req.starts_with("HEAD ") ||
+                    req.starts_with("PUT "))
                 {
                     std::string body = "Hello from mynet SOCKS5 proxy tunnel!\n";
                     std::string resp = "HTTP/1.1 200 OK\r\n"
@@ -70,9 +69,7 @@ namespace mynet::example
             proxy::HandlerSocks5::reset();
             if (!g_user.empty())
             {
-                setAuthenticator([](std::string_view u, std::string_view p) {
-                    return u == g_user && p == g_pass;
-                });
+                setAuthenticator([](std::string_view u, std::string_view p) { return u == g_user && p == g_pass; });
             }
         }
     };

@@ -798,10 +798,7 @@ class StreamTestHttpHandler : public http::v1::HandlerHttp<HTTP_MODE::REQUEST>
 {
 public:
     std::vector<std::string> chunks;
-    void onBodyChunk(std::string_view chunk) noexcept override
-    {
-        chunks.emplace_back(chunk);
-    }
+    void onBodyChunk(std::string_view chunk) noexcept override { chunks.emplace_back(chunk); }
 };
 
 TEST(HandlerHttp, StreamingBodyPassThroughZeroCopy)

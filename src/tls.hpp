@@ -296,8 +296,7 @@ namespace mynet
         }
 
         [[nodiscard]] inline Result<SSL_CTX *>
-        createServerContext(const char *crt, const char *key, SecurityConfig &options,
-                            TlsProtocolType proto) noexcept
+        createServerContext(const char *crt, const char *key, SecurityConfig &options, TlsProtocolType proto) noexcept
         {
             return createServerContext(crt, key, options, nullptr, proto);
         }

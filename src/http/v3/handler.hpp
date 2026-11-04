@@ -92,12 +92,12 @@ namespace mynet
 
             ~HandlerHttp3() noexcept override = default;
 
-            HandlerHttp3(const HandlerHttp3 &) = delete("an http3 handler owns socket, streams and parser state");
+            HandlerHttp3(const HandlerHttp3 &) = delete ("an http3 handler owns socket, streams and parser state");
             HandlerHttp3 &
-            operator=(const HandlerHttp3 &) = delete("an http3 handler owns socket, streams and parser state");
-            HandlerHttp3(HandlerHttp3 &&) = delete("an http3 handler owns socket, streams and parser state");
+            operator=(const HandlerHttp3 &) = delete ("an http3 handler owns socket, streams and parser state");
+            HandlerHttp3(HandlerHttp3 &&) = delete ("an http3 handler owns socket, streams and parser state");
             HandlerHttp3 &
-            operator=(HandlerHttp3 &&) = delete("an http3 handler owns socket, streams and parser state");
+            operator=(HandlerHttp3 &&) = delete ("an http3 handler owns socket, streams and parser state");
 
             void reset() noexcept override
             {

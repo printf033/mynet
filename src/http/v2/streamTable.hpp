@@ -44,10 +44,10 @@ namespace mynet
         public:
             StreamTable() noexcept = default;
             ~StreamTable() noexcept { release(); }
-            StreamTable(const StreamTable &) = delete("流表独占其槽位与流身份");
-            StreamTable &operator=(const StreamTable &) = delete("流表独占其槽位与流身份");
-            StreamTable(StreamTable &&) = delete("流槽位指针对外有效，移动会造成悬垂");
-            StreamTable &operator=(StreamTable &&) = delete("流槽位指针对外有效，移动会造成悬垂");
+            StreamTable(const StreamTable &) = delete ("流表独占其槽位与流身份");
+            StreamTable &operator=(const StreamTable &) = delete ("流表独占其槽位与流身份");
+            StreamTable(StreamTable &&) = delete ("流槽位指针对外有效，移动会造成悬垂");
+            StreamTable &operator=(StreamTable &&) = delete ("流槽位指针对外有效，移动会造成悬垂");
 
             /**
              * @brief 一次性分配 2 的幂个槽位（幂等：重复 init 前自动释放旧槽）。

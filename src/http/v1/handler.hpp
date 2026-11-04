@@ -42,11 +42,11 @@ namespace mynet
 
             ~HandlerHttp() noexcept override = default;
 
-            HandlerHttp(const HandlerHttp &) = delete("a handler holds parser state bound to one connection");
+            HandlerHttp(const HandlerHttp &) = delete ("a handler holds parser state bound to one connection");
             HandlerHttp &
-            operator=(const HandlerHttp &) = delete("a handler holds parser state bound to one connection");
-            HandlerHttp(HandlerHttp &&) = delete("a handler holds parser state bound to one connection");
-            HandlerHttp &operator=(HandlerHttp &&) = delete("a handler holds parser state bound to one connection");
+            operator=(const HandlerHttp &) = delete ("a handler holds parser state bound to one connection");
+            HandlerHttp(HandlerHttp &&) = delete ("a handler holds parser state bound to one connection");
+            HandlerHttp &operator=(HandlerHttp &&) = delete ("a handler holds parser state bound to one connection");
 
             inline void init() noexcept
             {
@@ -304,10 +304,7 @@ namespace mynet
             }
 
         private:
-            [[nodiscard]] static inline const Http1Config &http1Config() noexcept
-            {
-                return getHttp1Config();
-            }
+            [[nodiscard]] static inline const Http1Config &http1Config() noexcept { return getHttp1Config(); }
 
             llhttp_t parser_{};
             llhttp_settings_t settings_{};

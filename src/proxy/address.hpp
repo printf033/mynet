@@ -8,12 +8,21 @@
 #include <arpa/inet.h>
 #include <cstdint>
 #include <cstring>
+#include <linux/netfilter_ipv4.h>
 #include <netinet/in.h>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <sys/socket.h>
 #include <vector>
+
+#ifndef SO_ORIGINAL_DST
+#define SO_ORIGINAL_DST 80
+#endif
+#ifndef IP6T_SO_ORIGINAL_DST
+#define IP6T_SO_ORIGINAL_DST 80
+#endif
 
 namespace mynet::proxy
 {
@@ -226,6 +235,128 @@ namespace mynet::proxy
                 return "[" + host + "]:" + std::to_string(port);
             }
             return host + ":" + std::to_string(port);
+        }
+
+        /**
+         * @brief 从主机名/IP字符串与端口自适应构造
+         */
+        static ProxyAddress fromHostPort(std::string_view hostStr, uint16_t port)
+        {
+            if (hostStr.empty())
+            {
+                return fromDomain("", port);
+            }
+
+            // 尝试 IPv4
+            if (auto ipv4 = fromIPv4String(hostStr, port); ipv4.has_value())
+            {
+                return *ipv4;
+            }
+
+            // 尝试 IPv6
+            std::string tmp(hostStr);
+            if (!tmp.empty() && tmp.front() == '[' && tmp.back() == ']')
+            {
+                tmp = tmp.substr(1, tmp.size() - 2);
+            }
+            in6_addr sin6{};
+            if (::inet_pton(AF_INET6, tmp.c_str(), &sin6) == 1)
+            {
+                return fromIPv6(reinterpret_cast<const uint8_t *>(&sin6), port);
+            }
+
+            // 默认为域名
+            return fromDomain(hostStr, port);
+        }
+
+        /**
+         * @brief 解析 VLESS 格式目标地址
+         *
+         * VLESS 规范：Port (2B BE) 先行，后接 ATYP 与对应地址字节：
+         * - 0x01: IPv4 (4B)
+         * - 0x02: 域名 (1B 长度 + 域名字符)
+         * - 0x03: IPv6 (16B)
+         *
+         * @param atyp 地址类型字节
+         * @param bytes 待解析切片（从地址内容开始）
+         * @param port 预先解析到的端口
+         * @param consumed 成功时回填地址占用的字节数
+         */
+        static std::optional<ProxyAddress> decodeVlessAddress(uint8_t atyp, std::span<const uint8_t> bytes,
+                                                              uint16_t port, size_t &consumed)
+        {
+            switch (atyp)
+            {
+            case 0x01: // IPv4
+            {
+                if (bytes.size() < 4)
+                {
+                    return std::nullopt;
+                }
+                uint32_t ipBe = 0;
+                std::memcpy(&ipBe, bytes.data(), 4);
+                consumed = 4;
+                return fromIPv4(ipBe, port);
+            }
+            case 0x02: // Domain
+            {
+                if (bytes.size() < 1)
+                {
+                    return std::nullopt;
+                }
+                const uint8_t domainLen = bytes[0];
+                if (bytes.size() < 1 + static_cast<size_t>(domainLen))
+                {
+                    return std::nullopt;
+                }
+                std::string_view domain(reinterpret_cast<const char *>(bytes.data() + 1), domainLen);
+                consumed = 1 + domainLen;
+                return fromDomain(domain, port);
+            }
+            case 0x03: // IPv6
+            {
+                if (bytes.size() < 16)
+                {
+                    return std::nullopt;
+                }
+                consumed = 16;
+                return fromIPv6(bytes.data(), port);
+            }
+            default:
+                return std::nullopt;
+            }
+        }
+
+        /**
+         * @brief 从已连接套接字提取透明代理原始目的地址 (Linux Netfilter SO_ORIGINAL_DST)
+         *
+         * @param fd 套接字描述符
+         * @return std::optional<ProxyAddress> 提取成功返回目的地址，未重定向或失败返回 nullopt
+         */
+        static std::optional<ProxyAddress> fromOriginalDst(int fd) noexcept
+        {
+            if (fd < 0)
+            {
+                return std::nullopt;
+            }
+
+            sockaddr_in sin{};
+            socklen_t slen = sizeof(sin);
+            if (::getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &sin, &slen) == 0 && sin.sin_family == AF_INET)
+            {
+                const uint16_t port = ntohs(sin.sin_port);
+                return fromIPv4(sin.sin_addr.s_addr, port);
+            }
+
+            sockaddr_in6 sin6{};
+            socklen_t slen6 = sizeof(sin6);
+            if (::getsockopt(fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST, &sin6, &slen6) == 0 && sin6.sin6_family == AF_INET6)
+            {
+                const uint16_t port = ntohs(sin6.sin6_port);
+                return fromIPv6(reinterpret_cast<const uint8_t *>(&sin6.sin6_addr), port);
+            }
+
+            return std::nullopt;
         }
     };
 

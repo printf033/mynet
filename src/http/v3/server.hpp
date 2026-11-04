@@ -48,9 +48,9 @@ namespace mynet
         {
         public:
             ServerHttp3(std::string certPath = "", std::string keyPath = "") noexcept
-                : certPath_(certPath.empty()
-                                ? (getSecurityConfig().certFile.empty() ? "certs/ser.crt" : getSecurityConfig().certFile)
-                                : std::move(certPath)),
+                : certPath_(certPath.empty() ? (getSecurityConfig().certFile.empty() ? "certs/ser.crt"
+                                                                                     : getSecurityConfig().certFile)
+                                             : std::move(certPath)),
                   keyPath_(keyPath.empty()
                                ? (getSecurityConfig().keyFile.empty() ? "certs/ser.key" : getSecurityConfig().keyFile)
                                : std::move(keyPath))

@@ -5,11 +5,11 @@
  * @brief 高性能 Linux io_uring 前摄器（Proactor）服务器实现。
  */
 
+#include "acceptor.hpp"
 #include "configHolder.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
-#include "acceptor.hpp"
 #include "log_config.hpp"
 #include "objectPool.hpp"
 #include "tls.hpp"
@@ -62,9 +62,9 @@ namespace mynet
 
         ~Proactor() noexcept { reset(); }
 
-        Proactor(const Proactor &) = delete("a proactor owns the io_uring ring and the buffers handed to the kernel");
+        Proactor(const Proactor &) = delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
         Proactor &
-        operator=(const Proactor &) = delete("a proactor owns the io_uring ring and the buffers handed to the kernel");
+        operator=(const Proactor &) = delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
         Proactor(Proactor &&) noexcept =
             delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
         Proactor &operator=(Proactor &&) noexcept =
@@ -112,7 +112,8 @@ namespace mynet
         {
             contract_assert(validServerConfig(server));
             contract_assert(validProactorConfig(proactor));
-            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err) [[unlikely]]
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err)
+                [[unlikely]]
             {
                 reset();
                 return err;
@@ -204,7 +205,8 @@ namespace mynet
         {
             contract_assert(validServerConfig(server));
             contract_assert(validProactorConfig(proactor));
-            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err) [[unlikely]]
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err)
+                [[unlikely]]
             {
                 reset();
                 return err;
@@ -232,7 +234,8 @@ namespace mynet
         {
             contract_assert(validServerConfig(server));
             contract_assert(validProactorConfig(proactor));
-            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err) [[unlikely]]
+            if (auto err = acceptor_.listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err)
+                [[unlikely]]
             {
                 reset();
                 return err;
