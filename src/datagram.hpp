@@ -4,11 +4,11 @@
 #include "constraints.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
+#include "responseQueue.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <netinet/in.h>
 #include <string>
@@ -19,16 +19,42 @@
 namespace mynet
 {
 
+    class HandlerDatagram;
+
     /**
-     * @brief UDP 数据报报文上下文元信息封装（涵盖回复、转发、广播与主动发包）
+     * @brief 数据报协议外发参数包特化
      *
-     * 关联目标对端地址元数据与待发送二进制报文载荷。
+     * 包含目标对端网络地址 sockaddr_in peer 与待发送载荷 std::string bytes。
      */
-    struct DatagramPacket
+    template <>
+    struct Protocol<HandlerDatagram>
     {
         sockaddr_in peer{};
         std::string bytes{};
+
+        Protocol() noexcept = default;
+        Protocol(const sockaddr_in &p, std::string b) noexcept
+            : peer(p),
+              bytes(std::move(b))
+        {
+        }
+        Protocol(const sockaddr_in &p, const char *buf, size_t n)
+            : peer(p),
+              bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
+        {
+        }
+
+        void clear() noexcept
+        {
+            peer = {};
+            bytes.clear();
+        }
     };
+
+    /**
+     * @brief 数据报外发响应队列特化类型（基于通用 ResponseQueueBase）
+     */
+    using DatagramQueue = ResponseQueueBase<Protocol<HandlerDatagram>>;
 
     /**
      * @brief 格式化 IPv4 对端套接字地址文本 ("192.0.2.7:5353")
@@ -76,6 +102,7 @@ namespace mynet
             : maxDatagramBytes_(config.maxDatagramBytes),
               maxPendingOutgoing_(config.maxPendingOutgoing)
         {
+            [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
         }
 
         virtual ~HandlerDatagram() noexcept = default;
@@ -106,10 +133,18 @@ namespace mynet
          */
         virtual void reset() noexcept
         {
-            outgoing_.clear();
+            const auto &cfg = getDatagramConfig();
+            maxDatagramBytes_ = cfg.maxDatagramBytes;
+            maxPendingOutgoing_ = cfg.maxPendingOutgoing;
+            if (outgoing_.capacity() != maxPendingOutgoing_) [[unlikely]]
+            {
+                [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
+            }
+            else
+            {
+                outgoing_.reset();
+            }
             droppedOutgoing_ = 0;
-            maxDatagramBytes_ = getDatagramConfig().maxDatagramBytes;
-            maxPendingOutgoing_ = getDatagramConfig().maxPendingOutgoing;
         }
 
         /**
@@ -136,14 +171,12 @@ namespace mynet
         inline void sendTo(const sockaddr_in &target, const char *buf, size_t n)
         {
             contract_assert(buf != nullptr);
-            if (outgoing_.size() >= maxPendingOutgoing_) [[unlikely]]
+            if (!outgoing_.emplace(target, buf, n)) [[unlikely]]
             {
                 ++droppedOutgoing_;
                 LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
                          outgoing_.size(), n, datagramPeerText(target));
-                return;
             }
-            outgoing_.push_back(DatagramPacket{target, (n > 0) ? std::string(buf, n) : std::string()});
         }
 
         /**
@@ -151,14 +184,13 @@ namespace mynet
          */
         inline void sendTo(const sockaddr_in &target, std::string bytes)
         {
-            if (outgoing_.size() >= maxPendingOutgoing_) [[unlikely]]
+            const size_t sz = bytes.size();
+            if (!outgoing_.emplace(target, std::move(bytes))) [[unlikely]]
             {
                 ++droppedOutgoing_;
                 LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
-                         outgoing_.size(), bytes.size(), datagramPeerText(target));
-                return;
+                         outgoing_.size(), sz, datagramPeerText(target));
             }
-            outgoing_.push_back(DatagramPacket{target, std::move(bytes)});
         }
 
         /**
@@ -189,16 +221,19 @@ namespace mynet
 
         [[nodiscard]] inline bool hasOutgoing() const noexcept { return !outgoing_.empty(); }
         [[nodiscard]] inline size_t outgoingCount() const noexcept { return outgoing_.size(); }
-        [[nodiscard]] inline const DatagramPacket &peekOutgoing() const noexcept { return outgoing_.front(); }
+        [[nodiscard]] inline const Protocol<HandlerDatagram> &peekOutgoing() const noexcept
+        {
+            return outgoing_.front();
+        }
 
-        [[nodiscard]] inline DatagramPacket takeOutgoing()
+        [[nodiscard]] inline Protocol<HandlerDatagram> takeOutgoing()
         {
             if (outgoing_.empty()) [[unlikely]]
             {
                 return {};
             }
-            DatagramPacket out = std::move(outgoing_.front());
-            outgoing_.pop_front();
+            Protocol<HandlerDatagram> out = std::move(outgoing_.front());
+            outgoing_.pop();
             return out;
         }
 
@@ -211,6 +246,7 @@ namespace mynet
         {
             contract_assert(n > 0);
             maxPendingOutgoing_ = n;
+            [[maybe_unused]] auto _ = outgoing_.init(n);
         }
         [[nodiscard]] inline size_t maxPendingOutgoing() const noexcept { return maxPendingOutgoing_; }
 
@@ -218,7 +254,7 @@ namespace mynet
         size_t maxDatagramBytes_ = getDatagramConfig().maxDatagramBytes;
         size_t maxPendingOutgoing_ = getDatagramConfig().maxPendingOutgoing;
         size_t droppedOutgoing_ = 0;
-        std::deque<DatagramPacket> outgoing_{};
+        DatagramQueue outgoing_{};
     };
 
     /**
@@ -250,8 +286,10 @@ namespace mynet
                                           d.broadcastTo(targets, buf, n);
                                           { d.hasOutgoing() } noexcept -> std::same_as<bool>;
                                           { d.outgoingCount() } noexcept -> std::same_as<size_t>;
-                                          { d.peekOutgoing() } noexcept -> std::same_as<const DatagramPacket &>;
-                                          { d.takeOutgoing() } -> std::same_as<DatagramPacket>;
+                                          {
+                                              d.peekOutgoing()
+                                          } noexcept -> std::same_as<const Protocol<HandlerDatagram> &>;
+                                          { d.takeOutgoing() } -> std::same_as<Protocol<HandlerDatagram>>;
                                           { d.droppedOutgoing() } noexcept -> std::same_as<size_t>;
 
                                           // ---- 容量与限制控制 ----
@@ -464,7 +502,7 @@ namespace mynet
 
             while (handler_->hasOutgoing())
             {
-                DatagramPacket packet = handler_->takeOutgoing();
+                Protocol<HandlerDatagram> packet = handler_->takeOutgoing();
                 for (;;)
                 {
                     ssize_t n = ::sendto(fd, packet.bytes.data(), packet.bytes.size(), 0,
@@ -601,7 +639,7 @@ namespace mynet
     private:
         Handler *handler_ = nullptr;
         std::vector<char> recvWindow_{};
-        DatagramPacket pendingPacket_{};
+        Protocol<HandlerDatagram> pendingPacket_{};
         bool hasPendingPacket_ = false;
         uint64_t receivedDatagrams_ = 0;
         uint64_t receivedBytes_ = 0;

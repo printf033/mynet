@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <string>
 
 namespace mynet
 {
@@ -36,5 +37,18 @@ namespace mynet
     // 基类与其派生约束分散在各自头文件：HandlerConnection / HandlerDatagram 及
     // 其概念在 connection.hpp、datagram.hpp，AcceptorBase 及其概念在 acceptor.hpp。
     // 传输无关的通用契约集中在本文件，避免监听层反向依赖具体传输。
+
+    /**
+     * @brief 协议运行时上下文与元信息特征主模板
+     *
+     * 基础主模板为空，供各协议特化对应小型参数包：
+     * - AcceptorSsl (acceptor.hpp)：特化附加 SSL_CTX* ctx;
+     * - HandlerConnection (connection.hpp)：特化包含 std::string bytes 响应载荷参数包;
+     * - HandlerDatagram (datagram.hpp)：特化包含 sockaddr_in peer 与 std::string bytes 报文参数包。
+     */
+    template <typename = void>
+    struct Protocol
+    {
+    };
 
 } // namespace mynet

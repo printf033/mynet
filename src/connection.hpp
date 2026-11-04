@@ -59,6 +59,67 @@ namespace mynet
         return "UNKNOWN";
     }
 
+    class HandlerConnection;
+
+    /**
+     * @brief 流式连接协议外发参数包特化
+     *
+     * 包含待外发字节载荷 std::string bytes。提供与 std::string 互相隐式转换与兼容接口，
+     * 保证上层零适配成本无缝复用。
+     */
+    template <>
+    struct Protocol<HandlerConnection>
+    {
+        std::string bytes{};
+
+        Protocol() noexcept = default;
+        Protocol(std::string s) noexcept
+            : bytes(std::move(s))
+        {
+        }
+        Protocol(std::string_view sv)
+            : bytes(sv)
+        {
+        }
+        Protocol(const char *buf, size_t n)
+            : bytes(buf, n)
+        {
+        }
+        Protocol(const char *s)
+            : bytes(s != nullptr ? s : "")
+        {
+        }
+
+        void clear() noexcept { bytes.clear(); }
+        [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
+        [[nodiscard]] size_t size() const noexcept { return bytes.size(); }
+        [[nodiscard]] size_t capacity() const noexcept { return bytes.capacity(); }
+        [[nodiscard]] const char *data() const noexcept { return bytes.data(); }
+
+        operator std::string &() & noexcept { return bytes; }
+        operator const std::string &() const & noexcept { return bytes; }
+        operator std::string() && noexcept { return std::move(bytes); }
+        operator std::string_view() const noexcept { return bytes; }
+
+        Protocol &operator=(std::string s) noexcept
+        {
+            bytes = std::move(s);
+            return *this;
+        }
+
+        Protocol &operator=(std::string_view sv)
+        {
+            bytes.assign(sv);
+            return *this;
+        }
+
+        bool operator==(const Protocol &other) const noexcept { return bytes == other.bytes; }
+        bool operator==(std::string_view sv) const noexcept { return bytes == sv; }
+        bool operator==(const char *s) const noexcept { return bytes == s; }
+
+        friend std::ostream &operator<<(std::ostream &os, const Protocol &p) { return os << p.bytes; }
+    };
+
     /**
      * @brief 偏连接的流式协议处理器基类
      *

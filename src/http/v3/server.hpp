@@ -436,6 +436,4 @@ namespace mynet
 
     } // namespace http::v3
 
-    using ServerHttp3 = http::v3::ServerHttp3;
-
 } // namespace mynet

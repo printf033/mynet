@@ -456,24 +456,24 @@ TEST(Datagram, DecoupledSendForwardBroadcastApis)
     handler.broadcastTo(targets, "multicast", 9);
     EXPECT_EQ(handler.outgoingCount(), 5u);
 
-    // 校验队列出队与 DatagramPacket
-    DatagramPacket p1 = handler.takeOutgoing();
+    // 校验队列出队与 Protocol<HandlerDatagram>
+    Protocol<HandlerDatagram> p1 = handler.takeOutgoing();
     EXPECT_EQ(p1.bytes, "pkt1");
     EXPECT_EQ(p1.peer.sin_port, peer1.sin_port);
 
-    DatagramPacket p2 = handler.takeOutgoing();
+    Protocol<HandlerDatagram> p2 = handler.takeOutgoing();
     EXPECT_EQ(p2.bytes, "pkt2");
     EXPECT_EQ(p2.peer.sin_port, peer2.sin_port);
 
-    DatagramPacket p3 = handler.takeOutgoing();
+    Protocol<HandlerDatagram> p3 = handler.takeOutgoing();
     EXPECT_EQ(p3.bytes, "forward_data");
     EXPECT_EQ(p3.peer.sin_port, peer3.sin_port);
 
-    DatagramPacket p4 = handler.takeOutgoing();
+    Protocol<HandlerDatagram> p4 = handler.takeOutgoing();
     EXPECT_EQ(p4.bytes, "multicast");
     EXPECT_EQ(p4.peer.sin_port, peer1.sin_port);
 
-    DatagramPacket p5 = handler.takeOutgoing();
+    Protocol<HandlerDatagram> p5 = handler.takeOutgoing();
     EXPECT_EQ(p5.bytes, "multicast");
     EXPECT_EQ(p5.peer.sin_port, peer2.sin_port);
 

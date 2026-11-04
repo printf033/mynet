@@ -471,7 +471,4 @@ namespace mynet
         };
     } // namespace http::v1
 
-    using http::v1::HandlerHttp;
-    using http::v1::HTTP_MODE;
-
 } // namespace mynet

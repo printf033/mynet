@@ -665,6 +665,4 @@ namespace mynet
 
     } // namespace http::v3
 
-    using HandlerHttp3 = http::v3::HandlerHttp3;
-
 } // namespace mynet

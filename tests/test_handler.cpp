@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 using namespace mynet;
+using namespace mynet::http::v1;
 
 namespace
 {
@@ -602,6 +603,74 @@ TEST(ResponseQueue, ResetClearsElementsAndPreservesCapacity)
     EXPECT_TRUE(queue.push(std::string("third")));
     EXPECT_EQ(queue.size(), 1u);
     EXPECT_EQ(queue.front(), "third");
+}
+
+TEST(DatagramQueue, FixedCapacityAndPeerPreservation)
+{
+    DatagramQueue queue;
+    ASSERT_TRUE(queue.init(2));
+    EXPECT_EQ(queue.capacity(), 2u);
+    EXPECT_TRUE(queue.empty());
+
+    sockaddr_in peer1{};
+    peer1.sin_family = AF_INET;
+    peer1.sin_port = htons(8080);
+    inet_pton(AF_INET, "127.0.0.1", &peer1.sin_addr);
+
+    sockaddr_in peer2{};
+    peer2.sin_family = AF_INET;
+    peer2.sin_port = htons(9090);
+    inet_pton(AF_INET, "10.0.0.1", &peer2.sin_addr);
+
+    EXPECT_TRUE(queue.emplace(peer1, "packet_one", 10));
+    EXPECT_TRUE(queue.emplace(peer2, std::string("packet_two")));
+    EXPECT_EQ(queue.size(), 2u);
+
+    // 满队拒绝
+    auto overflow = queue.emplace(peer1, "overflow", 8);
+    EXPECT_FALSE(overflow.has_value());
+    EXPECT_EQ(overflow.error(), ERR::QUEUE_FULL);
+
+    // 队首检验与弹出
+    const auto &front1 = queue.front();
+    EXPECT_EQ(front1.bytes, "packet_one");
+    EXPECT_EQ(front1.peer.sin_port, htons(8080));
+    queue.pop();
+    EXPECT_EQ(queue.size(), 1u);
+
+    const auto &front2 = queue.front();
+    EXPECT_EQ(front2.bytes, "packet_two");
+    EXPECT_EQ(front2.peer.sin_port, htons(9090));
+    queue.pop();
+    EXPECT_TRUE(queue.empty());
+
+    // 再次入队验证槽位 string 内存复用与正确性
+    EXPECT_TRUE(queue.emplace(peer1, "packet_three", 12));
+    EXPECT_EQ(queue.size(), 1u);
+    EXPECT_EQ(queue.front().bytes, "packet_three");
+}
+
+TEST(DatagramQueue, ResetClearsElementsAndPreservesCapacity)
+{
+    DatagramQueue queue;
+    ASSERT_TRUE(queue.init(4));
+
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(5353);
+
+    EXPECT_TRUE(queue.emplace(peer, "dns_query_1", 11));
+    EXPECT_TRUE(queue.emplace(peer, "dns_query_2", 11));
+    EXPECT_EQ(queue.size(), 2u);
+
+    queue.reset();
+    EXPECT_EQ(queue.size(), 0u);
+    EXPECT_TRUE(queue.empty());
+    EXPECT_EQ(queue.capacity(), 4u);
+
+    EXPECT_TRUE(queue.emplace(peer, "dns_query_3", 11));
+    EXPECT_EQ(queue.size(), 1u);
+    EXPECT_EQ(queue.front().bytes, "dns_query_3");
 }
 
 TEST(Connection, SpliceDecoupledProxyForward)

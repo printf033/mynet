@@ -12,6 +12,8 @@
 #include <version>
 
 using namespace mynet;
+using namespace mynet::http::v1;
+using namespace mynet::http::v3;
 
 namespace
 {
@@ -177,7 +179,7 @@ namespace
 
     struct DeletedTakeOutgoingHandler : HandlerDatagram
     {
-        DatagramPacket takeOutgoing() = delete;
+        Protocol<HandlerDatagram> takeOutgoing() = delete;
     };
 
     /// 反例：方法全齐、可重置，但未派生 HandlerDatagram。
@@ -195,12 +197,12 @@ namespace
 
         bool hasOutgoing() noexcept { return false; }
         size_t outgoingCount() noexcept { return 0; }
-        const DatagramPacket &peekOutgoing() noexcept
+        const Protocol<HandlerDatagram> &peekOutgoing() noexcept
         {
-            static DatagramPacket p;
+            static Protocol<HandlerDatagram> p;
             return p;
         }
-        DatagramPacket takeOutgoing() { return {}; }
+        Protocol<HandlerDatagram> takeOutgoing() { return {}; }
         size_t droppedOutgoing() noexcept { return 0; }
 
         void setMaxDatagramBytes(size_t) noexcept {}
@@ -236,6 +238,7 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<ValidResettable>);
     static_assert(Resettable<RequestBuffer>);
     static_assert(Resettable<ResponseQueue>);
+    static_assert(Resettable<DatagramQueue>);
     static_assert(Resettable<HandlerConnection>);
     static_assert(Resettable<HandlerDatagram>);
     static_assert(Resettable<AcceptorBase<HandlerConnection>>);

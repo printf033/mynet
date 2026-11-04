@@ -224,11 +224,6 @@ namespace mynet
     /**
      * @brief 监听接收器协议运行时上下文状态特化特征模板
      */
-    template <typename>
-    struct Protocol
-    {
-    };
-
     template <typename H>
     struct Protocol<AcceptorSsl<H>>
     {

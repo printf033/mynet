@@ -1,43 +1,44 @@
 #pragma once
 
+#include "constraints.hpp"
 #include "error.hpp"
 #include <cstddef>
-#include <cstring>
 #include <expected>
 #include <limits>
 #include <new>
-#include <string>
 #include <utility>
 
 namespace mynet
 {
+    class HandlerConnection;
 
     /**
-     * @brief 定容零异常 FIFO 响应队列
+     * @brief 定容零异常通用 FIFO 响应队列模板
      *
-     * 面向响应/待发数据这类有界流：init() 一次性分配 capacity 个槽位（每个槽
-     * 一个空 std::string），此后 push/pop 全程零堆分配、零异常。满队时 push
-     * 返回 ERR::QUEUE_FULL 拒绝新元素——不覆盖、不静默丢弃，背压语义显式。
+     * 队列自身是纯粹通用的定容环形队列，通过单一模板参数 Proto 适配不同协议的小型参数包：
+     * - 面向连接的流式会话（默认 Proto = Protocol<HandlerConnection>）：存储包含 std::string 的参数包；
+     * - 面向无连接的数据报会话（Proto = Protocol<HandlerDatagram>）：存储包含 sockaddr_in peer 与 std::string
+     * 的参数包。
      *
-     * 槽位地址在整个生命周期内稳定（无 rehash、无扩容搬迁），取出的
-     * std::string 引用在其他槽位操作期间保持有效。
-     *
-     * 异常策略：全部操作 noexcept；唯一可失败路径是 init() 的槽位分配，
-     * 以 ERR::POOL_ALLOC_FAILED 交付（与对象池同一类失败：一次性预分配失败）。
+     * 队列在 init(capacity) 时一次性分配内存，后续 push/pop 均无任何堆分配，
+     * 弹出与重置时调用槽位的 clear() 复用已分配容量。
      */
-    class ResponseQueue
+    template <typename Proto = Protocol<HandlerConnection>>
+    class ResponseQueueBase
     {
     public:
-        ResponseQueue() noexcept = default;
+        using Item = Proto;
 
-        ~ResponseQueue() noexcept { destroy(); }
+        ResponseQueueBase() noexcept = default;
 
-        ResponseQueue(const ResponseQueue &) =
-            delete ("a response queue owns one slot array; a copy would alias the strings");
-        ResponseQueue &operator=(const ResponseQueue &) =
-            delete ("a response queue owns one slot array; a copy would alias the strings");
+        ~ResponseQueueBase() noexcept { destroy(); }
 
-        ResponseQueue(ResponseQueue &&other) noexcept
+        ResponseQueueBase(const ResponseQueueBase &) =
+            delete ("a response queue owns one slot array; a copy would alias the elements");
+        ResponseQueueBase &operator=(const ResponseQueueBase &) =
+            delete ("a response queue owns one slot array; a copy would alias the elements");
+
+        ResponseQueueBase(ResponseQueueBase &&other) noexcept
             : slots_(std::exchange(other.slots_, nullptr)),
               capacity_(std::exchange(other.capacity_, 0)),
               head_(std::exchange(other.head_, 0)),
@@ -45,7 +46,7 @@ namespace mynet
         {
         }
 
-        ResponseQueue &operator=(ResponseQueue &&other) noexcept
+        ResponseQueueBase &operator=(ResponseQueueBase &&other) noexcept
         {
             if (this != &other)
             {
@@ -68,21 +69,20 @@ namespace mynet
         {
             destroy();
             const size_t n = capacity == 0 ? 1 : capacity;
-            if (n > std::numeric_limits<size_t>::max() / sizeof(std::string)) [[unlikely]]
+            if (n > std::numeric_limits<size_t>::max() / sizeof(Item)) [[unlikely]]
             {
                 capacity_ = 0;
                 return std::unexpected(ERR::POOL_ALLOC_FAILED);
             }
-            slots_ = static_cast<std::string *>(::operator new[](n * sizeof(std::string), std::nothrow));
+            slots_ = static_cast<Item *>(::operator new[](n * sizeof(Item), std::nothrow));
             if (slots_ == nullptr) [[unlikely]]
             {
                 capacity_ = 0;
                 return std::unexpected(ERR::POOL_ALLOC_FAILED);
             }
-            // 空字符串默认构造零堆分配、确定 noexcept，逐槽定位 new 无失败路径
             for (size_t i = 0; i < n; ++i)
             {
-                ::new (static_cast<void *>(slots_ + i)) std::string();
+                ::new (static_cast<void *>(slots_ + i)) Item();
             }
             capacity_ = n;
             head_ = 0;
@@ -91,73 +91,75 @@ namespace mynet
         }
 
         /**
-         * @brief 队尾推入一个字符串（移动语义）
+         * @brief 队尾推入一个协议参数包（移动语义）
          *
          * 满队时拒绝并返回 ERR::QUEUE_FULL，原队内容与新元素均不受影响。
-         * std::string 的移动赋值 noexcept（源为普通堆串），失败面不存在。
          *
          * @return 成功 {}；满队 std::unexpected(ERR::QUEUE_FULL)
          */
-        [[nodiscard]] inline Result<> push(std::string &&s) noexcept
+        [[nodiscard]] inline Result<> push(Item &&item) noexcept
         {
             if (size_ >= capacity_) [[unlikely]]
             {
                 return std::unexpected(ERR::QUEUE_FULL);
             }
             const size_t tail = (head_ + size_ >= capacity_) ? (head_ + size_ - capacity_) : (head_ + size_);
-            slots_[tail] = std::move(s);
+            slots_[tail] = std::move(item);
             ++size_;
             return {};
         }
 
         /**
-         * @brief 队尾推入一个字符串（左值引用拷贝）
+         * @brief 队尾推入一个协议参数包（左值引用拷贝）
          */
-        [[nodiscard]] inline Result<> push(const std::string &s) noexcept
+        [[nodiscard]] inline Result<> push(const Item &item) noexcept
         {
             if (size_ >= capacity_) [[unlikely]]
             {
                 return std::unexpected(ERR::QUEUE_FULL);
             }
             const size_t tail = (head_ + size_ >= capacity_) ? (head_ + size_ - capacity_) : (head_ + size_);
-            slots_[tail] = s;
+            slots_[tail] = item;
             ++size_;
             return {};
         }
 
         /**
-         * @brief 队尾原地构造一个字符串
+         * @brief 队尾原地构造一个协议参数包
          */
-        [[nodiscard]] inline Result<> emplace(std::string_view sv) noexcept
+        template <typename... Args>
+        [[nodiscard]] inline Result<> emplace(Args &&...args) noexcept
         {
             if (size_ >= capacity_) [[unlikely]]
             {
                 return std::unexpected(ERR::QUEUE_FULL);
             }
             const size_t tail = (head_ + size_ >= capacity_) ? (head_ + size_ - capacity_) : (head_ + size_);
-            std::string &slot = slots_[tail];
-            slot.clear();
-            const Result<> r = appendTo(slot, sv);
-            if (!r) [[unlikely]]
-            {
-                slot.clear(); // 失败不留半截内容
-                return r;
-            }
+            slots_[tail] = Item(std::forward<Args>(args)...);
             ++size_;
             return {};
         }
 
         /**
-         * @brief 队头字符串引用（empty() 时不得调用）
+         * @brief 队头参数包引用（empty() 时不得调用）
          */
-        [[nodiscard]] inline std::string &front() noexcept
+        [[nodiscard]] inline Item &front() noexcept
         {
             contract_assert(size_ > 0);
             return slots_[head_];
         }
 
         /**
-         * @brief 弹出队头（empty() 时为无操作）
+         * @brief 队头参数包常量引用（empty() 时不得调用）
+         */
+        [[nodiscard]] inline const Item &front() const noexcept
+        {
+            contract_assert(size_ > 0);
+            return slots_[head_];
+        }
+
+        /**
+         * @brief 弹出队头并清空槽位（保留槽位内部 string 等动态容量）
          */
         inline void pop() noexcept
         {
@@ -165,18 +167,13 @@ namespace mynet
             {
                 return;
             }
-            std::string &slot = slots_[head_];
-            if (!slot.empty()) [[likely]]
-            {
-                // 归还字符串持有的堆块代价高于清空指针：直接 clear 保留容量复用
-                slot.clear();
-            }
+            slots_[head_].clear();
             head_ = (head_ + 1 >= capacity_) ? 0 : (head_ + 1);
             --size_;
         }
 
         /**
-         * @brief 重置全部元素（保留槽位与各字符串容量，复位游标）
+         * @brief 重置全部元素（保留槽位与各参数包容量，复位游标）
          */
         inline void reset() noexcept
         {
@@ -195,23 +192,6 @@ namespace mynet
 
     private:
         /**
-         * @brief 向字符串追加视图的零异常路径
-         *
-         * 先 resize 预留目标长度（resize 越界时抛 length_error/bad_alloc——
-         * 标准容器在 -fno-exceptions 下将直接 std::terminate，与库纪律等价：
-         * 分配失败是不可恢复的进程级故障），再 memcpy 落数据。
-         */
-        [[nodiscard]] static inline Result<> appendTo(std::string &dst, std::string_view sv) noexcept
-        {
-            if (sv.empty()) [[unlikely]]
-            {
-                return {};
-            }
-            dst.append(sv.data(), sv.size());
-            return {};
-        }
-
-        /**
          * @brief 析构全部槽位并释放槽位数组
          */
         inline void destroy() noexcept
@@ -222,7 +202,7 @@ namespace mynet
             }
             for (size_t i = 0; i < capacity_; ++i)
             {
-                slots_[i].~basic_string();
+                slots_[i].~Item();
             }
             ::operator delete[](slots_, std::nothrow);
             slots_ = nullptr;
@@ -231,10 +211,15 @@ namespace mynet
             size_ = 0;
         }
 
-        std::string *slots_ = nullptr;
+        Item *slots_ = nullptr;
         size_t capacity_ = 0;
         size_t head_ = 0;
         size_t size_ = 0;
     };
+
+    /**
+     * @brief 默认流式单连接响应队列别名
+     */
+    using ResponseQueue = ResponseQueueBase<Protocol<HandlerConnection>>;
 
 } // namespace mynet
