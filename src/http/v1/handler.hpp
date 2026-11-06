@@ -151,26 +151,6 @@ namespace mynet
                 return sendResponse(statusCode, statusText, {}, body);
             }
 
-            /**
-             * @brief 适配 Connection::echo 契约：将请求体作为 HTTP 200 OK 响应载荷回显
-             */
-            inline void echo() noexcept
-            {
-                if constexpr (Mode == HTTP_MODE::REQUEST)
-                {
-                    if (!body_.empty())
-                    {
-                        std::vector<std::pair<std::string, std::string>> hdrs = {
-                            {"Content-Type", "application/octet-stream"}};
-                        [[maybe_unused]] auto _ = sendResponse(200, "OK", hdrs, body_);
-                    }
-                }
-                else
-                {
-                    HandlerConnection::echo();
-                }
-            }
-
             // ---- 解析元数据快速提取 ----
 
             [[nodiscard]] inline const std::string &url() const noexcept { return url_; }

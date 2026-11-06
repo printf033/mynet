@@ -307,7 +307,7 @@ namespace mynet
         inline void applyMultiplexerConfig() noexcept { applyHttp2Config(); }
 
         /**
-         * @brief 适配 Connection::echo 契约：遍历当前活跃流表，驱动每条流上的处理器执行 echo() 并泵送响应
+         * @brief 驱动当前所有活跃流上的处理器执行 process() 并泵送响应
          */
         inline void echo() noexcept
         {
@@ -321,7 +321,7 @@ namespace mynet
                         StreamSlot *slot = streams_.find(id);
                         if (slot != nullptr && slot->handler != nullptr)
                         {
-                            slot->handler->echo();
+                            slot->handler->process();
                             pumpStream(id, *slot);
                         }
                     }
@@ -1045,14 +1045,7 @@ namespace mynet
                     return;
                 }
             }
-            if constexpr (requires { slot->handler->process(); })
-            {
-                slot->handler->process();
-            }
-            else
-            {
-                slot->handler->echo();
-            }
+            slot->handler->process();
             collectResponses(frame.streamId, *slot);
 
             if (frame.hasFlag(FrameFlags::kEndStream))

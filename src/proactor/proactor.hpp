@@ -931,14 +931,7 @@ namespace mynet
                         }
                         else
                         {
-                            if constexpr (requires { handler.process(); })
-                            {
-                                handler.process();
-                            }
-                            else
-                            {
-                                handler.echo();
-                            }
+                            handler.process();
                         }
                         session->conn.touch();
                         recycleBuffer(bid);

@@ -36,10 +36,10 @@ namespace
     {
     };
 
-    /// 正例：派生自 HandlerConnection，只重写 echo() 表达业务定制。
+    /// 正例：派生自 HandlerConnection，只重写 process() 表达业务定制。
     struct FakeHandler : public HandlerConnection
     {
-        void echo() {}
+        void process() {}
     };
 
     /// 反例：手写齐全部流式成员与生命周期钩子——结构上无懈可击，
@@ -62,7 +62,7 @@ namespace
         const char *requestBegin() noexcept { return ""; }
         void requestConsume(size_t) noexcept {}
         void requestClear() noexcept {}
-        void echo() {}
+        void process() {}
         void reset() noexcept {}
         void onConnect(int) noexcept {}
         void onUpgrade() noexcept {}
@@ -97,7 +97,7 @@ namespace
         bool hasResponse() noexcept { return false; }
         std::string takeResponse() { return ""; }
         bool requestOverLimit() noexcept { return false; }
-        void echo() {}
+        void process() {}
         void reset() noexcept {}
     };
 
@@ -108,9 +108,9 @@ namespace
         void appendRequest(const char *, ssize_t) {}
     };
 
-    struct DeletedEchoHandler : public HandlerConnection
+    struct DeletedProcessHandler : public HandlerConnection
     {
-        void echo() = delete;
+        void process() = delete;
     };
 
     struct DeletedTakeResponseHandler : public HandlerConnection
@@ -291,7 +291,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     static_assert(MandatoryMethodConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(!MandatoryMethodConnection<ThrowingAppendHandler>); // 旧语义：允许抛出的摄入路径现被约束拒绝
 
-    static_assert(!MandatoryMethodConnection<DeletedEchoHandler>);
+    static_assert(!MandatoryMethodConnection<DeletedProcessHandler>);
     static_assert(!MandatoryMethodConnection<DeletedTakeResponseHandler>);
     static_assert(!MandatoryMethodConnection<DeletedPushResponseHandler>);
     static_assert(!MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);
@@ -305,7 +305,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     EXPECT_FALSE(MandatoryMethodConnection<FullContractWithoutDerivation>);
     EXPECT_FALSE(MandatoryMethodConnection<LegacySixMemberHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<ThrowingAppendHandler>);
-    EXPECT_FALSE(MandatoryMethodConnection<DeletedEchoHandler>);
+    EXPECT_FALSE(MandatoryMethodConnection<DeletedProcessHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedTakeResponseHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedPushResponseHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);

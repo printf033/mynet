@@ -495,6 +495,11 @@ namespace mynet
         virtual void onParseError([[maybe_unused]] const char *reason) noexcept {}
 
         /**
+         * @brief 默认业务处理入口：当派生协议未定制处理逻辑时，默认回显 (Echo) 请求数据
+         */
+        inline void process() { echo(); }
+
+        /**
          * @brief 默认执行逻辑：标准 Echo 协议回显
          */
         void echo()
@@ -591,7 +596,7 @@ namespace mynet
             { h.onMessageComplete() } noexcept;
             { h.onParseError(buf) } noexcept;
             { h.fd() } noexcept -> std::same_as<int>;
-            h.echo();
+            { h.process() };
         };
 
     /**
@@ -1321,14 +1326,7 @@ namespace mynet
                     readPaused_ = true;
                     return IO_STATUS::KEEP;
                 }
-                if constexpr (requires { handler_.process(); })
-                {
-                    handler_.process();
-                }
-                else
-                {
-                    handler_.echo();
-                }
+                handler_.process();
                 collectResponses();
                 if (closeAfterWrite_)
                 {

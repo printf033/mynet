@@ -818,7 +818,7 @@ TEST(HandlerHttp, LifecycleAndFd)
     EXPECT_EQ(handler.fd(), -1);
 }
 
-TEST(HandlerHttp, SendResponseAndEcho)
+TEST(HandlerHttp, SendResponseAndProcess)
 {
     http::v1::HandlerHttp<HTTP_MODE::REQUEST> handler;
 
@@ -832,12 +832,10 @@ TEST(HandlerHttp, SendResponseAndEcho)
     EXPECT_NE(resp.find("X-App: mynet\r\n"), std::string::npos);
     EXPECT_NE(resp.find("\r\n\r\nhello world"), std::string::npos);
 
-    // 2. 模拟请求解析完成后的 echo() 回显行为
+    // 2. 模拟请求解析完成后的 process() 业务响应行为
     std::string rawReq = "POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\n12345";
     feed(handler, rawReq);
     handler.process();
-    // 触发 HTTP 级回显
-    handler.echo();
     ASSERT_TRUE(handler.hasResponse());
     std::string echoResp = handler.takeResponse();
     EXPECT_NE(echoResp.find("HTTP/1.1 200 OK\r\n"), std::string::npos);

@@ -35,7 +35,7 @@ namespace
     /// 只具备流式能力、不满足 MandatoryMethodDatagram 的处理器。
     struct StreamOnlyHandler : HandlerConnection
     {
-        void echo() {}
+        void process() {}
     };
 
     /// 同时具备两种传输能力（与 HandlerHttp3 同构）。

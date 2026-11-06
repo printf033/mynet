@@ -38,8 +38,6 @@ namespace mynet
         class HandlerHttp3 : public HandlerConnection, public HandlerDatagram
         {
         public:
-            using HandlerConnection::echo;
-
             struct SessionKey
             {
                 uint32_t addr = 0;
