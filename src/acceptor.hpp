@@ -230,4 +230,28 @@ namespace mynet
         SSL_CTX *ctx = nullptr;
     };
 
+    /**
+     * @brief QUIC (UDP + TLS 1.3) 传输层监听接收器标签特化类型
+     */
+    template <typename HandlerType>
+        requires HandlerConstraint<HandlerType>
+    struct AcceptorQuic : public AcceptorSocket<HandlerType>
+    {
+    };
+
+    /**
+     * @brief QUIC 接收器通道约束
+     */
+    template <typename A>
+    concept QuicAcceptor = requires { typename A::Handler; } && std::same_as<A, AcceptorQuic<typename A::Handler>>;
+
+    /**
+     * @brief QUIC 监听接收器协议运行时上下文状态特化特征模板
+     */
+    template <typename H>
+    struct Protocol<AcceptorQuic<H>>
+    {
+        SSL_CTX *ctx = nullptr;
+    };
+
 } // namespace mynet

@@ -126,6 +126,21 @@ namespace mynet
             return "unknown frame decode error";
         }
 
+        struct Frame;
+
+        /**
+         * @brief HTTP/3 标准协议帧零拷贝视图结构体
+         *
+         * 载荷使用 std::string_view 直接切片底层接收缓冲区或常量存储，彻底消除帧解析时的堆内存分配。
+         */
+        struct FrameView
+        {
+            uint64_t type = 0;
+            std::string_view payload{};
+
+            [[nodiscard]] inline operator Frame() const;
+        };
+
         /**
          * @brief HTTP/3 协议帧实体
          */
@@ -133,7 +148,17 @@ namespace mynet
         {
             uint64_t type = 0;
             std::string payload{};
+
+            [[nodiscard]] inline FrameView view() const noexcept
+            {
+                return FrameView{.type = type, .payload = payload};
+            }
         };
+
+        inline FrameView::operator Frame() const
+        {
+            return Frame{.type = type, .payload = std::string(payload)};
+        }
 
         /**
          * @brief 按照 RFC 9114 格式将帧类型与载荷序列化追加至输出缓冲区
@@ -149,6 +174,11 @@ namespace mynet
             appendVarint(out, type);
             appendVarint(out, payload.size());
             out.append(payload);
+        }
+
+        inline void appendFrame(std::string &out, const FrameView &fv)
+        {
+            appendFrame(out, fv.type, fv.payload);
         }
 
         inline void appendFrame(std::string &out, const Frame &f)
@@ -168,17 +198,17 @@ namespace mynet
             [[nodiscard]] inline uint64_t maxFrameSize() const noexcept { return maxFrameSize_; }
 
             /**
-             * @brief 从输入缓冲区解析提取下一个完整 HTTP/3 协议帧
+             * @brief 从输入缓冲区零拷贝解析提取下一个完整 HTTP/3 协议帧视图
              *
              * @param in 输入数据缓冲区
-             * @return 成功且有完整帧返回 Frame；数据不足返回 nullopt；解析超限或破损返回错误码
+             * @return 成功且有完整帧返回 FrameView；数据不足返回 nullopt；解析超限或破损返回错误码
              */
-            [[nodiscard]] inline std::expected<std::optional<Frame>, FRAME_DECODE_ERROR> next(RequestBuffer &in) const
+            [[nodiscard]] inline std::expected<std::optional<FrameView>, FRAME_DECODE_ERROR> nextView(RequestBuffer &in) const
             {
                 const size_t available = in.readableBytes();
                 if (available == 0) [[unlikely]]
                 {
-                    return std::optional<Frame>{};
+                    return std::optional<FrameView>{};
                 }
 
                 const auto *base = reinterpret_cast<const uint8_t *>(in.readableBegin());
@@ -191,7 +221,7 @@ namespace mynet
                 {
                     if (typeRes.error() == VARINT_ERROR::INSUFFICIENT_BYTES)
                     {
-                        return std::optional<Frame>{};
+                        return std::optional<FrameView>{};
                     }
                     return std::unexpected(FRAME_DECODE_ERROR::INVALID_VARINT);
                 }
@@ -202,7 +232,7 @@ namespace mynet
                 {
                     if (lenRes.error() == VARINT_ERROR::INSUFFICIENT_BYTES)
                     {
-                        return std::optional<Frame>{};
+                        return std::optional<FrameView>{};
                     }
                     return std::unexpected(FRAME_DECODE_ERROR::INVALID_VARINT);
                 }
@@ -216,17 +246,37 @@ namespace mynet
                 if (rem < length)
                 {
                     // 载荷尚未完整到达，保持只读游标不推进
-                    return std::optional<Frame>{};
+                    return std::optional<FrameView>{};
                 }
 
-                Frame frame;
-                frame.type = *typeRes;
-                frame.payload.assign(reinterpret_cast<const char *>(ptr), static_cast<size_t>(length));
+                FrameView fv;
+                fv.type = *typeRes;
+                fv.payload = std::string_view(reinterpret_cast<const char *>(ptr), static_cast<size_t>(length));
 
                 const size_t consumed = static_cast<size_t>((ptr - base)) + static_cast<size_t>(length);
-                in.retrieve(consumed);
+                in.retrieveNoCompact(consumed);
 
-                return std::optional<Frame>{std::move(frame)};
+                return std::optional<FrameView>{fv};
+            }
+
+            /**
+             * @brief 从输入缓冲区解析提取下一个完整 HTTP/3 协议帧（实体拷贝）
+             *
+             * @param in 输入数据缓冲区
+             * @return 成功且有完整帧返回 Frame；数据不足返回 nullopt；解析超限或破损返回错误码
+             */
+            [[nodiscard]] inline std::expected<std::optional<Frame>, FRAME_DECODE_ERROR> next(RequestBuffer &in) const
+            {
+                auto viewRes = nextView(in);
+                if (!viewRes)
+                {
+                    return std::unexpected(viewRes.error());
+                }
+                if (!viewRes->has_value())
+                {
+                    return std::optional<Frame>{};
+                }
+                return std::optional<Frame>{Frame(**viewRes)};
             }
 
         private:

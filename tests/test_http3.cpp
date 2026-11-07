@@ -702,3 +702,112 @@ TEST(HandlerHttp3, SpliceTunnelApis)
     EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
     EXPECT_EQ(handler.spliceTarget(), -1);
 }
+
+// ============================================================================
+// 7. Refactored HTTP/3 Stream & Zero-Copy Tests
+// ============================================================================
+
+TEST(Http3Frame, ZeroCopyFrameViewDecodesDirectlyFromBuffer)
+{
+    std::string frameBytes;
+    appendFrame(frameBytes, std::to_underlying(FRAME_TYPE::DATA), "zerocopy-h3-payload");
+
+    RequestBuffer buf;
+    [[maybe_unused]] auto _ = buf.append(frameBytes.data(), frameBytes.size());
+
+    FrameDecoder decoder;
+    auto res = decoder.nextView(buf);
+    ASSERT_TRUE(res.has_value());
+    ASSERT_TRUE(res->has_value());
+
+    const FrameView &fv = **res;
+    EXPECT_EQ(fv.type, std::to_underlying(FRAME_TYPE::DATA));
+    EXPECT_EQ(fv.payload, "zerocopy-h3-payload");
+
+    // 验证 Frame 与 FrameView 互相转换
+    Frame owningFrame = fv;
+    EXPECT_EQ(owningFrame.type, fv.type);
+    EXPECT_EQ(owningFrame.payload, fv.payload);
+    EXPECT_EQ(owningFrame.view().payload, fv.payload);
+}
+
+class TrackingHttp3Stream : public HandlerConnection
+{
+public:
+    size_t processCount = 0;
+    void process() noexcept { ++processCount; }
+};
+
+class HookTrackingHttp3Handler : public HandlerHttp3Mux<TrackingHttp3Stream>
+{
+public:
+    bool openCalled = false;
+    bool headersCalled = false;
+    bool dataCalled = false;
+    bool endCalled = false;
+    bool closeCalled = false;
+    uint64_t lastStreamId = 999;
+    std::string lastData{};
+
+    void onStreamOpen(uint64_t id) noexcept override
+    {
+        openCalled = true;
+        lastStreamId = id;
+    }
+
+    void onStreamHeadersDecoded(uint64_t id, const std::vector<Header> &) noexcept override
+    {
+        headersCalled = true;
+        EXPECT_EQ(id, lastStreamId);
+    }
+
+    void onStreamData(uint64_t id, std::string_view bytes) noexcept override
+    {
+        dataCalled = true;
+        lastData.assign(bytes);
+        EXPECT_EQ(id, lastStreamId);
+    }
+
+    void onStreamEnd(uint64_t id) noexcept override
+    {
+        endCalled = true;
+        EXPECT_EQ(id, lastStreamId);
+    }
+
+    void onStreamClose(uint64_t id) noexcept override
+    {
+        closeCalled = true;
+        EXPECT_EQ(id, lastStreamId);
+    }
+};
+
+TEST(HandlerHttp3, CustomStreamHandlerAndLifecycleHooksDispatched)
+{
+    HookTrackingHttp3Handler handler;
+
+    EXPECT_EQ(handler.openStreams(), 0u);
+    EXPECT_GT(handler.streamPoolCapacity(), 0u);
+
+    std::vector<Header> reqHeaders = {{":method", "POST"}, {":path", "/hook-test"}};
+    std::string headerBytes;
+    encodeHeaders(headerBytes, reqHeaders);
+
+    std::string frames;
+    appendFrame(frames, std::to_underlying(FRAME_TYPE::HEADERS), headerBytes);
+    appendFrame(frames, std::to_underlying(FRAME_TYPE::DATA), "stream-data-bytes");
+
+    [[maybe_unused]] auto _ = handler.appendRequest(frames.data(), static_cast<ssize_t>(frames.size()));
+    handler.process();
+
+    EXPECT_TRUE(handler.openCalled);
+    EXPECT_TRUE(handler.headersCalled);
+    EXPECT_TRUE(handler.dataCalled);
+    EXPECT_TRUE(handler.endCalled);
+    EXPECT_TRUE(handler.closeCalled);
+    EXPECT_EQ(handler.lastStreamId, 0u);
+    EXPECT_EQ(handler.lastData, "stream-data-bytes");
+
+    // 流处理完成后流从表中清除，StreamHandler 归还对象池
+    EXPECT_EQ(handler.openStreams(), 0u);
+    EXPECT_TRUE(handler.hasResponse());
+}

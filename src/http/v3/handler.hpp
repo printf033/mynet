@@ -3,17 +3,28 @@
 /**
  * @file http/v3/handler.hpp
  * @brief RFC 9114 HTTP/3 统一协议处理器实现（支持 QUIC/UDP 数据报与流式传输）。
+ *
+ * 架构参考 HTTP/2 模块成熟设计，全面基于 mynet 基础库基础设施：
+ * 1. 泛型逻辑流：支持 HandlerHttp3Mux<StreamHandler>，每条逻辑流绑定一个独立的流处理器；
+ * 2. 对象池复用：引入 ObjectPool<StreamHandler>，流的分配与回收零动态堆分配；
+ * 3. 定容平坦流表：复用 mux::StreamTable 开放寻址平坦哈希表算法，消除 std::unordered_map 分配；
+ * 4. 零拷贝分帧：分帧层使用 FrameView (std::string_view) 切片输入缓冲；
+ * 5. 传输层双重绑定：具备 HandlerConnection 与 HandlerDatagram 双重能力，完美兼顾流仿真与 UDP/QUIC；
+ * 6. 统一生命周期钩子：提供与 HTTP/2 对齐的 onStreamOpen / onStreamHeadersDecoded / onStreamData / onStreamEnd / onStreamClose 钩子。
  */
 
 #include "../../connection.hpp"
 #include "../../datagram.hpp"
+#include "../../objectPool.hpp"
 #include "frame.hpp"
 #include "qpack.hpp"
 #include "quic.hpp"
 #include "streamTable.hpp"
 #include "varint.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -24,642 +35,811 @@ namespace mynet
 {
     namespace http::v3
     {
+
         /**
-         * @class HandlerHttp3
-         * @brief RFC 9114 HTTP/3 极速编解码与多路复用协议处理器
-         *
-         * 架构特性：
-         * 1. 传输层双重绑定：具备 HandlerConnection（流式/单连接会话生命周期）与 HandlerDatagram（UDP
-         * 无连接数据报）双重能力；
-         * 2. QUIC 原生支持：内置 RFC 9000 1-RTT 短首部报文解析、STREAM 传输帧打包与连接关闭通知；
-         * 3. QPACK 压缩与解压：支持静态表快速索引与字面量编码；
-         * 4. 逻辑流多路复用：跟踪控制流与客户端双向请求流状态，支持流水线化应答。
-         */
-        class HandlerHttp3 : public HandlerConnection, public HandlerDatagram
+         * @class HandlerHttp3Mux
+     * @brief RFC 9114 HTTP/3 极速编解码与多路复用协议处理器主模板
+     *
+     * @tparam StreamHandler 每条独立逻辑流所绑定的协议处理器类型，默认复用 HandlerConnection。
+     */
+    template <typename StreamHandler = HandlerConnection>
+        requires MandatoryMethodConnection<StreamHandler>
+    class HandlerHttp3Mux : public HandlerConnection, public HandlerDatagram
+    {
+    public:
+        using Stream = StreamHandler;
+        using StreamSlotType = http::v3::StreamSlot<StreamHandler>;
+        using StreamTableType = http::v3::StreamTable<StreamSlotType>;
+
+        struct SessionKey
         {
-        public:
-            struct SessionKey
+            uint32_t addr = 0;
+            uint16_t port = 0;
+            http::v3::ConnectionId dcid{};
+
+            bool operator==(const SessionKey &o) const noexcept
             {
-                uint32_t addr = 0;
-                uint16_t port = 0;
-                ConnectionId dcid{};
+                return addr == o.addr && port == o.port && dcid == o.dcid;
+            }
+        };
 
-                bool operator==(const SessionKey &o) const noexcept
-                {
-                    return addr == o.addr && port == o.port && dcid == o.dcid;
-                }
-            };
-
-            struct SessionKeyHash
+        struct SessionKeyHash
+        {
+            size_t operator()(const SessionKey &k) const noexcept
             {
-                size_t operator()(const SessionKey &k) const noexcept
+                size_t h = static_cast<size_t>(k.addr) ^ (static_cast<size_t>(k.port) << 16);
+                for (size_t i = 0; i < k.dcid.length; ++i)
                 {
-                    size_t h = static_cast<size_t>(k.addr) ^ (static_cast<size_t>(k.port) << 16);
-                    for (size_t i = 0; i < k.dcid.length; ++i)
-                    {
-                        h = (h * 131) ^ k.dcid.data[i];
-                    }
-                    return h;
+                    h = (h * 131) ^ k.dcid.data[i];
                 }
-            };
+                return h;
+            }
+        };
 
-            struct QuicSession
-            {
-                ConnectionId dcid{};
-                sockaddr_in peer{};
-                StreamTable streamTable;
-                FrameDecoder frameDecoder{};
-                uint32_t nextPacketNumber = 1;
-                size_t bytesReceived = 0;
-                size_t bytesSent = 0;
-                bool addressValidated = false;
+        struct QuicSession
+        {
+            http::v3::ConnectionId dcid{};
+            sockaddr_in peer{};
+            StreamTableType streamTable;
+            http::v3::FrameDecoder frameDecoder{};
+            uint32_t nextPacketNumber = 1;
+            size_t bytesReceived = 0;
+            size_t bytesSent = 0;
+            bool addressValidated = false;
 
-                explicit QuicSession(size_t maxStreams = 128)
-                    : streamTable(maxStreams)
-                {
-                }
-            };
-
-            explicit HandlerHttp3(size_t responseCapacity = getConnectionConfig().responseCapacity,
-                                  size_t maxStreams = 128) noexcept
-                : HandlerConnection(responseCapacity),
-                  maxStreams_(maxStreams),
-                  streamTable_(maxStreams)
+            explicit QuicSession(size_t maxStreams = 128)
+                : streamTable(maxStreams)
             {
             }
+        };
 
-            ~HandlerHttp3() noexcept override = default;
+        explicit HandlerHttp3Mux(size_t responseCapacity = getConnectionConfig().responseCapacity,
+                                 size_t maxStreams = 128) noexcept
+            : HandlerConnection(responseCapacity),
+              maxStreams_(maxStreams == 0 ? 1 : maxStreams),
+              streamTable_(maxStreams_ == 0 ? 1 : maxStreams_)
+        {
+            ensureStreamPool();
+        }
 
-            HandlerHttp3(const HandlerHttp3 &) = delete ("an http3 handler owns socket, streams and parser state");
-            HandlerHttp3 &
-            operator=(const HandlerHttp3 &) = delete ("an http3 handler owns socket, streams and parser state");
-            HandlerHttp3(HandlerHttp3 &&) = delete ("an http3 handler owns socket, streams and parser state");
-            HandlerHttp3 &
-            operator=(HandlerHttp3 &&) = delete ("an http3 handler owns socket, streams and parser state");
+        ~HandlerHttp3Mux() noexcept override
+        {
+            clearAllStreams();
+        }
 
-            void reset() noexcept override
+        HandlerHttp3Mux(const HandlerHttp3Mux &) =
+            delete ("an http3 handler owns socket, streams and parser state");
+        HandlerHttp3Mux &
+        operator=(const HandlerHttp3Mux &) =
+            delete ("an http3 handler owns socket, streams and parser state");
+        HandlerHttp3Mux(HandlerHttp3Mux &&) =
+            delete ("an http3 handler owns socket, streams and parser state");
+        HandlerHttp3Mux &
+        operator=(HandlerHttp3Mux &&) =
+            delete ("an http3 handler owns socket, streams and parser state");
+
+        void reset() noexcept override
+        {
+            HandlerConnection::reset();
+            HandlerDatagram::reset();
+            clearAllStreams();
+            sessions_.clear();
+            ensureStreamPool();
+            nextPacketNumber_ = 1;
+            controlStreamSent_ = false;
+            peerSettings_ = http::v3::Settings{};
+        }
+
+        void onConnect(int fd) noexcept override { HandlerConnection::onConnect(fd); }
+
+        /// 两个传输基类各自提供同名生命周期钩子，显式覆盖以消除二义并逐层转发
+        void onMessageComplete() noexcept override
+        {
+            HandlerConnection::onMessageComplete();
+            HandlerDatagram::onMessageComplete();
+        }
+
+        void onParseError(const char *reason) noexcept override
+        {
+            HandlerConnection::onParseError(reason);
+            HandlerDatagram::onParseError(reason);
+        }
+
+        [[nodiscard]] const http::v3::Settings &localSettings() const noexcept { return localSettings_; }
+        [[nodiscard]] const http::v3::Settings &peerSettings() const noexcept { return peerSettings_; }
+
+        inline void setMaxConcurrentStreams(size_t n)
+        {
+            maxStreams_ = n == 0 ? 1 : n;
+            streamTable_.setMaxStreams(maxStreams_);
+            if (streamPool_.capacity() == 0)
             {
-                HandlerConnection::reset();
-                HandlerDatagram::reset();
-                streamTable_.reset();
-                sessions_.clear();
-                nextPacketNumber_ = 1;
-                controlStreamSent_ = false;
-                peerSettings_ = Settings{};
+                ensureStreamPool();
             }
+        }
 
-            void onConnect(int fd) noexcept override { HandlerConnection::onConnect(fd); }
+        [[nodiscard]] inline size_t maxConcurrentStreams() const noexcept { return maxStreams_; }
+        [[nodiscard]] inline size_t openStreams() const noexcept { return streamTable_.size(); }
+        [[nodiscard]] inline size_t streamPoolCapacity() const noexcept { return streamPool_.capacity(); }
 
-            /// 两个传输基类各自提供同名生命周期钩子，此处显式覆盖以消除二义，
-            /// 并逐层转发，保留任一层将来加入行为时的语义。
-            void onMessageComplete() noexcept override
+        [[nodiscard]] inline StreamHandler *streamHandler(uint64_t streamId) noexcept
+        {
+            auto *slot = streamTable_.find(streamId);
+            return (slot != nullptr) ? slot->handler : nullptr;
+        }
+
+        [[nodiscard]] inline const StreamHandler *streamHandler(uint64_t streamId) const noexcept
+        {
+            const auto *slot = streamTable_.find(streamId);
+            return (slot != nullptr) ? slot->handler : nullptr;
+        }
+
+        [[nodiscard]] inline StreamSlotType *stream(uint64_t streamId) noexcept
+        {
+            return streamTable_.find(streamId);
+        }
+
+        [[nodiscard]] inline const StreamSlotType *stream(uint64_t streamId) const noexcept
+        {
+            return streamTable_.find(streamId);
+        }
+
+        [[nodiscard]] size_t activeStreams() const noexcept
+        {
+            size_t total = streamTable_.size();
+            for (const auto &[_, sess] : sessions_)
             {
-                HandlerConnection::onMessageComplete();
-                HandlerDatagram::onMessageComplete();
+                total += sess->streamTable.size();
             }
+            return total;
+        }
 
-            void onParseError(const char *reason) noexcept override
+        [[nodiscard]] size_t activeSessions() const noexcept { return sessions_.size(); }
+
+        void validateAddress(const sockaddr_in &peer, const http::v3::ConnectionId &dcid = {}) noexcept
+        {
+            for (auto &[k, sess] : sessions_)
             {
-                HandlerConnection::onParseError(reason);
-                HandlerDatagram::onParseError(reason);
-            }
-
-            [[nodiscard]] const Settings &localSettings() const noexcept { return localSettings_; }
-            [[nodiscard]] const Settings &peerSettings() const noexcept { return peerSettings_; }
-
-            [[nodiscard]] size_t activeStreams() const noexcept
-            {
-                size_t total = streamTable_.size();
-                for (const auto &[_, sess] : sessions_)
+                if (k.addr == peer.sin_addr.s_addr && k.port == peer.sin_port)
                 {
-                    total += sess->streamTable.size();
-                }
-                return total;
-            }
-
-            [[nodiscard]] size_t activeSessions() const noexcept { return sessions_.size(); }
-
-            void validateAddress(const sockaddr_in &peer, const ConnectionId &dcid = {}) noexcept
-            {
-                for (auto &[k, sess] : sessions_)
-                {
-                    if (k.addr == peer.sin_addr.s_addr && k.port == peer.sin_port)
+                    if (dcid.length == 0 || k.dcid == dcid)
                     {
-                        if (dcid.length == 0 || k.dcid == dcid)
-                        {
-                            sess->addressValidated = true;
-                        }
+                        sess->addressValidated = true;
                     }
-                }
-            }
-
-            [[nodiscard]] bool isAddressValidated(const sockaddr_in &peer, const ConnectionId &dcid = {}) const noexcept
-            {
-                for (const auto &[k, sess] : sessions_)
-                {
-                    if (k.addr == peer.sin_addr.s_addr && k.port == peer.sin_port)
-                    {
-                        if (dcid.length == 0 || k.dcid == dcid)
-                        {
-                            return sess->addressValidated;
-                        }
-                    }
-                }
-                return false;
-            }
-
-            /**
-             * @brief 业务请求处理钩子（可由派生类定制覆盖）
-             *
-             * @param streamId 逻辑流 ID
-             * @param headers 请求首部列表
-             * @param body 请求体数据
-             * @param responseBody 待填充的响应体内容（默认为回显或就绪问候语）
-             */
-            virtual void onRequest([[maybe_unused]] uint64_t streamId,
-                                   [[maybe_unused]] const std::vector<Header> &headers, std::string_view body,
-                                   std::string &responseBody)
-            {
-                if (!body.empty())
-                {
-                    responseBody.assign(body);
-                }
-                else
-                {
-                    responseBody.assign("Hello from mynet HTTP/3!");
-                }
-            }
-
-            /**
-             * @brief 流式报文处理逻辑 (TCP / 管道流仿真)
-             *
-             * 从 requestBuffer_ 中提取 HTTP/3 协议帧并驱动当前流的请求应答
-             */
-            void process()
-            {
-                if (requestBuffer_.empty()) [[unlikely]]
-                {
-                    return;
-                }
-
-                while (true)
-                {
-                    auto frameRes = frameDecoder_.next(requestBuffer_);
-                    if (!frameRes)
-                    {
-                        LOG_WARN("HandlerHttp3::process: frame decode error: {}", toString(frameRes.error()));
-                        requestBuffer_.reset();
-                        break;
-                    }
-                    if (!frameRes->has_value())
-                    {
-                        break;
-                    }
-
-                    auto &frame = **frameRes;
-                    auto slot = streamTable_.getOrCreate(0);
-                    if (!slot)
-                    {
-                        continue;
-                    }
-
-                    if (frame.type == std::to_underlying(FRAME_TYPE::SETTINGS))
-                    {
-                        auto setRes = Settings::decode(frame.payload);
-                        if (setRes)
-                        {
-                            peerSettings_ = *setRes;
-                            LOG_INFO("HandlerHttp3: peer SETTINGS received (maxFieldSectionSize={})",
-                                     peerSettings_.maxFieldSectionSize);
-                        }
-                    }
-                    else if (frame.type == std::to_underlying(FRAME_TYPE::HEADERS))
-                    {
-                        auto hRes = decodeHeaders(frame.payload);
-                        if (hRes)
-                        {
-                            slot->requestHeaders = std::move(*hRes);
-                            slot->headersComplete = true;
-                        }
-                    }
-                    else if (frame.type == std::to_underlying(FRAME_TYPE::DATA))
-                    {
-                        if (slot->requestBody.size() + frame.payload.size() <= maxRequestBodyBytes())
-                        {
-                            slot->requestBody.append(frame.payload);
-                        }
-                    }
-                }
-
-                // 排空一轮解析后，对已就绪的流生成应答
-                auto slot = streamTable_.find(0);
-                if (slot && slot->headersComplete)
-                {
-                    std::string responseBody;
-                    onRequest(0, slot->requestHeaders, slot->requestBody, responseBody);
-                    sendResponse(0, 200, {}, responseBody);
-                    slot->reset();
                 }
             }
+        }
 
-            /**
-             * @brief UDP 数据报处理逻辑 (RFC 9000 QUIC + RFC 9114 HTTP/3)
-             *
-             * 解析传入的 UDP 数据报，识别 QUIC 1-RTT 短首部报文与 STREAM 帧，
-             * 解复用 HTTP/3 请求并在同一 UDP 端点原路构造应答数据报回写。
-             * 按照 SessionKey (peer + dcid) 实现严格的 per-connection 会话隔离与
-             * RFC 9000 Section 8.1 3x 抗反射放大保护。
-             */
-            void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
+        [[nodiscard]] bool isAddressValidated(const sockaddr_in &peer, const http::v3::ConnectionId &dcid = {}) const noexcept
+        {
+            for (const auto &[k, sess] : sessions_)
             {
-                if (data == nullptr || n == 0) [[unlikely]]
+                if (k.addr == peer.sin_addr.s_addr && k.port == peer.sin_port)
                 {
-                    return;
-                }
-
-                std::string_view packet(data, n);
-
-                // 尝试作为 QUIC 短首部报文解析
-                auto shpRes = parseShortHeaderPacket(packet, 8);
-                if (shpRes)
-                {
-                    auto &shp = *shpRes;
-                    QuicSession *session = getOrCreateSession(peer, shp.dcid);
-                    if (!session)
+                    if (dcid.length == 0 || k.dcid == dcid)
                     {
-                        return;
+                        return sess->addressValidated;
                     }
-                    session->bytesReceived += n;
-                    handleQuicPacket(peer, shp, *session);
-                    return;
+                }
+            }
+            return false;
+        }
+
+        // ---- 协议前端可重写的钩子函数（对齐 HTTP/2 设计） ----
+
+        virtual void onStreamOpen([[maybe_unused]] uint64_t id) noexcept {}
+
+        virtual void onStreamHeaders([[maybe_unused]] uint64_t id, [[maybe_unused]] std::string_view block) noexcept {}
+
+        virtual void onStreamHeadersDecoded([[maybe_unused]] uint64_t id,
+                                            [[maybe_unused]] const std::vector<http::v3::Header> &headers) noexcept
+        {
+        }
+
+        virtual void onStreamTrailers([[maybe_unused]] uint64_t id,
+                                      [[maybe_unused]] const std::vector<http::v3::Header> &headers) noexcept
+        {
+        }
+
+        virtual void onStreamData([[maybe_unused]] uint64_t id, [[maybe_unused]] std::string_view bytes) noexcept {}
+
+        virtual void onStreamEnd([[maybe_unused]] uint64_t id) noexcept {}
+
+        virtual void onStreamClose([[maybe_unused]] uint64_t id) noexcept {}
+
+        virtual void onProtocolError([[maybe_unused]] http::v3::H3_ERROR code, [[maybe_unused]] std::string_view why) noexcept
+        {
+        }
+
+        /**
+         * @brief 业务请求处理钩子（可由派生类定制覆盖，保持 100% 现有用法兼容）
+         *
+         * @param streamId 逻辑流 ID
+         * @param headers 请求首部列表
+         * @param body 请求体数据
+         * @param responseBody 待填充的响应体内容（默认为回显或问候语）
+         */
+        virtual void onRequest([[maybe_unused]] uint64_t streamId,
+                               [[maybe_unused]] const std::vector<http::v3::Header> &headers, std::string_view body,
+                               std::string &responseBody)
+        {
+            if (!body.empty())
+            {
+                responseBody.assign(body);
+            }
+            else
+            {
+                responseBody.assign("Hello from mynet HTTP/3!");
+            }
+        }
+
+        /**
+         * @brief 流式报文处理逻辑 (TCP / 管道流仿真)
+         *
+         * 从 requestBuffer_ 中提取 HTTP/3 协议帧并驱动当前流的请求应答
+         */
+        void process()
+        {
+            ensureStreamPool();
+            if (requestBuffer_.empty()) [[unlikely]]
+            {
+                return;
+            }
+
+            while (true)
+            {
+                auto frameRes = frameDecoder_.nextView(requestBuffer_);
+                if (!frameRes)
+                {
+                    LOG_WARN("HandlerHttp3::process: frame decode error: {}", toString(frameRes.error()));
+                    onProtocolError(http::v3::H3_ERROR::H3_FRAME_ERROR, toString(frameRes.error()));
+                    requestBuffer_.reset();
+                    break;
+                }
+                if (!frameRes->has_value())
+                {
+                    requestBuffer_.maybeCompact();
+                    break;
                 }
 
-                // 备选路径：直接承载裸 HTTP/3 分帧的数据报（轻量/测试回环）
-                QuicSession *session = getOrCreateSession(peer, ConnectionId{});
+                auto &frame = **frameRes;
+                auto slot = streamTable_.getOrCreate(0);
+                if (!slot)
+                {
+                    continue;
+                }
+                if (slot->handler == nullptr)
+                {
+                    slot->handler = streamPool_.acquire();
+                    onStreamOpen(0);
+                }
+
+                if (frame.type == std::to_underlying(http::v3::FRAME_TYPE::SETTINGS))
+                {
+                    auto setRes = http::v3::Settings::decode(frame.payload);
+                    if (setRes)
+                    {
+                        peerSettings_ = *setRes;
+                        LOG_INFO("HandlerHttp3: peer SETTINGS received (maxFieldSectionSize={})",
+                                 peerSettings_.maxFieldSectionSize);
+                    }
+                }
+                else if (frame.type == std::to_underlying(http::v3::FRAME_TYPE::HEADERS))
+                {
+                    onStreamHeaders(0, frame.payload);
+                    auto hRes = http::v3::decodeHeaders(frame.payload);
+                    if (hRes)
+                    {
+                        slot->requestHeaders = std::move(*hRes);
+                        slot->headersComplete = true;
+                        slot->headersReceived = true;
+                        onStreamHeadersDecoded(0, slot->requestHeaders);
+                    }
+                }
+                else if (frame.type == std::to_underlying(http::v3::FRAME_TYPE::DATA))
+                {
+                    onStreamData(0, frame.payload);
+                    if (slot->handler != nullptr)
+                    {
+                        [[maybe_unused]] auto _ = slot->handler->appendRequest(frame.payload.data(), frame.payload.size());
+                        slot->handler->process();
+                    }
+                    if (slot->requestBody.size() + frame.payload.size() <= maxRequestBodyBytes())
+                    {
+                        slot->requestBody.append(frame.payload);
+                    }
+                }
+            }
+
+            // 排空一轮解析后，对已就绪的流生成应答
+            auto slot = streamTable_.find(0);
+            if (slot && slot->headersComplete)
+            {
+                onStreamEnd(0);
+                std::string body = slot->requestBody;
+                if (body.empty() && slot->handler != nullptr && slot->handler->requestBytes() > 0)
+                {
+                    body.assign(slot->handler->requestBegin(), slot->handler->requestBytes());
+                }
+                std::string responseBody;
+                onRequest(0, slot->requestHeaders, body, responseBody);
+                sendResponse(0, 200, {}, responseBody);
+                if (slot->handler != nullptr)
+                {
+                    streamPool_.release(slot->handler);
+                    slot->handler = nullptr;
+                }
+                onStreamClose(0);
+                streamTable_.close(0);
+            }
+        }
+
+        /**
+         * @brief UDP 数据报处理逻辑 (RFC 9000 QUIC + RFC 9114 HTTP/3)
+         */
+        void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
+        {
+            if (data == nullptr || n == 0) [[unlikely]]
+            {
+                return;
+            }
+
+            ensureStreamPool();
+            std::string_view packet(data, n);
+
+            // 尝试作为 QUIC 短首部报文解析
+            auto shpRes = http::v3::parseShortHeaderPacket(packet, 8);
+            if (shpRes)
+            {
+                auto &shp = *shpRes;
+                QuicSession *session = getOrCreateSession(peer, shp.dcid);
                 if (!session)
                 {
                     return;
                 }
                 session->bytesReceived += n;
+                handleQuicPacket(peer, shp, *session);
+                return;
+            }
 
-                RequestBuffer directBuf;
-                [[maybe_unused]] auto _ = directBuf.append(data, n);
-                while (true)
+            // 备选路径：直接承载裸 HTTP/3 分帧的数据报（轻量/测试回环）
+            QuicSession *session = getOrCreateSession(peer, http::v3::ConnectionId{});
+            if (!session)
+            {
+                return;
+            }
+            session->bytesReceived += n;
+
+            RequestBuffer directBuf;
+            [[maybe_unused]] auto _ = directBuf.append(data, n);
+            while (true)
+            {
+                auto frameRes = session->frameDecoder.nextView(directBuf);
+                if (!frameRes || !frameRes->has_value())
                 {
-                    auto frameRes = session->frameDecoder.next(directBuf);
-                    if (!frameRes || !frameRes->has_value())
+                    break;
+                }
+                auto &frame = **frameRes;
+                auto slot = session->streamTable.getOrCreate(0);
+                if (!slot)
+                {
+                    continue;
+                }
+                if (slot->handler == nullptr)
+                {
+                    slot->handler = streamPool_.acquire();
+                    onStreamOpen(0);
+                }
+
+                if (frame.type == std::to_underlying(http::v3::FRAME_TYPE::HEADERS))
+                {
+                    onStreamHeaders(0, frame.payload);
+                    auto hRes = http::v3::decodeHeaders(frame.payload);
+                    if (hRes)
+                    {
+                        slot->requestHeaders = std::move(*hRes);
+                        slot->headersComplete = true;
+                        slot->headersReceived = true;
+                        onStreamHeadersDecoded(0, slot->requestHeaders);
+                    }
+                }
+                else if (frame.type == std::to_underlying(http::v3::FRAME_TYPE::DATA))
+                {
+                    onStreamData(0, frame.payload);
+                    if (slot->handler != nullptr)
+                    {
+                        [[maybe_unused]] auto _a = slot->handler->appendRequest(frame.payload.data(), frame.payload.size());
+                        slot->handler->process();
+                    }
+                    if (slot->requestBody.size() + frame.payload.size() <= maxRequestBodyBytes())
+                    {
+                        slot->requestBody.append(frame.payload);
+                    }
+                }
+            }
+
+            auto slot = session->streamTable.find(0);
+            if (slot && slot->headersComplete)
+            {
+                onStreamEnd(0);
+                std::string body = slot->requestBody;
+                if (body.empty() && slot->handler != nullptr && slot->handler->requestBytes() > 0)
+                {
+                    body.assign(slot->handler->requestBegin(), slot->handler->requestBytes());
+                }
+                std::string responseBody;
+                onRequest(0, slot->requestHeaders, body, responseBody);
+
+                std::vector<http::v3::Header> finalHeaders;
+                finalHeaders.reserve(3);
+                finalHeaders.push_back({":status", "200"});
+                finalHeaders.push_back({"server", "mynet-http3"});
+                finalHeaders.push_back({"content-type", "text/plain; charset=utf-8"});
+
+                std::string headerPayload;
+                http::v3::encodeHeaders(headerPayload, finalHeaders);
+
+                std::string frameBytes;
+                http::v3::appendFrame(frameBytes, std::to_underlying(http::v3::FRAME_TYPE::HEADERS), headerPayload);
+                if (!responseBody.empty())
+                {
+                    http::v3::appendFrame(frameBytes, std::to_underlying(http::v3::FRAME_TYPE::DATA), responseBody);
+                }
+
+                // RFC 9000 Section 8.1 抗反射放大防护：未验证地址发送字节不得超过接收字节的 3 倍
+                if (!session->addressValidated &&
+                    session->bytesSent + frameBytes.size() > 3 * session->bytesReceived)
+                {
+                    LOG_WARN(
+                        "HandlerHttp3: direct fallback anti-amplification limit exceeded (received {}, sent {})",
+                        session->bytesReceived, session->bytesSent + frameBytes.size());
+                }
+                else
+                {
+                    session->bytesSent += frameBytes.size();
+                    sendTo(peer, std::move(frameBytes));
+                }
+                if (slot->handler != nullptr)
+                {
+                    streamPool_.release(slot->handler);
+                    slot->handler = nullptr;
+                }
+                onStreamClose(0);
+                session->streamTable.close(0);
+            }
+        }
+
+        /**
+         * @brief 构造 HTTP/3 响应帧并写入流式响应队列
+         */
+        void sendResponse(uint64_t streamId, int statusCode, std::span<const http::v3::Header> headers = {},
+                          std::string_view body = {})
+        {
+            std::vector<http::v3::Header> finalHeaders;
+            finalHeaders.reserve(headers.size() + 3);
+            finalHeaders.push_back({":status", std::to_string(statusCode)});
+            finalHeaders.push_back({"server", "mynet-http3"});
+            finalHeaders.push_back({"content-type", "text/plain; charset=utf-8"});
+            for (const auto &h : headers)
+            {
+                finalHeaders.push_back(h);
+            }
+
+            std::string headerPayload;
+            http::v3::encodeHeaders(headerPayload, finalHeaders);
+
+            std::string frameBytes;
+            http::v3::appendFrame(frameBytes, std::to_underlying(http::v3::FRAME_TYPE::HEADERS), headerPayload);
+            if (!body.empty())
+            {
+                http::v3::appendFrame(frameBytes, std::to_underlying(http::v3::FRAME_TYPE::DATA), body);
+            }
+
+            [[maybe_unused]] auto _ = pushResponse(std::move(frameBytes));
+            [[maybe_unused]] auto stream = streamId;
+        }
+
+        /**
+         * @brief 构造 QUIC 报文并推入 UDP 回复队列发送给指定对端（基于对应会话）
+         */
+        void sendQuicReply(const sockaddr_in &peer, QuicSession &session, uint64_t streamId, int statusCode,
+                           std::span<const http::v3::Header> headers = {}, std::string_view body = {})
+        {
+            std::vector<http::v3::Header> finalHeaders;
+            finalHeaders.reserve(headers.size() + 3);
+            finalHeaders.push_back({":status", std::to_string(statusCode)});
+            finalHeaders.push_back({"server", "mynet-http3"});
+            finalHeaders.push_back({"content-type", "text/plain; charset=utf-8"});
+            for (const auto &h : headers)
+            {
+                finalHeaders.push_back(h);
+            }
+
+            std::string headerPayload;
+            http::v3::encodeHeaders(headerPayload, finalHeaders);
+
+            std::string h3Frames;
+            http::v3::appendFrame(h3Frames, std::to_underlying(http::v3::FRAME_TYPE::HEADERS), headerPayload);
+            if (!body.empty())
+            {
+                http::v3::appendFrame(h3Frames, std::to_underlying(http::v3::FRAME_TYPE::DATA), body);
+            }
+
+            // 打包进 QUIC STREAM 帧 (FIN 标记表示响应完成)
+            std::string quicPayload;
+            http::v3::appendStreamFrame(quicPayload, streamId, 0, h3Frames, true);
+
+            // 封装为 QUIC 1-RTT 短首部报文
+            std::string packet;
+            http::v3::appendShortHeaderPacket(packet, session.dcid, session.nextPacketNumber++, quicPayload);
+
+            // RFC 9000 Section 8.1: 地址验证前响应字节数不得超过接收字节数的 3 倍 (Anti-Amplification Limit)
+            if (!session.addressValidated && session.bytesSent + packet.size() > 3 * session.bytesReceived)
+            {
+                LOG_WARN(
+                    "HandlerHttp3: anti-amplification limit exceeded for peer {} (received={}, sent={}, packet={})",
+                    datagramPeerText(peer), session.bytesReceived, session.bytesSent, packet.size());
+                return;
+            }
+
+            session.bytesSent += packet.size();
+            sendTo(peer, std::move(packet));
+        }
+
+        void sendQuicReply(const sockaddr_in &peer, const http::v3::ConnectionId &dcid, uint64_t streamId, int statusCode,
+                           std::span<const http::v3::Header> headers = {}, std::string_view body = {})
+        {
+            QuicSession *sess = getOrCreateSession(peer, dcid);
+            if (sess != nullptr)
+            {
+                sendQuicReply(peer, *sess, streamId, statusCode, headers, body);
+            }
+        }
+
+        inline void forwardDatagram(const sockaddr_in &upstream, const char *data, size_t n)
+        {
+            forwardTo(upstream, data, n);
+        }
+
+        inline void broadcastDatagram(const std::vector<sockaddr_in> &targets, const char *data, size_t n)
+        {
+            broadcastTo(targets, data, n);
+        }
+
+        inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
+        inline void enableSpliceTunnel(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
+        inline void disableSpliceTunnel() noexcept { disableSplice(); }
+        [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
+
+        QuicSession *getOrCreateSession(const sockaddr_in &peer, const http::v3::ConnectionId &dcid)
+        {
+            SessionKey key{peer.sin_addr.s_addr, peer.sin_port, dcid};
+            auto it = sessions_.find(key);
+            if (it != sessions_.end())
+            {
+                return it->second.get();
+            }
+            if (sessions_.size() >= maxSessions_) [[unlikely]]
+            {
+                for (auto sIt = sessions_.begin(); sIt != sessions_.end();)
+                {
+                    if (sIt->second->streamTable.empty())
+                    {
+                        sIt = sessions_.erase(sIt);
+                    }
+                    else
+                    {
+                        ++sIt;
+                    }
+                }
+                if (sessions_.size() >= maxSessions_)
+                {
+                    LOG_WARN("HandlerHttp3: max sessions limit reached ({})", maxSessions_);
+                    return nullptr;
+                }
+            }
+            auto sess = std::make_unique<QuicSession>(maxStreams_);
+            sess->dcid = dcid;
+            sess->peer = peer;
+            auto *ptr = sess.get();
+            sessions_.emplace(key, std::move(sess));
+            return ptr;
+        }
+
+    private:
+        void handleQuicPacket(const sockaddr_in &peer, const http::v3::ShortHeaderPacket &shp, QuicSession &session)
+        {
+            const auto *ptr = reinterpret_cast<const uint8_t *>(shp.payload.data());
+            size_t rem = shp.payload.size();
+
+            while (rem > 0)
+            {
+                const uint8_t frameType = *ptr;
+                if (frameType >= 0x08 && frameType <= 0x0f)
+                {
+                    // QUIC STREAM 帧
+                    auto sfRes = http::v3::parseStreamFrame(ptr, rem);
+                    if (!sfRes)
                     {
                         break;
                     }
-                    auto &frame = **frameRes;
-                    auto slot = session->streamTable.getOrCreate(0);
+
+                    auto &sf = *sfRes;
+                    // RFC 9000 Section 2.1: 客户端发起的流编号必须为偶数 (0x00 bidi, 0x02 uni)
+                    if ((sf.streamId & 1u) != 0) [[unlikely]]
+                    {
+                        LOG_WARN("HandlerHttp3: peer sent stream {} which is server-initiated", sf.streamId);
+                        continue;
+                    }
+
+                    auto slot = session.streamTable.getOrCreate(sf.streamId);
                     if (!slot)
                     {
                         continue;
                     }
-
-                    if (frame.type == std::to_underlying(FRAME_TYPE::HEADERS))
+                    if (slot->handler == nullptr)
                     {
-                        auto hRes = decodeHeaders(frame.payload);
-                        if (hRes)
+                        slot->handler = streamPool_.acquire();
+                        onStreamOpen(sf.streamId);
+                    }
+
+                    if (slot->inBuffer.readableBytes() + sf.data.size() > maxStreamBufferBytes()) [[unlikely]]
+                    {
+                        LOG_WARN("HandlerHttp3: stream {} buffer exceeded maximum limit", sf.streamId);
+                        if (slot->handler != nullptr)
                         {
-                            slot->requestHeaders = std::move(*hRes);
-                            slot->headersComplete = true;
+                            streamPool_.release(slot->handler);
+                            slot->handler = nullptr;
                         }
-                    }
-                    else if (frame.type == std::to_underlying(FRAME_TYPE::DATA))
-                    {
-                        if (slot->requestBody.size() + frame.payload.size() <= maxRequestBodyBytes())
-                        {
-                            slot->requestBody.append(frame.payload);
-                        }
-                    }
-                }
-
-                auto slot = session->streamTable.find(0);
-                if (slot && slot->headersComplete)
-                {
-                    std::string responseBody;
-                    onRequest(0, slot->requestHeaders, slot->requestBody, responseBody);
-
-                    std::vector<Header> finalHeaders;
-                    finalHeaders.reserve(3);
-                    finalHeaders.push_back({":status", "200"});
-                    finalHeaders.push_back({"server", "mynet-http3"});
-                    finalHeaders.push_back({"content-type", "text/plain; charset=utf-8"});
-
-                    std::string headerPayload;
-                    encodeHeaders(headerPayload, finalHeaders);
-
-                    std::string frameBytes;
-                    appendFrame(frameBytes, std::to_underlying(FRAME_TYPE::HEADERS), headerPayload);
-                    if (!responseBody.empty())
-                    {
-                        appendFrame(frameBytes, std::to_underlying(FRAME_TYPE::DATA), responseBody);
+                        session.streamTable.close(sf.streamId);
+                        continue;
                     }
 
-                    // RFC 9000 Section 8.1 抗反射放大防护：未验证地址发送字节不得超过接收字节的 3 倍
-                    if (!session->addressValidated &&
-                        session->bytesSent + frameBytes.size() > 3 * session->bytesReceived)
+                    [[maybe_unused]] auto _ = slot->inBuffer.append(sf.data.data(), sf.data.size());
+                    if (sf.fin)
                     {
-                        LOG_WARN(
-                            "HandlerHttp3: direct fallback anti-amplification limit exceeded (received {}, sent {})",
-                            session->bytesReceived, session->bytesSent + frameBytes.size());
+                        slot->finReceived = true;
                     }
-                    else
+
+                    // 从该会话专属流输入缓冲区中零拷贝解码 HTTP/3 帧
+                    while (true)
                     {
-                        session->bytesSent += frameBytes.size();
-                        sendTo(peer, std::move(frameBytes));
-                    }
-                    session->streamTable.close(0);
-                }
-            }
-
-            /**
-             * @brief 构造 HTTP/3 响应帧并写入流式响应队列
-             */
-            void sendResponse(uint64_t streamId, int statusCode, const std::vector<Header> &headers,
-                              std::string_view body)
-            {
-                std::vector<Header> finalHeaders;
-                finalHeaders.reserve(headers.size() + 3);
-                finalHeaders.push_back({":status", std::to_string(statusCode)});
-                finalHeaders.push_back({"server", "mynet-http3"});
-                finalHeaders.push_back({"content-type", "text/plain; charset=utf-8"});
-                for (const auto &h : headers)
-                {
-                    finalHeaders.push_back(h);
-                }
-
-                std::string headerPayload;
-                encodeHeaders(headerPayload, finalHeaders);
-
-                std::string frameBytes;
-                appendFrame(frameBytes, std::to_underlying(FRAME_TYPE::HEADERS), headerPayload);
-                if (!body.empty())
-                {
-                    appendFrame(frameBytes, std::to_underlying(FRAME_TYPE::DATA), body);
-                }
-
-                [[maybe_unused]] auto _ = pushResponse(std::move(frameBytes));
-                [[maybe_unused]] auto stream = streamId;
-            }
-
-            /**
-             * @brief 构造 QUIC 报文并推入 UDP 回复队列发送给指定对端（基于对应会话）
-             */
-            void sendQuicReply(const sockaddr_in &peer, QuicSession &session, uint64_t streamId, int statusCode,
-                               const std::vector<Header> &headers, std::string_view body)
-            {
-                std::vector<Header> finalHeaders;
-                finalHeaders.reserve(headers.size() + 3);
-                finalHeaders.push_back({":status", std::to_string(statusCode)});
-                finalHeaders.push_back({"server", "mynet-http3"});
-                finalHeaders.push_back({"content-type", "text/plain; charset=utf-8"});
-                for (const auto &h : headers)
-                {
-                    finalHeaders.push_back(h);
-                }
-
-                std::string headerPayload;
-                encodeHeaders(headerPayload, finalHeaders);
-
-                std::string h3Frames;
-                appendFrame(h3Frames, std::to_underlying(FRAME_TYPE::HEADERS), headerPayload);
-                if (!body.empty())
-                {
-                    appendFrame(h3Frames, std::to_underlying(FRAME_TYPE::DATA), body);
-                }
-
-                // 打包进 QUIC STREAM 帧 (FIN 标记表示响应完成)
-                std::string quicPayload;
-                appendStreamFrame(quicPayload, streamId, 0, h3Frames, true);
-
-                // 封装为 QUIC 1-RTT 短首部报文
-                std::string packet;
-                appendShortHeaderPacket(packet, session.dcid, session.nextPacketNumber++, quicPayload);
-
-                // RFC 9000 Section 8.1: 地址验证前响应字节数不得超过接收字节数的 3 倍 (Anti-Amplification Limit)
-                if (!session.addressValidated && session.bytesSent + packet.size() > 3 * session.bytesReceived)
-                {
-                    LOG_WARN(
-                        "HandlerHttp3: anti-amplification limit exceeded for peer {} (received={}, sent={}, packet={})",
-                        datagramPeerText(peer), session.bytesReceived, session.bytesSent, packet.size());
-                    return;
-                }
-
-                session.bytesSent += packet.size();
-                sendTo(peer, std::move(packet));
-            }
-
-            /**
-             * @brief 构造 QUIC 报文并推入 UDP 回复队列发送给指定对端（兼容重载）
-             */
-            void sendQuicReply(const sockaddr_in &peer, const ConnectionId &dcid, uint64_t streamId, int statusCode,
-                               const std::vector<Header> &headers, std::string_view body)
-            {
-                QuicSession *sess = getOrCreateSession(peer, dcid);
-                if (sess != nullptr)
-                {
-                    sendQuicReply(peer, *sess, streamId, statusCode, headers, body);
-                }
-            }
-
-            /**
-             * @brief 将当前收到的 UDP / QUIC 报文转发至指定上游对端（直接复用 HandlerDatagram::forwardTo）
-             *
-             * 适用于 HTTP/3 透明代理、MASQUE (RFC 9298) UDP 代理网关与反向中继。
-             *
-             * @param upstream 上游服务器对端地址
-             * @param data 报文载荷首地址
-             * @param n 报文有效长度
-             */
-            inline void forwardDatagram(const sockaddr_in &upstream, const char *data, size_t n)
-            {
-                forwardTo(upstream, data, n);
-            }
-
-            /**
-             * @brief 将当前数据报广播/多播至多个对端地址（直接复用 HandlerDatagram::broadcastTo）
-             *
-             * 适用于 WebTransport 组播分发、多路径探索与广播通道。
-             *
-             * @param targets 目标对端地址列表
-             * @param data 报文载荷首地址
-             * @param n 报文有效长度
-             */
-            inline void broadcastDatagram(const std::vector<sockaddr_in> &targets, const char *data, size_t n)
-            {
-                broadcastTo(targets, data, n);
-            }
-
-            /**
-             * @brief 开启零拷贝反向代理或流式隧道（直接复用 HandlerConnection 零拷贝管道）
-             *
-             * 适用于流式仿真回退场景下直接穿透至上游描述符。
-             *
-             * @param targetFd 目标文件或套接字描述符
-             */
-            inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
-            inline void enableSpliceTunnel(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-            inline void disableSpliceTunnel() noexcept { disableSplice(); }
-            [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
-
-            QuicSession *getOrCreateSession(const sockaddr_in &peer, const ConnectionId &dcid)
-            {
-                SessionKey key{peer.sin_addr.s_addr, peer.sin_port, dcid};
-                auto it = sessions_.find(key);
-                if (it != sessions_.end())
-                {
-                    return it->second.get();
-                }
-                if (sessions_.size() >= maxSessions_) [[unlikely]]
-                {
-                    for (auto sIt = sessions_.begin(); sIt != sessions_.end();)
-                    {
-                        if (sIt->second->streamTable.empty())
-                        {
-                            sIt = sessions_.erase(sIt);
-                        }
-                        else
-                        {
-                            ++sIt;
-                        }
-                    }
-                    if (sessions_.size() >= maxSessions_)
-                    {
-                        LOG_WARN("HandlerHttp3: max sessions limit reached ({})", maxSessions_);
-                        return nullptr;
-                    }
-                }
-                auto sess = std::make_unique<QuicSession>(maxStreams_);
-                sess->dcid = dcid;
-                sess->peer = peer;
-                auto *ptr = sess.get();
-                sessions_.emplace(key, std::move(sess));
-                return ptr;
-            }
-
-        private:
-            void handleQuicPacket(const sockaddr_in &peer, const ShortHeaderPacket &shp, QuicSession &session)
-            {
-                const auto *ptr = reinterpret_cast<const uint8_t *>(shp.payload.data());
-                size_t rem = shp.payload.size();
-
-                while (rem > 0)
-                {
-                    const uint8_t frameType = *ptr;
-                    if (frameType >= 0x08 && frameType <= 0x0f)
-                    {
-                        // QUIC STREAM 帧
-                        auto sfRes = parseStreamFrame(ptr, rem);
-                        if (!sfRes)
+                        auto h3Res = session.frameDecoder.nextView(slot->inBuffer);
+                        if (!h3Res || !h3Res->has_value())
                         {
                             break;
                         }
-
-                        auto &sf = *sfRes;
-                        // RFC 9000 Section 2.1: 客户端发起的流编号必须为偶数 (0x00 bidi, 0x02 uni)
-                        if ((sf.streamId & 1u) != 0) [[unlikely]]
+                        auto &h3Frame = **h3Res;
+                        if (h3Frame.type == std::to_underlying(http::v3::FRAME_TYPE::HEADERS))
                         {
-                            LOG_WARN("HandlerHttp3: peer sent stream {} which is server-initiated", sf.streamId);
-                            continue;
-                        }
-
-                        auto slot = session.streamTable.getOrCreate(sf.streamId);
-                        if (!slot)
-                        {
-                            continue;
-                        }
-
-                        if (slot->inBuffer.readableBytes() + sf.data.size() > maxStreamBufferBytes()) [[unlikely]]
-                        {
-                            LOG_WARN("HandlerHttp3: stream {} buffer exceeded maximum limit", sf.streamId);
-                            session.streamTable.close(sf.streamId);
-                            continue;
-                        }
-
-                        [[maybe_unused]] auto _ = slot->inBuffer.append(sf.data.data(), sf.data.size());
-                        if (sf.fin)
-                        {
-                            slot->finReceived = true;
-                        }
-
-                        // 从该会话专属流输入缓冲区中解码 HTTP/3 帧
-                        while (true)
-                        {
-                            auto h3Res = session.frameDecoder.next(slot->inBuffer);
-                            if (!h3Res || !h3Res->has_value())
+                            onStreamHeaders(sf.streamId, h3Frame.payload);
+                            auto hRes = http::v3::decodeHeaders(h3Frame.payload);
+                            if (hRes)
                             {
-                                break;
-                            }
-                            auto &h3Frame = **h3Res;
-                            if (h3Frame.type == std::to_underlying(FRAME_TYPE::HEADERS))
-                            {
-                                auto hRes = decodeHeaders(h3Frame.payload);
-                                if (hRes)
-                                {
-                                    slot->requestHeaders = std::move(*hRes);
-                                    slot->headersComplete = true;
-                                }
-                            }
-                            else if (h3Frame.type == std::to_underlying(FRAME_TYPE::DATA))
-                            {
-                                if (slot->requestBody.size() + h3Frame.payload.size() <= maxRequestBodyBytes())
-                                {
-                                    slot->requestBody.append(h3Frame.payload);
-                                }
+                                slot->requestHeaders = std::move(*hRes);
+                                slot->headersComplete = true;
+                                slot->headersReceived = true;
+                                onStreamHeadersDecoded(sf.streamId, slot->requestHeaders);
                             }
                         }
-
-                        // 当收到 FIN 时表示请求流结束，构造 QUIC 回复并关闭该流
-                        if (slot->finReceived)
+                        else if (h3Frame.type == std::to_underlying(http::v3::FRAME_TYPE::DATA))
                         {
-                            std::string responseBody;
-                            onRequest(sf.streamId, slot->requestHeaders, slot->requestBody, responseBody);
-                            sendQuicReply(peer, session, sf.streamId, 200, {}, responseBody);
-                            session.streamTable.close(sf.streamId);
+                            onStreamData(sf.streamId, h3Frame.payload);
+                            if (slot->handler != nullptr)
+                            {
+                                [[maybe_unused]] auto _a =
+                                    slot->handler->appendRequest(h3Frame.payload.data(), h3Frame.payload.size());
+                                slot->handler->process();
+                            }
+                            if (slot->requestBody.size() + h3Frame.payload.size() <= maxRequestBodyBytes())
+                            {
+                                slot->requestBody.append(h3Frame.payload);
+                            }
                         }
                     }
-                    else if (frameType == 0x01)
+
+                    // 当收到 FIN 时表示请求流结束，构造 QUIC 回复并关闭该流
+                    if (slot->finReceived)
                     {
-                        // PING 帧，消耗 1 字节
-                        ++ptr;
-                        --rem;
-                    }
-                    else if (frameType == 0x00)
-                    {
-                        // PADDING 帧，消耗 1 字节
-                        ++ptr;
-                        --rem;
-                    }
-                    else
-                    {
-                        // 未知或非 STREAM 帧，跳过剩余部分
-                        break;
+                        onStreamEnd(sf.streamId);
+                        std::string body = slot->requestBody;
+                        if (body.empty() && slot->handler != nullptr && slot->handler->requestBytes() > 0)
+                        {
+                            body.assign(slot->handler->requestBegin(), slot->handler->requestBytes());
+                        }
+                        std::string responseBody;
+                        onRequest(sf.streamId, slot->requestHeaders, body, responseBody);
+                        sendQuicReply(peer, session, sf.streamId, 200, {}, responseBody);
+                        if (slot->handler != nullptr)
+                        {
+                            streamPool_.release(slot->handler);
+                            slot->handler = nullptr;
+                        }
+                        onStreamClose(sf.streamId);
+                        session.streamTable.close(sf.streamId);
                     }
                 }
+                else if (frameType == 0x01)
+                {
+                    // PING 帧，消耗 1 字节
+                    ++ptr;
+                    --rem;
+                }
+                else if (frameType == 0x00)
+                {
+                    // PADDING 帧，消耗 1 字节
+                    ++ptr;
+                    --rem;
+                }
+                else
+                {
+                    // 未知或非 STREAM 帧，跳过剩余部分
+                    break;
+                }
             }
+        }
 
-            [[nodiscard]] static inline size_t maxRequestBodyBytes() noexcept
+        inline void ensureStreamPool()
+        {
+            if (streamPool_.capacity() == 0)
             {
-                return getHttp3Config().maxRequestBodyBytes;
+                if (auto poolRes = streamPool_.init(maxStreams_); !poolRes) [[unlikely]]
+                {
+                    LOG_ERROR("HandlerHttp3::ensureStreamPool: initialising stream pool ({} slots) failed",
+                              maxStreams_);
+                }
             }
-            [[nodiscard]] static inline size_t maxStreamBufferBytes() noexcept
+            if (!streamTable_.ready())
             {
-                return getHttp3Config().maxStreamBufferBytes;
+                streamTable_.setMaxStreams(maxStreams_);
             }
+        }
 
-            size_t maxStreams_ = 128;
-            size_t maxSessions_ = 1024;
-            StreamTable streamTable_;
-            FrameDecoder frameDecoder_{};
-            std::unordered_map<SessionKey, std::unique_ptr<QuicSession>, SessionKeyHash> sessions_{};
-            Settings localSettings_{};
-            Settings peerSettings_{};
-            uint32_t nextPacketNumber_ = 1;
-            bool controlStreamSent_ = false;
-        };
+        void clearAllStreams() noexcept
+        {
+            streamTable_.clear([this]([[maybe_unused]] uint64_t id, StreamSlotType &slot) {
+                if (slot.handler != nullptr)
+                {
+                    streamPool_.release(slot.handler);
+                    slot.handler = nullptr;
+                }
+                slot.reset();
+            });
+            for (auto &[_, sess] : sessions_)
+            {
+                sess->streamTable.clear([this]([[maybe_unused]] uint64_t id, StreamSlotType &slot) {
+                    if (slot.handler != nullptr)
+                    {
+                        streamPool_.release(slot.handler);
+                        slot.handler = nullptr;
+                    }
+                    slot.reset();
+                });
+            }
+        }
+
+        [[nodiscard]] static inline size_t maxRequestBodyBytes() noexcept
+        {
+            return getHttp3Config().maxRequestBodyBytes;
+        }
+        [[nodiscard]] static inline size_t maxStreamBufferBytes() noexcept
+        {
+            return getHttp3Config().maxStreamBufferBytes;
+        }
+
+        size_t maxStreams_ = 128;
+        size_t maxSessions_ = 1024;
+        ObjectPool<StreamHandler> streamPool_{};
+        StreamTableType streamTable_{128};
+        http::v3::FrameDecoder frameDecoder_{};
+        std::unordered_map<SessionKey, std::unique_ptr<QuicSession>, SessionKeyHash> sessions_{};
+        http::v3::Settings localSettings_{};
+        http::v3::Settings peerSettings_{};
+        uint32_t nextPacketNumber_ = 1;
+        bool controlStreamSent_ = false;
+    };
+
+    using HandlerHttp3 = HandlerHttp3Mux<HandlerConnection>;
 
     } // namespace http::v3
 

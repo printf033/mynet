@@ -4,7 +4,7 @@
 #include "error.hpp"
 #include "http/v1/handler.hpp"
 #include "http/v2/handler.hpp"
-#include "http/v3/server.hpp"
+#include "http/v3/handler.hpp"
 #include "log_config.hpp"
 #include "proactor/proactor.hpp"
 #include "proxy/socks5.hpp"
@@ -818,8 +818,12 @@ namespace
     void benchHttp3Quic(int port)
     {
         auto [certPath, keyPath] = findCertFiles();
-        http::v3::ServerHttp3 server(certPath, keyPath);
-        std::thread srvThread([&]() { [[maybe_unused]] auto _ = server.run("127.0.0.1", port); });
+        http::v3::HandlerHttp3 handler;
+        Reactor<AcceptorQuic<http::v3::HandlerHttp3>> reactor;
+        std::thread srvThread([&]() {
+            [[maybe_unused]] auto _ =
+                reactor.runQuic("127.0.0.1", port, certPath.c_str(), keyPath.c_str(), handler);
+        });
 
         // 等待服务监听就绪
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -844,7 +848,7 @@ namespace
         }
         double totalSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-        server.stop();
+        reactor.stop();
         srvThread.join();
 
         if (!latencies.empty())

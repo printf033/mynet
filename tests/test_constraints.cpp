@@ -416,28 +416,41 @@ TEST(Constraints, AcceptorConceptsEvaluationOnCompleteTypes)
     using BaseAcc = AcceptorBase<HandlerConnection>;
     using SockAcc = AcceptorSocket<HandlerConnection>;
     using SslAcc = AcceptorSsl<HandlerDatagram>;
+    using QuicAcc = AcceptorQuic<HandlerDatagram>;
 
     // 概念约束测试：DerivedFromAcceptorBase
     static_assert(DerivedFromAcceptorBase<BaseAcc>);
     static_assert(DerivedFromAcceptorBase<SockAcc>);
     static_assert(DerivedFromAcceptorBase<SslAcc>);
+    static_assert(DerivedFromAcceptorBase<QuicAcc>);
     static_assert(!DerivedFromAcceptorBase<HandlerConnection>);
 
     // 概念约束测试：SocketAcceptor
     static_assert(SocketAcceptor<SockAcc>);
     static_assert(!SocketAcceptor<BaseAcc>);
     static_assert(!SocketAcceptor<SslAcc>);
+    static_assert(!SocketAcceptor<QuicAcc>);
 
     // 概念约束测试：SslAcceptor
     static_assert(SslAcceptor<SslAcc>);
     static_assert(!SslAcceptor<BaseAcc>);
     static_assert(!SslAcceptor<SockAcc>);
+    static_assert(!SslAcceptor<QuicAcc>);
+
+    // 概念约束测试：QuicAcceptor
+    static_assert(QuicAcceptor<QuicAcc>);
+    static_assert(!QuicAcceptor<BaseAcc>);
+    static_assert(!QuicAcceptor<SockAcc>);
+    static_assert(!QuicAcceptor<SslAcc>);
 
     EXPECT_TRUE(DerivedFromAcceptorBase<BaseAcc>);
     EXPECT_TRUE(SocketAcceptor<SockAcc>);
     EXPECT_TRUE(SslAcceptor<SslAcc>);
+    EXPECT_TRUE(QuicAcceptor<QuicAcc>);
     EXPECT_FALSE(SocketAcceptor<SslAcc>);
+    EXPECT_FALSE(SocketAcceptor<QuicAcc>);
     EXPECT_FALSE(SslAcceptor<SockAcc>);
+    EXPECT_FALSE(QuicAcceptor<SockAcc>);
 }
 
 TEST(Constraints, EnginesAcceptPureDatagramHandlers)
@@ -563,12 +576,14 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
 
     mynet::Reactor<mynet::AcceptorSsl<mynet::HandlerConnection>> reactorTls;
     mynet::Proactor<mynet::AcceptorSsl<mynet::HandlerConnection>> proactorTls;
+    mynet::Reactor<mynet::AcceptorQuic<mynet::HandlerDatagram>> reactorQuic;
 
     // 每次调用都会立刻失败（监听/加载证书），因此不会真的进入事件循环。
     [[maybe_unused]] auto r1 = reactorStream.runTcp("1.2.3.4", 0);
     [[maybe_unused]] auto r2 = reactorStream.runTcp();
     [[maybe_unused]] auto r3 = reactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
     [[maybe_unused]] auto r3_zero = reactorDatagram.runUdp(datagramHandler);
+    [[maybe_unused]] auto rq = reactorQuic.runQuic("1.2.3.4", 0, datagramHandler);
     [[maybe_unused]] auto r4 = proactorStream.runTcp("1.2.3.4", 0);
     [[maybe_unused]] auto r5 = proactorStream.runTcp();
     [[maybe_unused]] auto r5_udp = proactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);

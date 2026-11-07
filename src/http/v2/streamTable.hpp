@@ -36,18 +36,26 @@ namespace mynet
         /**
          * @brief 定容开放寻址哈希表（线性探测 + 墓碑删除 + 墓碑复用）。
          * @tparam T 值类型；必须可默认构造（open() 依赖）。
+         * @tparam Key 键类型；默认为 uint32_t。
+         * @tparam NilKey 空哨兵键值；默认为 0。
          * @note 容器生命周期：init() 一次分配，之后热路径零堆分配、零异常。
          */
-        template <typename T>
+        template <typename T, typename Key = uint32_t, Key NilKey = 0>
         class StreamTable
         {
         public:
             StreamTable() noexcept = default;
             ~StreamTable() noexcept { release(); }
-            StreamTable(const StreamTable &) = delete ("流表独占其槽位与流身份");
-            StreamTable &operator=(const StreamTable &) = delete ("流表独占其槽位与流身份");
-            StreamTable(StreamTable &&) = delete ("流槽位指针对外有效，移动会造成悬垂");
-            StreamTable &operator=(StreamTable &&) = delete ("流槽位指针对外有效，移动会造成悬垂");
+            StreamTable(const StreamTable &) =
+                delete ("a stream table exclusively owns its slots and stream identities");
+            StreamTable &
+            operator=(const StreamTable &) =
+                delete ("a stream table exclusively owns its slots and stream identities");
+            StreamTable(StreamTable &&) =
+                delete ("stream slot pointers remain valid externally; moving causes dangling pointers");
+            StreamTable &
+            operator=(StreamTable &&) =
+                delete ("stream slot pointers remain valid externally; moving causes dangling pointers");
 
             /**
              * @brief 一次性分配 2 的幂个槽位（幂等：重复 init 前自动释放旧槽）。
@@ -88,12 +96,12 @@ namespace mynet
 
             /**
              * @brief 占用 key 对应的槽位（线性探测，墓碑可复用）。
-             * @param key 非零流 ID；调用方保证未插入过（find() 为 nullptr）。
-             * @return 槽位引用；表未初始化、key 为 0 或装填因子超过 75% 返回 nullptr。
+             * @param key 非哨兵流 ID；调用方保证未插入过（find() 为 nullptr）。
+             * @return 槽位引用；表未初始化、key 为 NilKey 或装填因子超过 75% 返回 nullptr。
              */
-            [[nodiscard]] inline T *open(uint32_t key) noexcept
+            [[nodiscard]] inline T *open(Key key) noexcept
             {
-                if (slots_ == nullptr || key == 0) [[unlikely]]
+                if (slots_ == nullptr || key == NilKey) [[unlikely]]
                 {
                     return nullptr;
                 }
@@ -112,7 +120,7 @@ namespace mynet
                     }
                 }
                 const size_t base = static_cast<size_t>(key) & mask_;
-                size_t seq = static_cast<size_t>(key) >> 1;
+                size_t seq = static_cast<size_t>(key >> 1);
                 Slot *reusable = nullptr; // 链上首个墓碑：确认真空位（链尾）后复用
                 for (size_t probes = 0; probes <= mask_; ++probes)
                 {
@@ -167,14 +175,14 @@ namespace mynet
              * @brief 查找 key 对应的槽位。
              * @return 槽位引用；不存在返回 nullptr。
              */
-            [[nodiscard]] inline T *find(uint32_t key) noexcept
+            [[nodiscard]] inline T *find(Key key) noexcept
             {
-                if (slots_ == nullptr || key == 0 || size_ == 0)
+                if (slots_ == nullptr || key == NilKey || size_ == 0)
                 {
                     return nullptr;
                 }
                 const size_t base = static_cast<size_t>(key) & mask_;
-                size_t seq = static_cast<size_t>(key) >> 1;
+                size_t seq = static_cast<size_t>(key >> 1);
                 for (size_t probes = 0; probes <= mask_; ++probes)
                 {
                     const Slot &slot = slots_[(base + seq + probes) & mask_];
@@ -197,20 +205,20 @@ namespace mynet
             /**
              * @brief key 是否存在。
              */
-            [[nodiscard]] inline bool has(uint32_t key) noexcept { return find(key) != nullptr; }
+            [[nodiscard]] inline bool has(Key key) noexcept { return find(key) != nullptr; }
 
             /**
              * @brief 摘除 key（墓碑标记，值由调用方先行处置）。
              * @return true 表示确实摘除了一个活跃槽位。
              */
-            inline bool erase(uint32_t key) noexcept
+            inline bool erase(Key key) noexcept
             {
-                if (slots_ == nullptr || key == 0 || size_ == 0)
+                if (slots_ == nullptr || key == NilKey || size_ == 0)
                 {
                     return false;
                 }
                 const size_t base = static_cast<size_t>(key) & mask_;
-                size_t seq = static_cast<size_t>(key) >> 1;
+                size_t seq = static_cast<size_t>(key >> 1);
                 for (size_t probes = 0; probes <= mask_; ++probes)
                 {
                     Slot &slot = slots_[(base + seq + probes) & mask_];
@@ -226,7 +234,7 @@ namespace mynet
                     {
                         slot.used = false;
                         slot.tombstone = true;
-                        slot.key = 0;
+                        slot.key = NilKey;
                         slot.value = T{};
                         --size_; // occupied_ 保持：墓碑仍占探测链位（活跃与墓碑总和不变）
                         return true;
@@ -252,7 +260,7 @@ namespace mynet
 
             /**
              * @brief 就地清空：遍历活跃槽位回调处置后复位全部标记（分配零成本）。
-             * @param reset 形如 void(const uint32_t key, T &value) 的回调。
+             * @param reset 形如 void(const Key key, T &value) 的回调。
              */
             template <typename F>
             inline void clear(F &&reset) noexcept
@@ -270,17 +278,17 @@ namespace mynet
                     }
                     slot.used = false;
                     slot.tombstone = false;
-                    slot.key = 0;
+                    slot.key = NilKey;
                 }
                 size_ = 0;
                 occupied_ = 0;
             }
 
             /**
-             * @brief 遍历专用：第 i 槽的键（used 槽恒非零，空/墓碑槽已复位为 0）。
+             * @brief 遍历专用：第 i 槽的键（used 槽恒非哨兵，空/墓碑槽已复位为 NilKey）。
              * @param i 槽位下标，需满足 i < capacity()；调用方负责 ready() 前置。
              */
-            [[nodiscard]] inline const uint32_t &keyAt(size_t i) const noexcept { return slots_[i].key; }
+            [[nodiscard]] inline const Key &keyAt(size_t i) const noexcept { return slots_[i].key; }
 
             /**
              * @brief 遍历专用：第 i 槽的值指针；未占用（空/墓碑）返回 nullptr。
@@ -339,7 +347,7 @@ namespace mynet
                         continue;
                     }
                     const size_t base = static_cast<size_t>(old.key) & mask_;
-                    const size_t seq = static_cast<size_t>(old.key) >> 1;
+                    const size_t seq = static_cast<size_t>(old.key >> 1);
                     for (size_t probes = 0;; ++probes)
                     {
                         Slot &dst = fresh[(base + seq + probes) & mask_];
@@ -367,7 +375,7 @@ namespace mynet
             struct Slot
             {
                 T value{};
-                uint32_t key = 0;
+                Key key = NilKey;
                 bool used = false;
                 bool tombstone = false; ///< 墓碑：erase 留下的链位，open 可复用，find 视为继续探
             };
@@ -380,4 +388,5 @@ namespace mynet
         };
 
     } // namespace mux
+
 } // namespace mynet

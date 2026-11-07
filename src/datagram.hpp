@@ -3,16 +3,23 @@
 #include "configHolder.hpp"
 #include "constraints.hpp"
 #include "error.hpp"
+#include "http/v3/frame.hpp"
+#include "http/v3/qpack.hpp"
+#include "http/v3/varint.hpp"
 #include "log_config.hpp"
+#include "requestBuffer.hpp"
 #include "responseQueue.hpp"
+#include "tls.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <netinet/in.h>
 #include <string>
 #include <sys/socket.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -324,8 +331,27 @@ namespace mynet
     public:
         using Handler = HandlerType;
 
+#ifdef MYNET_HAVE_QUIC
+        struct QuicStreamState
+        {
+            SSL *stream = nullptr;
+            RequestBuffer inBuf{};
+            std::vector<http::v3::Header> headers{};
+            std::string body{};
+            bool responseSent = false;
+        };
+
+        struct QuicConnState
+        {
+            SSL *conn = nullptr;
+            SSL *ctrlStream = nullptr;
+            std::vector<SSL *> uniStreams{};
+            std::unordered_map<uint64_t, QuicStreamState> bidiStreams{};
+        };
+#endif
+
         Datagram() noexcept = default;
-        ~Datagram() noexcept = default;
+        ~Datagram() noexcept { reset(); }
 
         Datagram(const Datagram &) =
             delete ("a datagram binding owns a handler reference and the receive window of one socket");
@@ -377,7 +403,7 @@ namespace mynet
         }
 
         /**
-         * @brief 解除绑定、释放接收窗口并清零收发计数
+         * @brief 解除绑定、释放接收窗口与 TLS/QUIC 状态并清零收发计数
          */
         void reset() noexcept
         {
@@ -390,9 +416,108 @@ namespace mynet
             truncatedDatagrams_ = 0;
             sentDatagrams_ = 0;
             sendFailures_ = 0;
+#ifdef MYNET_HAVE_QUIC
+            if (quicListener_ != nullptr)
+            {
+                for (auto &qc : quicConns_)
+                {
+                    for (auto &[id, st] : qc->bidiStreams)
+                    {
+                        if (st.stream != nullptr)
+                        {
+                            SSL_free(st.stream);
+                        }
+                    }
+                    for (SSL *uni : qc->uniStreams)
+                    {
+                        if (uni != nullptr)
+                        {
+                            SSL_free(uni);
+                        }
+                    }
+                    if (qc->ctrlStream != nullptr)
+                    {
+                        SSL_free(qc->ctrlStream);
+                    }
+                    if (qc->conn != nullptr)
+                    {
+                        SSL_free(qc->conn);
+                    }
+                }
+                quicConns_.clear();
+                SSL_free(quicListener_);
+                quicListener_ = nullptr;
+            }
+#endif
         }
 
         [[nodiscard]] inline bool bound() const noexcept { return handler_ != nullptr; }
+
+        [[nodiscard]] inline bool isQuic() const noexcept
+        {
+#ifdef MYNET_HAVE_QUIC
+            return quicListener_ != nullptr;
+#else
+            return false;
+#endif
+        }
+
+        /**
+         * @brief 启动 QUIC TLS 监听器（对齐 Connection::startTLS）
+         */
+        [[nodiscard]] inline Result<> startTLS(SSL_CTX *ctx, int fd) noexcept
+        {
+#ifdef MYNET_HAVE_QUIC
+            if (ctx == nullptr || fd < 0) [[unlikely]]
+            {
+                return std::unexpected(ERR::SSL_CTX_FAILED);
+            }
+            quicListener_ = SSL_new_listener(ctx, 0);
+            if (quicListener_ == nullptr) [[unlikely]]
+            {
+                LOG_ERROR("Datagram::startTLS: SSL_new_listener failed: {}", sslText());
+                return std::unexpected(ERR::SSL_CTX_FAILED);
+            }
+
+            SSL_set_blocking_mode(quicListener_, 0);
+            SSL_set_default_stream_mode(quicListener_, SSL_DEFAULT_STREAM_MODE_NONE);
+            SSL_set_incoming_stream_policy(quicListener_, SSL_INCOMING_STREAM_POLICY_ACCEPT, 0);
+
+            if (!SSL_set_fd(quicListener_, fd)) [[unlikely]]
+            {
+                LOG_ERROR("Datagram::startTLS: SSL_set_fd failed on fd {}: {}", fd, sslText());
+                SSL_free(quicListener_);
+                quicListener_ = nullptr;
+                return std::unexpected(ERR::SSL_SET_FD_FAILED);
+            }
+
+            if (!SSL_listen(quicListener_)) [[unlikely]]
+            {
+                LOG_ERROR("Datagram::startTLS: SSL_listen failed: {}", sslText());
+                SSL_free(quicListener_);
+                quicListener_ = nullptr;
+                return std::unexpected(ERR::LISTEN_FAILED);
+            }
+            return {};
+#else
+            (void)ctx;
+            (void)fd;
+            return std::unexpected(ERR::SSL_CTX_FAILED);
+#endif
+        }
+
+        /**
+         * @brief 定时推进 QUIC 状态机（驱动重传、ACK 定时器等）
+         */
+        inline void tick([[maybe_unused]] int fd) noexcept
+        {
+#ifdef MYNET_HAVE_QUIC
+            if (quicListener_ != nullptr)
+            {
+                handleQuic(fd);
+            }
+#endif
+        }
 
         [[nodiscard]] inline Handler *handler() noexcept { return handler_; }
         [[nodiscard]] inline const Handler *handler() const noexcept { return handler_; }
@@ -579,6 +704,13 @@ namespace mynet
             {
                 return IO_STATUS::KEEP;
             }
+#ifdef MYNET_HAVE_QUIC
+            if (quicListener_ != nullptr)
+            {
+                handleQuic(fd);
+                return IO_STATUS::KEEP;
+            }
+#endif
             char *window = recvBuffer();
             const size_t windowBytes = recvCapacity();
             for (;;)
@@ -617,9 +749,225 @@ namespace mynet
             {
                 return IO_STATUS::KEEP;
             }
+#ifdef MYNET_HAVE_QUIC
+            if (quicListener_ != nullptr)
+            {
+                handleQuic(fd);
+                return IO_STATUS::KEEP;
+            }
+#endif
             flushTo(fd);
             return IO_STATUS::KEEP;
         }
+
+#ifdef MYNET_HAVE_QUIC
+        inline void handleQuic([[maybe_unused]] int fd) noexcept
+        {
+            if (quicListener_ == nullptr) [[unlikely]]
+            {
+                return;
+            }
+
+            SSL_handle_events(quicListener_);
+            for (auto &qc : quicConns_)
+            {
+                SSL_handle_events(qc->conn);
+            }
+
+            // 接受新建立的 QUIC 连接
+            while (SSL *conn = SSL_accept_connection(quicListener_, SSL_ACCEPT_CONNECTION_NO_BLOCK))
+            {
+                LOG_DEBUG("Datagram: accepted new QUIC connection");
+                SSL_set_blocking_mode(conn, 0);
+                SSL_set_default_stream_mode(conn, SSL_DEFAULT_STREAM_MODE_NONE);
+                SSL_set_incoming_stream_policy(conn, SSL_INCOMING_STREAM_POLICY_ACCEPT, 0);
+
+                auto qc = std::make_unique<QuicConnState>();
+                qc->conn = conn;
+
+                // RFC 9114 Section 6.2.1: 打开单向控制流并发送 SETTINGS 首帧
+                SSL *ctrl = SSL_new_stream(conn, SSL_STREAM_FLAG_UNI);
+                if (ctrl != nullptr)
+                {
+                    std::string ctrlPayload;
+                    http::v3::appendVarint(ctrlPayload, 0x00); // Control stream
+                    http::v3::Settings s;
+                    std::string setPayload;
+                    s.encode(setPayload);
+                    http::v3::appendFrame(ctrlPayload, std::to_underlying(http::v3::FRAME_TYPE::SETTINGS), setPayload);
+                    size_t written = 0;
+                    SSL_write_ex(ctrl, ctrlPayload.data(), ctrlPayload.size(), &written);
+                    qc->ctrlStream = ctrl;
+                    SSL_handle_events(conn);
+                }
+
+                quicConns_.push_back(std::move(qc));
+            }
+
+            // 轮询活跃连接中的新流与数据
+            for (auto it = quicConns_.begin(); it != quicConns_.end();)
+            {
+                auto &qc = *it;
+
+                while (SSL *stream = SSL_accept_stream(qc->conn, SSL_ACCEPT_STREAM_NO_BLOCK))
+                {
+                    const int streamType = SSL_get_stream_type(stream);
+                    const uint64_t streamId = SSL_get_stream_id(stream);
+                    LOG_DEBUG("Datagram: accepted QUIC stream {} (type={})", streamId, streamType);
+                    if (streamType == SSL_STREAM_TYPE_BIDI)
+                    {
+                        SSL_set_blocking_mode(stream, 0);
+                        qc->bidiStreams.emplace(streamId, QuicStreamState{.stream = stream});
+                        if constexpr (requires { handler_->onStreamOpen(streamId); })
+                        {
+                            handler_->onStreamOpen(streamId);
+                        }
+                    }
+                    else
+                    {
+                        qc->uniStreams.push_back(stream);
+                    }
+                }
+
+                // 排空客户端单向流（维持连接健康）
+                for (SSL *uni : qc->uniStreams)
+                {
+                    uint8_t discard[512];
+                    size_t dlen = 0;
+                    while (SSL_read_ex(uni, discard, sizeof(discard), &dlen) > 0)
+                    {
+                    }
+                }
+
+                // 处理双向请求流
+                for (auto sIt = qc->bidiStreams.begin(); sIt != qc->bidiStreams.end();)
+                {
+                    auto &[streamId, st] = *sIt;
+                    uint8_t buf[4096];
+                    size_t nread = 0;
+                    while (SSL_read_ex(st.stream, buf, sizeof(buf), &nread) > 0)
+                    {
+                        [[maybe_unused]] auto _ = st.inBuf.append(reinterpret_cast<const char *>(buf), nread);
+                    }
+
+                    // 零拷贝解码 HTTP/3 帧
+                    http::v3::FrameDecoder decoder;
+                    while (true)
+                    {
+                        auto fRes = decoder.nextView(st.inBuf);
+                        if (!fRes || !fRes->has_value())
+                        {
+                            break;
+                        }
+                        auto &frame = **fRes;
+                        if (frame.type == std::to_underlying(http::v3::FRAME_TYPE::HEADERS))
+                        {
+                            if constexpr (requires { handler_->onStreamHeaders(streamId, frame.payload); })
+                            {
+                                handler_->onStreamHeaders(streamId, frame.payload);
+                            }
+                            auto hRes = http::v3::decodeHeaders(frame.payload);
+                            if (hRes)
+                            {
+                                st.headers = std::move(*hRes);
+                                if constexpr (requires { handler_->onStreamHeadersDecoded(streamId, st.headers); })
+                                {
+                                    handler_->onStreamHeadersDecoded(streamId, st.headers);
+                                }
+                            }
+                        }
+                        else if (frame.type == std::to_underlying(http::v3::FRAME_TYPE::DATA))
+                        {
+                            if constexpr (requires { handler_->onStreamData(streamId, frame.payload); })
+                            {
+                                handler_->onStreamData(streamId, frame.payload);
+                            }
+                            st.body.append(frame.payload);
+                        }
+                    }
+
+                    const int rstate = SSL_get_stream_read_state(st.stream);
+                    if (!st.responseSent && (rstate == SSL_STREAM_STATE_FINISHED || !st.headers.empty()))
+                    {
+                        if constexpr (requires { handler_->onStreamEnd(streamId); })
+                        {
+                            handler_->onStreamEnd(streamId);
+                        }
+                        std::string responseBody;
+                        if constexpr (requires { handler_->onRequest(streamId, st.headers, st.body, responseBody); })
+                        {
+                            handler_->onRequest(streamId, st.headers, st.body, responseBody);
+                        }
+                        else
+                        {
+                            responseBody = "HTTP/3 200 OK\n";
+                        }
+
+                        std::vector<http::v3::Header> respHeaders;
+                        respHeaders.reserve(4);
+                        respHeaders.push_back({":status", "200"});
+                        respHeaders.push_back({"server", "mynet-http3"});
+                        respHeaders.push_back({"content-type", "text/plain; charset=utf-8"});
+
+                        std::string hdrPayload;
+                        http::v3::encodeHeaders(hdrPayload, respHeaders);
+
+                        std::string respFrames;
+                        http::v3::appendFrame(respFrames, std::to_underlying(http::v3::FRAME_TYPE::HEADERS), hdrPayload);
+                        if (!responseBody.empty())
+                        {
+                            http::v3::appendFrame(respFrames, std::to_underlying(http::v3::FRAME_TYPE::DATA), responseBody);
+                        }
+
+                        size_t written = 0;
+                        SSL_write_ex(st.stream, respFrames.data(), respFrames.size(), &written);
+                        SSL_stream_conclude(st.stream, 0);
+                        SSL_handle_events(qc->conn);
+                        st.responseSent = true;
+                    }
+
+                    const int wstate = SSL_get_stream_write_state(st.stream);
+                    if (st.responseSent &&
+                        (wstate == SSL_STREAM_STATE_FINISHED || rstate == SSL_STREAM_STATE_FINISHED))
+                    {
+                        if constexpr (requires { handler_->onStreamClose(streamId); })
+                        {
+                            handler_->onStreamClose(streamId);
+                        }
+                        SSL_free(st.stream);
+                        sIt = qc->bidiStreams.erase(sIt);
+                    }
+                    else
+                    {
+                        ++sIt;
+                    }
+                }
+
+                // 连接关闭回收
+                if ((SSL_get_shutdown(qc->conn) & SSL_RECEIVED_SHUTDOWN) != 0)
+                {
+                    for (auto &[id, st] : qc->bidiStreams)
+                    {
+                        SSL_free(st.stream);
+                    }
+                    for (SSL *uni : qc->uniStreams)
+                    {
+                        SSL_free(uni);
+                    }
+                    if (qc->ctrlStream != nullptr)
+                    {
+                        SSL_free(qc->ctrlStream);
+                    }
+                    SSL_free(qc->conn);
+                    it = quicConns_.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        }
+#endif
 
         /**
          * @brief 收发计数（只读）
@@ -646,6 +994,10 @@ namespace mynet
         uint64_t truncatedDatagrams_ = 0;
         uint64_t sentDatagrams_ = 0;
         uint64_t sendFailures_ = 0;
+#ifdef MYNET_HAVE_QUIC
+        SSL *quicListener_ = nullptr;
+        std::vector<std::unique_ptr<QuicConnState>> quicConns_{};
+#endif
     };
 
     /**
@@ -660,6 +1012,9 @@ namespace mynet
     {
         void reset() noexcept {}
         [[nodiscard]] bool bound() const noexcept { return false; }
+        [[nodiscard]] bool isQuic() const noexcept { return false; }
+        [[nodiscard]] Result<> startTLS(SSL_CTX *, int) noexcept { return {}; }
+        void tick(int) noexcept {}
         [[nodiscard]] size_t maxDatagramBytes() const noexcept { return 0; }
         [[nodiscard]] char *recvBuffer() noexcept { return nullptr; }
         [[nodiscard]] size_t recvCapacity() const noexcept { return 0; }

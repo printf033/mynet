@@ -337,6 +337,77 @@ namespace mynet
         }
 
         /**
+         * @brief 完全以全局配置运行 QUIC (HTTP/3 over UDP) 服务器。
+         */
+        [[nodiscard]] Result<> runQuic(Handler &handler)
+            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+        {
+            const NetConfig cfg = getNetConfig();
+            return runQuic(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler);
+        }
+
+        /**
+         * @brief 以全局配置（reactor/security 段）运行 QUIC 服务器。
+         */
+        [[nodiscard]] Result<> runQuic(const char *ip, int port, Handler &handler)
+            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+        {
+            const NetConfig cfg = getNetConfig();
+            const char *crt = cfg.security.certFile.empty() ? "certs/ser.crt" : cfg.security.certFile.c_str();
+            const char *key = cfg.security.keyFile.empty() ? "certs/ser.key" : cfg.security.keyFile.c_str();
+            return runQuic(ip, port, crt, key, handler, cfg.reactor);
+        }
+
+        /**
+         * @brief 以显式证书路径 + 全局 reactor 配置运行 QUIC 服务器。
+         */
+        [[nodiscard]] Result<> runQuic(const char *ip, int port, const char *crt, const char *key, Handler &handler)
+            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+        {
+            const ReactorConfig cfg = getReactorConfig();
+            return runQuic(ip, port, crt, key, handler, cfg);
+        }
+
+        /**
+         * @brief 以显式配置与证书路径运行 QUIC 服务器，直至被请求停止。
+         */
+        [[nodiscard]] Result<> runQuic(const char *ip, int port, const char *crt, const char *key,
+                                       Handler &handler, const ReactorConfig &reactor)
+            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+        {
+            contract_assert(validReactorConfig(reactor));
+            if (auto err = acceptor_.listenUdp(ip, port); !err) [[unlikely]]
+            {
+                reset();
+                return err;
+            }
+            handler.reset();
+            datagram_.bind(handler);
+
+            SecurityConfig security{};
+            security.alpnProtocols = "h3";
+            auto ctxRes = detail::createServerContext(crt, key, security, &alpnList_, TlsProtocolType::DatagramQuic);
+            if (!ctxRes) [[unlikely]]
+            {
+                LOG_ERROR("Reactor::runQuic: TLS context creation failed: {}", ctxRes.error());
+                reset();
+                return std::unexpected(ctxRes.error());
+            }
+            protocol_.ctx = *ctxRes;
+
+            if (auto tlsErr = datagram_.startTLS(protocol_.ctx, acceptor_.fd); !tlsErr) [[unlikely]]
+            {
+                LOG_ERROR("Reactor::runQuic: datagram startTLS failed: {}", tlsErr.error());
+                reset();
+                return tlsErr;
+            }
+
+            Result<> rc = serveDatagram(reactor);
+            reset();
+            return rc;
+        }
+
+        /**
          * @brief 提交任务至事件循环线程异步执行。
          * @param task 可调用任务对象。
          */
@@ -441,7 +512,19 @@ namespace mynet
                           errnoText(errno));
                 return std::unexpected(ERR::EPOLL_CTL_FAILED);
             }
-            return loop_.run();
+            uint64_t quicTimerId = 0;
+            if (datagram_.isQuic())
+            {
+                quicTimerId = loop_.runEvery(std::chrono::milliseconds(20), [this] {
+                    datagram_.tick(acceptor_.fd);
+                });
+            }
+            Result<> rc = loop_.run();
+            if (quicTimerId != 0)
+            {
+                [[maybe_unused]] auto _ = loop_.cancelTimer(quicTimerId);
+            }
+            return rc;
         }
 
         /**
@@ -466,7 +549,7 @@ namespace mynet
             index_.clear();
             connPool_.reset();
             loop_.setEventCallback({});
-            if constexpr (SslAcceptor<Acceptor>)
+            if constexpr (SslAcceptor<Acceptor> || QuicAcceptor<Acceptor>)
             {
                 detail::freeContext(protocol_.ctx);
             }

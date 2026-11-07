@@ -295,7 +295,7 @@ namespace mynet
         /**
          * @brief 将 HTTP 首部列表编码为 QPACK 头部块字节序列 (HEADERS 载荷)
          */
-        inline void encodeHeaders(std::string &out, const std::vector<Header> &headers)
+        inline void encodeHeaders(std::string &out, std::span<const Header> headers)
         {
             // RFC 9204 Section 4.5.1: 头部块前缀 (RIC = 0, Delta Base = 0)
             out.push_back('\0');
@@ -326,6 +326,11 @@ namespace mynet
                     appendStringLiteral(out, h.value);
                 }
             }
+        }
+
+        inline void encodeHeaders(std::string &out, const std::vector<Header> &headers)
+        {
+            encodeHeaders(out, std::span<const Header>(headers));
         }
 
         /**

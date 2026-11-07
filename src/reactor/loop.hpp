@@ -392,11 +392,13 @@ namespace mynet
             }
             // next > now 保证差值非负；先分桶截断再做 duration_cast，
             // 避免极大过期时间在有符号差值上未定义溢出
-            if (next - now > std::chrono::milliseconds(std::numeric_limits<int>::max()))
+            const auto diff = next - now;
+            if (diff > std::chrono::milliseconds(std::numeric_limits<int>::max()))
             {
                 return std::numeric_limits<int>::max();
             }
-            return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(next - now).count());
+            auto ms = std::chrono::ceil<std::chrono::milliseconds>(diff).count();
+            return static_cast<int>(ms);
         }
 
         inline void doPendingTasks()
