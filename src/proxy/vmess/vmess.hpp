@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/vmess.hpp
+ * @file proxy/vmess/vmess.hpp
  * @brief VMess 代理协议服务端状态机处理器。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include "crypto.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
+#include "../crypto.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>

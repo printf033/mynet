@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/trojan.hpp
+ * @file proxy/trojan/trojan.hpp
  * @brief Trojan 代理协议服务端状态机处理器。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include "crypto.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
+#include "../crypto.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

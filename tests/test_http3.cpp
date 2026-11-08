@@ -235,20 +235,29 @@ TEST(Http3Quic, ShortHeaderPacketRoundtrip)
 
 TEST(HandlerHttp3, ConceptConformance)
 {
-    static_assert(MandatoryMethodConnection<HandlerHttp3>);
-    static_assert(HandlerConstraint<HandlerHttp3>);
-    static_assert(DerivedFromHandlerDatagram<HandlerHttp3>);
-    static_assert(Resettable<HandlerHttp3>);
+    static_assert(MandatoryMethodDatagram<HandlerHttp3<>>);
+    static_assert(HandlerConstraint<HandlerHttp3<>>);
+    static_assert(DerivedFromHandlerDatagram<HandlerHttp3<>>);
+    static_assert(Resettable<HandlerHttp3<>>);
+    static_assert(!DerivedFromHandlerConnection<HandlerHttp3<>>);
+    static_assert(!MandatoryMethodConnection<HandlerHttp3<>>);
 
-    EXPECT_TRUE(MandatoryMethodConnection<HandlerHttp3>);
-    EXPECT_TRUE(HandlerConstraint<HandlerHttp3>);
-    EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerHttp3>);
-    EXPECT_TRUE(Resettable<HandlerHttp3>);
+    EXPECT_TRUE(MandatoryMethodDatagram<HandlerHttp3<>>);
+    EXPECT_TRUE(HandlerConstraint<HandlerHttp3<>>);
+    EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerHttp3<>>);
+    EXPECT_TRUE(Resettable<HandlerHttp3<>>);
+    EXPECT_FALSE(DerivedFromHandlerConnection<HandlerHttp3<>>);
+    EXPECT_FALSE(MandatoryMethodConnection<HandlerHttp3<>>);
 }
 
 TEST(HandlerHttp3, ProcessStreamFramesGeneratesResponse)
 {
     HandlerHttp3 handler;
+
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(54321);
+    inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
 
     std::vector<Header> reqHeaders = {{":method", "GET"}, {":path", "/test"}};
     std::string headerBytes;
@@ -258,11 +267,11 @@ TEST(HandlerHttp3, ProcessStreamFramesGeneratesResponse)
     appendFrame(frames, std::to_underlying(FRAME_TYPE::HEADERS), headerBytes);
     appendFrame(frames, std::to_underlying(FRAME_TYPE::DATA), "request payload");
 
-    [[maybe_unused]] auto _ = handler.appendRequest(frames.data(), static_cast<ssize_t>(frames.size()));
-    handler.process();
+    handler.onDatagram(peer, frames.data(), frames.size());
 
-    ASSERT_TRUE(handler.hasResponse());
-    std::string resp = handler.takeResponse();
+    ASSERT_TRUE(handler.hasOutgoing());
+    auto out = handler.takeOutgoing();
+    std::string resp = std::move(out.bytes);
     EXPECT_FALSE(resp.empty());
 
     // 解析响应帧
@@ -507,7 +516,7 @@ TEST(HandlerHttp3, RejectsServerInitiatedStreamIdFromClient)
     EXPECT_FALSE(handler.hasOutgoing());
 }
 
-class LargeResponseHttp3Handler : public HandlerHttp3
+class LargeResponseHttp3Handler : public HandlerHttp3<>
 {
 public:
     void onRequest([[maybe_unused]] uint64_t streamId, [[maybe_unused]] const std::vector<Header> &headers,
@@ -611,11 +620,8 @@ TEST(HandlerHttp3, PerConnectionSessionIsolationPreventsCrosstalk)
     EXPECT_FALSE(handler.hasOutgoing());
 }
 
-TEST(HandlerHttp3, DualBaseLifecycleHooksAreUnambiguous)
+TEST(HandlerHttp3, DatagramLifecycleHooks)
 {
-    // HandlerHttp3 同时继承 HandlerConnection 与 HandlerDatagram，两个并列基类各自
-    // 提供 reset / onMessageComplete / onParseError。HandlerHttp3 显式覆盖三者以消除
-    // 二义；这里既验证调用无歧义，也验证 reset 会逐层清理两个基类的状态。
     HandlerHttp3 handler;
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
@@ -625,28 +631,12 @@ TEST(HandlerHttp3, DualBaseLifecycleHooksAreUnambiguous)
     handler.sendTo(peer, "stale", 5);
     ASSERT_TRUE(handler.hasOutgoing());
 
-    // 通过两个基类静态类型分别调用钩子：两个子对象互不遮蔽，转发实现可达
-    static_cast<HandlerConnection &>(handler).onParseError("conn-side");
-    static_cast<HandlerDatagram &>(handler).onParseError("dgram-side");
-    static_cast<HandlerConnection &>(handler).onMessageComplete();
-    static_cast<HandlerDatagram &>(handler).onMessageComplete();
+    handler.onParseError("dgram-side");
+    handler.onMessageComplete();
 
     handler.reset();
-    EXPECT_FALSE(handler.hasOutgoing()); // HandlerDatagram::reset()
-    EXPECT_FALSE(handler.hasResponse()); // HandlerConnection::reset()
+    EXPECT_FALSE(handler.hasOutgoing());
     EXPECT_EQ(handler.activeStreams(), size_t{0});
-}
-
-TEST(HandlerHttp3, LifecycleAndFd)
-{
-    HandlerHttp3 handler;
-    EXPECT_EQ(handler.fd(), -1);
-
-    handler.onConnect(99);
-    EXPECT_EQ(handler.fd(), 99);
-
-    handler.reset();
-    EXPECT_EQ(handler.fd(), -1);
 }
 
 TEST(HandlerHttp3, DatagramForwardAndBroadcast)
@@ -685,24 +675,6 @@ TEST(HandlerHttp3, DatagramForwardAndBroadcast)
     EXPECT_EQ(b2.bytes, bcastMsg);
 }
 
-TEST(HandlerHttp3, SpliceTunnelApis)
-{
-    HandlerHttp3 handler;
-    EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-
-    handler.enableSpliceTunnel(200);
-    EXPECT_TRUE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceTarget(), 200);
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
-
-    handler.disableSpliceTunnel();
-    EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-}
-
 // ============================================================================
 // 7. Refactored HTTP/3 Stream & Zero-Copy Tests
 // ============================================================================
@@ -738,7 +710,7 @@ public:
     void process() noexcept { ++processCount; }
 };
 
-class HookTrackingHttp3Handler : public HandlerHttp3Mux<TrackingHttp3Stream>
+class HookTrackingHttp3Handler : public HandlerHttp3<TrackingHttp3Stream>
 {
 public:
     bool openCalled = false;
@@ -788,6 +760,11 @@ TEST(HandlerHttp3, CustomStreamHandlerAndLifecycleHooksDispatched)
     EXPECT_EQ(handler.openStreams(), 0u);
     EXPECT_GT(handler.streamPoolCapacity(), 0u);
 
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(54322);
+    inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+
     std::vector<Header> reqHeaders = {{":method", "POST"}, {":path", "/hook-test"}};
     std::string headerBytes;
     encodeHeaders(headerBytes, reqHeaders);
@@ -796,8 +773,7 @@ TEST(HandlerHttp3, CustomStreamHandlerAndLifecycleHooksDispatched)
     appendFrame(frames, std::to_underlying(FRAME_TYPE::HEADERS), headerBytes);
     appendFrame(frames, std::to_underlying(FRAME_TYPE::DATA), "stream-data-bytes");
 
-    [[maybe_unused]] auto _ = handler.appendRequest(frames.data(), static_cast<ssize_t>(frames.size()));
-    handler.process();
+    handler.onDatagram(peer, frames.data(), frames.size());
 
     EXPECT_TRUE(handler.openCalled);
     EXPECT_TRUE(handler.headersCalled);
@@ -809,5 +785,5 @@ TEST(HandlerHttp3, CustomStreamHandlerAndLifecycleHooksDispatched)
 
     // 流处理完成后流从表中清除，StreamHandler 归还对象池
     EXPECT_EQ(handler.openStreams(), 0u);
-    EXPECT_TRUE(handler.hasResponse());
+    EXPECT_TRUE(handler.hasOutgoing());
 }

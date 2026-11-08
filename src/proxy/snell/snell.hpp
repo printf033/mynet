@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/snell.hpp
+ * @file proxy/snell/snell.hpp
  * @brief Snell 代理协议服务端状态机处理器。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include "crypto.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
+#include "../crypto.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

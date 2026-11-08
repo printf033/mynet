@@ -1,12 +1,12 @@
 #pragma once
 
 /**
- * @file proxy/transparent.hpp
+ * @file proxy/transparent/transparent.hpp
  * @brief Linux Netfilter 透明代理状态机处理器（Redirect / TProxy）。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

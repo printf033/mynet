@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/http.hpp
+ * @file proxy/http/http.hpp
  * @brief HTTP 代理协议服务端状态机处理器（支持 HTTP CONNECT 隧道与透明转发，带 Basic 认证）。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include "crypto.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
+#include "../crypto.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

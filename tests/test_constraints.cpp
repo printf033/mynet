@@ -263,7 +263,7 @@ TEST(Constraints, HandlerConstraintEnforcement)
     static_assert(HandlerConstraint<HandlerDatagram>);
     static_assert(HandlerConstraint<FakeHandler>);
     static_assert(HandlerConstraint<HandlerHttp<HTTP_MODE::REQUEST>>);
-    static_assert(HandlerConstraint<HandlerHttp3>);
+    static_assert(HandlerConstraint<HandlerHttp3<>>);
 
     // 反例：缺 onMessageComplete / onParseError 钩子，或不可重置
     static_assert(!HandlerConstraint<ValidResettable>); // 只有 reset()
@@ -273,7 +273,7 @@ TEST(Constraints, HandlerConstraintEnforcement)
 
     EXPECT_TRUE(HandlerConstraint<HandlerConnection>);
     EXPECT_TRUE(HandlerConstraint<HandlerDatagram>);
-    EXPECT_TRUE(HandlerConstraint<HandlerHttp3>);
+    EXPECT_TRUE(HandlerConstraint<HandlerHttp3<>>);
     EXPECT_FALSE(HandlerConstraint<ValidResettable>);
     EXPECT_FALSE(HandlerConstraint<NonDerivedHandler>);
 }
@@ -319,17 +319,19 @@ TEST(Constraints, DerivedFromHandlerConnectionConstraints)
     static_assert(DerivedFromHandlerConnection<HandlerConnection>);
     static_assert(DerivedFromHandlerConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(DerivedFromHandlerConnection<CombinedHandler>);
-    static_assert(DerivedFromHandlerConnection<HandlerHttp3>);
+    static_assert(!DerivedFromHandlerConnection<HandlerHttp3<>>); // HTTP/3 纯报文处理器不继承 HandlerConnection
+    static_assert(DerivedFromHandlerDatagram<HandlerHttp3<>>);
     // 两个处理器基类并列独立，各自都满足通用生命周期契约
     static_assert(HandlerConstraint<HandlerConnection>);
-    static_assert(HandlerConstraint<HandlerHttp3>);
+    static_assert(HandlerConstraint<HandlerHttp3<>>);
 
     // 报文基类不是流式处理器
     static_assert(!DerivedFromHandlerConnection<HandlerDatagram>);
     static_assert(!DerivedFromHandlerConnection<NonDerivedHandler>);
 
     EXPECT_TRUE(DerivedFromHandlerConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
-    EXPECT_TRUE(DerivedFromHandlerConnection<HandlerHttp3>);
+    EXPECT_FALSE(DerivedFromHandlerConnection<HandlerHttp3<>>);
+    EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerHttp3<>>);
     EXPECT_FALSE(DerivedFromHandlerConnection<HandlerDatagram>);
 }
 
@@ -342,21 +344,18 @@ TEST(Constraints, HandlerBasesArePeersWithoutVirtualInheritance)
 #if defined(__cpp_lib_is_virtual_base_of)
     static_assert(!std::is_virtual_base_of_v<HandlerConnection, CombinedHandler>);
     static_assert(!std::is_virtual_base_of_v<HandlerDatagram, CombinedHandler>);
-    static_assert(!std::is_virtual_base_of_v<HandlerConnection, HandlerHttp3>);
-    static_assert(!std::is_virtual_base_of_v<HandlerDatagram, HandlerHttp3>);
 #endif
 
     // 两个基类各自贡献完整的子对象（虚继承下它们会共享/折叠布局）。
     static_assert(sizeof(CombinedHandler) >= sizeof(HandlerConnection) + sizeof(HandlerDatagram));
-    static_assert(sizeof(HandlerHttp3) >= sizeof(HandlerConnection) + sizeof(HandlerDatagram));
 
     // 两个基类互不派生：流式与报文是并列层次，没有共同祖先
     static_assert(!std::derived_from<HandlerConnection, HandlerDatagram>);
     static_assert(!std::derived_from<HandlerDatagram, HandlerConnection>);
 
 #if defined(__cpp_lib_is_virtual_base_of)
-    EXPECT_FALSE((std::is_virtual_base_of_v<HandlerConnection, HandlerHttp3>));
-    EXPECT_FALSE((std::is_virtual_base_of_v<HandlerDatagram, HandlerHttp3>));
+    EXPECT_FALSE((std::is_virtual_base_of_v<HandlerConnection, CombinedHandler>));
+    EXPECT_FALSE((std::is_virtual_base_of_v<HandlerDatagram, CombinedHandler>));
 #endif
 }
 
@@ -385,7 +384,7 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
     static_assert(MandatoryMethodDatagram<HandlerDatagram>); // 概念只校验接口，不要求可实例化
     static_assert(MandatoryMethodDatagram<PureDatagramHandler>);
     static_assert(MandatoryMethodDatagram<CombinedHandler>);
-    static_assert(MandatoryMethodDatagram<HandlerHttp3>);
+    static_assert(MandatoryMethodDatagram<HandlerHttp3<>>);
 
     // 数据报路径不要求任何流式设施
     static_assert(!MandatoryMethodConnection<PureDatagramHandler>);

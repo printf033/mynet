@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/vless.hpp
+ * @file proxy/vless/vless.hpp
  * @brief VLESS (v0) 代理协议服务端状态机处理器。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include "crypto.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
+#include "../crypto.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>

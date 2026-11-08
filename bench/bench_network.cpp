@@ -7,7 +7,7 @@
 #include "http/v3/handler.hpp"
 #include "log_config.hpp"
 #include "proactor/proactor.hpp"
-#include "proxy/socks5.hpp"
+#include "proxy/socks/socks5.hpp"
 #include "reactor/reactor.hpp"
 #include "tls.hpp"
 #include <algorithm>
@@ -819,7 +819,7 @@ namespace
     {
         auto [certPath, keyPath] = findCertFiles();
         http::v3::HandlerHttp3 handler;
-        Reactor<AcceptorQuic<http::v3::HandlerHttp3>> reactor;
+        Reactor<AcceptorQuic<http::v3::HandlerHttp3<>>> reactor;
         std::thread srvThread([&]() {
             [[maybe_unused]] auto _ =
                 reactor.runQuic("127.0.0.1", port, certPath.c_str(), keyPath.c_str(), handler);
@@ -829,9 +829,9 @@ namespace
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         char cmd[256];
-        std::snprintf(cmd, sizeof(cmd), "curl -k -s --http3 https://127.0.0.1:%d/ > /dev/null 2>&1", port);
+        std::snprintf(cmd, sizeof(cmd), "curl -k -s --connect-timeout 1 -m 2 --http3-only https://127.0.0.1:%d/ > /dev/null 2>&1", port);
 
-        constexpr size_t kQuicRequests = 50;
+        constexpr size_t kQuicRequests = 5;
         std::vector<double> latencies;
         latencies.reserve(kQuicRequests);
 

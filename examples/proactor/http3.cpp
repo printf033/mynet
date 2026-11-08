@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     http::v3::HandlerHttp3 handler;
-    if (auto res = Proactor<AcceptorSocket<http::v3::HandlerHttp3>>().runUdp(listen.ip, listen.port(), handler); !res)
+    if (auto res = Proactor<AcceptorSocket<http::v3::HandlerHttp3<>>>().runUdp(listen.ip, listen.port(), handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

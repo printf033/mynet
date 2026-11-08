@@ -1,4 +1,4 @@
-#include "proxy/socks5.hpp"
+#include "proxy/socks/socks5.hpp"
 #include "common/endpoint.hpp"
 #include "error.hpp"
 #include "log_config.hpp"

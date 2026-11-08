@@ -19,7 +19,7 @@
 
 namespace
 {
-    mynet::Reactor<mynet::AcceptorQuic<mynet::http::v3::HandlerHttp3>> *g_reactor = nullptr;
+    mynet::Reactor<mynet::AcceptorQuic<mynet::http::v3::HandlerHttp3<>>> *g_reactor = nullptr;
 
     void handleSignal(int)
     {
@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     http::v3::HandlerHttp3 handler;
-    Reactor<AcceptorQuic<http::v3::HandlerHttp3>> reactor;
+    Reactor<AcceptorQuic<http::v3::HandlerHttp3<>>> reactor;
     g_reactor = &reactor;
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);

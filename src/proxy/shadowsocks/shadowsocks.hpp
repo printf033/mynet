@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/shadowsocks.hpp
+ * @file proxy/shadowsocks/shadowsocks.hpp
  * @brief Shadowsocks AEAD 代理协议服务端状态机处理器（RFC/SIP002 规范）。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include "crypto.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
+#include "../crypto.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>

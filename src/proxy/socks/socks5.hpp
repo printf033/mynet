@@ -1,12 +1,12 @@
 #pragma once
 
 /**
- * @file proxy/socks5.hpp
+ * @file proxy/socks/socks5.hpp
  * @brief SOCKS5 代理协议服务端状态机处理器（RFC 1928 / RFC 1929）。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/shadowtls.hpp
+ * @file proxy/shadowtls/shadowtls.hpp
  * @brief ShadowTLS (v1/v2/v3) 协议服务端状态机处理器。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include "crypto.hpp"
+#include "../../connection.hpp"
+#include "../address.hpp"
+#include "../crypto.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

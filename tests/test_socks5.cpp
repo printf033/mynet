@@ -1,5 +1,5 @@
 #include "proxy/address.hpp"
-#include "proxy/socks5.hpp"
+#include "proxy/socks/socks5.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
