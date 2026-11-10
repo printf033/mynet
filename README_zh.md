@@ -77,14 +77,14 @@
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as 客户端 (Client)
-    participant Acceptor as 入站监听 (AcceptorBase / Ssl / Quic)
-    participant Engine as I/O 引擎 (Reactor / Proactor)
-    participant Pool as 对象池 (ObjectPool / BufferRing)
-    participant Conn as 传输会话 (Connection / RequestBuffer)
-    participant Handler as 业务处理器 (Handler: HTTP/DNS/SOCKS/Trojan)
-    participant Dialer as 出站拨号 (DialerBase / Ssl / Quic)
-    actor Upstream as 远端服务器 (Upstream / Target)
+    actor Client as "客户端 (Client)"
+    participant Acceptor as "入站监听 (AcceptorBase / Ssl / Quic)"
+    participant Engine as "I/O 引擎 (Reactor / Proactor)"
+    participant Pool as "对象池 (ObjectPool / BufferRing)"
+    participant Conn as "传输会话 (Connection / RequestBuffer)"
+    participant Handler as "业务处理器 (Handler: HTTP/DNS/SOCKS/Trojan)"
+    participant Dialer as "出站拨号 (DialerBase / Ssl / Quic)"
+    actor Upstream as "远端服务器 (Upstream / Target)"
 
     %% 阶段 1: 入站连接建立与对象池分配
     Note over Client, Acceptor: 阶段 1: 入站连接建立与对象池分配 (Inbound Handshake)
@@ -113,20 +113,20 @@ sequenceDiagram
         Handler->>Dialer: 发起目标解析与出站拨号请求 (Target: example.com:443)
         Dialer->>Dialer: dialTcp() / dialUdp() (SO_BINDTODEVICE 可选网卡绑定)
         Dialer->>Upstream: 发起非阻塞 connect() 建立 TCP/UDP 四元组
-        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS -> 可写事件就绪)
+        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS，可写事件就绪)
         Dialer->>Dialer: checkConnectError() 确认四元组连接成功
         opt 上游为代理或加密出站 (Trojan / Vless / Socks5 / TLS)
             Handler->>Upstream: 发送出站协议握手头 (HandlerOutbound*)
             Upstream-->>Handler: 握手协商响应 (进入 STREAMING 状态)
         end
         Note over Conn, Upstream: 阶段 4: 双向流式转发与零拷贝通道 (Streaming / Splice Forward)
-        opt 零拷贝内核管道转发 (Linux splice)
+        alt 零拷贝内核管道转发 (Linux splice)
             Conn->>Upstream: enableSpliceForward(targetFd) 激活内核管道零拷贝直通
         else 应用层流式中继 (Userspace Relay)
             Conn->>Upstream: pushResponse() 缓冲流水线转发
         end
     else 本地业务服务处理 (HTTP Web API / DNS 本地应答)
-        Note over Handler, Conn: 本地应答生成 (Local Server Response)
+        Note over Conn, Handler: 本地应答生成 (Local Server Response)
         Handler->>Conn: pushResponse() 存入零分配定容环形队列 (ResponseQueue)
     end
 

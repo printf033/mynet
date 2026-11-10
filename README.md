@@ -77,14 +77,14 @@ The following comprehensive Mermaid sequence diagram illustrates the complete li
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as Client / Peer
-    participant Acceptor as Acceptor (AcceptorBase / Ssl / Quic)
-    participant Engine as I/O Engine (Reactor / Proactor)
-    participant Pool as Pool (ObjectPool / BufferRing)
-    participant Conn as Connection (Connection / RequestBuffer)
-    participant Handler as Handler (HTTP/DNS/SOCKS/Trojan)
-    participant Dialer as Dialer (DialerBase / Ssl / Quic)
-    actor Upstream as Upstream Server / Target
+    actor Client as "Client / Peer"
+    participant Acceptor as "Acceptor (AcceptorBase / Ssl / Quic)"
+    participant Engine as "I/O Engine (Reactor / Proactor)"
+    participant Pool as "Pool (ObjectPool / BufferRing)"
+    participant Conn as "Connection (Connection / RequestBuffer)"
+    participant Handler as "Handler (HTTP/DNS/SOCKS/Trojan)"
+    participant Dialer as "Dialer (DialerBase / Ssl / Quic)"
+    actor Upstream as "Upstream Server / Target"
 
     %% Phase 1: Inbound Handshake & Pool Allocation
     Note over Client, Acceptor: Phase 1: Inbound Handshake & ObjectPool Allocation
@@ -113,27 +113,27 @@ sequenceDiagram
         Handler->>Dialer: Outbound dial request (Target: example.com:443)
         Dialer->>Dialer: dialTcp() / dialUdp() (optional SO_BINDTODEVICE binding)
         Dialer->>Upstream: Non-blocking connect() establish 4-tuple
-        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS -> writable event ready)
+        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS, writable event ready)
         Dialer->>Dialer: checkConnectError() verify socket connected
         opt Upstream Proxy / Encrypted Handshake (Trojan / Vless / Socks5 / TLS)
             Handler->>Upstream: Send outbound protocol header (HandlerOutbound*)
             Upstream-->>Handler: Handshake response (transition to STREAMING)
         end
         Note over Conn, Upstream: Phase 4: Bi-directional Streaming & Zero-Copy Forwarding
-        opt Linux Kernel Zero-Copy (splice)
+        alt Linux Kernel Zero-Copy (splice)
             Conn->>Upstream: enableSpliceForward(targetFd) activate pipe splice forwarding
         else Userspace Relay
             Conn->>Upstream: pushResponse() streaming pipeline relay
         end
     else Local Application Server (HTTP Web API / DNS Local Server)
-        Note over Handler, Conn: Local Response Generation
+        Note over Conn, Handler: Local Response Generation
         Handler->>Conn: pushResponse() into ring buffer (ResponseQueue, zero-alloc)
     end
 
     %% Phase 5: Response Egress & Safe Recycle
     Note over Client, Pool: Phase 5: Response Egress, Backpressure & Resource Recycle
     opt Backpressure Control
-        Conn->>Engine: High-water mark exceeded -> readCredit() pauses ingress
+        Conn->>Engine: High-water mark exceeded, readCredit() pauses ingress
     end
     Conn->>Engine: Extract pending responses (takeResponse)
     Engine->>Client: Non-blocking send / io_uring write
