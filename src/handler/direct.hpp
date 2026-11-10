@@ -1,80 +1,103 @@
 #pragma once
 
 /**
- * @file proxy/direct.hpp
- * @brief 直连直通代理处理器 (Direct Outbound / Inbound Pass-through)。
+ * @file handler/direct.hpp
+ * @brief 直连直通代理处理器（入站直通 HandlerInboundDirect 与出站直通 HandlerOutboundDirect）。
  */
 
-#include "../connection.hpp"
-#include "address.hpp"
-#include <cstdint>
-#include <functional>
-#include <optional>
+#include "inbound.hpp"
+#include "outbound.hpp"
 
 namespace mynet::handler
 {
 
     /**
-     * @brief 直连直通处理器
+     * @brief 直连入站直通处理器 (Direct Inbound Pass-through)
      */
-    class HandlerDirect : public HandlerConnection
+    class HandlerInboundDirect : public HandlerInboundConnection
     {
     public:
-        using RequestCallback = std::function<void(const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
+        using DirectRequestCallback = std::function<void(const ProxyAddress &target)>;
 
     private:
-        ProxyAddress target_{};
-        RequestCallback requestCallback_{nullptr};
+        DirectRequestCallback directCallback_{nullptr};
         bool triggered_{false};
 
     public:
-        HandlerDirect() noexcept = default;
-        explicit HandlerDirect(const ProxyAddress &target) noexcept
-            : target_(target)
+        HandlerInboundDirect() noexcept
         {
+            stage_ = InboundStage::STREAMING;
         }
-        ~HandlerDirect() noexcept override = default;
 
-        HandlerDirect(const HandlerDirect &) = delete;
-        HandlerDirect &operator=(const HandlerDirect &) = delete;
-        HandlerDirect(HandlerDirect &&) = delete;
-        HandlerDirect &operator=(HandlerDirect &&) = delete;
+        explicit HandlerInboundDirect(const ProxyAddress &target) noexcept
+        {
+            targetAddress_ = target;
+            stage_ = InboundStage::STREAMING;
+        }
 
-        void setTarget(const ProxyAddress &target) { target_ = target; }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
+        ~HandlerInboundDirect() noexcept override = default;
 
-        [[nodiscard]] bool isEstablished() const noexcept { return true; }
-        [[nodiscard]] const ProxyAddress &targetAddress() const noexcept { return target_; }
+        HandlerInboundDirect(const HandlerInboundDirect &) = delete;
+        HandlerInboundDirect &operator=(const HandlerInboundDirect &) = delete;
+        HandlerInboundDirect(HandlerInboundDirect &&) = delete;
+        HandlerInboundDirect &operator=(HandlerInboundDirect &&) = delete;
+
+        void setTarget(const ProxyAddress &target) { targetAddress_ = target; }
+        void setOnDirectRequest(DirectRequestCallback cb) noexcept { directCallback_ = std::move(cb); }
+        void setOnRequest(DirectRequestCallback cb) noexcept { directCallback_ = std::move(cb); }
+        using HandlerInboundConnection::setOnRequest;
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
+            HandlerInboundConnection::reset();
+            stage_ = InboundStage::STREAMING;
             triggered_ = false;
-            disableSpliceForward();
         }
 
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept { (void)reason; }
-
-        void process()
+        void process() override
         {
             if (!triggered_)
             {
                 triggered_ = true;
                 onMessageComplete();
-                if (requestCallback_)
+                if (directCallback_ && targetAddress_.has_value())
                 {
-                    requestCallback_(target_);
+                    directCallback_(*targetAddress_);
+                }
+                else if (requestCallback_ && targetAddress_.has_value())
+                {
+                    requestCallback_(command_, *targetAddress_);
                 }
             }
         }
+    };
+
+    /**
+     * @brief 直连出站处理器 (Direct Outbound)
+     *
+     * 初始即处于 STREAMING 状态，建连后可直接通过 splice 桥接入站。
+     */
+    class HandlerOutboundDirect : public HandlerOutboundConnection
+    {
+    public:
+        HandlerOutboundDirect() noexcept
+        {
+            stage_ = OutboundStage::STREAMING;
+        }
+
+        explicit HandlerOutboundDirect(const ProxyAddress &target) noexcept
+            : HandlerOutboundConnection(target)
+        {
+            stage_ = OutboundStage::STREAMING;
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            stage_ = OutboundStage::STREAMING;
+        }
+
+        void process() override {}
     };
 
 } // namespace mynet::handler

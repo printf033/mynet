@@ -1,8 +1,8 @@
 #pragma once
 
 /**
- * @file proxy/socks/socks.hpp
- * @brief 统一 SOCKS 代理协议服务端状态机处理器（同时支持 SOCKS4/SOCKS4a 与 SOCKS5）。
+ * @file handler/socks/socks.hpp
+ * @brief 统一 SOCKS 代理协议入站状态机处理器 (HandlerInboundSocks)（同时支持 SOCKS4/SOCKS4a 与 SOCKS5 自适应嗅探）。
  */
 
 #include "socks4.hpp"
@@ -19,58 +19,42 @@ namespace mynet::handler
     };
 
     /**
-     * @brief 统一 SOCKS 服务端处理器
+     * @brief 统一 SOCKS 入站服务端处理器
      *
      * 自动嗅探客户端发起的首字节协议版本号：
      * - 0x04: 路由至 SOCKS4 / SOCKS4a 处理逻辑
      * - 0x05: 路由至 SOCKS5 (RFC 1928 / RFC 1929) 处理逻辑
      */
-    class HandlerSocks : public HandlerConnection
+    class HandlerInboundSocks : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
         SocksProtocolVersion version_{SocksProtocolVersion::UNKNOWN};
-        HandlerSocks4 s4_{};
-        HandlerSocks5 s5_{};
+        HandlerInboundSocks4 s4_{};
+        HandlerInboundSocks5 s5_{};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
 
     public:
-        HandlerSocks() noexcept = default;
-        explicit HandlerSocks(const ProxyConfig &cfg) noexcept
+        HandlerInboundSocks() noexcept = default;
+        explicit HandlerInboundSocks(const ProxyConfig &cfg) noexcept
             : s4_(cfg),
               s5_(cfg)
         {
         }
-        ~HandlerSocks() noexcept override = default;
+        ~HandlerInboundSocks() noexcept override = default;
 
-        HandlerSocks(const HandlerSocks &) = delete;
-        HandlerSocks &operator=(const HandlerSocks &) = delete;
-        HandlerSocks(HandlerSocks &&) = delete;
-        HandlerSocks &operator=(HandlerSocks &&) = delete;
+        HandlerInboundSocks(const HandlerInboundSocks &) = delete;
+        HandlerInboundSocks &operator=(const HandlerInboundSocks &) = delete;
+        HandlerInboundSocks(HandlerInboundSocks &&) = delete;
+        HandlerInboundSocks &operator=(HandlerInboundSocks &&) = delete;
 
         void setAuthenticator(AuthCallback cb) noexcept
         {
             authCallback_ = cb;
             s5_.setAuthenticator(cb);
             s4_.setAuthenticator([cb](std::string_view uid) { return cb(uid, ""); });
-        }
-
-        void setOnRequest(RequestCallback cb) noexcept
-        {
-            requestCallback_ = cb;
-            s4_.setOnRequest(cb);
-            s5_.setOnRequest(cb);
         }
 
         [[nodiscard]] SocksProtocolVersion version() const noexcept { return version_; }
@@ -80,7 +64,7 @@ namespace mynet::handler
                    (version_ == SocksProtocolVersion::SOCKS5 && s5_.isEstablished());
         }
 
-        [[nodiscard]] std::optional<ProxyAddress> targetAddress() const noexcept
+        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept
         {
             if (version_ == SocksProtocolVersion::SOCKS4)
             {
@@ -90,7 +74,7 @@ namespace mynet::handler
             {
                 return s5_.targetAddress();
             }
-            return std::nullopt;
+            return targetAddress_;
         }
 
         void configure(const ProxyConfig &cfg) noexcept
@@ -101,17 +85,16 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
+            HandlerInboundConnection::reset();
             version_ = SocksProtocolVersion::UNKNOWN;
             s4_.reset();
             s5_.reset();
-            disableSpliceForward();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept { (void)reason; }
 
-        void process()
+        void process() override
         {
             if (version_ == SocksProtocolVersion::UNKNOWN)
             {
@@ -138,16 +121,27 @@ namespace mynet::handler
 
             if (version_ == SocksProtocolVersion::SOCKS4)
             {
-                // 将本连接的请求数据同步给 s4_
                 syncToChild(s4_);
                 s4_.process();
                 syncFromChild(s4_);
+                if (s4_.isEstablished())
+                {
+                    stage_ = InboundStage::STREAMING;
+                    targetAddress_ = s4_.targetAddress();
+                    command_ = s4_.command();
+                }
             }
             else if (version_ == SocksProtocolVersion::SOCKS5)
             {
                 syncToChild(s5_);
                 s5_.process();
                 syncFromChild(s5_);
+                if (s5_.isEstablished())
+                {
+                    stage_ = InboundStage::STREAMING;
+                    targetAddress_ = s5_.targetAddress();
+                    command_ = s5_.command();
+                }
             }
         }
 
@@ -165,14 +159,12 @@ namespace mynet::handler
 
         void syncFromChild(HandlerConnection &child)
         {
-            // 同步消耗的请求字节
             const size_t childAvail = child.requestBytes();
             if (requestBytes() > childAvail)
             {
                 requestConsume(requestBytes() - childAvail);
             }
 
-            // 同步子状态机的响应报文
             while (child.hasResponse())
             {
                 std::string resp = child.takeResponse();

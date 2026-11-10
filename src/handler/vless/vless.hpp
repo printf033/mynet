@@ -1,13 +1,14 @@
 #pragma once
 
 /**
- * @file proxy/vless/vless.hpp
- * @brief VLESS (v0) 代理协议服务端状态机处理器。
+ * @file handler/vless/vless.hpp
+ * @brief VLESS (v0) 代理协议入站状态机处理器 (HandlerInboundVless) 与出站协议处理器 (HandlerOutboundVless)。
  */
 
-#include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
+#include "../outbound.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -30,51 +31,29 @@ namespace mynet::handler
     } // namespace vless
 
     /**
-     * @brief VLESS 会话状态
+     * @brief VLESS (v0) 入站协议状态机处理器
      */
-    enum class VlessStage : uint8_t
-    {
-        HEADER,    ///< 等待解析 VLESS 请求头部
-        STREAMING, ///< 握手成功并回送响应，进入数据流式透传
-        ERROR      ///< UUID 鉴权失败或协议畸变
-    };
-
-    /**
-     * @brief VLESS (v0) 协议状态机处理器
-     */
-    class HandlerVless : public HandlerConnection
+    class HandlerInboundVless : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &uuid)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
-        VlessStage stage_{VlessStage::HEADER};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
         std::vector<std::array<uint8_t, 16>> validUuids_{};
 
-        uint8_t command_{0};
         std::array<uint8_t, 16> clientUuid_{};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
         bool autoReplySuccess_{true};
 
     public:
-        HandlerVless() noexcept = default;
-        explicit HandlerVless(std::string_view uuidStr) { setUuid(uuidStr); }
-        ~HandlerVless() noexcept override = default;
+        HandlerInboundVless() noexcept = default;
+        explicit HandlerInboundVless(std::string_view uuidStr) { setUuid(uuidStr); }
+        ~HandlerInboundVless() noexcept override = default;
 
-        HandlerVless(const HandlerVless &) = delete;
-        HandlerVless &operator=(const HandlerVless &) = delete;
-        HandlerVless(HandlerVless &&) = delete;
-        HandlerVless &operator=(HandlerVless &&) = delete;
+        HandlerInboundVless(const HandlerInboundVless &) = delete;
+        HandlerInboundVless &operator=(const HandlerInboundVless &) = delete;
+        HandlerInboundVless(HandlerInboundVless &&) = delete;
+        HandlerInboundVless &operator=(HandlerInboundVless &&) = delete;
 
         void setUuid(std::string_view uuidStr)
         {
@@ -94,35 +73,19 @@ namespace mynet::handler
         }
 
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
         void setAutoReply(bool autoReply) noexcept { autoReplySuccess_ = autoReply; }
 
-        [[nodiscard]] VlessStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == VlessStage::STREAMING; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
         [[nodiscard]] const std::array<uint8_t, 16> &clientUuid() const noexcept { return clientUuid_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = VlessStage::HEADER;
-            command_ = 0;
+            HandlerInboundConnection::reset();
             std::memset(clientUuid_.data(), 0, 16);
-            targetAddress_.reset();
-            disableSpliceForward();
         }
 
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept
+        void process() override
         {
-            (void)reason;
-            stage_ = VlessStage::ERROR;
-        }
-
-        void process()
-        {
-            if (stage_ == VlessStage::HEADER)
+            if (stage_ == InboundStage::HANDSHAKE)
             {
                 if (!processHeader())
                 {
@@ -155,7 +118,7 @@ namespace mynet::handler
             if (data[0] != vless::kVersion)
             {
                 onParseError("VLESS: Unsupported version");
-                stage_ = VlessStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -191,7 +154,7 @@ namespace mynet::handler
             if (!authOk)
             {
                 onParseError("VLESS: Unauthorized UUID");
-                stage_ = VlessStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -222,7 +185,7 @@ namespace mynet::handler
                 sendReply();
             }
 
-            stage_ = VlessStage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
             if (requestCallback_)
@@ -230,6 +193,113 @@ namespace mynet::handler
                 requestCallback_(command_, *targetAddress_);
             }
             return true;
+        }
+    };
+
+    /**
+     * @brief VLESS (v0) 出站协议处理器 (VLESS Outbound)
+     *
+     * 建立四元组后发送 VLESS 首包：
+     * [Version 0x00][UUID 16B][AddonLen 0x00][CMD 0x01][Port 2B BE][Address ATYP + Body]
+     * 接收 2 字节回执 [0x00, 0x00] 后进入 STREAMING 阶段。
+     */
+    class HandlerOutboundVless : public HandlerOutboundConnection
+    {
+    private:
+        std::array<uint8_t, 16> uuid_{};
+        bool headerSent_{false};
+
+    public:
+        HandlerOutboundVless() noexcept = default;
+        HandlerOutboundVless(const std::array<uint8_t, 16> &uuid, const ProxyAddress &target)
+            : HandlerOutboundConnection(target),
+              uuid_(uuid)
+        {
+        }
+
+        void setUuid(const std::array<uint8_t, 16> &uuid) noexcept { uuid_ = uuid; }
+
+        bool setUuidString(std::string_view uuidStr) noexcept
+        {
+            auto parsed = crypto::parseUuid(uuidStr);
+            if (!parsed.has_value())
+            {
+                return false;
+            }
+            uuid_ = *parsed;
+            return true;
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            headerSent_ = false;
+        }
+
+        void process() override
+        {
+            if (!headerSent_)
+            {
+                sendVlessHeader();
+            }
+
+            if (stage_ == OutboundStage::CONNECTING)
+            {
+                // 等待服务端 2 字节握手回执 [0x00, 0x00]
+                if (requestBytes() >= 2)
+                {
+                    const auto *resp = reinterpret_cast<const uint8_t *>(requestBegin());
+                    if (resp[0] != 0x00) // Version
+                    {
+                        onParseError("HandlerOutboundVless: Invalid version in server response");
+                        return;
+                    }
+                    const uint8_t addonLen = resp[1];
+                    if (requestBytes() >= static_cast<size_t>(2 + addonLen))
+                    {
+                        requestConsume(2 + addonLen);
+                        stage_ = OutboundStage::STREAMING;
+                    }
+                }
+            }
+        }
+
+    private:
+        void sendVlessHeader()
+        {
+            std::vector<uint8_t> header;
+            header.reserve(1 + 16 + 1 + 1 + 2 + 64);
+
+            header.push_back(0x00); // Version 0
+            header.insert(header.end(), uuid_.begin(), uuid_.end()); // 16 字节 UUID
+            header.push_back(0x00); // Addon length 0
+
+            header.push_back(0x01); // CMD: 0x01 (TCP)
+            header.push_back(static_cast<uint8_t>(target_.port >> 8));
+            header.push_back(static_cast<uint8_t>(target_.port & 0xFF));
+
+            // ATYP + Address
+            header.push_back(static_cast<uint8_t>(target_.type));
+            if (target_.type == AddressType::IPV4)
+            {
+                const auto *p = reinterpret_cast<const uint8_t *>(&target_.ipv4_.s_addr);
+                header.insert(header.end(), p, p + 4);
+            }
+            else if (target_.type == AddressType::DOMAIN)
+            {
+                header.push_back(static_cast<uint8_t>(target_.host.size()));
+                header.insert(header.end(), target_.host.begin(), target_.host.end());
+            }
+            else if (target_.type == AddressType::IPV6)
+            {
+                const auto *p = reinterpret_cast<const uint8_t *>(&target_.ipv6_);
+                header.insert(header.end(), p, p + 16);
+            }
+
+            [[maybe_unused]] auto _ =
+                pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));
+            headerSent_ = true;
+            stage_ = OutboundStage::CONNECTING;
         }
     };
 

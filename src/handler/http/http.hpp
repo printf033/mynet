@@ -8,6 +8,7 @@
 #include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -36,72 +37,55 @@ namespace mynet::handler
     };
 
     /**
-     * @brief HTTP 代理协议服务端状态机处理器
+     * @brief HTTP 代理协议服务端入站状态机处理器
      */
-    class HandlerHttpProxy : public HandlerConnection
+    class HandlerInboundHttpProxy : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
-        HttpProxyStage stage_{HttpProxyStage::REQUEST};
+        HttpProxyStage httpStage_{HttpProxyStage::REQUEST};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
 
-        uint8_t command_{0};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
         bool isConnectMethod_{false};
         std::string method_{};
         std::string uri_{};
 
     public:
-        HandlerHttpProxy() noexcept = default;
-        ~HandlerHttpProxy() noexcept override = default;
+        HandlerInboundHttpProxy() noexcept = default;
+        ~HandlerInboundHttpProxy() noexcept override = default;
 
-        HandlerHttpProxy(const HandlerHttpProxy &) = delete;
-        HandlerHttpProxy &operator=(const HandlerHttpProxy &) = delete;
-        HandlerHttpProxy(HandlerHttpProxy &&) = delete;
-        HandlerHttpProxy &operator=(HandlerHttpProxy &&) = delete;
+        HandlerInboundHttpProxy(const HandlerInboundHttpProxy &) = delete;
+        HandlerInboundHttpProxy &operator=(const HandlerInboundHttpProxy &) = delete;
+        HandlerInboundHttpProxy(HandlerInboundHttpProxy &&) = delete;
+        HandlerInboundHttpProxy &operator=(HandlerInboundHttpProxy &&) = delete;
 
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
 
-        [[nodiscard]] HttpProxyStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == HttpProxyStage::STREAMING; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
+        [[nodiscard]] HttpProxyStage stage() const noexcept { return httpStage_; }
         [[nodiscard]] bool isConnectMethod() const noexcept { return isConnectMethod_; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = HttpProxyStage::REQUEST;
-            command_ = 0;
-            targetAddress_.reset();
+            HandlerInboundConnection::reset();
+            httpStage_ = HttpProxyStage::REQUEST;
             isConnectMethod_ = false;
             method_.clear();
             uri_.clear();
-            disableSpliceForward();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept
         {
             (void)reason;
-            stage_ = HttpProxyStage::ERROR;
+            httpStage_ = HttpProxyStage::ERROR;
+            stage_ = InboundStage::ERROR;
         }
 
         void process()
         {
-            if (stage_ == HttpProxyStage::REQUEST)
+            if (httpStage_ == HttpProxyStage::REQUEST)
             {
                 if (!processRequest())
                 {
@@ -139,7 +123,8 @@ namespace mynet::handler
             if (space1 == std::string_view::npos)
             {
                 onParseError("HTTP Proxy: Invalid request line");
-                stage_ = HttpProxyStage::ERROR;
+                httpStage_ = HttpProxyStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -149,7 +134,8 @@ namespace mynet::handler
             if (space2 == std::string_view::npos)
             {
                 onParseError("HTTP Proxy: Invalid request line format");
-                stage_ = HttpProxyStage::ERROR;
+                httpStage_ = HttpProxyStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -168,7 +154,8 @@ namespace mynet::handler
                                                                       "Content-Length: 0\r\n"
                                                                       "Connection: close\r\n\r\n";
                     [[maybe_unused]] auto _ = pushResponse(kAuthRequired);
-                    stage_ = HttpProxyStage::ERROR;
+                    httpStage_ = HttpProxyStage::ERROR;
+                    stage_ = InboundStage::ERROR;
                     setCloseAfterResponse(true);
                     requestConsume(totalHeaderSize);
                     return false;
@@ -186,7 +173,8 @@ namespace mynet::handler
                 if (!addr.has_value())
                 {
                     onParseError("HTTP Proxy: Invalid CONNECT target address");
-                    stage_ = HttpProxyStage::ERROR;
+                    httpStage_ = HttpProxyStage::ERROR;
+                    stage_ = InboundStage::ERROR;
                     setCloseAfterResponse(true);
                     return false;
                 }
@@ -199,7 +187,8 @@ namespace mynet::handler
                 static constexpr std::string_view kEstablished = "HTTP/1.1 200 Connection Established\r\n\r\n";
                 [[maybe_unused]] auto _ = pushResponse(kEstablished);
 
-                stage_ = HttpProxyStage::STREAMING;
+                httpStage_ = HttpProxyStage::STREAMING;
+                stage_ = InboundStage::STREAMING;
                 onMessageComplete();
 
                 if (requestCallback_)
@@ -224,13 +213,15 @@ namespace mynet::handler
                 if (!addr.has_value())
                 {
                     onParseError("HTTP Proxy: Missing target host in plain proxy request");
-                    stage_ = HttpProxyStage::ERROR;
+                    httpStage_ = HttpProxyStage::ERROR;
+                    stage_ = InboundStage::ERROR;
                     setCloseAfterResponse(true);
                     return false;
                 }
                 targetAddress_ = std::move(addr);
 
-                stage_ = HttpProxyStage::STREAMING;
+                httpStage_ = HttpProxyStage::STREAMING;
+                stage_ = InboundStage::STREAMING;
                 onMessageComplete();
 
                 if (requestCallback_)

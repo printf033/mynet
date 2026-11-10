@@ -8,6 +8,7 @@
 #include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -34,41 +35,33 @@ namespace mynet::handler
     };
 
     /**
-     * @brief ShadowTLS 服务端处理器
+     * @brief ShadowTLS 服务端入站处理器
      */
-    class HandlerShadowTls : public HandlerConnection
+    class HandlerInboundShadowTls : public HandlerInboundConnection
     {
     public:
-        using RequestCallback = std::function<void(bool authenticated, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
+        using ShadowTlsRequestCallback = std::function<void(bool authenticated, const ProxyAddress &target)>;
 
     private:
-        ShadowTlsStage stage_{ShadowTlsStage::INSPECT_CLIENT_HELLO};
+        ShadowTlsStage shadowTlsStage_{ShadowTlsStage::INSPECT_CLIENT_HELLO};
         ShadowTlsVersion version_{ShadowTlsVersion::V3};
         std::string password_{};
         ProxyAddress detourTarget_{};   ///< 鉴权成功时的内部代理目标
         ProxyAddress fallbackTarget_{}; ///< 鉴权失败/普通探测时的回落目标 (如 google.com:443)
-        RequestCallback requestCallback_{nullptr};
+        ShadowTlsRequestCallback shadowTlsCallback_{nullptr};
 
         bool clientAuthenticated_{false};
         std::string sni_{};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
 
     public:
-        HandlerShadowTls() noexcept
+        HandlerInboundShadowTls() noexcept
         {
             detourTarget_ = ProxyAddress::fromHostPort("127.0.0.1", 1080);
             fallbackTarget_ = ProxyAddress::fromHostPort("google.com", 443);
         }
 
-        HandlerShadowTls(ShadowTlsVersion ver, std::string_view password, const ProxyAddress &detour,
-                         const ProxyAddress &fallback)
+        HandlerInboundShadowTls(ShadowTlsVersion ver, std::string_view password, const ProxyAddress &detour,
+                                const ProxyAddress &fallback)
             : version_(ver),
               password_(password),
               detourTarget_(detour),
@@ -76,45 +69,42 @@ namespace mynet::handler
         {
         }
 
-        ~HandlerShadowTls() noexcept override = default;
+        ~HandlerInboundShadowTls() noexcept override = default;
 
-        HandlerShadowTls(const HandlerShadowTls &) = delete;
-        HandlerShadowTls &operator=(const HandlerShadowTls &) = delete;
-        HandlerShadowTls(HandlerShadowTls &&) = delete;
-        HandlerShadowTls &operator=(HandlerShadowTls &&) = delete;
+        HandlerInboundShadowTls(const HandlerInboundShadowTls &) = delete;
+        HandlerInboundShadowTls &operator=(const HandlerInboundShadowTls &) = delete;
+        HandlerInboundShadowTls(HandlerInboundShadowTls &&) = delete;
+        HandlerInboundShadowTls &operator=(HandlerInboundShadowTls &&) = delete;
 
         void setVersion(ShadowTlsVersion ver) noexcept { version_ = ver; }
         void setPassword(std::string_view pass) { password_ = std::string(pass); }
         void setDetourTarget(const ProxyAddress &addr) { detourTarget_ = addr; }
         void setFallbackTarget(const ProxyAddress &addr) { fallbackTarget_ = addr; }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
+        void setOnShadowTlsRequest(ShadowTlsRequestCallback cb) noexcept { shadowTlsCallback_ = std::move(cb); }
 
-        [[nodiscard]] ShadowTlsStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == ShadowTlsStage::STREAMING; }
+        [[nodiscard]] ShadowTlsStage stage() const noexcept { return shadowTlsStage_; }
         [[nodiscard]] bool isClientAuthenticated() const noexcept { return clientAuthenticated_; }
         [[nodiscard]] std::string_view sni() const noexcept { return sni_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = ShadowTlsStage::INSPECT_CLIENT_HELLO;
+            HandlerInboundConnection::reset();
+            shadowTlsStage_ = ShadowTlsStage::INSPECT_CLIENT_HELLO;
             clientAuthenticated_ = false;
             sni_.clear();
-            targetAddress_.reset();
-            disableSpliceForward();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept
         {
             (void)reason;
-            stage_ = ShadowTlsStage::ERROR;
+            shadowTlsStage_ = ShadowTlsStage::ERROR;
+            stage_ = InboundStage::ERROR;
         }
 
         void process()
         {
-            if (stage_ == ShadowTlsStage::INSPECT_CLIENT_HELLO)
+            if (shadowTlsStage_ == ShadowTlsStage::INSPECT_CLIENT_HELLO)
             {
                 if (!inspectClientHello())
                 {
@@ -139,7 +129,8 @@ namespace mynet::handler
                 // 非 TLS 请求，直接回落
                 clientAuthenticated_ = false;
                 targetAddress_ = fallbackTarget_;
-                stage_ = ShadowTlsStage::STREAMING;
+                shadowTlsStage_ = ShadowTlsStage::STREAMING;
+                stage_ = InboundStage::STREAMING;
                 onMessageComplete();
                 if (requestCallback_)
                 {
@@ -160,7 +151,8 @@ namespace mynet::handler
             {
                 clientAuthenticated_ = false;
                 targetAddress_ = fallbackTarget_;
-                stage_ = ShadowTlsStage::STREAMING;
+                shadowTlsStage_ = ShadowTlsStage::STREAMING;
+                stage_ = InboundStage::STREAMING;
                 onMessageComplete();
                 if (requestCallback_)
                 {
@@ -249,12 +241,17 @@ namespace mynet::handler
                 }
             }
 
-            stage_ = ShadowTlsStage::STREAMING;
+            shadowTlsStage_ = ShadowTlsStage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
-            if (requestCallback_)
+            if (shadowTlsCallback_)
             {
-                requestCallback_(clientAuthenticated_, *targetAddress_);
+                shadowTlsCallback_(clientAuthenticated_, *targetAddress_);
+            }
+            else if (requestCallback_)
+            {
+                requestCallback_(clientAuthenticated_ ? 0x01 : 0x00, *targetAddress_);
             }
             return true;
         }

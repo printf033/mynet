@@ -1,45 +1,77 @@
 #pragma once
 
 /**
- * @file proxy/block.hpp
- * @brief 拦截阻断代理处理器 (Block Outbound / Blackhole)。
+ * @file handler/block.hpp
+ * @brief 拦截阻断代理处理器（入站黑洞 HandlerInboundBlock 与出站黑洞 HandlerOutboundBlock）。
  */
 
-#include "../connection.hpp"
+#include "inbound.hpp"
+#include "outbound.hpp"
 
 namespace mynet::handler
 {
 
     /**
-     * @brief 拦截阻断处理器
+     * @brief 拦截阻断入站处理器 (Block Inbound / Blackhole)
      */
-    class HandlerBlock : public HandlerConnection
+    class HandlerInboundBlock : public HandlerInboundConnection
     {
     public:
         static constexpr bool kEnableSplice = false;
 
-        HandlerBlock() noexcept { setCloseAfterResponse(true); }
-        ~HandlerBlock() noexcept override = default;
+        HandlerInboundBlock() noexcept
+        {
+            setCloseAfterResponse(true);
+            stage_ = InboundStage::ERROR;
+        }
 
-        HandlerBlock(const HandlerBlock &) = delete;
-        HandlerBlock &operator=(const HandlerBlock &) = delete;
-        HandlerBlock(HandlerBlock &&) = delete;
-        HandlerBlock &operator=(HandlerBlock &&) = delete;
+        ~HandlerInboundBlock() noexcept override = default;
 
-        [[nodiscard]] bool isEstablished() const noexcept { return false; }
+        HandlerInboundBlock(const HandlerInboundBlock &) = delete;
+        HandlerInboundBlock &operator=(const HandlerInboundBlock &) = delete;
+        HandlerInboundBlock(HandlerInboundBlock &&) = delete;
+        HandlerInboundBlock &operator=(HandlerInboundBlock &&) = delete;
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
+            HandlerInboundConnection::reset();
             setCloseAfterResponse(true);
+            stage_ = InboundStage::ERROR;
         }
 
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept { (void)reason; }
-
-        void process()
+        void process() override
         {
-            // 收到任何数据立即阻断并关闭
+            if (requestBytes() > 0)
+            {
+                requestConsume(requestBytes());
+            }
+            setCloseAfterResponse(true);
+        }
+    };
+
+    /**
+     * @brief 拦截阻断出站处理器 (Block Outbound / Blackhole)
+     */
+    class HandlerOutboundBlock : public HandlerOutboundConnection
+    {
+    public:
+        static constexpr bool kEnableSplice = false;
+
+        HandlerOutboundBlock() noexcept
+        {
+            setCloseAfterResponse(true);
+            stage_ = OutboundStage::ERROR;
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            setCloseAfterResponse(true);
+            stage_ = OutboundStage::ERROR;
+        }
+
+        void process() override
+        {
             if (requestBytes() > 0)
             {
                 requestConsume(requestBytes());

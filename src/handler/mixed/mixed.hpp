@@ -1,11 +1,12 @@
 #pragma once
 
 /**
- * @file proxy/mixed/mixed.hpp
- * @brief Mixed 混合代理协议服务端状态机处理器（同时支持 SOCKS4/SOCKS5 与 HTTP Proxy）。
+ * @file handler/mixed/mixed.hpp
+ * @brief Mixed 混合代理协议入站状态机处理器 (HandlerInboundMixed)（同时支持 SOCKS4/SOCKS5 与 HTTP Proxy）。
  */
 
 #include "../http/http.hpp"
+#include "../inbound.hpp"
 #include "../socks/socks4.hpp"
 #include "../socks/socks5.hpp"
 
@@ -21,47 +22,38 @@ namespace mynet::handler
     };
 
     /**
-     * @brief 混合协议服务端处理器 (Mixed Inbound)
+     * @brief 混合协议入站服务端处理器 (Mixed Inbound)
      *
      * 对标 sing-box mixed 入站：在同一监听端口上自动根据客户端首字节分流：
      * - 0x04 -> SOCKS4 / SOCKS4a
      * - 0x05 -> SOCKS5
      * - 'C', 'G', 'P', 'H', 'D', 'O', 'T' 等 ASCII 字符 -> HTTP CONNECT / 明文代理
      */
-    class HandlerMixed : public HandlerConnection
+    class HandlerInboundMixed : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
         MixedProtocolType protocol_{MixedProtocolType::UNKNOWN};
-        HandlerSocks4 s4_{};
-        HandlerSocks5 s5_{};
-        HandlerHttpProxy http_{};
+        HandlerInboundSocks4 s4_{};
+        HandlerInboundSocks5 s5_{};
+        HandlerInboundHttpProxy http_{};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
 
     public:
-        HandlerMixed() noexcept = default;
-        explicit HandlerMixed(const ProxyConfig &cfg) noexcept
+        HandlerInboundMixed() noexcept = default;
+        explicit HandlerInboundMixed(const ProxyConfig &cfg) noexcept
             : s4_(cfg),
               s5_(cfg)
         {
         }
-        ~HandlerMixed() noexcept override = default;
+        ~HandlerInboundMixed() noexcept override = default;
 
-        HandlerMixed(const HandlerMixed &) = delete;
-        HandlerMixed &operator=(const HandlerMixed &) = delete;
-        HandlerMixed(HandlerMixed &&) = delete;
-        HandlerMixed &operator=(HandlerMixed &&) = delete;
+        HandlerInboundMixed(const HandlerInboundMixed &) = delete;
+        HandlerInboundMixed &operator=(const HandlerInboundMixed &) = delete;
+        HandlerInboundMixed(HandlerInboundMixed &&) = delete;
+        HandlerInboundMixed &operator=(HandlerInboundMixed &&) = delete;
 
         void setAuthenticator(AuthCallback cb) noexcept
         {
@@ -69,14 +61,6 @@ namespace mynet::handler
             s5_.setAuthenticator(cb);
             s4_.setAuthenticator([cb](std::string_view uid) { return cb(uid, ""); });
             http_.setAuthenticator(cb);
-        }
-
-        void setOnRequest(RequestCallback cb) noexcept
-        {
-            requestCallback_ = cb;
-            s4_.setOnRequest(cb);
-            s5_.setOnRequest(cb);
-            http_.setOnRequest(cb);
         }
 
         [[nodiscard]] MixedProtocolType protocol() const noexcept { return protocol_; }
@@ -96,7 +80,7 @@ namespace mynet::handler
             }
         }
 
-        [[nodiscard]] std::optional<ProxyAddress> targetAddress() const noexcept
+        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept
         {
             switch (protocol_)
             {
@@ -107,7 +91,7 @@ namespace mynet::handler
             case MixedProtocolType::HTTP:
                 return http_.targetAddress();
             default:
-                return std::nullopt;
+                return targetAddress_;
             }
         }
 
@@ -119,18 +103,17 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
+            HandlerInboundConnection::reset();
             protocol_ = MixedProtocolType::UNKNOWN;
             s4_.reset();
             s5_.reset();
             http_.reset();
-            disableSpliceForward();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept { (void)reason; }
 
-        void process()
+        void process() override
         {
             if (protocol_ == MixedProtocolType::UNKNOWN)
             {
@@ -165,16 +148,34 @@ namespace mynet::handler
                 syncToChild(s4_);
                 s4_.process();
                 syncFromChild(s4_);
+                if (s4_.isEstablished())
+                {
+                    stage_ = InboundStage::STREAMING;
+                    targetAddress_ = s4_.targetAddress();
+                    command_ = s4_.command();
+                }
                 break;
             case MixedProtocolType::SOCKS5:
                 syncToChild(s5_);
                 s5_.process();
                 syncFromChild(s5_);
+                if (s5_.isEstablished())
+                {
+                    stage_ = InboundStage::STREAMING;
+                    targetAddress_ = s5_.targetAddress();
+                    command_ = s5_.command();
+                }
                 break;
             case MixedProtocolType::HTTP:
                 syncToChild(http_);
                 http_.process();
                 syncFromChild(http_);
+                if (http_.isEstablished())
+                {
+                    stage_ = InboundStage::STREAMING;
+                    targetAddress_ = http_.targetAddress();
+                    command_ = http_.command();
+                }
                 break;
             default:
                 break;
@@ -184,7 +185,6 @@ namespace mynet::handler
     private:
         static bool isHttpChar(uint8_t b) noexcept
         {
-            // ASCII 大写字符 (CONNECT, GET, POST, HEAD, PUT, DELETE, OPTIONS, TRACE)
             return (b == 'C' || b == 'G' || b == 'P' || b == 'H' || b == 'D' || b == 'O' || b == 'T' ||
                     (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'));
         }

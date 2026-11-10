@@ -1,12 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/socks/socks5.hpp
- * @brief SOCKS5 代理协议服务端状态机处理器（RFC 1928 / RFC 1929）。
+ * @file handler/socks/socks5.hpp
+ * @brief SOCKS5 代理协议入站状态机处理器 (HandlerInboundSocks5) 与出站协议处理器 (HandlerOutboundSocks5)（RFC 1928 / RFC 1929）。
  */
 
-#include "../../connection.hpp"
 #include "../address.hpp"
+#include "../inbound.hpp"
+#include "../outbound.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -64,248 +65,208 @@ namespace mynet::handler
     };
 
     /**
-     * @brief SOCKS5 协议状态机处理器
+     * @brief SOCKS5 协议入站状态机处理器
      *
-     * 派生自 HandlerConnection，满足 HandlerConstraint，可直接供 Reactor / Proactor 引擎驱动，
-     * 并完美兼容 ObjectPool 进行零分配重用。
+     * 派生自 HandlerInboundConnection，满足 HandlerConstraint 与 MandatoryMethodConnection。
      */
-    class HandlerSocks5 : public HandlerConnection
+    class HandlerInboundSocks5 : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(std::string_view username, std::string_view password)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝（SOCKS5 转发管道）
-        static constexpr bool kEnableSplice = true;
-
-        /**
-         * @brief 开启零拷贝 SOCKS5 转发管道（直接复用 Connection 零拷贝管道）
-         *
-         * 在 CONNECT 握手完成进入 STREAMING 状态后调用，将客户端与目标套接字直连，
-         * 避免在用户态搬运数据载荷。
-         *
-         * @param targetFd 目标远端套接字描述符
-         */
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
-        Socks5Stage stage_{Socks5Stage::METHOD_SELECT};
+        Socks5Stage socks5Stage_{Socks5Stage::METHOD_SELECT};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
 
         uint8_t selectedMethod_{socks5::kMethodNoAcceptable};
-        uint8_t command_{0};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
         bool autoReplyConnectSuccess_{true};
 
     public:
-        HandlerSocks5() noexcept
+        HandlerInboundSocks5() noexcept
             : autoReplyConnectSuccess_(getProxyConfig().autoReplyConnectSuccess)
         {
         }
-        explicit HandlerSocks5(const ProxyConfig &cfg) noexcept
+        explicit HandlerInboundSocks5(const ProxyConfig &cfg) noexcept
             : autoReplyConnectSuccess_(cfg.autoReplyConnectSuccess)
         {
         }
-        ~HandlerSocks5() noexcept override = default;
+        ~HandlerInboundSocks5() noexcept override = default;
 
-        HandlerSocks5(const HandlerSocks5 &) = delete;
-        HandlerSocks5 &operator=(const HandlerSocks5 &) = delete;
-        HandlerSocks5(HandlerSocks5 &&) = delete;
-        HandlerSocks5 &operator=(HandlerSocks5 &&) = delete;
+        HandlerInboundSocks5(const HandlerInboundSocks5 &) = delete;
+        HandlerInboundSocks5 &operator=(const HandlerInboundSocks5 &) = delete;
+        HandlerInboundSocks5(HandlerInboundSocks5 &&) = delete;
+        HandlerInboundSocks5 &operator=(HandlerInboundSocks5 &&) = delete;
 
-        /**
-         * @brief 设置用户认证回调函数（为空表示仅接受无认证 NO_AUTH）
-         */
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-
-        /**
-         * @brief 设置收到目标连接请求时的业务回调
-         */
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
-
-        /**
-         * @brief 设置是否在解析出 CONNECT 成功时自动向客户端回送 0x00 Success 响应包
-         * 默认为 true。若业务层需要异步连接目标后再回送实际绑定地址，可设为 false。
-         */
-        void setAutoReplyConnectSuccess(bool autoReply) noexcept { autoReplyConnectSuccess_ = autoReply; }
-
-        /**
-         * @brief 应用 SOCKS5 代理配置
-         */
+        void setAutoReply(bool autoReply) noexcept { autoReplyConnectSuccess_ = autoReply; }
         void configure(const ProxyConfig &cfg) noexcept { autoReplyConnectSuccess_ = cfg.autoReplyConnectSuccess; }
 
-        [[nodiscard]] Socks5Stage stage() const noexcept { return stage_; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == Socks5Stage::STREAMING; }
+        [[nodiscard]] Socks5Stage stage() const noexcept { return socks5Stage_; }
+        [[nodiscard]] uint8_t selectedMethod() const noexcept { return selectedMethod_; }
 
-        /**
-         * @brief 重置协议状态（供对象池重用）
-         */
         void reset() noexcept override
         {
-            stage_ = Socks5Stage::METHOD_SELECT;
+            HandlerInboundConnection::reset();
+            socks5Stage_ = Socks5Stage::METHOD_SELECT;
             selectedMethod_ = socks5::kMethodNoAcceptable;
-            command_ = 0;
-            targetAddress_.reset();
-            autoReplyConnectSuccess_ = getProxyConfig().autoReplyConnectSuccess;
-            HandlerConnection::reset();
         }
 
-        /**
-         * @brief 发送 SOCKS5 应答包（RFC 1928 规范）
-         *
-         * @param rep 应答状态码（如 kRepSuccess）
-         * @param bindAddr 服务端分配/绑定的地址（通常可为 0.0.0.0:0）
-         */
-        void sendReply(uint8_t rep, const ProxyAddress &bindAddr = ProxyAddress::fromIPv4(0, 0))
+        void process() override
         {
-            std::vector<uint8_t> packet;
-            packet.reserve(32);
-            packet.push_back(socks5::kVersion);
-            packet.push_back(rep);
-            packet.push_back(0x00); // RSV
-            bindAddr.encodeSocks5(packet);
-            [[maybe_unused]] auto _ =
-                pushResponse(std::string_view(reinterpret_cast<const char *>(packet.data()), packet.size()));
-        }
-
-        /**
-         * @brief 驱动协议解析状态机
-         */
-        void process()
-        {
-            while (true)
+            while (requestBytes() > 0)
             {
-                const size_t avail = requestBytes();
-                if (avail == 0 || stage_ == Socks5Stage::ERROR)
-                {
-                    return;
-                }
-
-                switch (stage_)
+                switch (socks5Stage_)
                 {
                 case Socks5Stage::METHOD_SELECT:
-                {
                     if (!processMethodSelect())
                     {
-                        return; // 数据不足或出错退出循环
+                        return;
                     }
                     break;
-                }
                 case Socks5Stage::AUTH:
-                {
                     if (!processAuth())
                     {
                         return;
                     }
                     break;
-                }
                 case Socks5Stage::REQUEST:
-                {
                     if (!processRequest())
                     {
                         return;
                     }
                     break;
-                }
                 case Socks5Stage::STREAMING:
-                {
-                    // 已建立隧道，后续数据由具体流转业务处理（保留在缓冲区中供上层读取转发）
                     return;
-                }
                 case Socks5Stage::ERROR:
                     return;
                 }
             }
         }
 
+        /**
+         * @brief 发送标准的 SOCKS5 握手回复包（默认 0x00 表示成功）
+         *
+         * 格式：VER(0x05) | REP | RSV(0x00) | ATYP(0x01) | BND.ADDR(0.0.0.0) | BND.PORT(0)
+         */
+        void sendReply(uint8_t replyCode, const ProxyAddress *bindAddr = nullptr)
+        {
+            std::vector<uint8_t> frame;
+            frame.reserve(32);
+            frame.push_back(socks5::kVersion);
+            frame.push_back(replyCode);
+            frame.push_back(0x00); // RSV
+
+            if (bindAddr != nullptr)
+            {
+                bindAddr->encodeSocks5(frame);
+            }
+            else
+            {
+                // 默认返回 0.0.0.0:0 (IPv4)
+                frame.push_back(static_cast<uint8_t>(AddressType::IPV4));
+                frame.push_back(0);
+                frame.push_back(0);
+                frame.push_back(0);
+                frame.push_back(0);
+                frame.push_back(0);
+                frame.push_back(0);
+            }
+
+            [[maybe_unused]] auto _ =
+                pushResponse(std::string_view(reinterpret_cast<const char *>(frame.data()), frame.size()));
+        }
+
     private:
         /**
-         * @brief 解析方法协商包：VER(1) | NMETHODS(1) | METHODS(N)
+         * @brief 解析方法协商包
+         * 格式：VER(1) | NMETHODS(1) | METHODS(NMETHODS)
          */
         bool processMethodSelect()
         {
             const size_t avail = requestBytes();
             if (avail < 2)
             {
-                return false; // 数据不足 2 字节
+                return false;
             }
 
             const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
             if (data[0] != socks5::kVersion)
             {
-                onParseError("SOCKS5: Unsupported protocol version");
-                stage_ = Socks5Stage::ERROR;
+                onParseError("SOCKS5: Unsupported version");
+                socks5Stage_ = Socks5Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
             const uint8_t nmethods = data[1];
-            const size_t totalExpected = 2 + nmethods;
-            if (avail < totalExpected)
+            if (avail < static_cast<size_t>(2 + nmethods))
             {
-                return false; // 等待完整的方法列表
-            }
-
-            std::span<const uint8_t> methods(data + 2, nmethods);
-            uint8_t chosenMethod = socks5::kMethodNoAcceptable;
-
-            if (authCallback_ != nullptr)
-            {
-                // 需要用户密码认证
-                for (uint8_t m : methods)
-                {
-                    if (m == socks5::kMethodUserPass)
-                    {
-                        chosenMethod = socks5::kMethodUserPass;
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                // 无需认证
-                for (uint8_t m : methods)
-                {
-                    if (m == socks5::kMethodNoAuth)
-                    {
-                        chosenMethod = socks5::kMethodNoAuth;
-                        break;
-                    }
-                }
-            }
-
-            selectedMethod_ = chosenMethod;
-            requestConsume(totalExpected);
-
-            // 回复协商结果：VER(1) | METHOD(1)
-            char reply[2] = {static_cast<char>(socks5::kVersion), static_cast<char>(chosenMethod)};
-            [[maybe_unused]] auto _ = pushResponse(std::string_view(reply, 2));
-
-            if (chosenMethod == socks5::kMethodNoAcceptable)
-            {
-                stage_ = Socks5Stage::ERROR;
-                setCloseAfterResponse(true);
                 return false;
             }
-            else if (chosenMethod == socks5::kMethodUserPass)
+
+            // 检查客户端支持的方法列表
+            bool hasNoAuth = false;
+            bool hasUserPass = false;
+            for (size_t i = 0; i < nmethods; ++i)
             {
-                stage_ = Socks5Stage::AUTH;
+                uint8_t m = data[2 + i];
+                if (m == socks5::kMethodNoAuth)
+                {
+                    hasNoAuth = true;
+                }
+                else if (m == socks5::kMethodUserPass)
+                {
+                    hasUserPass = true;
+                }
+            }
+
+            requestConsume(2 + nmethods);
+
+            // 服务端决策：若设置了 authenticator，必须走用户名密码认证；否则免密
+            uint8_t chosen = socks5::kMethodNoAcceptable;
+            if (authCallback_)
+            {
+                if (hasUserPass)
+                {
+                    chosen = socks5::kMethodUserPass;
+                    socks5Stage_ = Socks5Stage::AUTH;
+                }
+                else
+                {
+                    chosen = socks5::kMethodNoAcceptable;
+                    socks5Stage_ = Socks5Stage::ERROR;
+                    stage_ = InboundStage::ERROR;
+                    setCloseAfterResponse(true);
+                }
             }
             else
             {
-                stage_ = Socks5Stage::REQUEST;
+                if (hasNoAuth)
+                {
+                    chosen = socks5::kMethodNoAuth;
+                    socks5Stage_ = Socks5Stage::REQUEST;
+                }
+                else
+                {
+                    chosen = socks5::kMethodNoAcceptable;
+                    socks5Stage_ = Socks5Stage::ERROR;
+                    stage_ = InboundStage::ERROR;
+                    setCloseAfterResponse(true);
+                }
             }
-            return true;
+
+            selectedMethod_ = chosen;
+
+            // 回复客户端协商结果：VER(0x05) | METHOD(1B)
+            char reply[2] = {static_cast<char>(socks5::kVersion), static_cast<char>(chosen)};
+            [[maybe_unused]] auto _ = pushResponse(std::string_view(reply, 2));
+
+            return socks5Stage_ != Socks5Stage::ERROR;
         }
 
         /**
-         * @brief 解析 RFC 1929 用户名密码认证包
+         * @brief 解析用户名/密码认证包 (RFC 1929)
          * 格式：VER(1=0x01) | ULEN(1) | UNAME(ULEN) | PLEN(1) | PASSWD(PLEN)
          */
         bool processAuth()
@@ -319,32 +280,33 @@ namespace mynet::handler
             const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
             if (data[0] != socks5::kSubnegotiationVersion)
             {
-                onParseError("SOCKS5: Unsupported subnegotiation auth version");
-                stage_ = Socks5Stage::ERROR;
+                onParseError("SOCKS5 Auth: Invalid subnegotiation version");
+                socks5Stage_ = Socks5Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
             const uint8_t ulen = data[1];
-            if (avail < 2 + static_cast<size_t>(ulen) + 1)
+            if (avail < static_cast<size_t>(2 + ulen + 1))
             {
                 return false;
             }
 
             const uint8_t plen = data[2 + ulen];
-            const size_t totalExpected = 2 + static_cast<size_t>(ulen) + 1 + static_cast<size_t>(plen);
+            const size_t totalExpected = 2 + ulen + 1 + plen;
             if (avail < totalExpected)
             {
                 return false;
             }
 
-            std::string_view username(reinterpret_cast<const char *>(data + 2), ulen);
-            std::string_view password(reinterpret_cast<const char *>(data + 2 + ulen + 1), plen);
+            std::string_view uname(reinterpret_cast<const char *>(data + 2), ulen);
+            std::string_view passwd(reinterpret_cast<const char *>(data + 2 + ulen + 1), plen);
 
             bool ok = false;
             if (authCallback_)
             {
-                ok = authCallback_(username, password);
+                ok = authCallback_(uname, passwd);
             }
 
             requestConsume(totalExpected);
@@ -355,12 +317,13 @@ namespace mynet::handler
 
             if (ok)
             {
-                stage_ = Socks5Stage::REQUEST;
+                socks5Stage_ = Socks5Stage::REQUEST;
                 return true;
             }
             else
             {
-                stage_ = Socks5Stage::ERROR;
+                socks5Stage_ = Socks5Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -382,7 +345,8 @@ namespace mynet::handler
             if (data[0] != socks5::kVersion)
             {
                 onParseError("SOCKS5: Invalid request version");
-                stage_ = Socks5Stage::ERROR;
+                socks5Stage_ = Socks5Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -395,7 +359,6 @@ namespace mynet::handler
             auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
-                // 数据不足以构成完整地址
                 return false;
             }
 
@@ -406,9 +369,9 @@ namespace mynet::handler
 
             if (cmd != socks5::kCmdConnect)
             {
-                // 目前仅默认放行 CONNECT 命令，其余返回 Command Not Supported
                 sendReply(socks5::kRepCommandNotSupported);
-                stage_ = Socks5Stage::ERROR;
+                socks5Stage_ = Socks5Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -418,7 +381,8 @@ namespace mynet::handler
                 sendReply(socks5::kRepSuccess);
             }
 
-            stage_ = Socks5Stage::STREAMING;
+            socks5Stage_ = Socks5Stage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
             if (requestCallback_)
@@ -426,6 +390,104 @@ namespace mynet::handler
                 requestCallback_(command_, *targetAddress_);
             }
             return true;
+        }
+    };
+
+    /**
+     * @brief SOCKS5 出站协议客户端处理器 (SOCKS5 Outbound)
+     *
+     * 自动处理与上游 SOCKS5 代理服务器的握手与 CONNECT 建连指令。
+     */
+    class HandlerOutboundSocks5 : public HandlerOutboundConnection
+    {
+    private:
+        enum class Step : uint8_t
+        {
+            SEND_GREETING,
+            RECV_GREETING,
+            RECV_CONNECT,
+            DONE
+        };
+        Step step_{Step::SEND_GREETING};
+
+    public:
+        HandlerOutboundSocks5() noexcept = default;
+        explicit HandlerOutboundSocks5(const ProxyAddress &target) noexcept
+            : HandlerOutboundConnection(target)
+        {
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            step_ = Step::SEND_GREETING;
+        }
+
+        void process() override
+        {
+            switch (step_)
+            {
+            case Step::SEND_GREETING:
+            {
+                // 发送 [VER 0x05, NMETHODS 0x01, METHOD 0x00 (NO AUTH)]
+                static constexpr char kGreeting[] = {0x05, 0x01, 0x00};
+                [[maybe_unused]] auto _ = pushResponse(std::string_view(kGreeting, 3));
+                step_ = Step::RECV_GREETING;
+                stage_ = OutboundStage::CONNECTING;
+                break;
+            }
+            case Step::RECV_GREETING:
+            {
+                if (requestBytes() < 2)
+                {
+                    return;
+                }
+                const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
+                if (data[0] != 0x05 || data[1] != 0x00)
+                {
+                    onParseError("HandlerOutboundSocks5: Server rejected authentication");
+                    return;
+                }
+                requestConsume(2);
+
+                // 发送 CONNECT 请求
+                std::vector<uint8_t> req = {0x05, 0x01, 0x00};
+                target_.encodeSocks5(req);
+                [[maybe_unused]] auto _ =
+                    pushResponse(std::string_view(reinterpret_cast<const char *>(req.data()), req.size()));
+
+                step_ = Step::RECV_CONNECT;
+                break;
+            }
+            case Step::RECV_CONNECT:
+            {
+                // SOCKS5 响应头部至少 4 字节: VER, REP, RSV, ATYP
+                if (requestBytes() < 4)
+                {
+                    return;
+                }
+                const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
+                if (data[1] != 0x00) // REP != 0x00
+                {
+                    onParseError("HandlerOutboundSocks5: CONNECT failed");
+                    return;
+                }
+
+                size_t consumed = 0;
+                auto boundAddr = ProxyAddress::decodeSocks5(
+                    std::span<const uint8_t>(data + 3, requestBytes() - 3), consumed);
+                if (!boundAddr.has_value())
+                {
+                    return; // 数据尚不足
+                }
+                requestConsume(3 + consumed);
+                step_ = Step::DONE;
+                stage_ = OutboundStage::STREAMING;
+                break;
+            }
+            case Step::DONE:
+                break;
+            }
         }
     };
 

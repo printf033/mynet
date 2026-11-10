@@ -1,18 +1,15 @@
 #pragma once
 
 /**
- * @file proxy/transparent/transparent.hpp
- * @brief Linux Netfilter 透明代理状态机处理器（Redirect / TProxy）。
+ * @file handler/transparent/transparent.hpp
+ * @brief Linux Netfilter 透明代理入站状态机处理器 (HandlerInboundRedirect / HandlerInboundTProxy)。
  */
 
-#include "../../connection.hpp"
 #include "../address.hpp"
+#include "../inbound.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <span>
-#include <string>
-#include <string_view>
 
 namespace mynet::handler
 {
@@ -25,65 +22,49 @@ namespace mynet::handler
     };
 
     /**
-     * @brief Linux Redirect 透明代理处理器 (iptables -j REDIRECT)
+     * @brief Linux Redirect 透明代理入站处理器 (iptables -j REDIRECT)
      */
-    class HandlerRedirect : public HandlerConnection
+    class HandlerInboundRedirect : public HandlerInboundConnection
     {
-    public:
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
-
     private:
-        TransparentStage stage_{TransparentStage::RESOLVING};
-        RequestCallback requestCallback_{nullptr};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
+        TransparentStage transparentStage_{TransparentStage::RESOLVING};
         int clientFd_{-1};
 
     public:
-        HandlerRedirect() noexcept = default;
-        explicit HandlerRedirect(int clientFd) noexcept
+        HandlerInboundRedirect() noexcept = default;
+        explicit HandlerInboundRedirect(int clientFd) noexcept
             : clientFd_(clientFd)
         {
         }
-        ~HandlerRedirect() noexcept override = default;
+        ~HandlerInboundRedirect() noexcept override = default;
 
-        HandlerRedirect(const HandlerRedirect &) = delete;
-        HandlerRedirect &operator=(const HandlerRedirect &) = delete;
-        HandlerRedirect(HandlerRedirect &&) = delete;
-        HandlerRedirect &operator=(HandlerRedirect &&) = delete;
+        HandlerInboundRedirect(const HandlerInboundRedirect &) = delete;
+        HandlerInboundRedirect &operator=(const HandlerInboundRedirect &) = delete;
+        HandlerInboundRedirect(HandlerInboundRedirect &&) = delete;
+        HandlerInboundRedirect &operator=(HandlerInboundRedirect &&) = delete;
 
         void setClientFd(int fd) noexcept { clientFd_ = fd; }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
 
-        [[nodiscard]] TransparentStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == TransparentStage::STREAMING; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
+        [[nodiscard]] TransparentStage stage() const noexcept { return transparentStage_; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = TransparentStage::RESOLVING;
-            targetAddress_.reset();
+            HandlerInboundConnection::reset();
+            transparentStage_ = TransparentStage::RESOLVING;
             clientFd_ = -1;
-            disableSpliceForward();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept
         {
             (void)reason;
-            stage_ = TransparentStage::ERROR;
+            transparentStage_ = TransparentStage::ERROR;
+            stage_ = InboundStage::ERROR;
         }
 
-        void process()
+        void process() override
         {
-            if (stage_ == TransparentStage::RESOLVING)
+            if (transparentStage_ == TransparentStage::RESOLVING)
             {
                 resolveOriginalDst();
             }
@@ -99,14 +80,16 @@ namespace mynet::handler
 
             if (!targetAddress_.has_value())
             {
-                // 若未绑定 fd 或非重定向连接，报错关闭
                 onParseError("Redirect: SO_ORIGINAL_DST not found on socket");
-                stage_ = TransparentStage::ERROR;
+                transparentStage_ = TransparentStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return;
             }
 
-            stage_ = TransparentStage::STREAMING;
+            transparentStage_ = TransparentStage::STREAMING;
+            stage_ = InboundStage::STREAMING;
+            command_ = 0x01;
             onMessageComplete();
 
             if (requestCallback_)
@@ -119,6 +102,6 @@ namespace mynet::handler
     /**
      * @brief Linux TProxy 透明代理处理器 (iptables -j TPROXY)
      */
-    using HandlerTProxy = HandlerRedirect;
+    using HandlerInboundTProxy = HandlerInboundRedirect;
 
 } // namespace mynet::handler

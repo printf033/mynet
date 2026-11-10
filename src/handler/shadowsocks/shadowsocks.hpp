@@ -8,6 +8,7 @@
 #include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -41,19 +42,16 @@ namespace mynet::handler
     };
 
     /**
-     * @brief Shadowsocks AEAD 协议状态机处理器
+     * @brief Shadowsocks AEAD 协议入站状态机处理器
      */
-    class HandlerShadowsocks : public HandlerConnection
+    class HandlerInboundShadowsocks : public HandlerInboundConnection
     {
     public:
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
         static constexpr bool kEnableSplice = false;
 
     private:
-        ShadowsocksStage stage_{ShadowsocksStage::SALT};
+        ShadowsocksStage ssStage_{ShadowsocksStage::SALT};
         ShadowsocksCipher cipherType_{ShadowsocksCipher::AES_128_GCM};
-        RequestCallback requestCallback_{nullptr};
 
         size_t keyLen_{16};
         size_t saltLen_{16};
@@ -63,19 +61,18 @@ namespace mynet::handler
 
         size_t currentChunkLen_{0};
         bool targetResolved_{false};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
 
     public:
-        HandlerShadowsocks() noexcept { setMethod("aes-128-gcm", "password"); }
+        HandlerInboundShadowsocks() noexcept { setMethod("aes-128-gcm", "password"); }
 
-        HandlerShadowsocks(std::string_view method, std::string_view password) { setMethod(method, password); }
+        HandlerInboundShadowsocks(std::string_view method, std::string_view password) { setMethod(method, password); }
 
-        ~HandlerShadowsocks() noexcept override = default;
+        ~HandlerInboundShadowsocks() noexcept override = default;
 
-        HandlerShadowsocks(const HandlerShadowsocks &) = delete;
-        HandlerShadowsocks &operator=(const HandlerShadowsocks &) = delete;
-        HandlerShadowsocks(HandlerShadowsocks &&) = delete;
-        HandlerShadowsocks &operator=(HandlerShadowsocks &&) = delete;
+        HandlerInboundShadowsocks(const HandlerInboundShadowsocks &) = delete;
+        HandlerInboundShadowsocks &operator=(const HandlerInboundShadowsocks &) = delete;
+        HandlerInboundShadowsocks(HandlerInboundShadowsocks &&) = delete;
+        HandlerInboundShadowsocks &operator=(HandlerInboundShadowsocks &&) = delete;
 
         void setMethod(std::string_view method, std::string_view password)
         {
@@ -111,27 +108,26 @@ namespace mynet::handler
 
         void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
 
-        [[nodiscard]] ShadowsocksStage stage() const noexcept { return stage_; }
+        [[nodiscard]] ShadowsocksStage stage() const noexcept { return ssStage_; }
         [[nodiscard]] bool isEstablished() const noexcept { return targetResolved_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ =
+            HandlerInboundConnection::reset();
+            ssStage_ =
                 (cipherType_ == ShadowsocksCipher::NONE) ? ShadowsocksStage::CHUNK_PAYLOAD : ShadowsocksStage::SALT;
             rxSubkey_.clear();
             std::memset(rxNonce_.data(), 0, rxNonce_.size());
             currentChunkLen_ = 0;
             targetResolved_ = false;
-            targetAddress_.reset();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept
         {
             (void)reason;
-            stage_ = ShadowsocksStage::ERROR;
+            ssStage_ = ShadowsocksStage::ERROR;
+            stage_ = InboundStage::ERROR;
         }
 
         void process()
@@ -144,7 +140,7 @@ namespace mynet::handler
 
             while (true)
             {
-                if (stage_ == ShadowsocksStage::SALT)
+                if (ssStage_ == ShadowsocksStage::SALT)
                 {
                     if (!processSalt())
                     {
@@ -152,7 +148,7 @@ namespace mynet::handler
                     }
                 }
 
-                if (stage_ == ShadowsocksStage::CHUNK_LEN)
+                if (ssStage_ == ShadowsocksStage::CHUNK_LEN)
                 {
                     if (!processChunkLen())
                     {
@@ -160,7 +156,7 @@ namespace mynet::handler
                     }
                 }
 
-                if (stage_ == ShadowsocksStage::CHUNK_PAYLOAD)
+                if (ssStage_ == ShadowsocksStage::CHUNK_PAYLOAD)
                 {
                     if (!processChunkPayload())
                     {
@@ -168,7 +164,7 @@ namespace mynet::handler
                     }
                 }
 
-                if (stage_ == ShadowsocksStage::STREAMING)
+                if (ssStage_ == ShadowsocksStage::STREAMING)
                 {
                     // 在数据流转发阶段，持续解析后续 AEAD 块
                     if (!processChunkLen())
@@ -177,7 +173,7 @@ namespace mynet::handler
                     }
                 }
 
-                if (stage_ == ShadowsocksStage::ERROR)
+                if (ssStage_ == ShadowsocksStage::ERROR)
                 {
                     return;
                 }
@@ -244,7 +240,8 @@ namespace mynet::handler
                 targetAddress_ = std::move(target);
                 targetResolved_ = true;
                 requestConsume(consumed);
-                stage_ = ShadowsocksStage::STREAMING;
+                ssStage_ = ShadowsocksStage::STREAMING;
+                stage_ = InboundStage::STREAMING;
                 onMessageComplete();
 
                 if (requestCallback_)
@@ -271,14 +268,15 @@ namespace mynet::handler
             if (!crypto::hkdfSha1(masterKey_, salt, kInfo, rxSubkey_))
             {
                 onParseError("Shadowsocks: HKDF subkey derivation failed");
-                stage_ = ShadowsocksStage::ERROR;
+                ssStage_ = ShadowsocksStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
             std::memset(rxNonce_.data(), 0, rxNonce_.size());
             requestConsume(saltLen_);
-            stage_ = ShadowsocksStage::CHUNK_LEN;
+            ssStage_ = ShadowsocksStage::CHUNK_LEN;
             return true;
         }
 
@@ -301,7 +299,8 @@ namespace mynet::handler
             if (!crypto::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherLen, tag, plainLen))
             {
                 onParseError("Shadowsocks: Decrypt chunk length failed");
-                stage_ = ShadowsocksStage::ERROR;
+                ssStage_ = ShadowsocksStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -310,7 +309,8 @@ namespace mynet::handler
             if (plainLen.size() < 2)
             {
                 onParseError("Shadowsocks: Invalid decrypted chunk length");
-                stage_ = ShadowsocksStage::ERROR;
+                ssStage_ = ShadowsocksStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -320,13 +320,14 @@ namespace mynet::handler
             if (currentChunkLen_ > 0x3FFF)
             {
                 onParseError("Shadowsocks: Chunk length exceeds 0x3FFF");
-                stage_ = ShadowsocksStage::ERROR;
+                ssStage_ = ShadowsocksStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
             requestConsume(kLenPacketSize);
-            stage_ = ShadowsocksStage::CHUNK_PAYLOAD;
+            ssStage_ = ShadowsocksStage::CHUNK_PAYLOAD;
             return true;
         }
 
@@ -349,7 +350,8 @@ namespace mynet::handler
             if (!crypto::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherPayload, tag, plainPayload))
             {
                 onParseError("Shadowsocks: Decrypt chunk payload failed");
-                stage_ = ShadowsocksStage::ERROR;
+                ssStage_ = ShadowsocksStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -364,14 +366,16 @@ namespace mynet::handler
                 if (!target.has_value())
                 {
                     onParseError("Shadowsocks: Failed to decode initial destination address");
-                    stage_ = ShadowsocksStage::ERROR;
+                    ssStage_ = ShadowsocksStage::ERROR;
+                    stage_ = InboundStage::ERROR;
                     setCloseAfterResponse(true);
                     return false;
                 }
 
                 targetAddress_ = std::move(target);
                 targetResolved_ = true;
-                stage_ = ShadowsocksStage::STREAMING;
+                ssStage_ = ShadowsocksStage::STREAMING;
+                stage_ = InboundStage::STREAMING;
                 onMessageComplete();
 
                 if (requestCallback_)
@@ -381,7 +385,7 @@ namespace mynet::handler
             }
             else
             {
-                stage_ = ShadowsocksStage::CHUNK_LEN;
+                ssStage_ = ShadowsocksStage::CHUNK_LEN;
             }
 
             return true;

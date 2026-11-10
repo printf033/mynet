@@ -8,6 +8,7 @@
 #include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -46,35 +47,31 @@ namespace mynet::handler
     };
 
     /**
-     * @brief VMess 协议服务端状态机处理器
+     * @brief VMess 协议服务端入站状态机处理器
      */
-    class HandlerVmess : public HandlerConnection
+    class HandlerInboundVmess : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &authId)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
 
         static constexpr bool kEnableSplice = false;
 
     private:
-        VmessStage stage_{VmessStage::AUTH};
+        VmessStage vmessStage_{VmessStage::AUTH};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
         std::vector<std::array<uint8_t, 16>> validUuids_{};
 
-        uint8_t command_{0};
         std::array<uint8_t, 16> authId_{};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
 
     public:
-        HandlerVmess() noexcept = default;
-        explicit HandlerVmess(std::string_view uuidStr) { setUuid(uuidStr); }
-        ~HandlerVmess() noexcept override = default;
+        HandlerInboundVmess() noexcept = default;
+        explicit HandlerInboundVmess(std::string_view uuidStr) { setUuid(uuidStr); }
+        ~HandlerInboundVmess() noexcept override = default;
 
-        HandlerVmess(const HandlerVmess &) = delete;
-        HandlerVmess &operator=(const HandlerVmess &) = delete;
-        HandlerVmess(HandlerVmess &&) = delete;
-        HandlerVmess &operator=(HandlerVmess &&) = delete;
+        HandlerInboundVmess(const HandlerInboundVmess &) = delete;
+        HandlerInboundVmess &operator=(const HandlerInboundVmess &) = delete;
+        HandlerInboundVmess(HandlerInboundVmess &&) = delete;
+        HandlerInboundVmess &operator=(HandlerInboundVmess &&) = delete;
 
         void setUuid(std::string_view uuidStr)
         {
@@ -94,32 +91,27 @@ namespace mynet::handler
         }
 
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
 
-        [[nodiscard]] VmessStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == VmessStage::STREAMING; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
+        [[nodiscard]] VmessStage stage() const noexcept { return vmessStage_; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = VmessStage::AUTH;
-            command_ = 0;
+            HandlerInboundConnection::reset();
+            vmessStage_ = VmessStage::AUTH;
             std::memset(authId_.data(), 0, 16);
-            targetAddress_.reset();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept
         {
             (void)reason;
-            stage_ = VmessStage::ERROR;
+            vmessStage_ = VmessStage::ERROR;
+            stage_ = InboundStage::ERROR;
         }
 
         void process()
         {
-            if (stage_ == VmessStage::AUTH)
+            if (vmessStage_ == VmessStage::AUTH)
             {
                 if (!processAuth())
                 {
@@ -127,7 +119,7 @@ namespace mynet::handler
                 }
             }
 
-            if (stage_ == VmessStage::HEADER)
+            if (vmessStage_ == VmessStage::HEADER)
             {
                 if (!processHeader())
                 {
@@ -163,13 +155,14 @@ namespace mynet::handler
             if (!authOk)
             {
                 onParseError("VMess: Invalid AuthID");
-                stage_ = VmessStage::ERROR;
+                vmessStage_ = VmessStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
             requestConsume(vmess::kAuthIdLen);
-            stage_ = VmessStage::HEADER;
+            vmessStage_ = VmessStage::HEADER;
             return true;
         }
 
@@ -212,7 +205,8 @@ namespace mynet::handler
             targetAddress_ = std::move(target);
             requestConsume(totalConsumed);
 
-            stage_ = VmessStage::STREAMING;
+            vmessStage_ = VmessStage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
             if (requestCallback_)

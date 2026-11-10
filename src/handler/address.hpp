@@ -361,9 +361,3 @@ namespace mynet::handler
     };
 
 } // namespace mynet::handler
-
-namespace mynet
-{
-    using handler::AddressType;
-    using handler::ProxyAddress;
-} // namespace mynet

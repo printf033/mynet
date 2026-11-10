@@ -5,16 +5,14 @@
 #include "datagram.hpp"
 #include "dialer.hpp"
 #include "proactor.hpp"
-#include "handler/dns/handler.hpp"
-#include "handler/http/v1/handler.hpp"
-#include "handler/http/v3/handler.hpp"
-#include "handler/outbound.hpp"
+#include "handler/handler.hpp"
 #include "reactor.hpp"
 #include <gtest/gtest.h>
 #include <type_traits>
 #include <version>
 
 using namespace mynet;
+using namespace mynet::handler;
 using namespace mynet::http::v1;
 using namespace mynet::http::v3;
 
@@ -248,11 +246,16 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<AcceptorSsl<HandlerDatagram>>);
     static_assert(Resettable<DialerBase<HandlerConnection>>);
     static_assert(Resettable<DialerSsl<HandlerConnection>>);
+    static_assert(Resettable<HandlerInboundConnection>);
+    static_assert(Resettable<HandlerInboundDatagram>);
+    static_assert(Resettable<HandlerOutboundConnection>);
+    static_assert(Resettable<HandlerOutboundDatagram>);
     static_assert(Resettable<HandlerOutboundDirect>);
     static_assert(Resettable<HandlerOutboundTrojan>);
     static_assert(Resettable<HandlerOutboundVless>);
     static_assert(Resettable<HandlerOutboundSocks5>);
     static_assert(Resettable<HandlerOutboundBlock>);
+    static_assert(Resettable<HandlerOutboundHysteria2>);
 
     static_assert(!Resettable<NonNoexceptReset>);
     static_assert(!Resettable<NonVoidReset>);
@@ -475,6 +478,18 @@ TEST(Constraints, DialerAndOutboundConceptsEvaluation)
     EXPECT_FALSE(BaseDialer<SslDial>);
 
     // 出站协议处理器约束测试：全部满足 HandlerConstraint 与 MandatoryMethodConnection
+    static_assert(HandlerConstraint<HandlerOutboundConnection>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundConnection>);
+
+    static_assert(HandlerConstraint<HandlerOutboundDatagram>);
+    static_assert(MandatoryMethodDatagram<HandlerOutboundDatagram>);
+
+    static_assert(HandlerConstraint<HandlerInboundConnection>);
+    static_assert(MandatoryMethodConnection<HandlerInboundConnection>);
+
+    static_assert(HandlerConstraint<HandlerInboundDatagram>);
+    static_assert(MandatoryMethodDatagram<HandlerInboundDatagram>);
+
     static_assert(HandlerConstraint<HandlerOutboundDirect>);
     static_assert(MandatoryMethodConnection<HandlerOutboundDirect>);
 
@@ -490,13 +505,18 @@ TEST(Constraints, DialerAndOutboundConceptsEvaluation)
     static_assert(HandlerConstraint<HandlerOutboundBlock>);
     static_assert(MandatoryMethodConnection<HandlerOutboundBlock>);
 
+    static_assert(HandlerConstraint<HandlerOutboundHysteria2>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundHysteria2>);
+
     // DNS 协议处理器族约束测试
-    static_assert(HandlerConstraint<HandlerDns>);
-    static_assert(MandatoryMethodConnection<HandlerDns>);
-    static_assert(HandlerConstraint<HandlerDatagramDns>);
-    static_assert(MandatoryMethodDatagram<HandlerDatagramDns>);
-    static_assert(HandlerConstraint<HandlerOutboundDns>);
-    static_assert(MandatoryMethodConnection<HandlerOutboundDns>);
+    static_assert(HandlerConstraint<HandlerInboundConnectionDns>);
+    static_assert(MandatoryMethodConnection<HandlerInboundConnectionDns>);
+    static_assert(HandlerConstraint<HandlerInboundDatagramDns>);
+    static_assert(MandatoryMethodDatagram<HandlerInboundDatagramDns>);
+    static_assert(HandlerConstraint<HandlerOutboundConnectionDns>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundConnectionDns>);
+    static_assert(HandlerConstraint<HandlerOutboundDatagramDns>);
+    static_assert(MandatoryMethodDatagram<HandlerOutboundDatagramDns>);
 }
 
 TEST(Constraints, EnginesAcceptPureDatagramHandlers)

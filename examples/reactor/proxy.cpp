@@ -20,7 +20,7 @@
 
 namespace mynet::example
 {
-    class MixedProxyServerHandler : public handler::HandlerMixed
+    class MixedProxyServerHandler : public handler::HandlerInboundMixed
     {
     public:
         inline static std::string g_user;
@@ -37,7 +37,7 @@ namespace mynet::example
 
         void process()
         {
-            handler::HandlerMixed::process();
+            handler::HandlerInboundMixed::process();
             if (isEstablished() && requestBytes() > 0)
             {
                 std::string_view req(requestBegin(), requestBytes());
@@ -68,7 +68,7 @@ namespace mynet::example
 
         void reset() noexcept override
         {
-            handler::HandlerMixed::reset();
+            handler::HandlerInboundMixed::reset();
             if (!g_user.empty())
             {
                 setAuthenticator([](std::string_view u, std::string_view p)

@@ -19,7 +19,7 @@
 
 namespace mynet::example
 {
-    class Socks5ServerHandler : public handler::HandlerSocks5
+    class Socks5ServerHandler : public handler::HandlerInboundSocks5
     {
     public:
         inline static std::string g_user;
@@ -34,7 +34,7 @@ namespace mynet::example
         }
         void process()
         {
-            handler::HandlerSocks5::process();
+            handler::HandlerInboundSocks5::process();
             if (stage() == handler::Socks5Stage::STREAMING && requestBytes() > 0)
             {
                 std::string_view req(requestBegin(), requestBytes());
@@ -66,7 +66,7 @@ namespace mynet::example
 
         void reset() noexcept override
         {
-            handler::HandlerSocks5::reset();
+            handler::HandlerInboundSocks5::reset();
             if (!g_user.empty())
             {
                 setAuthenticator([](std::string_view u, std::string_view p) { return u == g_user && p == g_pass; });

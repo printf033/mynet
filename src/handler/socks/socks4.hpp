@@ -7,6 +7,7 @@
 
 #include "../../connection.hpp"
 #include "../address.hpp"
+#include "../inbound.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -45,79 +46,62 @@ namespace mynet::handler
     };
 
     /**
-     * @brief SOCKS4 / SOCKS4a 协议状态机处理器
+     * @brief SOCKS4 / SOCKS4a 协议入站状态机处理器
      */
-    class HandlerSocks4 : public HandlerConnection
+    class HandlerInboundSocks4 : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(std::string_view userId)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
-        Socks4Stage stage_{Socks4Stage::REQUEST};
+        Socks4Stage socks4Stage_{Socks4Stage::REQUEST};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
 
-        uint8_t command_{0};
         std::string userId_{};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
         bool autoReplyConnectSuccess_{true};
 
     public:
-        HandlerSocks4() noexcept
+        HandlerInboundSocks4() noexcept
             : autoReplyConnectSuccess_(getProxyConfig().autoReplyConnectSuccess)
         {
         }
-        explicit HandlerSocks4(const ProxyConfig &cfg) noexcept
+        explicit HandlerInboundSocks4(const ProxyConfig &cfg) noexcept
             : autoReplyConnectSuccess_(cfg.autoReplyConnectSuccess)
         {
         }
-        ~HandlerSocks4() noexcept override = default;
+        ~HandlerInboundSocks4() noexcept override = default;
 
-        HandlerSocks4(const HandlerSocks4 &) = delete;
-        HandlerSocks4 &operator=(const HandlerSocks4 &) = delete;
-        HandlerSocks4(HandlerSocks4 &&) = delete;
-        HandlerSocks4 &operator=(HandlerSocks4 &&) = delete;
+        HandlerInboundSocks4(const HandlerInboundSocks4 &) = delete;
+        HandlerInboundSocks4 &operator=(const HandlerInboundSocks4 &) = delete;
+        HandlerInboundSocks4(HandlerInboundSocks4 &&) = delete;
+        HandlerInboundSocks4 &operator=(HandlerInboundSocks4 &&) = delete;
 
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
 
-        [[nodiscard]] Socks4Stage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == Socks4Stage::STREAMING; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
+        [[nodiscard]] Socks4Stage stage() const noexcept { return socks4Stage_; }
         [[nodiscard]] std::string_view userId() const noexcept { return userId_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
 
         void configure(const ProxyConfig &cfg) noexcept { autoReplyConnectSuccess_ = cfg.autoReplyConnectSuccess; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = Socks4Stage::REQUEST;
-            command_ = 0;
+            HandlerInboundConnection::reset();
+            socks4Stage_ = Socks4Stage::REQUEST;
             userId_.clear();
-            targetAddress_.reset();
             autoReplyConnectSuccess_ = getProxyConfig().autoReplyConnectSuccess;
-            disableSpliceForward();
         }
 
         void onMessageComplete() noexcept {}
         void onParseError(const char *reason) noexcept
         {
             (void)reason;
-            stage_ = Socks4Stage::ERROR;
+            socks4Stage_ = Socks4Stage::ERROR;
+            stage_ = InboundStage::ERROR;
         }
 
         void process()
         {
-            if (stage_ == Socks4Stage::REQUEST)
+            if (socks4Stage_ == Socks4Stage::REQUEST)
             {
                 if (!processRequest())
                 {
@@ -155,7 +139,8 @@ namespace mynet::handler
             if (data[0] != socks4::kVersion)
             {
                 onParseError("SOCKS4: Invalid version");
-                stage_ = Socks4Stage::ERROR;
+                socks4Stage_ = Socks4Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -202,7 +187,8 @@ namespace mynet::handler
             if (authCallback_ && !authCallback_(uid))
             {
                 sendReply(socks4::kRepRejected);
-                stage_ = Socks4Stage::ERROR;
+                socks4Stage_ = Socks4Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 requestConsume(totalExpected);
                 return false;
@@ -225,7 +211,8 @@ namespace mynet::handler
             if (cmd != socks4::kCmdConnect)
             {
                 sendReply(socks4::kRepRejected);
-                stage_ = Socks4Stage::ERROR;
+                socks4Stage_ = Socks4Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -235,7 +222,8 @@ namespace mynet::handler
                 sendReply(socks4::kRepSuccess, port, ipBe);
             }
 
-            stage_ = Socks4Stage::STREAMING;
+            socks4Stage_ = Socks4Stage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
             if (requestCallback_)

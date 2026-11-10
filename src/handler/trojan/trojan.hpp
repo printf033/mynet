@@ -1,13 +1,14 @@
 #pragma once
 
 /**
- * @file proxy/trojan/trojan.hpp
- * @brief Trojan 代理协议服务端状态机处理器。
+ * @file handler/trojan/trojan.hpp
+ * @brief Trojan 代理协议入站状态机处理器 (HandlerInboundTrojan) 与出站协议处理器 (HandlerOutboundTrojan)。
  */
 
-#include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
+#include "../outbound.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -28,49 +29,26 @@ namespace mynet::handler
     } // namespace trojan
 
     /**
-     * @brief Trojan 会话状态
+     * @brief Trojan 协议入站状态机处理器
      */
-    enum class TrojanStage : uint8_t
-    {
-        HEADER,    ///< 等待解析 Trojan 鉴权头部与目标地址
-        STREAMING, ///< 握手成功，处于数据隧道/零拷贝透传阶段
-        ERROR      ///< 鉴权失败或协议畸变
-    };
-
-    /**
-     * @brief Trojan 协议状态机处理器
-     */
-    class HandlerTrojan : public HandlerConnection
+    class HandlerInboundTrojan : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(std::string_view hexHash)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
-        TrojanStage stage_{TrojanStage::HEADER};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
         std::vector<std::string> validHexKeys_{};
 
-        uint8_t command_{0};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
-
     public:
-        HandlerTrojan() noexcept = default;
-        explicit HandlerTrojan(std::string_view password) { setPassword(password); }
-        ~HandlerTrojan() noexcept override = default;
+        HandlerInboundTrojan() noexcept = default;
+        explicit HandlerInboundTrojan(std::string_view password) { setPassword(password); }
+        ~HandlerInboundTrojan() noexcept override = default;
 
-        HandlerTrojan(const HandlerTrojan &) = delete;
-        HandlerTrojan &operator=(const HandlerTrojan &) = delete;
-        HandlerTrojan(HandlerTrojan &&) = delete;
-        HandlerTrojan &operator=(HandlerTrojan &&) = delete;
+        HandlerInboundTrojan(const HandlerInboundTrojan &) = delete;
+        HandlerInboundTrojan &operator=(const HandlerInboundTrojan &) = delete;
+        HandlerInboundTrojan(HandlerInboundTrojan &&) = delete;
+        HandlerInboundTrojan &operator=(HandlerInboundTrojan &&) = delete;
 
         /**
          * @brief 设置单一合法密码
@@ -90,32 +68,15 @@ namespace mynet::handler
          * @brief 自定义鉴权回调（供复杂数据库/鉴权系统使用）
          */
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
-
-        [[nodiscard]] TrojanStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == TrojanStage::STREAMING; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = TrojanStage::HEADER;
-            command_ = 0;
-            targetAddress_.reset();
-            disableSpliceForward();
+            HandlerInboundConnection::reset();
         }
 
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept
+        void process() override
         {
-            (void)reason;
-            stage_ = TrojanStage::ERROR;
-        }
-
-        void process()
-        {
-            if (stage_ == TrojanStage::HEADER)
+            if (stage_ == InboundStage::HANDSHAKE)
             {
                 if (!processHeader())
                 {
@@ -142,7 +103,7 @@ namespace mynet::handler
             if (data[trojan::kKeyLength] != '\r' || data[trojan::kKeyLength + 1] != '\n')
             {
                 onParseError("Trojan: Missing CRLF after auth key");
-                stage_ = TrojanStage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -154,9 +115,9 @@ namespace mynet::handler
             }
             else
             {
-                for (const auto &validKey : validHexKeys_)
+                for (const auto &v : validHexKeys_)
                 {
-                    if (crypto::constantTimeEqual(keySpan, validKey))
+                    if (crypto::constantTimeEqual(keySpan, v))
                     {
                         authOk = true;
                         break;
@@ -166,46 +127,45 @@ namespace mynet::handler
 
             if (!authOk)
             {
-                onParseError("Trojan: Authentication failed");
-                stage_ = TrojanStage::ERROR;
+                onParseError("Trojan: Unauthorized user hex key");
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
-            // 2. 解析命令与目标地址
-            const size_t cmdOffset = trojan::kKeyLength + 2;
-            const uint8_t cmd = data[cmdOffset];
-            const size_t addrOffset = cmdOffset + 1;
+            // 2. 命令字 CMD
+            const uint8_t cmd = data[trojan::kKeyLength + 2];
 
+            // 3. 目标地址解析 (SOCKS5 格式)
+            const size_t addrOffset = trojan::kKeyLength + 2 + 1;
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
             auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
-                // 地址部分尚未接收完整
-                return false;
+                return false; // 地址不完整
             }
 
-            const size_t crlf2Offset = addrOffset + addrConsumed;
-            if (avail < crlf2Offset + 2)
+            const size_t afterAddr = addrOffset + addrConsumed;
+            if (avail < afterAddr + 2)
             {
                 return false; // 等待结尾 CRLF
             }
 
-            if (data[crlf2Offset] != '\r' || data[crlf2Offset + 1] != '\n')
+            if (data[afterAddr] != '\r' || data[afterAddr + 1] != '\n')
             {
-                onParseError("Trojan: Missing closing CRLF after target address");
-                stage_ = TrojanStage::ERROR;
+                onParseError("Trojan: Missing CRLF after target address");
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
-            const size_t totalHeaderSize = crlf2Offset + 2;
+            const size_t totalHeaderSize = afterAddr + 2;
             command_ = cmd;
             targetAddress_ = std::move(target);
             requestConsume(totalHeaderSize);
 
-            stage_ = TrojanStage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
             if (requestCallback_)
@@ -213,6 +173,78 @@ namespace mynet::handler
                 requestCallback_(command_, *targetAddress_);
             }
             return true;
+        }
+    };
+
+    /**
+     * @brief Trojan 出站协议处理器 (Trojan Outbound)
+     *
+     * 建立四元组连接后，在流首部自动填充并推送 Trojan 鉴权报文头：
+     * [SHA-224 Hex Key (56B)][CRLF][CMD (0x01)][SOCKS5 Target Address][CRLF]
+     */
+    class HandlerOutboundTrojan : public HandlerOutboundConnection
+    {
+    private:
+        std::string hexKey_{};
+        bool headerSent_{false};
+
+    public:
+        HandlerOutboundTrojan() noexcept = default;
+        HandlerOutboundTrojan(std::string_view password, const ProxyAddress &target)
+            : HandlerOutboundConnection(target),
+              hexKey_(crypto::sha224Hex(password))
+        {
+        }
+
+        void setPassword(std::string_view password)
+        {
+            hexKey_ = crypto::sha224Hex(password);
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            headerSent_ = false;
+        }
+
+        void process() override
+        {
+            if (!headerSent_)
+            {
+                sendHandshakeHeader();
+            }
+        }
+
+    private:
+        void sendHandshakeHeader()
+        {
+            if (hexKey_.empty())
+            {
+                onParseError("HandlerOutboundTrojan: Missing password");
+                return;
+            }
+
+            std::string header;
+            header.reserve(56 + 2 + 1 + 64 + 2);
+
+            // 1. 56 字节 SHA-224 十六进制密钥 + CRLF
+            header.append(hexKey_);
+            header.append("\r\n");
+
+            // 2. CMD (0x01 TCP CONNECT)
+            header.push_back(0x01);
+
+            // 3. SOCKS5 目标网络地址
+            std::vector<uint8_t> encodedAddr;
+            target_.encodeSocks5(encodedAddr);
+            header.append(reinterpret_cast<const char *>(encodedAddr.data()), encodedAddr.size());
+
+            // 4. 结尾 CRLF
+            header.append("\r\n");
+
+            [[maybe_unused]] auto _ = pushResponse(std::move(header));
+            headerSent_ = true;
+            stage_ = OutboundStage::STREAMING;
         }
     };
 

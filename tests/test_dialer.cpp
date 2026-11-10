@@ -1,6 +1,5 @@
 #include "dialer.hpp"
-#include "handler/dns/handler.hpp"
-#include "handler/outbound.hpp"
+#include "handler/handler.hpp"
 #include "../examples/common/resolver.hpp"
 #include <gtest/gtest.h>
 #include <string>
@@ -123,7 +122,7 @@ TEST(DialerBaseTest, LifecycleAndReset)
 }
 
 // =============================================================================
-// 3. HandlerOutbound 出站协议族测试
+// 3. HandlerOutboundConnection 出站协议族测试
 // =============================================================================
 
 TEST(HandlerOutboundTest, DirectOutbound)
@@ -221,13 +220,40 @@ TEST(HandlerOutboundTest, BlockOutbound)
     EXPECT_TRUE(block.closeAfterResponse());
 }
 
+TEST(HandlerOutboundTest, Hysteria2Outbound)
+{
+    auto target = ProxyAddress::fromDomain("hysteria.test", 443);
+    HandlerOutboundHysteria2 hy2("mypassword", target);
+
+    EXPECT_FALSE(hy2.isEstablished());
+    EXPECT_EQ(hy2.stage(), OutboundStage::INITIAL);
+
+    hy2.process(); // 发送认证首包，进入 CONNECTING
+    EXPECT_EQ(hy2.stage(), OutboundStage::CONNECTING);
+    ASSERT_TRUE(hy2.hasResponse());
+
+    std::string sent = hy2.takeResponse();
+    ASSERT_GE(sent.size(), 12u);
+    EXPECT_EQ(static_cast<uint8_t>(sent[0]), 10u);
+    EXPECT_EQ(sent.substr(1, 10), "mypassword");
+    EXPECT_EQ(static_cast<uint8_t>(sent[11]), hysteria2::kCmdTcp);
+
+    // 服务端回送 1 字节握手成功 [0x00]
+    std::string serverResp("\x00", 1);
+    [[maybe_unused]] auto _ = hy2.appendRequest(serverResp);
+    hy2.process();
+
+    EXPECT_TRUE(hy2.isEstablished());
+    EXPECT_EQ(hy2.stage(), OutboundStage::STREAMING);
+}
+
 // =============================================================================
-// 4. DNS 协议处理器族测试 (HandlerDns / HandlerDatagramDns / HandlerOutboundDns)
+// 4. DNS 协议处理器族测试 (HandlerInboundConnectionDns / HandlerInboundDatagramDns / HandlerOutboundConnectionDns / HandlerOutboundDatagramDns)
 // =============================================================================
 
 TEST(HandlerDnsTest, TcpDnsServerAndClient)
 {
-    HandlerDns server;
+    HandlerInboundConnectionDns server;
     server.setResponder([](const dns::DnsMessage &query) -> std::optional<dns::DnsMessage> {
         auto resp = query.makeResponse();
         in_addr ip{};
@@ -254,7 +280,7 @@ TEST(HandlerDnsTest, TcpDnsServerAndClient)
     std::string srvResp = server.takeResponse();
 
     // 客户端接收响应
-    HandlerDns client;
+    HandlerInboundConnectionDns client;
     [[maybe_unused]] auto _2 = client.appendRequest(srvResp);
     client.process();
 
@@ -267,7 +293,7 @@ TEST(HandlerDnsTest, TcpDnsServerAndClient)
 
 TEST(HandlerDnsTest, UdpDatagramDnsServer)
 {
-    HandlerDatagramDns udpServer;
+    HandlerInboundDatagramDns udpServer;
     udpServer.setResponder([](const dns::DnsMessage &query) -> std::optional<dns::DnsMessage> {
         auto resp = query.makeResponse();
         in_addr ip{};
@@ -297,7 +323,7 @@ TEST(HandlerDnsTest, UdpDatagramDnsServer)
 
 TEST(HandlerDnsTest, OutboundDnsClient)
 {
-    HandlerOutboundDns client("query.test", dns::kTypeA, 0x9999);
+    HandlerOutboundConnectionDns client("query.test", dns::kTypeA, 0x9999);
     EXPECT_EQ(client.stage(), OutboundStage::INITIAL);
 
     // 驱动 process() 发出 TCP 查询包
@@ -331,4 +357,37 @@ TEST(HandlerDnsTest, OutboundDnsClient)
     EXPECT_EQ(client.response()->header.id, 0x9999);
     ASSERT_EQ(client.response()->answers.size(), 1u);
     EXPECT_EQ(client.response()->answers[0].ipString(), "8.8.4.4");
+}
+
+TEST(HandlerDnsTest, OutboundDatagramDnsClient)
+{
+    sockaddr_in server{};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(53);
+    ::inet_pton(AF_INET, "8.8.8.8", &server.sin_addr);
+
+    HandlerOutboundDatagramDns client(server, "udpquery.test", dns::kTypeA, 0x4321);
+    client.sendQuery();
+    ASSERT_TRUE(client.hasOutgoing());
+
+    auto out = client.takeOutgoing();
+    std::span<const uint8_t> payload(reinterpret_cast<const uint8_t *>(out.bytes.data()), out.bytes.size());
+    auto decoded = dns::DnsMessage::decode(payload);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->header.id, 0x4321);
+
+    // 服务端响应
+    dns::DnsMessage resp;
+    resp.header.id = 0x4321;
+    resp.header.setResponse(true);
+    in_addr ip{};
+    ::inet_pton(AF_INET, "1.1.1.1", &ip);
+    resp.answers.push_back(dns::DnsRecord::createA("udpquery.test", ip, 60));
+    auto respBytes = resp.encode();
+
+    client.onDatagram(server, reinterpret_cast<const char *>(respBytes.data()), respBytes.size());
+    ASSERT_TRUE(client.response().has_value());
+    EXPECT_EQ(client.response()->header.id, 0x4321);
+    ASSERT_EQ(client.response()->answers.size(), 1u);
+    EXPECT_EQ(client.response()->answers[0].ipString(), "1.1.1.1");
 }

@@ -1,13 +1,14 @@
 #pragma once
 
 /**
- * @file proxy/hysteria2/hysteria2.hpp
- * @brief Hysteria 2 代理协议状态机处理器。
+ * @file handler/hysteria2/hysteria2.hpp
+ * @brief Hysteria 2 代理协议入站状态机处理器 (HandlerInboundHysteria2) 与出站协议处理器 (HandlerOutboundHysteria2)。
  */
 
-#include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
+#include "../outbound.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -28,80 +29,44 @@ namespace mynet::handler
         inline constexpr uint8_t kStatusAuthFailed = 0x01;
     } // namespace hysteria2
 
-    enum class Hysteria2Stage : uint8_t
-    {
-        AUTH,      ///< 鉴权与目标指令解析
-        STREAMING, ///< 握手成功，进入双向数据转发
-        ERROR      ///< 鉴权失败或协议错误
-    };
-
     /**
-     * @brief Hysteria 2 协议状态机处理器
+     * @brief Hysteria 2 协议入站状态机处理器
      */
-    class HandlerHysteria2 : public HandlerConnection
+    class HandlerInboundHysteria2 : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(std::string_view authStr)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
-        Hysteria2Stage stage_{Hysteria2Stage::AUTH};
         std::string password_{};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
-
-        uint8_t command_{0};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
         bool autoReplyOk_{true};
 
     public:
-        HandlerHysteria2() noexcept = default;
-        explicit HandlerHysteria2(std::string_view password)
+        HandlerInboundHysteria2() noexcept = default;
+        explicit HandlerInboundHysteria2(std::string_view password)
             : password_(password)
         {
         }
-        ~HandlerHysteria2() noexcept override = default;
+        ~HandlerInboundHysteria2() noexcept override = default;
 
-        HandlerHysteria2(const HandlerHysteria2 &) = delete;
-        HandlerHysteria2 &operator=(const HandlerHysteria2 &) = delete;
-        HandlerHysteria2(HandlerHysteria2 &&) = delete;
-        HandlerHysteria2 &operator=(HandlerHysteria2 &&) = delete;
+        HandlerInboundHysteria2(const HandlerInboundHysteria2 &) = delete;
+        HandlerInboundHysteria2 &operator=(const HandlerInboundHysteria2 &) = delete;
+        HandlerInboundHysteria2(HandlerInboundHysteria2 &&) = delete;
+        HandlerInboundHysteria2 &operator=(HandlerInboundHysteria2 &&) = delete;
 
         void setPassword(std::string_view pass) { password_ = std::string(pass); }
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
-
-        [[nodiscard]] Hysteria2Stage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == Hysteria2Stage::STREAMING; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
+        void setAutoReply(bool autoReply) noexcept { autoReplyOk_ = autoReply; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = Hysteria2Stage::AUTH;
-            command_ = 0;
-            targetAddress_.reset();
-            disableSpliceForward();
+            HandlerInboundConnection::reset();
         }
 
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept
+        void process() override
         {
-            (void)reason;
-            stage_ = Hysteria2Stage::ERROR;
-        }
-
-        void process()
-        {
-            if (stage_ == Hysteria2Stage::AUTH)
+            if (stage_ == InboundStage::HANDSHAKE)
             {
                 if (!processAuth())
                 {
@@ -150,7 +115,7 @@ namespace mynet::handler
             {
                 sendReply(hysteria2::kStatusAuthFailed);
                 onParseError("Hysteria2: Authentication failed");
-                stage_ = Hysteria2Stage::ERROR;
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -177,7 +142,7 @@ namespace mynet::handler
                 sendReply(hysteria2::kStatusOk);
             }
 
-            stage_ = Hysteria2Stage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
             if (requestCallback_)
@@ -185,6 +150,77 @@ namespace mynet::handler
                 requestCallback_(command_, *targetAddress_);
             }
             return true;
+        }
+    };
+
+    /**
+     * @brief Hysteria 2 协议出站客户端处理器 (Hysteria 2 Outbound)
+     *
+     * 自动向上游发送 [AuthLen 1B][AuthStr][CMD 0x01][Target Address]，并等待 1 字节状态码 0x00。
+     */
+    class HandlerOutboundHysteria2 : public HandlerOutboundConnection
+    {
+    private:
+        std::string password_{};
+        bool headerSent_{false};
+
+    public:
+        HandlerOutboundHysteria2() noexcept = default;
+        HandlerOutboundHysteria2(std::string_view password, const ProxyAddress &target)
+            : HandlerOutboundConnection(target),
+              password_(password)
+        {
+        }
+
+        void setPassword(std::string_view password) { password_ = std::string(password); }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            headerSent_ = false;
+        }
+
+        void process() override
+        {
+            if (!headerSent_)
+            {
+                sendHandshakeHeader();
+            }
+
+            if (stage_ == OutboundStage::CONNECTING)
+            {
+                if (requestBytes() >= 1)
+                {
+                    const auto *resp = reinterpret_cast<const uint8_t *>(requestBegin());
+                    if (resp[0] != hysteria2::kStatusOk)
+                    {
+                        onParseError("HandlerOutboundHysteria2: Server rejected handshake");
+                        return;
+                    }
+                    requestConsume(1);
+                    stage_ = OutboundStage::STREAMING;
+                }
+            }
+        }
+
+    private:
+        void sendHandshakeHeader()
+        {
+            std::vector<uint8_t> header;
+            header.reserve(1 + password_.size() + 1 + 64);
+
+            header.push_back(static_cast<uint8_t>(password_.size() > 255 ? 255 : password_.size()));
+            header.insert(header.end(), password_.begin(),
+                          password_.begin() + (password_.size() > 255 ? 255 : password_.size()));
+
+            header.push_back(hysteria2::kCmdTcp);
+
+            target_.encodeSocks5(header);
+
+            [[maybe_unused]] auto _ =
+                pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));
+            headerSent_ = true;
+            stage_ = OutboundStage::CONNECTING;
         }
     };
 

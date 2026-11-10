@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file proxy/tuic/tuic.hpp
- * @brief TUIC (v5) 代理协议状态机处理器。
+ * @file handler/tuic/tuic.hpp
+ * @brief TUIC (v5) 代理协议入站状态机处理器 (HandlerInboundTuic)。
  */
 
-#include "../../connection.hpp"
 #include "../address.hpp"
 #include "../crypto.hpp"
+#include "../inbound.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -30,48 +30,28 @@ namespace mynet::handler
         inline constexpr uint8_t kRepAuthFailure = 0x01;
     } // namespace tuic
 
-    enum class TuicStage : uint8_t
-    {
-        HEADER,    ///< 鉴权与目标指令解析
-        STREAMING, ///< 握手成功，进入双向数据转发
-        ERROR      ///< 鉴权失败或协议错误
-    };
-
     /**
-     * @brief TUIC 协议状态机处理器
+     * @brief TUIC 协议入站状态机处理器
      */
-    class HandlerTuic : public HandlerConnection
+    class HandlerInboundTuic : public HandlerInboundConnection
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &uuid)>;
-        using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
-
-        static constexpr bool kEnableSplice = true;
-
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
 
     private:
-        TuicStage stage_{TuicStage::HEADER};
         std::array<uint8_t, 16> expectedUuid_{};
         AuthCallback authCallback_{nullptr};
-        RequestCallback requestCallback_{nullptr};
-
-        uint8_t command_{0};
-        std::optional<ProxyAddress> targetAddress_{std::nullopt};
         bool autoReplySuccess_{true};
 
     public:
-        HandlerTuic() noexcept = default;
-        explicit HandlerTuic(std::string_view uuidStr) { setUuid(uuidStr); }
-        ~HandlerTuic() noexcept override = default;
+        HandlerInboundTuic() noexcept = default;
+        explicit HandlerInboundTuic(std::string_view uuidStr) { setUuid(uuidStr); }
+        ~HandlerInboundTuic() noexcept override = default;
 
-        HandlerTuic(const HandlerTuic &) = delete;
-        HandlerTuic &operator=(const HandlerTuic &) = delete;
-        HandlerTuic(HandlerTuic &&) = delete;
-        HandlerTuic &operator=(HandlerTuic &&) = delete;
+        HandlerInboundTuic(const HandlerInboundTuic &) = delete;
+        HandlerInboundTuic &operator=(const HandlerInboundTuic &) = delete;
+        HandlerInboundTuic(HandlerInboundTuic &&) = delete;
+        HandlerInboundTuic &operator=(HandlerInboundTuic &&) = delete;
 
         void setUuid(std::string_view uuidStr)
         {
@@ -82,32 +62,16 @@ namespace mynet::handler
         }
 
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
-        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
-
-        [[nodiscard]] TuicStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return stage_ == TuicStage::STREAMING; }
-        [[nodiscard]] uint8_t command() const noexcept { return command_; }
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
+        void setAutoReply(bool autoReply) noexcept { autoReplySuccess_ = autoReply; }
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
-            stage_ = TuicStage::HEADER;
-            command_ = 0;
-            targetAddress_.reset();
-            disableSpliceForward();
+            HandlerInboundConnection::reset();
         }
 
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept
+        void process() override
         {
-            (void)reason;
-            stage_ = TuicStage::ERROR;
-        }
-
-        void process()
-        {
-            if (stage_ == TuicStage::HEADER)
+            if (stage_ == InboundStage::HANDSHAKE)
             {
                 if (!processHeader())
                 {
@@ -125,47 +89,49 @@ namespace mynet::handler
     private:
         bool processHeader()
         {
-            // 首部格式：[CMD 1B][UUID 16B][Address (SOCKS5)]
+            // 首部格式：[UUID 16B][CMD 1B][Address (SOCKS5)]
             const size_t avail = requestBytes();
-            if (avail < 1 + 16 + 7)
+            if (avail < 16 + 1 + 7)
             {
                 return false;
             }
 
             const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
-            const uint8_t cmd = data[0];
 
             std::array<uint8_t, 16> clientUuid{};
-            std::memcpy(clientUuid.data(), data + 1, 16);
+            std::memcpy(clientUuid.data(), data, 16);
 
-            bool ok = false;
+            bool authOk = false;
             if (authCallback_)
             {
-                ok = authCallback_(clientUuid);
+                authOk = authCallback_(clientUuid);
             }
             else
             {
-                ok = crypto::constantTimeEqual(clientUuid, expectedUuid_);
+                authOk = crypto::constantTimeEqual(clientUuid, expectedUuid_);
             }
 
-            if (!ok)
+            if (!authOk)
             {
                 sendReply(tuic::kRepAuthFailure);
-                onParseError("TUIC: Authentication failed");
-                stage_ = TuicStage::ERROR;
+                onParseError("TUIC: Unauthorized UUID");
+                stage_ = InboundStage::ERROR;
                 setCloseAfterResponse(true);
                 return false;
             }
 
+            const uint8_t cmd = data[16];
+            const size_t addrOffset = 17;
+
             size_t addrConsumed = 0;
-            std::span<const uint8_t> addrSpan(data + 17, avail - 17);
+            std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
             auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
                 return false;
             }
 
-            const size_t totalHeader = 17 + addrConsumed;
+            const size_t totalHeader = addrOffset + addrConsumed;
             command_ = cmd;
             targetAddress_ = std::move(target);
             requestConsume(totalHeader);
@@ -175,7 +141,7 @@ namespace mynet::handler
                 sendReply(tuic::kRepSuccess);
             }
 
-            stage_ = TuicStage::STREAMING;
+            stage_ = InboundStage::STREAMING;
             onMessageComplete();
 
             if (requestCallback_)

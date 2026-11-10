@@ -7,51 +7,51 @@ using namespace mynet;
 using namespace mynet::handler;
 
 // 静态概念约束检验：全部代理协议处理器均必须严格满足 HandlerConstraint 与 MandatoryMethodConnection
-static_assert(HandlerConstraint<HandlerSocks4>, "HandlerSocks4 must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerSocks4>, "HandlerSocks4 must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundSocks4>, "HandlerInboundSocks4 must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundSocks4>, "HandlerInboundSocks4 must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerSocks>, "HandlerSocks must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerSocks>, "HandlerSocks must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundSocks>, "HandlerInboundSocks must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundSocks>, "HandlerInboundSocks must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerHttpProxy>, "HandlerHttpProxy must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerHttpProxy>, "HandlerHttpProxy must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundHttpProxy>, "HandlerInboundHttpProxy must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundHttpProxy>, "HandlerInboundHttpProxy must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerMixed>, "HandlerMixed must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerMixed>, "HandlerMixed must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundMixed>, "HandlerInboundMixed must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundMixed>, "HandlerInboundMixed must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerTrojan>, "HandlerTrojan must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerTrojan>, "HandlerTrojan must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundTrojan>, "HandlerInboundTrojan must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundTrojan>, "HandlerInboundTrojan must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerVless>, "HandlerVless must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerVless>, "HandlerVless must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundVless>, "HandlerInboundVless must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundVless>, "HandlerInboundVless must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerVmess>, "HandlerVmess must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerVmess>, "HandlerVmess must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundVmess>, "HandlerInboundVmess must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundVmess>, "HandlerInboundVmess must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerShadowsocks>, "HandlerShadowsocks must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerShadowsocks>,
-              "HandlerShadowsocks must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundShadowsocks>, "HandlerInboundShadowsocks must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundShadowsocks>,
+              "HandlerInboundShadowsocks must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerShadowTls>, "HandlerShadowTls must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerShadowTls>, "HandlerShadowTls must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundShadowTls>, "HandlerInboundShadowTls must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundShadowTls>, "HandlerInboundShadowTls must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerSnell>, "HandlerSnell must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerSnell>, "HandlerSnell must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundSnell>, "HandlerInboundSnell must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundSnell>, "HandlerInboundSnell must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerHysteria2>, "HandlerHysteria2 must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerHysteria2>, "HandlerHysteria2 must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundHysteria2>, "HandlerInboundHysteria2 must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundHysteria2>, "HandlerInboundHysteria2 must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerTuic>, "HandlerTuic must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerTuic>, "HandlerTuic must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundTuic>, "HandlerInboundTuic must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundTuic>, "HandlerInboundTuic must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerRedirect>, "HandlerRedirect must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerRedirect>, "HandlerRedirect must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundRedirect>, "HandlerInboundRedirect must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundRedirect>, "HandlerInboundRedirect must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerDirect>, "HandlerDirect must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerDirect>, "HandlerDirect must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundDirect>, "HandlerInboundDirect must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundDirect>, "HandlerInboundDirect must satisfy MandatoryMethodConnection");
 
-static_assert(HandlerConstraint<HandlerBlock>, "HandlerBlock must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerBlock>, "HandlerBlock must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundBlock>, "HandlerInboundBlock must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundBlock>, "HandlerInboundBlock must satisfy MandatoryMethodConnection");
 
 namespace
 {
@@ -73,7 +73,7 @@ namespace
 
 TEST(HandlerSocks4Test, IPv4ConnectSuccess)
 {
-    HandlerSocks4 handler;
+    HandlerInboundSocks4 handler;
     bool requestCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -106,7 +106,7 @@ TEST(HandlerSocks4Test, IPv4ConnectSuccess)
 
 TEST(HandlerSocks4Test, Socks4aDomainConnect)
 {
-    HandlerSocks4 handler;
+    HandlerInboundSocks4 handler;
     handler.setOnRequest(
         [](uint8_t cmd, const ProxyAddress &target)
         {
@@ -134,7 +134,7 @@ TEST(HandlerSocks4Test, Socks4aDomainConnect)
 
 TEST(HandlerSocks4Test, AuthFailureRejected)
 {
-    HandlerSocks4 handler;
+    HandlerInboundSocks4 handler;
     handler.setAuthenticator([](std::string_view uid) { return uid == "admin"; });
 
     std::vector<uint8_t> req = {0x04, 0x01, 0x00, 80, 10, 0, 0, 1, 'h', 'a', 'c', 'k', 'e', 'r', 0x00};
@@ -149,14 +149,14 @@ TEST(HandlerSocks4Test, AuthFailureRejected)
 }
 
 // =============================================================================
-// 2. 统一 SOCKS 处理器 (HandlerSocks) 嗅探自适应测试
+// 2. 统一 SOCKS 处理器 (HandlerInboundSocks) 嗅探自适应测试
 // =============================================================================
 
 TEST(HandlerSocksTest, AutoDetectSocks4AndSocks5)
 {
     // 测试 SOCKS4 路径
     {
-        HandlerSocks handler;
+        HandlerInboundSocks handler;
         std::vector<uint8_t> req4 = {0x04, 0x01, 0x00, 80, 1, 1, 1, 1, 0x00};
         feed(handler, req4);
         handler.process();
@@ -168,7 +168,7 @@ TEST(HandlerSocksTest, AutoDetectSocks4AndSocks5)
 
     // 测试 SOCKS5 路径
     {
-        HandlerSocks handler;
+        HandlerInboundSocks handler;
         // 1. SOCKS5 初始握手
         feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
         handler.process();
@@ -186,12 +186,12 @@ TEST(HandlerSocksTest, AutoDetectSocks4AndSocks5)
 }
 
 // =============================================================================
-// 3. HTTP 代理 (HandlerHttpProxy) 测试
+// 3. HTTP 代理 (HandlerInboundHttpProxy) 测试
 // =============================================================================
 
 TEST(HandlerHttpProxyTest, ConnectTunneling)
 {
-    HandlerHttpProxy handler;
+    HandlerInboundHttpProxy handler;
     bool requestCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -218,7 +218,7 @@ TEST(HandlerHttpProxyTest, ConnectTunneling)
 
 TEST(HandlerHttpProxyTest, PlainHttpForwardProxy)
 {
-    HandlerHttpProxy handler;
+    HandlerInboundHttpProxy handler;
     handler.setOnRequest(
         [](uint8_t cmd, const ProxyAddress &target)
         {
@@ -240,7 +240,7 @@ TEST(HandlerHttpProxyTest, PlainHttpForwardProxy)
 
 TEST(HandlerHttpProxyTest, BasicAuthCheck)
 {
-    HandlerHttpProxy handler;
+    HandlerInboundHttpProxy handler;
     handler.setAuthenticator([](std::string_view user, std::string_view pass)
                              { return user == "admin" && pass == "secret"; });
 
@@ -267,14 +267,14 @@ TEST(HandlerHttpProxyTest, BasicAuthCheck)
 }
 
 // =============================================================================
-// 4. Mixed 混合共端口代理 (HandlerMixed) 测试
+// 4. Mixed 混合共端口代理 (HandlerInboundMixed) 测试
 // =============================================================================
 
 TEST(HandlerMixedTest, MultiplexSocksAndHttp)
 {
     // 1. SOCKS5 客户端接入
     {
-        HandlerMixed handler;
+        HandlerInboundMixed handler;
         feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
         handler.process();
         EXPECT_EQ(handler.protocol(), MixedProtocolType::SOCKS5);
@@ -282,7 +282,7 @@ TEST(HandlerMixedTest, MultiplexSocksAndHttp)
 
     // 2. SOCKS4 客户端接入
     {
-        HandlerMixed handler;
+        HandlerInboundMixed handler;
         feed(handler, std::vector<uint8_t>{0x04, 0x01, 0x00, 80, 1, 2, 3, 4, 0x00});
         handler.process();
         EXPECT_EQ(handler.protocol(), MixedProtocolType::SOCKS4);
@@ -290,7 +290,7 @@ TEST(HandlerMixedTest, MultiplexSocksAndHttp)
 
     // 3. HTTP 客户端接入
     {
-        HandlerMixed handler;
+        HandlerInboundMixed handler;
         std::string httpReq = "CONNECT 127.0.0.1:8443 HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n";
         feed(handler, httpReq);
         handler.process();
@@ -302,7 +302,7 @@ TEST(HandlerMixedTest, MultiplexSocksAndHttp)
 }
 
 // =============================================================================
-// 5. Trojan 代理协议 (HandlerTrojan) 测试
+// 5. Trojan 代理协议 (HandlerInboundTrojan) 测试
 // =============================================================================
 
 TEST(HandlerTrojanTest, Sha224KeyHandshake)
@@ -311,7 +311,7 @@ TEST(HandlerTrojanTest, Sha224KeyHandshake)
     std::string hexKey = crypto::sha224Hex(pass);
     ASSERT_EQ(hexKey.size(), 56u);
 
-    HandlerTrojan handler(pass);
+    HandlerInboundTrojan handler(pass);
     bool reqCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -346,7 +346,7 @@ TEST(HandlerTrojanTest, Sha224KeyHandshake)
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
-    EXPECT_EQ(handler.stage(), TrojanStage::STREAMING);
+    EXPECT_EQ(handler.stage(), InboundStage::STREAMING);
     ASSERT_TRUE(handler.targetAddress().has_value());
     EXPECT_EQ(handler.targetAddress()->toString(), "1.1.1.1:853");
 
@@ -356,7 +356,7 @@ TEST(HandlerTrojanTest, Sha224KeyHandshake)
 
 TEST(HandlerTrojanTest, WrongPasswordRejected)
 {
-    HandlerTrojan handler("correct-password");
+    HandlerInboundTrojan handler("correct-password");
     std::string wrongKey = crypto::sha224Hex("wrong-password");
 
     std::vector<uint8_t> req;
@@ -371,12 +371,12 @@ TEST(HandlerTrojanTest, WrongPasswordRejected)
     feed(handler, req);
     handler.process();
 
-    EXPECT_EQ(handler.stage(), TrojanStage::ERROR);
+    EXPECT_EQ(handler.stage(), InboundStage::ERROR);
     EXPECT_FALSE(handler.isEstablished());
 }
 
 // =============================================================================
-// 6. VLESS (v0) 代理协议 (HandlerVless) 测试
+// 6. VLESS (v0) 代理协议 (HandlerInboundVless) 测试
 // =============================================================================
 
 TEST(HandlerVlessTest, UuidConnectHandshake)
@@ -385,7 +385,7 @@ TEST(HandlerVlessTest, UuidConnectHandshake)
     auto parsedUuid = crypto::parseUuid(uuidStr);
     ASSERT_TRUE(parsedUuid.has_value());
 
-    HandlerVless handler(uuidStr);
+    HandlerInboundVless handler(uuidStr);
     bool reqCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -418,7 +418,7 @@ TEST(HandlerVlessTest, UuidConnectHandshake)
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
-    EXPECT_EQ(handler.stage(), VlessStage::STREAMING);
+    EXPECT_EQ(handler.stage(), InboundStage::STREAMING);
     ASSERT_TRUE(handler.targetAddress().has_value());
     EXPECT_EQ(handler.targetAddress()->toString(), "github.com:443");
 
@@ -434,13 +434,13 @@ TEST(HandlerVlessTest, UuidConnectHandshake)
 }
 
 // =============================================================================
-// 7. VMess 代理协议 (HandlerVmess) 测试
+// 7. VMess 代理协议 (HandlerInboundVmess) 测试
 // =============================================================================
 
 TEST(HandlerVmessTest, AuthAndHeaderDecode)
 {
     std::string uuidStr = "de04add9-5c1a-4b08-8e65-244e45cf5483";
-    HandlerVmess handler(uuidStr);
+    HandlerInboundVmess handler(uuidStr);
 
     bool reqCalled = false;
     handler.setOnRequest(
@@ -478,12 +478,12 @@ TEST(HandlerVmessTest, AuthAndHeaderDecode)
 }
 
 // =============================================================================
-// 8. Shadowsocks AEAD (HandlerShadowsocks) 测试
+// 8. Shadowsocks AEAD (HandlerInboundShadowsocks) 测试
 // =============================================================================
 
 TEST(HandlerShadowsocksTest, NoneCipherDirectCodec)
 {
-    HandlerShadowsocks handler("none", "");
+    HandlerInboundShadowsocks handler("none", "");
     bool reqCalled = false;
     handler.setOnRequest(
         [&](uint8_t, const ProxyAddress &target)
@@ -505,7 +505,7 @@ TEST(HandlerShadowsocksTest, NoneCipherDirectCodec)
 TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
 {
     std::string pass = "test-password";
-    HandlerShadowsocks handler("aes-128-gcm", pass);
+    HandlerInboundShadowsocks handler("aes-128-gcm", pass);
 
     bool reqCalled = false;
     handler.setOnRequest(
@@ -568,7 +568,7 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
 }
 
 // =============================================================================
-// 9. ShadowTLS (HandlerShadowTls) 测试
+// 9. ShadowTLS (HandlerInboundShadowTls) 测试
 // =============================================================================
 
 TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
@@ -647,7 +647,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
 
     // 场景 A: 普通浏览器 ClientHello (带 SNI "cloudflare.com"，但未包含合法 ShadowTLS 认证令牌)
     {
-        HandlerShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
+        HandlerInboundShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
         bool callbackCalled = false;
         handler.setOnRequest(
             [&](bool authed, const ProxyAddress &target)
@@ -675,7 +675,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
 
     // 场景 B: 合法 ShadowTLS v3 客户端 (SessionID 包含对 Random 的 HMAC-SHA256 签名)
     {
-        HandlerShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
+        HandlerInboundShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
         bool callbackCalled = false;
         handler.setOnRequest(
             [&](bool authed, const ProxyAddress &target)
@@ -705,7 +705,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
 
     // 场景 C: 非 TLS 明文流量 (直接回落到 fallback)
     {
-        HandlerShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
+        HandlerInboundShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
         handler.setOnRequest(
             [&](bool authed, const ProxyAddress &target)
             {
@@ -721,12 +721,12 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
 }
 
 // =============================================================================
-// 10. Snell (HandlerSnell) 测试
+// 10. Snell (HandlerInboundSnell) 测试
 // =============================================================================
 
 TEST(HandlerSnellTest, ConnectHandshake)
 {
-    HandlerSnell handler(2, "psk123");
+    HandlerInboundSnell handler(2, "psk123");
     bool reqCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -748,12 +748,12 @@ TEST(HandlerSnellTest, ConnectHandshake)
 }
 
 // =============================================================================
-// 11. Hysteria 2 (HandlerHysteria2) 测试
+// 11. Hysteria 2 (HandlerInboundHysteria2) 测试
 // =============================================================================
 
 TEST(HandlerHysteria2Test, AuthAndConnectSuccess)
 {
-    HandlerHysteria2 handler("mypassword");
+    HandlerInboundHysteria2 handler("mypassword");
     bool reqCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -784,7 +784,7 @@ TEST(HandlerHysteria2Test, AuthAndConnectSuccess)
 }
 
 // =============================================================================
-// 12. TUIC (HandlerTuic) 测试
+// 12. TUIC (HandlerInboundTuic) 测试
 // =============================================================================
 
 TEST(HandlerTuicTest, ConnectSuccess)
@@ -793,7 +793,7 @@ TEST(HandlerTuicTest, ConnectSuccess)
     auto uuid = crypto::parseUuid(uuidStr);
     ASSERT_TRUE(uuid.has_value());
 
-    HandlerTuic handler(uuidStr);
+    HandlerInboundTuic handler(uuidStr);
     bool reqCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -805,8 +805,8 @@ TEST(HandlerTuicTest, ConnectSuccess)
         });
 
     std::vector<uint8_t> req;
-    req.push_back(tuic::kCmdConnect);
     req.insert(req.end(), uuid->begin(), uuid->end());
+    req.push_back(tuic::kCmdConnect);
     ProxyAddress::fromIPv4(htonl(0x0A000001), 443).encodeSocks5(req);
 
     feed(handler, req);
@@ -827,9 +827,9 @@ TEST(HandlerTuicTest, ConnectSuccess)
 TEST(HandlerDirectBlockTest, DirectPassThrough)
 {
     ProxyAddress target = ProxyAddress::fromHostPort("8.8.8.8", 53);
-    HandlerDirect direct(target);
+    HandlerInboundDirect direct(target);
     EXPECT_TRUE(direct.isEstablished());
-    EXPECT_EQ(direct.targetAddress().toString(), "8.8.8.8:53");
+    EXPECT_EQ(direct.target().toString(), "8.8.8.8:53");
 
     bool called = false;
     direct.setOnRequest(
@@ -844,7 +844,7 @@ TEST(HandlerDirectBlockTest, DirectPassThrough)
 
 TEST(HandlerBlockTest, BlockRejects)
 {
-    HandlerBlock block;
+    HandlerInboundBlock block;
     EXPECT_FALSE(block.isEstablished());
     feed(block, std::string_view("GET / HTTP/1.1\r\n\r\n"));
     block.process();

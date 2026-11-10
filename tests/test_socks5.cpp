@@ -7,8 +7,8 @@
 using namespace mynet;
 using namespace mynet::handler;
 
-static_assert(HandlerConstraint<HandlerSocks5>, "HandlerSocks5 must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerSocks5>, "HandlerSocks5 must satisfy MandatoryMethodConnection");
+static_assert(HandlerConstraint<HandlerInboundSocks5>, "HandlerInboundSocks5 must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundSocks5>, "HandlerInboundSocks5 must satisfy MandatoryMethodConnection");
 
 namespace
 {
@@ -102,13 +102,13 @@ TEST(ProxyAddressTest, IPv6Codec)
     EXPECT_EQ(decoded->port, 1080);
 }
 
-// ---- HandlerSocks5 测试 ----
+// ---- HandlerInboundSocks5 测试 ----
 
 TEST(HandlerSocks5Test, ProxyConfigConstruction)
 {
     ProxyConfig cfg;
     cfg.autoReplyConnectSuccess = false;
-    HandlerSocks5 handler(cfg);
+    HandlerInboundSocks5 handler(cfg);
 
     // 握手
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
@@ -132,7 +132,7 @@ TEST(HandlerSocks5Test, ProxyConfigConstruction)
 
 TEST(HandlerSocks5Test, NoAuthConnectIPv4Success)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
     bool requestCalled = false;
     handler.setOnRequest(
         [&](uint8_t cmd, const ProxyAddress &target)
@@ -175,7 +175,7 @@ TEST(HandlerSocks5Test, NoAuthConnectIPv4Success)
 
 TEST(HandlerSocks5Test, NoAuthConnectDomainSuccess)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
     std::string targetHost;
     uint16_t targetPort = 0;
     handler.setOnRequest(
@@ -220,7 +220,7 @@ TEST(HandlerSocks5Test, NoAuthConnectDomainSuccess)
 
 TEST(HandlerSocks5Test, UsernamePasswordAuthSuccess)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
     handler.setAuthenticator([](std::string_view user, std::string_view pass)
                              { return user == "admin" && pass == "secret123"; });
 
@@ -253,7 +253,7 @@ TEST(HandlerSocks5Test, UsernamePasswordAuthSuccess)
 
 TEST(HandlerSocks5Test, UsernamePasswordAuthFailure)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
     handler.setAuthenticator([](std::string_view user, std::string_view pass)
                              { return user == "admin" && pass == "correct"; });
 
@@ -276,7 +276,7 @@ TEST(HandlerSocks5Test, UsernamePasswordAuthFailure)
 
 TEST(HandlerSocks5Test, UnsupportedMethodRejected)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
     handler.setAuthenticator([](std::string_view, std::string_view) { return true; });
 
     // 客户端只声明支持 GSSAPI (0x01)，不支持 0x02
@@ -291,7 +291,7 @@ TEST(HandlerSocks5Test, UnsupportedMethodRejected)
 
 TEST(HandlerSocks5Test, UnsupportedCommandRejected)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
     handler.process();
     [[maybe_unused]] auto _ = handler.takeResponse();
@@ -309,7 +309,7 @@ TEST(HandlerSocks5Test, UnsupportedCommandRejected)
 
 TEST(HandlerSocks5Test, ByteByByteFeedRobustness)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
 
     std::vector<uint8_t> allBytes = {
         0x05, 0x01, 0x00,                  // 握手
@@ -332,7 +332,7 @@ TEST(HandlerSocks5Test, ByteByByteFeedRobustness)
 
 TEST(HandlerSocks5Test, ResetAndReuse)
 {
-    HandlerSocks5 handler;
+    HandlerInboundSocks5 handler;
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01, 8, 8, 8, 8, 0x00, 53});
     handler.process();
     EXPECT_TRUE(handler.isEstablished());
@@ -351,8 +351,8 @@ TEST(HandlerSocks5Test, ResetAndReuse)
 
 TEST(HandlerSocks5Test, SpliceForwardApis)
 {
-    HandlerSocks5 handler;
-    static_assert(HandlerSocks5::kEnableSplice, "HandlerSocks5 must declare kEnableSplice = true");
+    HandlerInboundSocks5 handler;
+    static_assert(HandlerInboundSocks5::kEnableSplice, "HandlerInboundSocks5 must declare kEnableSplice = true");
 
     EXPECT_FALSE(handler.isSpliceForwardActive());
     EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);

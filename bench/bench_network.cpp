@@ -677,19 +677,19 @@ namespace
     // 6. Benchmark SOCKS5 Proxy Tunnel
     // =========================================================================
 
-    class BenchSocks5Handler : public handler::HandlerSocks5
+    class BenchSocks5Handler : public handler::HandlerInboundSocks5
     {
     public:
         void process()
         {
-            handler::HandlerSocks5::process();
+            handler::HandlerInboundSocks5::process();
             if (stage() == handler::Socks5Stage::STREAMING && requestBytes() > 0)
             {
                 [[maybe_unused]] auto _ = pushResponse(std::string_view(requestBegin(), requestBytes()));
                 requestConsume(requestBytes());
             }
         }
-        void reset() noexcept override { handler::HandlerSocks5::reset(); }
+        void reset() noexcept override { handler::HandlerInboundSocks5::reset(); }
     };
 
     template <template <typename> class EngineType>

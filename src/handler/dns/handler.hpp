@@ -11,6 +11,7 @@
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "dns.hpp"
+#include "handler/inbound.hpp"
 #include "handler/outbound.hpp"
 #include <functional>
 #include <optional>
@@ -19,12 +20,12 @@
 namespace mynet::handler::dns
 {
     /**
-     * @brief TCP DNS 连接处理器 (RFC 1035 Section 4.2.2)
+     * @brief TCP DNS 入站连接处理器 (RFC 1035 Section 4.2.2)
      *
      * 满足 HandlerConstraint 与 MandatoryMethodConnection。
      * 每个 TCP DNS 报文均拥有 2 字节大端序长度前缀。
      */
-    class HandlerDns : public HandlerConnection
+    class HandlerInboundConnectionDns : public HandlerInboundConnection
     {
     public:
         using QueryResponder = std::function<std::optional<DnsMessage>(const DnsMessage &)>;
@@ -35,13 +36,13 @@ namespace mynet::handler::dns
         std::optional<DnsMessage> lastResponse_{std::nullopt};
 
     public:
-        HandlerDns() noexcept = default;
-        ~HandlerDns() noexcept override = default;
+        HandlerInboundConnectionDns() noexcept = default;
+        ~HandlerInboundConnectionDns() noexcept override = default;
 
-        HandlerDns(const HandlerDns &) = delete;
-        HandlerDns &operator=(const HandlerDns &) = delete;
-        HandlerDns(HandlerDns &&) = delete;
-        HandlerDns &operator=(HandlerDns &&) = delete;
+        HandlerInboundConnectionDns(const HandlerInboundConnectionDns &) = delete;
+        HandlerInboundConnectionDns &operator=(const HandlerInboundConnectionDns &) = delete;
+        HandlerInboundConnectionDns(HandlerInboundConnectionDns &&) = delete;
+        HandlerInboundConnectionDns &operator=(HandlerInboundConnectionDns &&) = delete;
 
         /**
          * @brief 设置自定义 DNS 查询应答处理器（服务端场景）
@@ -89,7 +90,7 @@ namespace mynet::handler::dns
                 auto parsed = DnsMessage::decode(payload);
                 if (!parsed.has_value())
                 {
-                    onParseError("HandlerDns: malformed DNS packet");
+                    onParseError("HandlerInboundConnectionDns: malformed DNS packet");
                     return;
                 }
 
@@ -138,11 +139,11 @@ namespace mynet::handler::dns
     };
 
     /**
-     * @brief UDP DNS 数据报处理器
+     * @brief UDP DNS 数据报入站处理器
      *
      * 满足 DatagramConstraint 静态约束，直连 UDP 53 端口。
      */
-    class HandlerDatagramDns : public HandlerDatagram
+    class HandlerInboundDatagramDns : public HandlerInboundDatagram
     {
     public:
         using QueryResponder = std::function<std::optional<DnsMessage>(const DnsMessage &)>;
@@ -151,8 +152,8 @@ namespace mynet::handler::dns
         QueryResponder responder_{nullptr};
 
     public:
-        HandlerDatagramDns() noexcept = default;
-        ~HandlerDatagramDns() noexcept override = default;
+        HandlerInboundDatagramDns() noexcept = default;
+        ~HandlerInboundDatagramDns() noexcept override = default;
 
         void setResponder(QueryResponder responder) noexcept
         {
@@ -161,7 +162,7 @@ namespace mynet::handler::dns
 
         void reset() noexcept override
         {
-            HandlerDatagram::reset();
+            HandlerInboundDatagram::reset();
         }
 
         /**
@@ -193,11 +194,11 @@ namespace mynet::handler::dns
     };
 
     /**
-     * @brief 客户端出站 DNS 处理器 (HandlerOutboundDns)
+     * @brief 客户端出站 DNS 处理器 (HandlerOutboundConnectionDns)
      *
      * 负责向上游 DNS 服务器发起标准 TCP DNS 递归查询。
      */
-    class HandlerOutboundDns : public HandlerOutbound
+    class HandlerOutboundConnectionDns : public HandlerOutboundConnection
     {
     private:
         std::string queryDomain_{};
@@ -207,8 +208,8 @@ namespace mynet::handler::dns
         std::optional<DnsMessage> responseMessage_{std::nullopt};
 
     public:
-        HandlerOutboundDns() noexcept = default;
-        HandlerOutboundDns(std::string domain, uint16_t qtype = kTypeA, uint16_t txid = 0x5678)
+        HandlerOutboundConnectionDns() noexcept = default;
+        HandlerOutboundConnectionDns(std::string domain, uint16_t qtype = kTypeA, uint16_t txid = 0x5678)
             : queryDomain_(std::move(domain)),
               queryType_(qtype),
               txid_(txid)
@@ -228,7 +229,7 @@ namespace mynet::handler::dns
 
         void reset() noexcept override
         {
-            HandlerOutbound::reset();
+            HandlerOutboundConnection::reset();
             querySent_ = false;
             responseMessage_.reset();
         }
@@ -267,9 +268,64 @@ namespace mynet::handler::dns
                     }
                     else
                     {
-                        onParseError("HandlerOutboundDns: TxID mismatch or malformed packet");
+                        onParseError("HandlerOutboundConnectionDns: TxID mismatch or malformed packet");
                     }
                 }
+            }
+        }
+    };
+
+    /**
+     * @brief UDP DNS 数据报客户端出站处理器
+     */
+    class HandlerOutboundDatagramDns : public HandlerOutboundDatagram
+    {
+    private:
+        std::string queryDomain_{};
+        uint16_t queryType_{kTypeA};
+        uint16_t txid_{0x1234};
+        std::optional<DnsMessage> responseMessage_{std::nullopt};
+
+    public:
+        HandlerOutboundDatagramDns() noexcept = default;
+        HandlerOutboundDatagramDns(const sockaddr_in &server, std::string domain, uint16_t qtype = kTypeA,
+                                   uint16_t txid = 0x1234)
+            : HandlerOutboundDatagram(server),
+              queryDomain_(std::move(domain)),
+              queryType_(qtype),
+              txid_(txid)
+        {
+        }
+
+        [[nodiscard]] const std::optional<DnsMessage> &response() const noexcept { return responseMessage_; }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundDatagram::reset();
+            responseMessage_.reset();
+        }
+
+        void sendQuery()
+        {
+            if (!queryDomain_.empty() && remotePeer_.sin_port != 0)
+            {
+                auto queryBytes = encodeQuery(queryDomain_, queryType_, txid_);
+                sendTo(remotePeer_, reinterpret_cast<const char *>(queryBytes.data()), queryBytes.size());
+            }
+        }
+
+        void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
+        {
+            (void)peer;
+            if (data == nullptr || n == 0)
+            {
+                return;
+            }
+            std::span<const uint8_t> payload(reinterpret_cast<const uint8_t *>(data), n);
+            auto resp = DnsMessage::decode(payload);
+            if (resp.has_value() && resp->header.id == txid_)
+            {
+                responseMessage_ = std::move(resp);
             }
         }
     };
@@ -278,14 +334,8 @@ namespace mynet::handler::dns
 
 namespace mynet::handler
 {
-    using dns::HandlerDatagramDns;
-    using dns::HandlerDns;
-    using dns::HandlerOutboundDns;
+    using dns::HandlerInboundConnectionDns;
+    using dns::HandlerInboundDatagramDns;
+    using dns::HandlerOutboundConnectionDns;
+    using dns::HandlerOutboundDatagramDns;
 } // namespace mynet::handler
-
-namespace mynet
-{
-    using handler::dns::HandlerDatagramDns;
-    using handler::dns::HandlerDns;
-    using handler::dns::HandlerOutboundDns;
-} // namespace mynet

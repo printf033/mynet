@@ -484,29 +484,30 @@ mynet/
 │   │   └── log.hpp             # Logging setup (mylog -> stderr)
 │   └── handler/                # Protocol and Application Handler Suite (All Handlers)
 │       ├── handler.hpp         # Convenience master aggregator header
+│       ├── inbound.hpp         # Inbound protocol base classes (HandlerInboundConnection / HandlerInboundDatagram)
+│       ├── outbound.hpp        # Outbound protocol base classes (HandlerOutboundConnection / HandlerOutboundDatagram)
 │       ├── address.hpp         # Proxy & network target endpoint abstraction (ProxyAddress)
-│       ├── outbound.hpp        # Unified client outbound protocol suite (HandlerOutboundDirect/Trojan/Vless/Socks5/Block)
 │       ├── crypto.hpp          # Crypto primitives & hashing (SHA-224, MD5, AEAD, UUID)
-│       ├── direct.hpp / block.hpp # Direct forwarding and blackhole block handlers
+│       ├── direct.hpp / block.hpp # Direct forwarding and blackhole block handlers (HandlerInboundDirect / HandlerOutboundDirect...)
 │       ├── dns/                # RFC 1035 / RFC 3596 DNS protocol codec & handlers
 │       │   ├── dns.hpp         # Wire message serialization, parsing & 0xC0xx compression
-│       │   └── handler.hpp     # HandlerDns (TCP) / HandlerDatagramDns (UDP) / HandlerOutboundDns
+│       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
 │       ├── http/               # HTTP protocol suite
 │       │   ├── v1/handler.hpp  # HTTP/1.x protocol handler (HandlerHttp) via llhttp
 │       │   ├── v2/             # HTTP/2 framing, HPACK tables, stream multiplexer & credit control
 │       │   ├── v3/             # HTTP/3 QUIC 1-RTT short header, QPACK, varint & stream tables
-│       │   └── http.hpp        # HTTP Proxy tunneling handler (HandlerHttpProxy)
-│       ├── socks/              # SOCKS protocol family (SOCKS4 / SOCKS4a / RFC 1928 SOCKS5 / RFC 1929 Auth)
-│       ├── trojan/             # Trojan protocol inbound/outbound authentication & tunneling
-│       ├── vless/              # VLESS v0 protocol UUID authentication & zero-copy passthrough
-│       ├── vmess/              # VMess protocol HMAC-MD5 header authentication
-│       ├── hysteria2/          # Hysteria 2 protocol handshake & forwarding
-│       ├── tuic/               # TUIC v5 protocol handling
-│       ├── shadowsocks/        # Shadowsocks AEAD handler (SIP002)
-│       ├── shadowtls/          # ShadowTLS SNI sniffing & HMAC challenge multiplexer
-│       ├── snell/              # Snell v1~v4 protocol handling
-│       ├── transparent/        # Linux Netfilter TProxy / Redirect original destination proxy
-│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound
+│       │   └── http.hpp        # HTTP Proxy tunneling handler (HandlerInboundHttpProxy)
+│       ├── socks/              # SOCKS protocol family (HandlerInboundSocks / HandlerInboundSocks4 / HandlerInboundSocks5 / HandlerOutboundSocks5)
+│       ├── trojan/             # Trojan protocol inbound/outbound authentication & tunneling (HandlerInboundTrojan / HandlerOutboundTrojan)
+│       ├── vless/              # VLESS v0 protocol UUID authentication & zero-copy passthrough (HandlerInboundVless / HandlerOutboundVless)
+│       ├── vmess/              # VMess protocol HMAC-MD5 header authentication (HandlerInboundVmess)
+│       ├── hysteria2/          # Hysteria 2 protocol handshake & forwarding (HandlerInboundHysteria2 / HandlerOutboundHysteria2)
+│       ├── tuic/               # TUIC v5 protocol handling (HandlerInboundTuic)
+│       ├── shadowsocks/        # Shadowsocks AEAD handler (HandlerInboundShadowsocks)
+│       ├── shadowtls/          # ShadowTLS SNI sniffing & HMAC challenge multiplexer (HandlerInboundShadowTls)
+│       ├── snell/              # Snell v1~v4 protocol handling (HandlerInboundSnell)
+│       ├── transparent/        # Linux Netfilter TProxy / Redirect original destination proxy (HandlerInboundRedirect / HandlerInboundTProxy)
+│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound (HandlerInboundMixed)
 │
 ├── config/                     # Runtime configuration
 │   └── config.lua              # Documented sandboxed Lua configuration (all sections)

@@ -485,29 +485,30 @@ mynet/
 │   │   └── log.hpp             # 日志输出配置（mylog 输出至 stderr）
 │   └── handler/                # 业务与协议处理器百宝箱 (All Handlers)
 │       ├── handler.hpp         # 全量 Handler 便捷聚合头文件
+│       ├── inbound.hpp         # 入站协议基类 (HandlerInboundConnection / HandlerInboundDatagram)
+│       ├── outbound.hpp        # 出站协议基类 (HandlerOutboundConnection / HandlerOutboundDatagram)
 │       ├── address.hpp         # 代理与网络目标端点地址抽象 (ProxyAddress)
-│       ├── outbound.hpp        # 统一客户端出站协议族 (HandlerOutboundDirect / Trojan / Vless / Socks5 / Block)
 │       ├── crypto.hpp          # 加密与哈希原语 (SHA-224, MD5, AEAD, UUID)
-│       ├── direct.hpp / block.hpp # 直连路由与黑洞阻断处理器
+│       ├── direct.hpp / block.hpp # 直连路由与黑洞阻断处理器 (HandlerInboundDirect / HandlerOutboundDirect...)
 │       ├── dns/                # RFC 1035 / RFC 3596 DNS 协议编解码与处理器
 │       │   ├── dns.hpp         # 二进制报文序列化、反序列化、指针压缩 (0xC0xx)
-│       │   └── handler.hpp     # HandlerDns (TCP) / HandlerDatagramDns (UDP) / HandlerOutboundDns
+│       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
 │       ├── http/               # HTTP 协议族实现
 │       │   ├── v1/handler.hpp  # 基于 llhttp 的 HTTP/1.x 协议处理器 (HandlerHttp)
 │       │   ├── v2/             # HTTP/2 分帧、HPACK 静态/动态表、流表与信用控制
 │       │   ├── v3/             # HTTP/3 QUIC 1-RTT 短首部、QPACK、变长整数与流表
-│       │   └── http.hpp        # HTTP Proxy 隧道代理处理器 (HandlerHttpProxy)
-│       ├── socks/              # SOCKS 协议族 (SOCKS4 / SOCKS4a / RFC 1928 SOCKS5 / RFC 1929 认证)
-│       ├── trojan/             # Trojan 协议出入站鉴权与隧道转发
-│       ├── vless/              # VLESS 协议 UUID 鉴权与零拷贝透传
-│       ├── vmess/              # VMess 协议 HMAC-MD5 头部鉴权
-│       ├── hysteria2/          # Hysteria 2 协议认证握手与转发
-│       ├── tuic/               # TUIC v5 协议处理
-│       ├── shadowsocks/        # Shadowsocks AEAD 处理器 (SIP002)
-│       ├── shadowtls/          # ShadowTLS SNI 嗅探与 HMAC 挑战分流
-│       ├── snell/              # Snell v1~v4 协议处理
-│       ├── transparent/        # Linux Netfilter TProxy / Redirect 原始目的地址透明代理
-│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站
+│       │   └── http.hpp        # HTTP Proxy 隧道代理处理器 (HandlerInboundHttpProxy)
+│       ├── socks/              # SOCKS 协议族 (HandlerInboundSocks / HandlerInboundSocks4 / HandlerInboundSocks5 / HandlerOutboundSocks5)
+│       ├── trojan/             # Trojan 协议出入站鉴权与隧道转发 (HandlerInboundTrojan / HandlerOutboundTrojan)
+│       ├── vless/              # VLESS 协议 UUID 鉴权与零拷贝透传 (HandlerInboundVless / HandlerOutboundVless)
+│       ├── vmess/              # VMess 协议 HMAC-MD5 头部鉴权 (HandlerInboundVmess)
+│       ├── hysteria2/          # Hysteria 2 协议认证握手与转发 (HandlerInboundHysteria2 / HandlerOutboundHysteria2)
+│       ├── tuic/               # TUIC v5 协议处理 (HandlerInboundTuic)
+│       ├── shadowsocks/        # Shadowsocks AEAD 处理器 (HandlerInboundShadowsocks)
+│       ├── shadowtls/          # ShadowTLS SNI 嗅探与 HMAC 挑战分流 (HandlerInboundShadowTls)
+│       ├── snell/              # Snell v1~v4 协议处理 (HandlerInboundSnell)
+│       ├── transparent/        # Linux Netfilter TProxy / Redirect 原始目的地址透明代理 (HandlerInboundRedirect / HandlerInboundTProxy)
+│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站 (HandlerInboundMixed)
 │
 ├── config/                     # 运行时配置
 │   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）
