@@ -2,7 +2,7 @@
 #include "common/endpoint.hpp"
 #include "connection.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "handler/http/v2/handler.hpp"
 #include "reactor.hpp"
 

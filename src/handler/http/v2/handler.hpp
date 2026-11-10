@@ -12,7 +12,7 @@
 #include "connection.hpp"
 #include "frame.hpp"
 #include "hpack.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "objectPool.hpp"
 #include "requestBuffer.hpp"
 #include "streamTable.hpp"

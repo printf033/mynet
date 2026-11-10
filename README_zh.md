@@ -240,16 +240,16 @@ tlsServer.runSsl();
 - **`Hot`（热）**——`reloadConfig()` 后立即生效。读取点在每连接或每次 I/O 的路径上（`Connection`、`Datagram`、`HandlerHttp2`），新连接与在途 I/O 立刻看到新值。
 - **`Startup`（启动）**——只在 `listen()` / `serve()` / `runSsl()` 里读一次。`reloadConfig()` 会更新快照，但已在运行的引擎仍用启动时的值；要生效需重启该服务。
 
-| 配置段 | 字段 | 生效时机 |
-| :----- | :--- | :------- |
-| `server` | `host`、`port`、`backlog`、`maxConnections`、`idleTimeoutSecs` | 启动 |
-| `server` | `tcpNoDelay`、`tcpQuickAck`、`enableSplice` | 热 |
-| `reactor` | `maxEvents`、`idleSweepIntervalMs` | 启动 |
-| `proactor` | `sqEntries`、`cqEntries`、`maxAcceptEvents`、`bufEntries`、`bufSize`、`udpBufSize`、`bufRingAlignment`、`cqeWaitMs` | 启动 |
-| `connection` | `responseCapacity`、`readChunkSize`、`maxRequestBytes`、`writeHighWaterMark`、`writeHardCapFactor`、`spliceChunkSize`、`maxWriteIov` | 热 |
-| `datagram` | `maxDatagramBytes`、`maxPendingOutgoing` | 热 |
-| `http2` | `maxConcurrentStreams`、`initialWindowSize`、`maxFrameSize` | 热 |
-| `security` | `certFile`、`keyFile`、`caFile`、`ciphers`、`alpnProtocols` | 启动 |
+| 配置段         | 字段                                                                                                                                               | 生效时机 |
+| :------------- | :------------------------------------------------------------------------------------------------------------------------------------------------- | :------- |
+| `server`     | `host`、`port`、`backlog`、`maxConnections`、`idleTimeoutSecs`                                                                           | 启动     |
+| `server`     | `tcpNoDelay`、`tcpQuickAck`、`enableSplice`                                                                                                  | 热       |
+| `reactor`    | `maxEvents`、`idleSweepIntervalMs`                                                                                                             | 启动     |
+| `proactor`   | `sqEntries`、`cqEntries`、`maxAcceptEvents`、`bufEntries`、`bufSize`、`udpBufSize`、`bufRingAlignment`、`cqeWaitMs`                | 启动     |
+| `connection` | `responseCapacity`、`readChunkSize`、`maxRequestBytes`、`writeHighWaterMark`、`writeHardCapFactor`、`spliceChunkSize`、`maxWriteIov` | 热       |
+| `datagram`   | `maxDatagramBytes`、`maxPendingOutgoing`                                                                                                       | 热       |
+| `http2`      | `maxConcurrentStreams`、`initialWindowSize`、`maxFrameSize`                                                                                  | 热       |
+| `security`   | `certFile`、`keyFile`、`caFile`、`ciphers`、`alpnProtocols`                                                                              | 启动     |
 
 `server.maxConnections` 是容量的唯一真源：Reactor 用它做连接池槽位数，Proactor 用它做会话池槽位数。`server.host`/`port` 由无参的 `runTcp()` / `runSsl()` 消费，`security.certFile`/`keyFile` 由不带路径参数的 `runSsl()` 消费——那个重载在路径未配置时会直接拒绝启动，而不是悄悄降级成明文。
 
@@ -372,7 +372,7 @@ docker run --rm -it -p 8888:8888 mynet:latest
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -396,7 +396,7 @@ int main() {
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "proactor.hpp"
 
 using namespace mynet;
@@ -473,15 +473,16 @@ mynet/
 │   ├── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎核心
 │   ├── loop.hpp                # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
 │   ├── timer.hpp               # 惰性删除的高效二叉最小堆定时器队列
-│   ├── tls.hpp                 # OpenSSL / KTLS 零拷贝内核卸载与多 SNI 握手支持
 │   ├── requestBuffer.hpp       # 滑动窗口自收缩低开销请求双端缓冲区
 │   ├── responseQueue.hpp       # 零分配定容循环响应队列
 │   ├── objectPool.hpp          # 地址稳定的固定容量对象池
 │   ├── constraints.hpp         # 通用约束（Resettable / HandlerConstraint / MandatoryMethod*）
 │   ├── error.hpp               # 强类型错误码枚举 Err、IoEnd 与 errno/OpenSSL 错误文本
 │   ├── configHolder.hpp        # 统一网络配置结构体与代次快照（NetConfig / ConfigHolder / ConfigSnapshot）
-│   ├── lua_config.hpp          # 沙箱化 Lua 配置加载与热重载（reloadConfig）
-│   ├── log_config.hpp          # 日志输出配置（mylog 输出至 stderr）
+│   ├── config/                 # 第三方适配与运行时配置子系统
+│   │   ├── tls.hpp             # OpenSSL / KTLS 零拷贝内核卸载与多 SNI 握手支持
+│   │   ├── lua.hpp             # 沙箱化 Lua 配置加载与热重载（reloadConfig）
+│   │   └── log.hpp             # 日志输出配置（mylog 输出至 stderr）
 │   └── handler/                # 业务与协议处理器百宝箱 (All Handlers)
 │       ├── handler.hpp         # 全量 Handler 便捷聚合头文件
 │       ├── address.hpp         # 代理与网络目标端点地址抽象 (ProxyAddress)

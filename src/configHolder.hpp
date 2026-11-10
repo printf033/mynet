@@ -435,7 +435,7 @@ namespace mynet
      * @brief 校验 Reactor 引擎配置是否处于可运行区间
      *
      * 引擎入口以此为契约前置条件：配置只允许来自 configHolder/config.lua，
-     * 默认值与钳位规则集中在 lua_config.hpp 的 loadReactorSection 里，引擎侧不再
+     * 默认值与钳位规则集中在 config/lua.hpp 的 loadReactorSection 里，引擎侧不再
      * 另设兜底默认值。
      */
     [[nodiscard]] constexpr bool validReactorConfig(const ReactorConfig &cfg) noexcept

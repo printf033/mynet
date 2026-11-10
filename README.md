@@ -371,7 +371,7 @@ docker run --rm -it -p 8888:8888 mynet:latest
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -395,7 +395,7 @@ int main() {
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "proactor.hpp"
 
 using namespace mynet;
@@ -472,15 +472,16 @@ mynet/
 │   ├── proactor.hpp            # io_uring-based completion Proactor engine core
 │   ├── loop.hpp                # epoll EventLoop with eventfd wakeups
 │   ├── timer.hpp               # Lazy-cancellation binary min-heap timer queue
-│   ├── tls.hpp                 # OpenSSL / KTLS kernel offload & multi-SNI handshake support
 │   ├── requestBuffer.hpp       # Low-allocation auto-compacting byte buffer
 │   ├── responseQueue.hpp       # Zero-allocation fixed-capacity circular response queue
 │   ├── objectPool.hpp          # Fixed-capacity stable-pointer object pool
 │   ├── constraints.hpp         # Generic concepts (Resettable / HandlerConstraint / MandatoryMethod*)
 │   ├── error.hpp               # Strongly-typed Err & IoEnd + errno/OpenSSL text helpers
 │   ├── configHolder.hpp        # Global network configuration & generation snapshots (NetConfig / ConfigHolder)
-│   ├── lua_config.hpp          # Sandboxed Lua config loader & hot reload (reloadConfig)
-│   ├── log_config.hpp          # Logging setup (mylog -> stderr)
+│   ├── config/                 # Third-party adapters and runtime configuration subsystem
+│   │   ├── tls.hpp             # OpenSSL / KTLS kernel offload & multi-SNI handshake support
+│   │   ├── lua.hpp             # Sandboxed Lua config loader & hot reload (reloadConfig)
+│   │   └── log.hpp             # Logging setup (mylog -> stderr)
 │   └── handler/                # Protocol and Application Handler Suite (All Handlers)
 │       ├── handler.hpp         # Convenience master aggregator header
 │       ├── address.hpp         # Proxy & network target endpoint abstraction (ProxyAddress)

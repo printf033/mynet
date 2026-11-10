@@ -6,7 +6,7 @@
  */
 
 #include "connection.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>

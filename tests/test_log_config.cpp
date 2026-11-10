@@ -1,4 +1,4 @@
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include <gtest/gtest.h>
 
 using namespace mynet;

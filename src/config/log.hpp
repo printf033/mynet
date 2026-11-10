@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file log_config.hpp
+ * @file config/log.hpp
  * @brief 日志输出与引擎配置：管理 mylog（thirdparty/mylog）的初始化、输出目标及格式策略。
  *
  * 进程启动时可调用 log::init() 或 log::init(cfg)，配置输出落点（默认 stderr）、日志级别等，

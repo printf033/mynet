@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file lua_config.hpp
+ * @file config/lua.hpp
  * @brief 沙箱化 Lua 配置加载与热重载引擎（loadServerSection / reloadConfig）。
  *
  * 把 config.lua 中的 server / reactor / connection / datagram / proactor /
@@ -10,7 +10,7 @@
  */
 
 #include "configHolder.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -22,8 +22,8 @@
 // 热重载钩子一并联入，失败则退化为只重载 mynet 配置（MYNET_HAS_MYLOG_LUA=0）。
 //
 // 路径必须与子模块当前的布局保持一致：mylog 曾把它命名为 configer_lua.hpp，
-// 后重命名为 lua_config.hpp。探测的是被包含文件而非本文件，因此与本库同名的
-// src/lua_config.hpp 不冲突——包含解析先看各自目录，两个文件互不遮蔽。
+// 后重命名为 lua_config.hpp。探测的是被包含文件而非本文件，因此与本库的
+// src/config/lua.hpp 不冲突——包含解析先看各自目录，两个文件互不遮蔽。
 #if __has_include("thirdparty/mylog/src/lua_config.hpp")
 #include "thirdparty/mylog/src/lua_config.hpp"
 #define MYNET_HAS_MYLOG_LUA 1

@@ -1,8 +1,8 @@
 #include "connection.hpp"
 #include "loop.hpp"
-#include "lua_config.hpp"
+#include "config/lua.hpp"
 #include "reactor.hpp"
-#include "tls.hpp"
+#include "config/tls.hpp"
 #include <arpa/inet.h>
 #include <chrono>
 #include <filesystem>

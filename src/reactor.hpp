@@ -10,10 +10,10 @@
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "loop.hpp"
 #include "objectPool.hpp"
-#include "tls.hpp"
+#include "config/tls.hpp"
 #include <cerrno>
 #include <chrono>
 #include <cstdint>

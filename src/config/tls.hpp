@@ -2,7 +2,7 @@
 
 #include "configHolder.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include <cstring>
 #include <mutex>
 #include <openssl/ssl.h>

@@ -16,7 +16,7 @@
 #include "connection.hpp"
 #include "handler/http/v2/frame.hpp"
 #include "handler/http/v2/handler.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "objectPool.hpp"
 #include "requestBuffer.hpp"
 #include <algorithm>

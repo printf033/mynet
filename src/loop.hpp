@@ -1,7 +1,7 @@
 #pragma once
 
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "timer.hpp"
 #include <atomic>
 #include <cerrno>

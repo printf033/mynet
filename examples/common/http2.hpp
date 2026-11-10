@@ -15,7 +15,7 @@
 
 #include "connection.hpp"
 #include "handler/http/v2/handler.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include <cstdint>
 #include <string_view>
 #include <vector>

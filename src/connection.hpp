@@ -6,7 +6,7 @@
 #include "configHolder.hpp"
 #include "constraints.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "requestBuffer.hpp"
 #include "responseQueue.hpp"
 #include <cerrno>

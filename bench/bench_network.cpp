@@ -2,14 +2,14 @@
 #include "../examples/common/http2.hpp"
 #include "connection.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "proactor.hpp"
 #include "handler/http/v1/handler.hpp"
 #include "handler/http/v2/handler.hpp"
 #include "handler/http/v3/handler.hpp"
 #include "handler/socks/socks5.hpp"
 #include "reactor.hpp"
-#include "tls.hpp"
+#include "config/tls.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>

@@ -2,7 +2,7 @@
 
 #include "constraints.hpp"
 #include "error.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <concepts>

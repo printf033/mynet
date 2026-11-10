@@ -6,10 +6,10 @@
 #include "handler/http/v3/frame.hpp"
 #include "handler/http/v3/qpack.hpp"
 #include "handler/http/v3/varint.hpp"
-#include "log_config.hpp"
+#include "config/log.hpp"
 #include "requestBuffer.hpp"
 #include "responseQueue.hpp"
-#include "tls.hpp"
+#include "config/tls.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstddef>
