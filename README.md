@@ -70,44 +70,80 @@
 
 ## Architecture
 
-The following diagram illustrates the layered architecture of `mynet`:
+`mynet` adopts a unified event-driven non-blocking and dual-transport symmetric architecture, decoupling inbound listening (`AcceptorBase`), outbound dialing (`DialerBase`), dual I/O engines (`Reactor` / `Proactor`), transport sessions (`Connection` / `DatagramContext`), and the rich protocol handler suite (`src/handler/`).
+
+The following comprehensive Mermaid sequence diagram illustrates the complete lifecycle — from inbound connection handshake, zero-heap `ObjectPool` allocation, userspace zero-copy ingress, protocol state machine execution, through outbound DNS resolution, 4-tuple establishment, outbound protocol handshake (Trojan / VLESS / SOCKS5), kernel zero-copy `splice` forwarding, backpressure flow control, to safe resource reclamation:
 
 ```mermaid
-flowchart TD
-    subgraph App ["Application & Protocol Handlers"]
-        direction LR
-        ConnHandler["HandlerConnection (stream sessions)"]
-        HandlerHttp["HandlerHttp (HTTP/1.x)"]
-        Mux["HandlerHttp2<StreamHandler> (HTTP/2)"]
-        DatagramHandler["HandlerDatagram (datagram sessions)"]
+sequenceDiagram
+    autonumber
+    actor Client as Client / Peer
+    participant Acceptor as Acceptor (AcceptorBase / Ssl / Quic)
+    participant Engine as I/O Engine (Reactor / Proactor)
+    participant Pool as Pool (ObjectPool / BufferRing)
+    participant Conn as Connection (Connection / RequestBuffer)
+    participant Handler as Handler (HTTP/DNS/SOCKS/Trojan)
+    participant Dialer as Dialer (DialerBase / Ssl / Quic)
+    actor Upstream as Upstream Server / Target
+
+    %% Phase 1: Inbound Handshake & Pool Allocation
+    Note over Client, Acceptor: Phase 1: Inbound Handshake & ObjectPool Allocation
+    Acceptor->>Acceptor: listenTcp() / listenUdp() start non-blocking listener (SOCK_NONBLOCK)
+    Client->>Acceptor: TCP SYN / UDP Datagram / TLS Handshake
+    Acceptor-->>Engine: Trigger readiness (epoll EPOLLIN / io_uring accept CQE)
+    Engine->>Pool: acquire() pinned connection slot (zero heap alloc)
+    Pool-->>Engine: Return stable pointer to Connection / Session
+    Engine->>Conn: Bind client socket fd and initialize state
+    opt TLS / QUIC Encrypted Transport
+        Client->>Conn: TLS ClientHello / 1-RTT Handshake (ALPN / SNI)
+        Conn->>Conn: Complete SSL handshake (supports Linux KTLS offload)
     end
 
-    subgraph Core ["Connection & Transport Abstractions"]
-        direction LR
-        Conn["Connection<Handler>"]
-        Dgram["Datagram<Handler>"]
-        Session["Proactor::Session"]
-        Datagram["DatagramReply"]
+    %% Phase 2: Ingress Data Reception & Protocol Parsing
+    Note over Client, Handler: Phase 2: Zero-Copy Ingress Reception & Protocol Dispatch
+    Client->>Engine: Ingress payload (HTTP 1/2/3, DNS, SOCKS5, Trojan, VLESS...)
+    Engine->>Conn: prepareRequestWritable() direct write slice allocation
+    Engine->>Conn: appendRequest() direct kernel receive (no stack buffer memcpy)
+    Conn->>Handler: process() trigger protocol state machine
+    Handler->>Handler: Parse headers, verify credentials, extract target (ProxyAddress)
+
+    %% Phase 3: Outbound Resolution, Dialing & Handshake
+    alt Proxy Tunneling / Outbound Client Mode
+        Note over Handler, Upstream: Phase 3: Outbound Resolution, 4-Tuple & Protocol Handshake
+        Handler->>Dialer: Outbound dial request (Target: example.com:443)
+        Dialer->>Dialer: dialTcp() / dialUdp() (optional SO_BINDTODEVICE binding)
+        Dialer->>Upstream: Non-blocking connect() establish 4-tuple
+        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS -> writable event ready)
+        Dialer->>Dialer: checkConnectError() verify socket connected
+        opt Upstream Proxy / Encrypted Handshake (Trojan / Vless / Socks5 / TLS)
+            Handler->>Upstream: Send outbound protocol header (HandlerOutbound*)
+            Upstream-->>Handler: Handshake response (transition to STREAMING)
+        end
+        Note over Conn, Upstream: Phase 4: Bi-directional Streaming & Zero-Copy Forwarding
+        opt Linux Kernel Zero-Copy (splice)
+            Conn->>Upstream: enableSpliceForward(targetFd) activate pipe splice forwarding
+        else Userspace Relay
+            Conn->>Upstream: pushResponse() streaming pipeline relay
+        end
+    else Local Application Server (HTTP Web API / DNS Local Server)
+        Note over Handler, Conn: Local Response Generation
+        Handler->>Conn: pushResponse() into ring buffer (ResponseQueue, zero-alloc)
     end
 
-    subgraph Engine ["Dual I/O Engines"]
-        direction LR
-        ReactorEngine["Reactor (epoll + EPOLLET + TimerQueue + eventfd)"]
-        ProactorEngine["Proactor (io_uring + multishot recv + buf_ring + poll TLS)"]
+    %% Phase 5: Response Egress & Safe Recycle
+    Note over Client, Pool: Phase 5: Response Egress, Backpressure & Resource Recycle
+    opt Backpressure Control
+        Conn->>Engine: High-water mark exceeded -> readCredit() pauses ingress
     end
-
-    subgraph Foundation ["Memory, Primitives & Diagnostics"]
-        direction LR
-        Pool["ObjectPool<T>"]
-        Buf["RequestBuffer"]
-        Constraints["constraints"]
-        Err["Err & IoEnd"]
-        Log["mynet::log (mylog -> stderr)"]
+    Conn->>Engine: Extract pending responses (takeResponse)
+    Engine->>Client: Non-blocking send / io_uring write
+    Client->>Conn: End of stream (peer FIN / RST / close)
+    Engine->>Conn: reset() connection & parser internal state
+    opt Proactor Safe Lifetime Guard
+        Engine->>Engine: Verify inFlight == 0 (no outstanding kernel I/O)
     end
-
-    App --> Core
-    Core --> Engine
-    Engine --> Foundation
+    Engine->>Pool: release(conn) return slot to ObjectPool index stack
+    Note over Pool: Slot immediately reusable for next incoming connection
 ```
 
 ---
@@ -140,13 +176,13 @@ flowchart TD
 - **`ObjectPool<Object>`**: Pre-allocates a contiguous array of slots via `std::unique_ptr<Slot[]>` with an index-based free stack. Objects are pinned in memory so epoll data pointers and io_uring completion context pointers remain 100% stable, completely bypassing heap allocation during connection accept/release cycles.
 - **`RequestBuffer`**: A zero-exception, self-managed contiguous byte buffer (`operator new[](std::nothrow)`) with sliding-window auto-compaction and direct zero-copy write window (`writableBytes()`, `writableBegin()`, `commitWritten()`, `ensureWritable()`, `readableView()`). Storage is compacted in-place only when dead prefix space exceeds 4 KiB and occupies at least half of the allocation, amortizing compaction overhead while keeping memory footprints bounded.
 - **`ResponseQueue`**: Fixed-capacity contiguous circular ring buffer (`src/responseQueue.hpp`) providing $O(1)$ zero-allocation enqueue/dequeue operations with bounded memory footprints.
-- **`StreamTable<T>`**: Open-addressing flat hash table (`src/http/v2/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
+- **`StreamTable<T>`**: Open-addressing flat hash table (`src/handler/http/v2/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
 
 ### 4. HTTP/2 Framing & Stream Multiplexer
 
 - **Wire Compatibility**: `FrameDecoder` and `appendFrame` parse and construct 9-byte HTTP/2 standard frames (`DATA`, `HEADERS`, `PRIORITY`, `RST_STREAM`, `SETTINGS`, `PUSH_PROMISE`, `PING`, `GOAWAY`, `WINDOW_UPDATE`).
 - **Client Connection Preface**: the 24-byte RFC 9113 §3.4 preface is validated before any frame is decoded (it may arrive split across reads); a wrong preface is answered with `GOAWAY(PROTOCOL_ERROR)` instead of being misparsed as a 5 MiB frame.
-- **HPACK (`http/v2/hpack.hpp`)**: RFC 7541 decoding — static table, dynamic table with eviction, table-size updates and Huffman strings — plus a stateless encoder used by `sendResponse`. Compression failures end the connection with `COMPRESSION_ERROR`; an over-large header list resets only that stream.
+- **HPACK (`handler/http/v2/hpack.hpp`)**: RFC 7541 decoding — static table, dynamic table with eviction, table-size updates and Huffman strings — plus a stateless encoder used by `sendResponse`. Compression failures end the connection with `COMPRESSION_ERROR`; an over-large header list resets only that stream.
 - **Fragmented Header Blocks**: `HEADERS` without `END_HEADERS` is assembled from same-stream `CONTINUATION` frames (fragment boundaries may fall inside an HPACK field). Per RFC 9113 §6.2 any interleaved frame — including one on another stream — ends the connection, which is also the CVE-2024-27983 defense; a zero-length `CONTINUATION` flood hits a 32-empty-frame cap (total fragments capped at 4096), and a header list that decodes past the advertised limit is answered with `RST_STREAM` — the block is still fully HPACK-decoded first, so the connection's dynamic table never desynchronises.
 - **Header List Limits**: `sendSettings` advertises `SETTINGS_MAX_HEADER_LIST_SIZE` with the same value the decoder enforces, so a compliant peer never trips the limit mid-block. The peer's advertised limit is honoured on the way out: `sendResponse` refuses a header list the peer said it will not accept, and outbound `HEADERS` are split into `CONTINUATION` frames by the peer's `SETTINGS_MAX_FRAME_SIZE`.
 - **`HandlerHttp2<StreamHandler>`**: Enables many independent logical request/response streams over a single byte stream.
@@ -336,7 +372,7 @@ docker run --rm -it -p 8888:8888 mynet:latest
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "reactor/reactor.hpp"
+#include "reactor.hpp"
 
 using namespace mynet;
 
@@ -344,7 +380,7 @@ int main() {
     mynet::log::init(); // Directs logs to stderr
 
     // Instantiate a Reactor with plain socket acceptor and an echo handler
-    Reactor<AcceptorSocket<HandlerConnection>> server;
+    Reactor<AcceptorBase<HandlerConnection>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("Server failed: {}", toString(res.error()));
@@ -360,7 +396,7 @@ int main() {
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proactor/proactor.hpp"
+#include "proactor.hpp"
 
 using namespace mynet;
 
@@ -368,7 +404,7 @@ int main() {
     mynet::log::init();
 
     // Instantiate a Proactor using io_uring multishot accept & multishot recv
-    Proactor<AcceptorSocket<HandlerConnection>> server;
+    Proactor<AcceptorBase<HandlerConnection>> server;
 
     // Tuning lives in config.lua (server / proactor sections) and is published
     // through ConfigHolder; the engine keeps no hard-coded defaults of its own.
@@ -385,8 +421,8 @@ int main() {
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "http/v2/handler.hpp"
-#include "reactor/reactor.hpp"
+#include "handler/http/v2/handler.hpp"
+#include "reactor.hpp"
 
 using namespace mynet;
 
@@ -394,7 +430,7 @@ int main() {
     mynet::log::init();
 
     // Stack: Reactor -> Socket -> HandlerHttp2 (framing + flow control) -> per-stream handler
-    Reactor<AcceptorSocket<HandlerHttp2<HandlerConnection>>> server;
+    Reactor<AcceptorBase<HandlerHttp2<HandlerConnection>>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("HTTP/2 server failed: {}", toString(res.error()));
@@ -428,37 +464,48 @@ mynet/
 │
 ├── src/                        # Core Header-Only Implementation
 │   ├── CMakeLists.txt          # Header-only interface library definition (INTERFACE mynet & mynet_lua)
-│   ├── constraints.hpp         # Generic constraints (Resettable / HandlerConstraint)
-│   ├── configHolder.hpp        # Global network configuration & generation snapshots (NetConfig / ConfigHolder)
-│   ├── lua_config.hpp          # Sandboxed Lua config loader & hot reload (reloadConfig)
-│   ├── error.hpp               # Strongly-typed Err & IoEnd + errno/OpenSSL text helpers
-│   ├── log_config.hpp          # Logging setup (mylog -> stderr)
+│   ├── acceptor.hpp            # Inbound listener root (AcceptorBase / AcceptorSsl / AcceptorQuic)
+│   ├── dialer.hpp              # Outbound dialing infrastructure (DialerBase / DialerSsl / DialerQuic)
+│   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection base
+│   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram base
+│   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine core
+│   ├── proactor.hpp            # io_uring-based completion Proactor engine core
+│   ├── loop.hpp                # epoll EventLoop with eventfd wakeups
+│   ├── timer.hpp               # Lazy-cancellation binary min-heap timer queue
+│   ├── tls.hpp                 # OpenSSL / KTLS kernel offload & multi-SNI handshake support
 │   ├── requestBuffer.hpp       # Low-allocation auto-compacting byte buffer
 │   ├── responseQueue.hpp       # Zero-allocation fixed-capacity circular response queue
 │   ├── objectPool.hpp          # Fixed-capacity stable-pointer object pool
-│   ├── acceptor.hpp            # Listener root (AcceptorBase) + socket & SSL channels
-│   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection
-│   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram
-│   ├── reactor/                # epoll-based Edge-Triggered Reactor engine
-│   │   ├── timer.hpp           # Lazy-cancellation binary min-heap timer queue
-│   │   ├── loop.hpp            # epoll EventLoop with eventfd wakeups
-│   │   └── reactor.hpp         # Reactor engine core
-│   ├── proactor/               # io_uring-based completion Proactor engine
-│   │   └── proactor.hpp        # Proactor engine core
-│   ├── http/                   # HTTP protocol implementations
-│   │   ├── v1/
-│   │   │   └── handler.hpp     # HTTP/1.x protocol handler (HandlerHttp)
-│   │   ├── v2/
-│   │   │   ├── frame.hpp       # HTTP/2 wire-compatible framing codec
-│   │   │   ├── streamTable.hpp # Open-addressing zero-allocation stream hash table
-│   │   │   └── handler.hpp     # HTTP/2 handler: framing, stream table, credit multiplexer
-│   │   └── v3/
-│   │       ├── varint.hpp      # RFC 9000 QUIC/HTTP/3 variable-length integer codec
-│   │       ├── frame.hpp       # RFC 9114 HTTP/3 framing, settings and error codes
-│   │       ├── qpack.hpp       # RFC 9204 QPACK static table and header field codec
-│   │       ├── quic.hpp        # RFC 9000 QUIC short-header packet & STREAM frames
-│   │       ├── streamTable.hpp # HTTP/3 logical stream table and state tracker
-│   │       └── handler.hpp     # Unified HTTP/3 protocol handler (HandlerHttp3)
+│   ├── constraints.hpp         # Generic concepts (Resettable / HandlerConstraint / MandatoryMethod*)
+│   ├── error.hpp               # Strongly-typed Err & IoEnd + errno/OpenSSL text helpers
+│   ├── configHolder.hpp        # Global network configuration & generation snapshots (NetConfig / ConfigHolder)
+│   ├── lua_config.hpp          # Sandboxed Lua config loader & hot reload (reloadConfig)
+│   ├── log_config.hpp          # Logging setup (mylog -> stderr)
+│   └── handler/                # Protocol and Application Handler Suite (All Handlers)
+│       ├── handler.hpp         # Convenience master aggregator header
+│       ├── address.hpp         # Proxy & network target endpoint abstraction (ProxyAddress)
+│       ├── outbound.hpp        # Unified client outbound protocol suite (HandlerOutboundDirect/Trojan/Vless/Socks5/Block)
+│       ├── crypto.hpp          # Crypto primitives & hashing (SHA-224, MD5, AEAD, UUID)
+│       ├── direct.hpp / block.hpp # Direct forwarding and blackhole block handlers
+│       ├── dns/                # RFC 1035 / RFC 3596 DNS protocol codec & handlers
+│       │   ├── dns.hpp         # Wire message serialization, parsing & 0xC0xx compression
+│       │   └── handler.hpp     # HandlerDns (TCP) / HandlerDatagramDns (UDP) / HandlerOutboundDns
+│       ├── http/               # HTTP protocol suite
+│       │   ├── v1/handler.hpp  # HTTP/1.x protocol handler (HandlerHttp) via llhttp
+│       │   ├── v2/             # HTTP/2 framing, HPACK tables, stream multiplexer & credit control
+│       │   ├── v3/             # HTTP/3 QUIC 1-RTT short header, QPACK, varint & stream tables
+│       │   └── http.hpp        # HTTP Proxy tunneling handler (HandlerHttpProxy)
+│       ├── socks/              # SOCKS protocol family (SOCKS4 / SOCKS4a / RFC 1928 SOCKS5 / RFC 1929 Auth)
+│       ├── trojan/             # Trojan protocol inbound/outbound authentication & tunneling
+│       ├── vless/              # VLESS v0 protocol UUID authentication & zero-copy passthrough
+│       ├── vmess/              # VMess protocol HMAC-MD5 header authentication
+│       ├── hysteria2/          # Hysteria 2 protocol handshake & forwarding
+│       ├── tuic/               # TUIC v5 protocol handling
+│       ├── shadowsocks/        # Shadowsocks AEAD handler (SIP002)
+│       ├── shadowtls/          # ShadowTLS SNI sniffing & HMAC challenge multiplexer
+│       ├── snell/              # Snell v1~v4 protocol handling
+│       ├── transparent/        # Linux Netfilter TProxy / Redirect original destination proxy
+│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound
 │
 ├── config/                     # Runtime configuration
 │   └── config.lua              # Documented sandboxed Lua configuration (all sections)
@@ -466,37 +513,50 @@ mynet/
 ├── examples/                   # Ready-to-run Executable Samples
 │   ├── common/
 │   │   ├── endpoint.hpp        # "<host>:<port>" parser shared by every sample
-│   │   └── handlers.hpp        # SpliceEchoHandler / UdpEchoHandler shared by both engines
+│   │   ├── handlers.hpp        # SpliceEchoHandler / UdpEchoHandler shared by both engines
+│   │   ├── http2.hpp           # HTTP/2 sample helper handler
+│   │   └── resolver.hpp        # Sample DNS caching & fast resolution policy (DnsResolver)
 │   ├── reactor/                # epoll Edge-Triggered Reactor servers
-│   │   ├── tcp.cpp             # reactor_tcp    TCP echo (splice zero-copy)
-│   │   ├── ssl.cpp             # reactor_ssl    TLS echo
-│   │   ├── udp.cpp             # reactor_udp    UDP datagram echo
-│   │   ├── http1.cpp           # reactor_http1  HTTP/1.x via llhttp
-│   │   ├── http2.cpp           # reactor_http2  HTTP/2 stream multiplexer
-│   │   └── http3.cpp           # reactor_http3  HTTP/3 over QUIC/UDP
+│   │   ├── tcp.cpp             # reactor_tcp     TCP echo (splice zero-copy)
+│   │   ├── ssl.cpp             # reactor_ssl     TLS echo
+│   │   ├── udp.cpp             # reactor_udp     UDP datagram echo
+│   │   ├── http1.cpp           # reactor_http1   HTTP/1.x via llhttp
+│   │   ├── http2.cpp           # reactor_http2   HTTP/2 stream multiplexer
+│   │   ├── http3.cpp           # reactor_http3   HTTP/3 over QUIC/UDP
+│   │   ├── socks5.cpp          # reactor_socks5  SOCKS5 proxy server
+│   │   └── proxy.cpp           # reactor_proxy   Multi-protocol adaptive mixed proxy
 │   └── proactor/               # io_uring Proactor servers
-│       ├── tcp.cpp             # proactor_tcp   TCP echo (multishot accept + buf ring)
-│       ├── ssl.cpp             # proactor_ssl   TLS echo (poll-driven handshake)
-│       ├── udp.cpp             # proactor_udp   UDP datagram echo
-│       ├── http1.cpp           # proactor_http1 HTTP/1.x via llhttp
-│       ├── http2.cpp           # proactor_http2 HTTP/2 stream multiplexer
-│       └── http3.cpp           # proactor_http3 HTTP/3 over QUIC/UDP
+│       ├── tcp.cpp             # proactor_tcp    TCP echo (multishot accept + buf ring)
+│       ├── ssl.cpp             # proactor_ssl    TLS echo (poll-driven handshake)
+│       ├── udp.cpp             # proactor_udp    UDP datagram echo
+│       ├── http1.cpp           # proactor_http1  HTTP/1.x via llhttp
+│       ├── http2.cpp           # proactor_http2  HTTP/2 stream multiplexer
+│       ├── http3.cpp           # proactor_http3  HTTP/3 over QUIC/UDP
+│       ├── socks5.cpp          # proactor_socks5 SOCKS5 proxy server
+│       └── proxy.cpp           # proactor_proxy  Multi-protocol adaptive mixed proxy
 │
 ├── tests/                      # Unit Test Suite (Google Test + ASan)
-│   ├── test_request_buffer.cpp
-│   ├── test_config_lua.cpp     # Sandboxed Lua configuration hot-reloading tests
-│   ├── test_constraints.cpp
+│   ├── test_request_buffer.cpp # Buffer bounds and compaction tests
+│   ├── test_constraints.cpp    # Concepts, Resettable & Dialer/Acceptor concept evaluations
 │   ├── test_datagram.cpp       # UDP transport session tests
-│   ├── test_error.cpp
-│   ├── test_frame.cpp
-│   ├── test_handler.cpp
-│   ├── test_http3.cpp
-│   ├── test_http2.cpp
-│   ├── test_object_pool.cpp
-│   └── test_timer.cpp
+│   ├── test_error.cpp          # Error code consistency tests
+│   ├── test_frame.cpp          # Protocol frame serialization tests
+│   ├── test_handler.cpp        # Handler state transition tests
+│   ├── test_hpack.cpp          # HPACK static/dynamic table & Huffman codec tests
+│   ├── test_http3.cpp          # HTTP/3 varint, framing, QPACK & QUIC packet tests
+│   ├── test_http2.cpp          # HTTP/2 multiplexing state machine & flow control tests
+│   ├── test_object_pool.cpp    # Object pool lifecycle & pointer stability tests
+│   ├── test_timer.cpp          # Timer precision & cancellation tests
+│   ├── test_tls.cpp            # TLS handshake & ALPN negotiation tests
+│   ├── test_socks5.cpp         # SOCKS5 handshake & authentication tests
+│   ├── test_proxy_protocols.cpp# Full proxy protocol suite concept & boundary tests
+│   ├── test_dialer.cpp         # Client dialer, outbound state machine & DNS handler tests
+│   ├── test_log_config.cpp     # Log level & output configuration tests
+│   └── test_config_lua.cpp     # Sandboxed Lua configuration hot-reloading tests
 │
 ├── bench/                      # Micro-benchmark Suite
-│   └── bench.cpp               # Throughput and latency micro-benchmarks
+│   ├── bench.cpp               # Throughput and latency micro-benchmarks
+│   └── bench_network.cpp       # Network high-concurrency throughput benchmarks
 │
 ├── certs/                      # Development self-signed certificates and keys
 ├── scripts/                    # Maintenance & formatting scripts
@@ -514,36 +574,46 @@ cd build
 ctest --output-on-failure
 ```
 
-Output:
+Output (All 17 test suites passing 100%):
 
 ```text
 Test project /home/aaa/code/mynet/build
       Start  1: test_request_buffer
- 1/12 Test  #1: test_request_buffer ..............   Passed    0.01 sec
+ 1/17 Test  #1: test_request_buffer ..............   Passed    0.01 sec
       Start  2: test_constraints
- 2/12 Test  #2: test_constraints .................   Passed    0.01 sec
+ 2/17 Test  #2: test_constraints .................   Passed    0.02 sec
       Start  3: test_datagram
- 3/12 Test  #3: test_datagram ....................   Passed    0.02 sec
+ 3/17 Test  #3: test_datagram ....................   Passed    0.02 sec
       Start  4: test_error
- 4/12 Test  #4: test_error .......................   Passed    0.01 sec
+ 4/17 Test  #4: test_error .......................   Passed    0.01 sec
       Start  5: test_frame
- 5/12 Test  #5: test_frame .......................   Passed    0.01 sec
+ 5/17 Test  #5: test_frame .......................   Passed    0.01 sec
       Start  6: test_handler
- 6/12 Test  #6: test_handler .....................   Passed    0.03 sec
-      Start  7: test_http3
- 7/12 Test  #7: test_http3 .......................   Passed    0.02 sec
-      Start  8: test_http2
- 8/12 Test  #8: test_http2 .......................   Passed    0.10 sec
-      Start  9: test_object_pool
- 9/12 Test  #9: test_object_pool .................   Passed    0.02 sec
-      Start 10: test_timer
-10/12 Test #10: test_timer .......................   Passed    0.03 sec
-      Start 11: test_tls
-11/12 Test #11: test_tls .........................   Passed    0.02 sec
-      Start 12: test_config_lua
-12/12 Test #12: test_config_lua ..................   Passed    0.02 sec
+ 6/17 Test  #6: test_handler .....................   Passed    0.03 sec
+      Start  7: test_hpack
+ 7/17 Test  #7: test_hpack .......................   Passed    0.02 sec
+      Start  8: test_http3
+ 8/17 Test  #8: test_http3 .......................   Passed    0.03 sec
+      Start  9: test_http2
+ 9/17 Test  #9: test_http2 .......................   Passed    0.17 sec
+      Start 10: test_object_pool
+10/17 Test #10: test_object_pool .................   Passed    0.02 sec
+      Start 11: test_timer
+11/17 Test #11: test_timer .......................   Passed    0.03 sec
+      Start 12: test_tls
+12/17 Test #12: test_tls .........................   Passed    0.03 sec
+      Start 13: test_socks5
+13/17 Test #13: test_socks5 ......................   Passed    0.01 sec
+      Start 14: test_proxy_protocols
+14/17 Test #14: test_proxy_protocols .............   Passed    0.02 sec
+      Start 15: test_dialer
+15/17 Test #15: test_dialer ......................   Passed    0.02 sec
+      Start 16: test_log_config
+16/17 Test #16: test_log_config ..................   Passed    0.01 sec
+      Start 17: test_config_lua
+17/17 Test #17: test_config_lua ..................   Passed    1.10 sec
 
-100% tests passed, 0 tests failed out of 12
+100% tests passed, 0 tests failed out of 17
 ```
 
 ---

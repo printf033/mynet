@@ -1,8 +1,8 @@
 #include "common/endpoint.hpp"
 #include "error.hpp"
-#include "http/v1/handler.hpp"
 #include "log_config.hpp"
-#include "reactor/reactor.hpp"
+#include "handler/http/v1/handler.hpp"
+#include "reactor.hpp"
 
 // epoll 驱动的 HTTP/1.x 服务端。用法：
 //
@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     using Handler = http::v1::HandlerHttp<http::v1::HTTP_MODE::REQUEST>;
-    if (auto res = Reactor<AcceptorSocket<Handler>>().runTcp(listen.ip, listen.port()); !res)
+    if (auto res = Reactor<AcceptorBase<Handler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

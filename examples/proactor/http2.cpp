@@ -2,9 +2,9 @@
 #include "common/endpoint.hpp"
 #include "connection.hpp"
 #include "error.hpp"
-#include "http/v2/handler.hpp"
 #include "log_config.hpp"
-#include "proactor/proactor.hpp"
+#include "proactor.hpp"
+#include "handler/http/v2/handler.hpp"
 
 // io_uring 驱动的 HTTP/2 流多路复用服务端。用法：
 //
@@ -31,7 +31,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     using Handler = example::Http2EchoHandler;
-    if (auto res = Proactor<AcceptorSocket<Handler>>().runTcp(listen.ip, listen.port()); !res)
+    if (auto res = Proactor<AcceptorBase<Handler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

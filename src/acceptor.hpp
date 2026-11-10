@@ -17,11 +17,11 @@ namespace mynet
 {
 
     /**
-     * @brief 监听接收器抽象基类
+     * @brief 监听接收器基类
      *
-     * 绑定基础文件描述符与处理器类型。处理器只需满足 HandlerConstraint：
-     * 删除公共根类 HandlerBase 之后，流式处理器（HandlerConnection）与报文处理器
-     * （HandlerDatagram）是两个并列的独立层次，接收层不应反向依赖其中任何一方。
+     * 绑定基础套接字描述符、地址与处理器类型，并提供标准的非阻塞 TCP 与 UDP 监听绑定逻辑。
+     * 处理器只需满足 HandlerConstraint。
+     * 后续传输层接收器（如 AcceptorSsl、AcceptorQuic 等）均直接派生自本类。
      */
     template <typename HandlerType>
         requires HandlerConstraint<HandlerType>
@@ -30,7 +30,7 @@ namespace mynet
     public:
         int fd = -1;
         using Handler = HandlerType;
-        Handler *handler = nullptr;
+        sockaddr_in addr{};
 
         virtual ~AcceptorBase() noexcept { reset(); }
 
@@ -41,31 +41,7 @@ namespace mynet
                 ::close(fd);
                 fd = -1;
             }
-            handler = nullptr;
-        }
-    };
-
-    /**
-     * @brief 约束从 AcceptorBase 派生的所有接收器通道类型
-     */
-    template <typename A>
-    concept DerivedFromAcceptorBase =
-        requires { typename A::Handler; } && std::derived_from<A, AcceptorBase<typename A::Handler>>;
-
-    /**
-     * @brief TCP / UDP 套接字监听接收器
-     */
-    template <typename HandlerType>
-        requires HandlerConstraint<HandlerType>
-    struct AcceptorSocket : public AcceptorBase<HandlerType>
-    {
-    public:
-        sockaddr_in addr{};
-
-        inline void reset() noexcept
-        {
             addr = {};
-            AcceptorBase<HandlerType>::reset();
         }
 
         /**
@@ -95,8 +71,8 @@ namespace mynet
             }
             addr.sin_port = ::htons(static_cast<uint16_t>(port));
 
-            AcceptorBase<HandlerType>::fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (AcceptorBase<HandlerType>::fd < 0) [[unlikely]]
+            fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            if (fd < 0) [[unlikely]]
             {
                 LOG_ERROR("listenTcp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
                 reset();
@@ -106,7 +82,7 @@ namespace mynet
             constexpr int opt = 1;
             if (reuseAddr)
             {
-                if (::setsockopt(AcceptorBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
                     [[unlikely]]
                 {
                     LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
@@ -116,7 +92,7 @@ namespace mynet
             }
             if (reusePort)
             {
-                if (::setsockopt(AcceptorBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
                     [[unlikely]]
                 {
                     LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
@@ -124,14 +100,14 @@ namespace mynet
                     return std::unexpected(ERR::SETSOCKOPT_FAILED);
                 }
             }
-            if (::bind(AcceptorBase<HandlerType>::fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) <
+            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) <
                 0) [[unlikely]]
             {
                 LOG_ERROR("listenTcp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::BIND_FAILED);
             }
-            if (::listen(AcceptorBase<HandlerType>::fd, backlog) < 0) [[unlikely]]
+            if (::listen(fd, backlog) < 0) [[unlikely]]
             {
                 LOG_ERROR("listenTcp {}:{}: listen(backlog={}) failed: {}", ip, port, backlog, errnoText(errno));
                 reset();
@@ -159,8 +135,8 @@ namespace mynet
             }
             addr.sin_port = ::htons(static_cast<uint16_t>(port));
 
-            AcceptorBase<HandlerType>::fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (AcceptorBase<HandlerType>::fd < 0) [[unlikely]]
+            fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            if (fd < 0) [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
                 reset();
@@ -168,28 +144,28 @@ namespace mynet
             }
 
             constexpr int opt = 1;
-            if (::setsockopt(AcceptorBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
                 [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
-            if (::setsockopt(AcceptorBase<HandlerType>::fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
+            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
                 [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
-            if (::setsockopt(AcceptorBase<HandlerType>::fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0)
+            if (::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0)
                 [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: setsockopt(SO_BROADCAST) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
-            if (::bind(AcceptorBase<HandlerType>::fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) <
+            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) <
                 0) [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
@@ -201,17 +177,24 @@ namespace mynet
     };
 
     /**
-     * @brief 套接字接收器通道约束
+     * @brief 约束从 AcceptorBase 派生的所有接收器通道类型
      */
     template <typename A>
-    concept SocketAcceptor = requires { typename A::Handler; } && std::same_as<A, AcceptorSocket<typename A::Handler>>;
+    concept DerivedFromAcceptorBase =
+        requires { typename A::Handler; } && std::derived_from<A, AcceptorBase<typename A::Handler>>;
+
+    /**
+     * @brief 基础监听接收器通道约束
+     */
+    template <typename A>
+    concept BaseAcceptor = requires { typename A::Handler; } && std::same_as<A, AcceptorBase<typename A::Handler>>;
 
     /**
      * @brief SSL / TLS 传输层监听接收器标签特化类型
      */
     template <typename HandlerType>
         requires HandlerConstraint<HandlerType>
-    struct AcceptorSsl : public AcceptorSocket<HandlerType>
+    struct AcceptorSsl : public AcceptorBase<HandlerType>
     {
     };
 
@@ -235,7 +218,7 @@ namespace mynet
      */
     template <typename HandlerType>
         requires HandlerConstraint<HandlerType>
-    struct AcceptorQuic : public AcceptorSocket<HandlerType>
+    struct AcceptorQuic : public AcceptorBase<HandlerType>
     {
     };
 

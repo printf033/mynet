@@ -3,8 +3,8 @@
 // 并从响应队列中读回其回复，这是上层唯一实际依赖的接口。
 #include "configHolder.hpp"
 #include "connection.hpp"
-#include "http/v2/frame.hpp"
-#include "http/v2/handler.hpp"
+#include "handler/http/v2/frame.hpp"
+#include "handler/http/v2/handler.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>

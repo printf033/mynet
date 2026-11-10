@@ -1,8 +1,8 @@
-#include "proxy/socks/socks5.hpp"
+#include "handler/socks/socks5.hpp"
 #include "common/endpoint.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proactor/proactor.hpp"
+#include "proactor.hpp"
 #include <string>
 #include <string_view>
 
@@ -14,7 +14,7 @@
 
 namespace mynet::example
 {
-    class Socks5ServerHandler : public proxy::HandlerSocks5
+    class Socks5ServerHandler : public handler::HandlerSocks5
     {
     public:
         inline static std::string g_user;
@@ -30,8 +30,8 @@ namespace mynet::example
 
         void process()
         {
-            proxy::HandlerSocks5::process();
-            if (stage() == proxy::Socks5Stage::STREAMING && requestBytes() > 0)
+            handler::HandlerSocks5::process();
+            if (stage() == handler::Socks5Stage::STREAMING && requestBytes() > 0)
             {
                 std::string_view req(requestBegin(), requestBytes());
                 if (req.starts_with("GET ") || req.starts_with("POST ") || req.starts_with("HEAD ") ||
@@ -60,7 +60,7 @@ namespace mynet::example
 
         void reset() noexcept override
         {
-            proxy::HandlerSocks5::reset();
+            handler::HandlerSocks5::reset();
             if (!g_user.empty())
             {
                 setAuthenticator([](std::string_view u, std::string_view p) { return u == g_user && p == g_pass; });
@@ -96,7 +96,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (socks5, proactor)", listen.text);
 
     using namespace mynet;
-    if (auto res = Proactor<AcceptorSocket<example::Socks5ServerHandler>>().runTcp(listen.ip, listen.port()); !res)
+    if (auto res = Proactor<AcceptorBase<example::Socks5ServerHandler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

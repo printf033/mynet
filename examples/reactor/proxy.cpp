@@ -1,8 +1,8 @@
-#include "proxy/proxy.hpp"
+#include "handler/handler.hpp"
 #include "common/endpoint.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "reactor/reactor.hpp"
+#include "reactor.hpp"
 #include <string>
 #include <string_view>
 
@@ -20,7 +20,7 @@
 
 namespace mynet::example
 {
-    class MixedProxyServerHandler : public proxy::HandlerMixed
+    class MixedProxyServerHandler : public handler::HandlerMixed
     {
     public:
         inline static std::string g_user;
@@ -37,7 +37,7 @@ namespace mynet::example
 
         void process()
         {
-            proxy::HandlerMixed::process();
+            handler::HandlerMixed::process();
             if (isEstablished() && requestBytes() > 0)
             {
                 std::string_view req(requestBegin(), requestBytes());
@@ -68,7 +68,7 @@ namespace mynet::example
 
         void reset() noexcept override
         {
-            proxy::HandlerMixed::reset();
+            handler::HandlerMixed::reset();
             if (!g_user.empty())
             {
                 setAuthenticator([](std::string_view u, std::string_view p)
@@ -107,7 +107,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (multi-protocol proxy: SOCKS4/SOCKS5/HTTP, reactor)", listen.text);
 
     using namespace mynet;
-    if (auto res = Reactor<AcceptorSocket<example::MixedProxyServerHandler>>().runTcp(listen.ip, listen.port()); !res)
+    if (auto res = Reactor<AcceptorBase<example::MixedProxyServerHandler>>().runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

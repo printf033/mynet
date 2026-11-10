@@ -1,6 +1,6 @@
 // RFC 7541 HPACK 编解码器：以附录 C 的规范字节序列为黄金用例，覆盖静态索引、
 // 动态表、Huffman 字符串、表大小更新与畸形输入。
-#include "http/v2/hpack.hpp"
+#include "handler/http/v2/hpack.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

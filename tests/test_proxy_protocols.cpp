@@ -1,10 +1,10 @@
-#include "proxy/proxy.hpp"
+#include "handler/handler.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
 
 using namespace mynet;
-using namespace mynet::proxy;
+using namespace mynet::handler;
 
 // 静态概念约束检验：全部代理协议处理器均必须严格满足 HandlerConstraint 与 MandatoryMethodConnection
 static_assert(HandlerConstraint<HandlerSocks4>, "HandlerSocks4 must satisfy HandlerConstraint");

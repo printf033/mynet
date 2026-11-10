@@ -1,11 +1,11 @@
-#include "proxy/address.hpp"
-#include "proxy/socks/socks5.hpp"
+#include "handler/address.hpp"
+#include "handler/socks/socks5.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
 
 using namespace mynet;
-using namespace mynet::proxy;
+using namespace mynet::handler;
 
 static_assert(HandlerConstraint<HandlerSocks5>, "HandlerSocks5 must satisfy HandlerConstraint");
 static_assert(MandatoryMethodConnection<HandlerSocks5>, "HandlerSocks5 must satisfy MandatoryMethodConnection");

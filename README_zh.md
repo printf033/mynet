@@ -70,44 +70,80 @@
 
 ## 系统架构
 
-`mynet` 采用高度模块化的分层解耦架构：
+`mynet` 采用统一非阻塞事件驱动与双传输对称架构，将服务端入站监听（`AcceptorBase`）、客户端出站建连（`DialerBase`）、双异步 I/O 驱动引擎（`Reactor` / `Proactor`）、传输会话（`Connection` / `DatagramContext`）以及全套业务协议处理器族（`src/handler/`）解耦闭环。
+
+以下 Mermaid 详细时序图涵盖从入站连接接入、对象池零堆分配、用户态零拷贝数据直写、协议状态机解析、到出站 DNS 域名解析、四元组建连、出站协议握手（Trojan / VLESS / SOCKS5）、内核零拷贝 `splice` 管道转发、背压流控直到安全生命周期回收的全景流程：
 
 ```mermaid
-flowchart TD
-    subgraph App ["业务与协议处理层 (Application & Handlers)"]
-        direction LR
-        ConnHandler["HandlerConnection (流式会话)"]
-        HandlerHttp["HandlerHttp (HTTP/1.x 编解码)"]
-        Mux["HandlerHttp2<StreamHandler> (HTTP/2 多路复用)"]
-        DatagramHandler["HandlerDatagram (数据报会话)"]
+sequenceDiagram
+    autonumber
+    actor Client as 客户端 (Client)
+    participant Acceptor as 入站监听 (AcceptorBase / Ssl / Quic)
+    participant Engine as I/O 引擎 (Reactor / Proactor)
+    participant Pool as 对象池 (ObjectPool / BufferRing)
+    participant Conn as 传输会话 (Connection / RequestBuffer)
+    participant Handler as 业务处理器 (Handler: HTTP/DNS/SOCKS/Trojan)
+    participant Dialer as 出站拨号 (DialerBase / Ssl / Quic)
+    actor Upstream as 远端服务器 (Upstream / Target)
+
+    %% 阶段 1: 入站连接建立与对象池分配
+    Note over Client, Acceptor: 阶段 1: 入站连接建立与对象池分配 (Inbound Handshake)
+    Acceptor->>Acceptor: listenTcp() / listenUdp() 启动非阻塞监听 (SOCK_NONBLOCK)
+    Client->>Acceptor: TCP SYN / UDP 数据报 / TLS 握手请求
+    Acceptor-->>Engine: 触发就绪事件 (epoll EPOLLIN / io_uring accept CQE)
+    Engine->>Pool: acquire() 获取预分配连接槽位 (连续内存, 零堆分配)
+    Pool-->>Engine: 返回固定内存地址的 Connection / Session 裸指针
+    Engine->>Conn: 绑定客户端 Socket fd 并初始化状态
+    opt 开启 TLS / QUIC 加密传输
+        Client->>Conn: 发起 TLS / 1-RTT 握手 (ALPN / SNI 协商)
+        Conn->>Conn: 完成 SSL 握手 (支持 Linux KTLS 内核零拷贝卸载)
     end
 
-    subgraph Core ["连接与传输抽象层 (Connection & Transport)"]
-        direction LR
-        Conn["Connection<Handler>"]
-        Dgram["Datagram<Handler>"]
-        Session["Proactor::Session"]
-        Datagram["DatagramReply"]
+    %% 阶段 2: 零拷贝请求摄入与协议解析
+    Note over Client, Handler: 阶段 2: 零拷贝请求摄入与协议分发 (Ingress Processing)
+    Client->>Engine: 发送应用层数据 (HTTP 1/2/3, DNS, SOCKS5, Trojan, VLESS...)
+    Engine->>Conn: prepareRequestWritable() 直写可写窗口分配
+    Engine->>Conn: appendRequest() 直接摄入内核数据 (无临时栈缓冲与 memcpy)
+    Conn->>Handler: process() 触发状态机流转
+    Handler->>Handler: 解析消息头、鉴权校验、提取目标地址 (ProxyAddress)
+
+    %% 阶段 3: 出站解析、四元组确立与协议握手
+    alt 需要代理转发或发起出站连接 (Proxy / Outbound Client)
+        Note over Handler, Upstream: 阶段 3: 出站解析、四元组确立与协议握手 (Outbound Pipeline)
+        Handler->>Dialer: 发起目标解析与出站拨号请求 (Target: example.com:443)
+        Dialer->>Dialer: dialTcp() / dialUdp() (SO_BINDTODEVICE 可选网卡绑定)
+        Dialer->>Upstream: 发起非阻塞 connect() 建立 TCP/UDP 四元组
+        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS -> 可写事件就绪)
+        Dialer->>Dialer: checkConnectError() 确认四元组连接成功
+        opt 上游为代理或加密出站 (Trojan / Vless / Socks5 / TLS)
+            Handler->>Upstream: 发送出站协议握手头 (HandlerOutbound*)
+            Upstream-->>Handler: 握手协商响应 (进入 STREAMING 状态)
+        end
+        Note over Conn, Upstream: 阶段 4: 双向流式转发与零拷贝通道 (Streaming / Splice Forward)
+        opt 零拷贝内核管道转发 (Linux splice)
+            Conn->>Upstream: enableSpliceForward(targetFd) 激活内核管道零拷贝直通
+        else 应用层流式中继 (Userspace Relay)
+            Conn->>Upstream: pushResponse() 缓冲流水线转发
+        end
+    else 本地业务服务处理 (HTTP Web API / DNS 本地应答)
+        Note over Handler, Conn: 本地应答生成 (Local Server Response)
+        Handler->>Conn: pushResponse() 存入零分配定容环形队列 (ResponseQueue)
     end
 
-    subgraph Engine ["双异步驱动引擎层 (Dual I/O Engines)"]
-        direction LR
-        ReactorEngine["Reactor (epoll + EPOLLET + TimerQueue + eventfd)"]
-        ProactorEngine["Proactor (io_uring + multishot recv + buf_ring + poll TLS)"]
+    %% 阶段 5: 响应写出、背压控制与对象池回收
+    Note over Client, Pool: 阶段 5: 响应写出、背压控制与对象池回收 (Egress & Recycle)
+    opt 写队列背压监控 (Backpressure Control)
+        Conn->>Engine: 监测高水位线，超限触发 readCredit() 暂停读事件
     end
-
-    subgraph Foundation ["内存基础设施与底层原语 (Foundation)"]
-        direction LR
-        Pool["ObjectPool<T>"]
-        Buf["RequestBuffer"]
-        Constraints["constraints"]
-        Err["Err & IoEnd"]
-        Log["mynet::log (mylog -> stderr)"]
+    Conn->>Engine: 提取待发送数据 (takeResponse)
+    Engine->>Client: 非阻塞 send / io_uring write 发送响应
+    Client->>Conn: 传输完毕，对端 FIN / RST 或主动关闭
+    Engine->>Conn: 触发 reset() 重置连接与解析器内部状态
+    opt Proactor 安全生命周期守卫
+        Engine->>Engine: 校验 inFlight == 0 (确保无内核在途 I/O 操作)
     end
-
-    App --> Core
-    Core --> Engine
-    Engine --> Foundation
+    Engine->>Pool: release(conn) 回收连接槽位至 ObjectPool 索引栈
+    Note over Pool: 槽位立即可供后续新连接秒级复用，全程零频繁 malloc/free
 ```
 
 ---
@@ -140,13 +176,13 @@ flowchart TD
 - **`ObjectPool<Object>`**：预先分配由连续槽位数组 `std::unique_ptr<Slot[]>` 与定容索引栈构成的池化结构。对象一旦分配，其在内存中的地址终生不变，确保注册在 epoll 凭证或 io_uring 完成事件上下文中的裸指针永不失效，彻底消除频繁创建与销毁连接导致的内存碎片与分配开销。
 - **`RequestBuffer`**：纯自管连续堆内存块（`operator new[](std::nothrow)` 零异常语义），提供真实可写直接窗口（`writableBytes()`、`writableBegin()`、`commitWritten()`、`ensureWritable()`）与零拷贝读视图（`readableView()`）。仅当已消费的死数据前缀超过 4 KiB 且达到占用总量一半以上时，才会在 `retrieve()` 触发就地数据搬移压缩，兼具极致性能与安全内存边界。
 - **`ResponseQueue`**：定容连续循环响应队列（`src/responseQueue.hpp`），提供 $O(1)$ 零堆分配入队/出队与严格有界内存开销。
-- **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/http/v2/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
+- **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/handler/http/v2/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
 
 ### 4. HTTP/2 帧编解码与流多路复用
 
 - **标准线网帧格式**：`FrameDecoder` 与 `appendFrame` 原生兼容标准 9 字节 HTTP/2 帧头，涵盖 `DATA`、`HEADERS`、`PRIORITY`、`RST_STREAM`、`SETTINGS`、`PUSH_PROMISE`、`PING`、`GOAWAY`、`WINDOW_UPDATE`。
 - **客户端连接前言**：在解码任何帧之前校验 RFC 9113 §3.4 的 24 字节前言（允许分片到达）；前言错误回 `GOAWAY(PROTOCOL_ERROR)`，而不是被误读成 5 MiB 的帧。
-- **HPACK（`http/v2/hpack.hpp`）**：RFC 7541 解码——静态表、带淘汰的动态表、表大小更新与 Huffman 字符串——以及供 `sendResponse` 使用的无状态编码器。压缩失步以 `COMPRESSION_ERROR` 关闭连接；首部列表超限只重置该流。
+- **HPACK（`handler/http/v2/hpack.hpp`）**：RFC 7541 解码——静态表、带淘汰的动态表、表大小更新与 Huffman 字符串——以及供 `sendResponse` 使用的无状态编码器。压缩失步以 `COMPRESSION_ERROR` 关闭连接；首部列表超限只重置该流。
 - **分片首部块**：未带 `END_HEADERS` 的 `HEADERS` 由同流 `CONTINUATION` 帧重组（分片边界可以落在 HPACK 字段中间）。按 RFC 9113 §6.2，期间插入任何其他帧（包括其他流的帧）都以连接错误终止——这同时是 CVE-2024-27983 的防线；零长 `CONTINUATION` 洪水受 32 个空帧上限约束（总片数上限 4096），解码后超过宣告上限的首部列表回 `RST_STREAM`——该块仍会先被完整 HPACK 解码，连接的动态表绝不因此失步。
 - **首部列表上限**：`sendSettings` 宣告的 `SETTINGS_MAX_HEADER_LIST_SIZE` 与解码器实际执行的上限取同一值，合规对端不会在中途触发上限。对端宣告的上限用于出站约束：`sendResponse` 拒绝对端已声明不接受的首部列表，出站 `HEADERS` 按对端 `SETTINGS_MAX_FRAME_SIZE` 拆成 `CONTINUATION`。
 - **`HandlerHttp2<StreamHandler>`**：在单一字节流上承载多条独立请求/响应流。
@@ -337,7 +373,7 @@ docker run --rm -it -p 8888:8888 mynet:latest
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "reactor/reactor.hpp"
+#include "reactor.hpp"
 
 using namespace mynet;
 
@@ -345,7 +381,7 @@ int main() {
     mynet::log::init(); // 初始化日志并重定向至 stderr
 
     // 创建普通 TCP 套接字与 Echo 回显处理器的 Reactor 实例
-    Reactor<AcceptorSocket<HandlerConnection>> server;
+    Reactor<AcceptorBase<HandlerConnection>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("服务端启动失败: {}", toString(res.error()));
@@ -361,7 +397,7 @@ int main() {
 #include "connection.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proactor/proactor.hpp"
+#include "proactor.hpp"
 
 using namespace mynet;
 
@@ -369,7 +405,7 @@ int main() {
     mynet::log::init();
 
     // 创建基于 io_uring 的 Proactor 前摄器服务端
-    Proactor<AcceptorSocket<HandlerConnection>> server;
+    Proactor<AcceptorBase<HandlerConnection>> server;
 
     // 调优参数统一放在 config.lua 的 server / proactor 段，经 ConfigHolder 发布；
     // 引擎自身不再保留硬编码默认值。
@@ -386,8 +422,8 @@ int main() {
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "http/v2/handler.hpp"
-#include "reactor/reactor.hpp"
+#include "handler/http/v2/handler.hpp"
+#include "reactor.hpp"
 
 using namespace mynet;
 
@@ -395,7 +431,7 @@ int main() {
     mynet::log::init();
 
     // 组合调用栈：Reactor -> Socket -> HandlerHttp2 (HTTP/2 协议帧多路复用) -> 每条流的处理器
-    Reactor<AcceptorSocket<HandlerHttp2<HandlerConnection>>> server;
+    Reactor<AcceptorBase<HandlerHttp2<HandlerConnection>>> server;
 
     if (auto res = server.runTcp("0.0.0.0", 8888); !res) {
         LOG_ERROR("HTTP/2 服务端启动失败: {}", toString(res.error()));
@@ -429,37 +465,48 @@ mynet/
 │
 ├── src/                        # 核心头文件库实现
 │   ├── CMakeLists.txt          # 纯头文件 Interface 接口库定义（INTERFACE mynet 与 mynet_lua）
-│   ├── constraints.hpp         # 通用约束（Resettable / HandlerConstraint）
-│   ├── configHolder.hpp        # 统一网络配置结构体与代次快照（NetConfig / ConfigHolder / ConfigSnapshot）
-│   ├── lua_config.hpp          # 沙箱化 Lua 配置加载与热重载（reloadConfig）
-│   ├── error.hpp               # 强类型错误码枚举 Err、IoEnd 与 errno/OpenSSL 错误文本
-│   ├── log_config.hpp          # 日志输出配置（mylog 输出至 stderr）
-│   ├── requestBuffer.hpp       # 滑动窗口自收缩低开销字节缓冲区
+│   ├── acceptor.hpp            # 服务端入站监听基础设施 (AcceptorBase / AcceptorSsl / AcceptorQuic)
+│   ├── dialer.hpp              # 客户端出站建连基础设施 (DialerBase / DialerSsl / DialerQuic)
+│   ├── connection.hpp          # TCP/TLS 传输层核心 + 连接处理器基类 (HandlerConnection)
+│   ├── datagram.hpp            # UDP 传输层 Datagram<H> + 报文处理器基类 (HandlerDatagram)
+│   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎核心
+│   ├── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎核心
+│   ├── loop.hpp                # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
+│   ├── timer.hpp               # 惰性删除的高效二叉最小堆定时器队列
+│   ├── tls.hpp                 # OpenSSL / KTLS 零拷贝内核卸载与多 SNI 握手支持
+│   ├── requestBuffer.hpp       # 滑动窗口自收缩低开销请求双端缓冲区
 │   ├── responseQueue.hpp       # 零分配定容循环响应队列
 │   ├── objectPool.hpp          # 地址稳定的固定容量对象池
-│   ├── acceptor.hpp            # 监听通道根类 AcceptorBase + 套接字及 SSL 通道
-│   ├── connection.hpp          # TCP/TLS 传输层核心 + 连接处理器特化（HandlerConnection）
-│   ├── datagram.hpp            # UDP 传输层 Datagram<H> + 报文处理器基类 HandlerDatagram
-│   ├── reactor/                # 边缘触发模式 Reactor 反应器引擎
-│   │   ├── timer.hpp           # 惰性删除的高效二叉最小堆定时器队列
-│   │   ├── loop.hpp            # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
-│   │   └── reactor.hpp         # Reactor 引擎核心
-│   ├── proactor/               # 基于 io_uring 完成态的 Proactor 前摄器引擎
-│   │   └── proactor.hpp        # Proactor 引擎核心
-│   ├── http/                   # HTTP 协议族实现
-│   │   ├── v1/
-│   │   │   └── handler.hpp     # 基于 llhttp 的 HTTP/1.x 协议处理器（HandlerHttp）
-│   │   ├── v2/
-│   │   │   ├── frame.hpp       # HTTP/2 兼容的标准二进制协议帧编解码器
-│   │   │   ├── streamTable.hpp # 开放寻址零分配流哈希表
-│   │   │   └── handler.hpp     # HTTP/2 处理器：分帧、流表与信用流多路复用
-│   │   └── v3/
-│   │       ├── varint.hpp      # RFC 9000 QUIC/HTTP/3 变长整数编解码器
-│   │       ├── frame.hpp       # RFC 9114 HTTP/3 协议分帧、设置与错误码
-│   │       ├── qpack.hpp       # RFC 9204 QPACK 静态表与首部编解码器
-│   │       ├── quic.hpp        # RFC 9000 QUIC 1-RTT 短首部报文与 STREAM 传输帧
-│   │       ├── streamTable.hpp # HTTP/3 逻辑流表与状态跟踪
-│   │       └── handler.hpp     # 统一 HTTP/3 协议处理器（HandlerHttp3）
+│   ├── constraints.hpp         # 通用约束（Resettable / HandlerConstraint / MandatoryMethod*）
+│   ├── error.hpp               # 强类型错误码枚举 Err、IoEnd 与 errno/OpenSSL 错误文本
+│   ├── configHolder.hpp        # 统一网络配置结构体与代次快照（NetConfig / ConfigHolder / ConfigSnapshot）
+│   ├── lua_config.hpp          # 沙箱化 Lua 配置加载与热重载（reloadConfig）
+│   ├── log_config.hpp          # 日志输出配置（mylog 输出至 stderr）
+│   └── handler/                # 业务与协议处理器百宝箱 (All Handlers)
+│       ├── handler.hpp         # 全量 Handler 便捷聚合头文件
+│       ├── address.hpp         # 代理与网络目标端点地址抽象 (ProxyAddress)
+│       ├── outbound.hpp        # 统一客户端出站协议族 (HandlerOutboundDirect / Trojan / Vless / Socks5 / Block)
+│       ├── crypto.hpp          # 加密与哈希原语 (SHA-224, MD5, AEAD, UUID)
+│       ├── direct.hpp / block.hpp # 直连路由与黑洞阻断处理器
+│       ├── dns/                # RFC 1035 / RFC 3596 DNS 协议编解码与处理器
+│       │   ├── dns.hpp         # 二进制报文序列化、反序列化、指针压缩 (0xC0xx)
+│       │   └── handler.hpp     # HandlerDns (TCP) / HandlerDatagramDns (UDP) / HandlerOutboundDns
+│       ├── http/               # HTTP 协议族实现
+│       │   ├── v1/handler.hpp  # 基于 llhttp 的 HTTP/1.x 协议处理器 (HandlerHttp)
+│       │   ├── v2/             # HTTP/2 分帧、HPACK 静态/动态表、流表与信用控制
+│       │   ├── v3/             # HTTP/3 QUIC 1-RTT 短首部、QPACK、变长整数与流表
+│       │   └── http.hpp        # HTTP Proxy 隧道代理处理器 (HandlerHttpProxy)
+│       ├── socks/              # SOCKS 协议族 (SOCKS4 / SOCKS4a / RFC 1928 SOCKS5 / RFC 1929 认证)
+│       ├── trojan/             # Trojan 协议出入站鉴权与隧道转发
+│       ├── vless/              # VLESS 协议 UUID 鉴权与零拷贝透传
+│       ├── vmess/              # VMess 协议 HMAC-MD5 头部鉴权
+│       ├── hysteria2/          # Hysteria 2 协议认证握手与转发
+│       ├── tuic/               # TUIC v5 协议处理
+│       ├── shadowsocks/        # Shadowsocks AEAD 处理器 (SIP002)
+│       ├── shadowtls/          # ShadowTLS SNI 嗅探与 HMAC 挑战分流
+│       ├── snell/              # Snell v1~v4 协议处理
+│       ├── transparent/        # Linux Netfilter TProxy / Redirect 原始目的地址透明代理
+│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站
 │
 ├── config/                     # 运行时配置
 │   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）
@@ -467,37 +514,50 @@ mynet/
 ├── examples/                   # 示例程序与可执行文件
 │   ├── common/
 │   │   ├── endpoint.hpp        # 全部示例共用的 "<host>:<port>" 解析
-│   │   └── handlers.hpp        # 两个引擎共用的 SpliceEchoHandler / UdpEchoHandler
+│   │   ├── handlers.hpp        # 两个引擎共用的 SpliceEchoHandler / UdpEchoHandler
+│   │   ├── http2.hpp           # HTTP/2 示例辅助处理器
+│   │   └── resolver.hpp        # DNS 缓存与快速解析策略示例 (DnsResolver)
 │   ├── reactor/                # epoll 边沿触发 Reactor 服务端
-│   │   ├── tcp.cpp             # reactor_tcp   TCP 回显（splice 零拷贝）
-│   │   ├── ssl.cpp             # reactor_ssl   TLS 回显
-│   │   ├── udp.cpp             # reactor_udp   UDP 数据报回显
-│   │   ├── http1.cpp           # reactor_http1 基于 llhttp 的 HTTP/1.x
-│   │   ├── http2.cpp           # reactor_http2 HTTP/2 流多路复用
-│   │   └── http3.cpp           # reactor_http3 HTTP/3（QUIC/UDP）
+│   │   ├── tcp.cpp             # reactor_tcp     TCP 回显（splice 零拷贝）
+│   │   ├── ssl.cpp             # reactor_ssl     TLS 回显
+│   │   ├── udp.cpp             # reactor_udp     UDP 数据报回显
+│   │   ├── http1.cpp           # reactor_http1   基于 llhttp 的 HTTP/1.x
+│   │   ├── http2.cpp           # reactor_http2   HTTP/2 流多路复用
+│   │   ├── http3.cpp           # reactor_http3   HTTP/3（QUIC/UDP）
+│   │   ├── socks5.cpp          # reactor_socks5  SOCKS5 代理服务端
+│   │   └── proxy.cpp           # reactor_proxy   多协议自适应混合代理
 │   └── proactor/               # io_uring 完成事件 Proactor 服务端
-│       ├── tcp.cpp             # proactor_tcp   TCP 回显（multishot accept + 缓冲环）
-│       ├── ssl.cpp             # proactor_ssl   TLS 回显（Poll 驱动握手）
-│       ├── udp.cpp             # proactor_udp   UDP 数据报回显
-│       ├── http1.cpp           # proactor_http1 基于 llhttp 的 HTTP/1.x
-│       ├── http2.cpp           # proactor_http2 HTTP/2 流多路复用
-│       └── http3.cpp           # proactor_http3 HTTP/3（QUIC/UDP）
+│       ├── tcp.cpp             # proactor_tcp    TCP 回显（multishot accept + 缓冲环）
+│       ├── ssl.cpp             # proactor_ssl    TLS 回显（Poll 驱动握手）
+│       ├── udp.cpp             # proactor_udp    UDP 数据报回显
+│       ├── http1.cpp           # proactor_http1  基于 llhttp 的 HTTP/1.x
+│       ├── http2.cpp           # proactor_http2  HTTP/2 流多路复用
+│       ├── http3.cpp           # proactor_http3  HTTP/3（QUIC/UDP）
+│       ├── socks5.cpp          # proactor_socks5 SOCKS5 代理服务端
+│       └── proxy.cpp           # proactor_proxy  多协议自适应混合代理
 │
 ├── tests/                      # 单元测试工程（Google Test + ASan 内存安全检查）
 │   ├── test_request_buffer.cpp # 缓冲区边界与压缩测试
-│   ├── test_config_lua.cpp     # 沙箱化 Lua 配置热重载与边界钳位测试
-│   ├── test_constraints.cpp    # 约束概念与可重置性测试
+│   ├── test_constraints.cpp    # 约束概念、可重置性与 Dialer/Acceptor 概念评估测试
 │   ├── test_datagram.cpp       # UDP 传输会话的窗口定容、截断与排空测试
 │   ├── test_error.cpp          # 错误码一致性测试
 │   ├── test_frame.cpp          # 协议帧拆装包测试
 │   ├── test_handler.cpp        # 处理器状态流转测试
+│   ├── test_hpack.cpp          # HPACK 静态/动态表与 Huffman 编解码测试
 │   ├── test_http3.cpp          # HTTP/3 变长整数、分帧、QPACK 与 QUIC 报文测试
 │   ├── test_http2.cpp          # HTTP/2 流多路复用状态机与流控测试
 │   ├── test_object_pool.cpp    # 对象池生命周期与指针稳定性测试
-│   └── test_timer.cpp          # 定时器精度与取消测试
+│   ├── test_timer.cpp          # 定时器精度与取消测试
+│   ├── test_tls.cpp            # TLS 握手与 ALPN 协商测试
+│   ├── test_socks5.cpp         # SOCKS5 握手协议与认证测试
+│   ├── test_proxy_protocols.cpp# 代理协议全族静态契约与边界测试
+│   ├── test_dialer.cpp         # 客户端拨号建连、出站状态机与 DNS 处理器测试
+│   ├── test_log_config.cpp     # 日志级别与输出配置测试
+│   └── test_config_lua.cpp     # 沙箱化 Lua 配置热重载与边界钳位测试
 │
 ├── bench/                      # 性能基准测试
-│   └── bench.cpp               # 核心模块纳秒级延时与吞吐测试
+│   ├── bench.cpp               # 核心模块纳秒级延时与吞吐测试
+│   └── bench_network.cpp       # 网络高并发吞吐压测
 │
 ├── certs/                      # 本地测试自签名 SSL/TLS 证书及私钥
 ├── scripts/                    # 辅助脚本（代码格式化等）
@@ -515,36 +575,46 @@ cd build
 ctest --output-on-failure
 ```
 
-测试执行结果：
+测试执行结果（17 套测试套件全部 100% 通过）：
 
 ```text
 Test project /home/aaa/code/mynet/build
       Start  1: test_request_buffer
- 1/12 Test  #1: test_request_buffer ..............   Passed    0.01 sec
+ 1/17 Test  #1: test_request_buffer ..............   Passed    0.01 sec
       Start  2: test_constraints
- 2/12 Test  #2: test_constraints .................   Passed    0.01 sec
+ 2/17 Test  #2: test_constraints .................   Passed    0.02 sec
       Start  3: test_datagram
- 3/12 Test  #3: test_datagram ....................   Passed    0.02 sec
+ 3/17 Test  #3: test_datagram ....................   Passed    0.02 sec
       Start  4: test_error
- 4/12 Test  #4: test_error .......................   Passed    0.01 sec
+ 4/17 Test  #4: test_error .......................   Passed    0.01 sec
       Start  5: test_frame
- 5/12 Test  #5: test_frame .......................   Passed    0.01 sec
+ 5/17 Test  #5: test_frame .......................   Passed    0.01 sec
       Start  6: test_handler
- 6/12 Test  #6: test_handler .....................   Passed    0.03 sec
-      Start  7: test_http3
- 7/12 Test  #7: test_http3 .......................   Passed    0.02 sec
-      Start  8: test_http2
- 8/12 Test  #8: test_http2 .......................   Passed    0.10 sec
-      Start  9: test_object_pool
- 9/12 Test  #9: test_object_pool .................   Passed    0.02 sec
-      Start 10: test_timer
-10/12 Test #10: test_timer .......................   Passed    0.03 sec
-      Start 11: test_tls
-11/12 Test #11: test_tls .........................   Passed    0.02 sec
-      Start 12: test_config_lua
-12/12 Test #12: test_config_lua ..................   Passed    0.02 sec
+ 6/17 Test  #6: test_handler .....................   Passed    0.03 sec
+      Start  7: test_hpack
+ 7/17 Test  #7: test_hpack .......................   Passed    0.02 sec
+      Start  8: test_http3
+ 8/17 Test  #8: test_http3 .......................   Passed    0.03 sec
+      Start  9: test_http2
+ 9/17 Test  #9: test_http2 .......................   Passed    0.17 sec
+      Start 10: test_object_pool
+10/17 Test #10: test_object_pool .................   Passed    0.02 sec
+      Start 11: test_timer
+11/17 Test #11: test_timer .......................   Passed    0.03 sec
+      Start 12: test_tls
+12/17 Test #12: test_tls .........................   Passed    0.03 sec
+      Start 13: test_socks5
+13/17 Test #13: test_socks5 ......................   Passed    0.01 sec
+      Start 14: test_proxy_protocols
+14/17 Test #14: test_proxy_protocols .............   Passed    0.02 sec
+      Start 15: test_dialer
+15/17 Test #15: test_dialer ......................   Passed    0.02 sec
+      Start 16: test_log_config
+16/17 Test #16: test_log_config ..................   Passed    0.01 sec
+      Start 17: test_config_lua
+17/17 Test #17: test_config_lua ..................   Passed    1.10 sec
 
-100% tests passed, 0 tests failed out of 12
+100% tests passed, 0 tests failed out of 17
 ```
 
 ---

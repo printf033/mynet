@@ -14,8 +14,8 @@
 //
 // 运行命令：./bench 2>/dev/null （日志行输出至 stderr）
 #include "connection.hpp"
-#include "http/v2/frame.hpp"
-#include "http/v2/handler.hpp"
+#include "handler/http/v2/frame.hpp"
+#include "handler/http/v2/handler.hpp"
 #include "log_config.hpp"
 #include "objectPool.hpp"
 #include "requestBuffer.hpp"

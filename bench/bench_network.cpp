@@ -2,13 +2,13 @@
 #include "../examples/common/http2.hpp"
 #include "connection.hpp"
 #include "error.hpp"
-#include "http/v1/handler.hpp"
-#include "http/v2/handler.hpp"
-#include "http/v3/handler.hpp"
 #include "log_config.hpp"
-#include "proactor/proactor.hpp"
-#include "proxy/socks/socks5.hpp"
-#include "reactor/reactor.hpp"
+#include "proactor.hpp"
+#include "handler/http/v1/handler.hpp"
+#include "handler/http/v2/handler.hpp"
+#include "handler/http/v3/handler.hpp"
+#include "handler/socks/socks5.hpp"
+#include "reactor.hpp"
 #include "tls.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -305,7 +305,7 @@ namespace
         }
 
         example::UdpEchoHandler handler;
-        auto server = std::make_unique<EngineType<AcceptorSocket<example::UdpEchoHandler>>>();
+        auto server = std::make_unique<EngineType<AcceptorBase<example::UdpEchoHandler>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
@@ -543,7 +543,7 @@ namespace
         }
 
         using Handler = http::v1::HandlerHttp<http::v1::HTTP_MODE::REQUEST>;
-        auto server = std::make_unique<EngineType<AcceptorSocket<Handler>>>();
+        auto server = std::make_unique<EngineType<AcceptorBase<Handler>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
@@ -677,19 +677,19 @@ namespace
     // 6. Benchmark SOCKS5 Proxy Tunnel
     // =========================================================================
 
-    class BenchSocks5Handler : public proxy::HandlerSocks5
+    class BenchSocks5Handler : public handler::HandlerSocks5
     {
     public:
         void process()
         {
-            proxy::HandlerSocks5::process();
-            if (stage() == proxy::Socks5Stage::STREAMING && requestBytes() > 0)
+            handler::HandlerSocks5::process();
+            if (stage() == handler::Socks5Stage::STREAMING && requestBytes() > 0)
             {
                 [[maybe_unused]] auto _ = pushResponse(std::string_view(requestBegin(), requestBytes()));
                 requestConsume(requestBytes());
             }
         }
-        void reset() noexcept override { proxy::HandlerSocks5::reset(); }
+        void reset() noexcept override { handler::HandlerSocks5::reset(); }
     };
 
     template <template <typename> class EngineType>
@@ -708,7 +708,7 @@ namespace
             return;
         }
 
-        using ServerType = EngineType<AcceptorSocket<BenchSocks5Handler>>;
+        using ServerType = EngineType<AcceptorBase<BenchSocks5Handler>>;
         auto server = std::make_unique<ServerType>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
@@ -885,12 +885,12 @@ int main()
 
     std::printf("[1/11] 正在测量 Reactor TCP (epoll)...          ");
     std::fflush(stdout);
-    benchTcp<Reactor<AcceptorSocket<example::SpliceEchoHandler>>>("Reactor (epoll)", 19101);
+    benchTcp<Reactor<AcceptorBase<example::SpliceEchoHandler>>>("Reactor (epoll)", 19101);
     std::printf("完成\n");
 
     std::printf("[2/11] 正在测量 Proactor TCP (io_uring)...       ");
     std::fflush(stdout);
-    benchTcp<Proactor<AcceptorSocket<example::SpliceEchoHandler>>>("Proactor (io_uring)", 19102);
+    benchTcp<Proactor<AcceptorBase<example::SpliceEchoHandler>>>("Proactor (io_uring)", 19102);
     std::printf("完成\n");
 
     std::printf("[3/11] 正在测量 Reactor UDP (epoll)...          ");

@@ -3,10 +3,13 @@
 #include "connection.hpp"
 #include "constraints.hpp"
 #include "datagram.hpp"
-#include "http/v1/handler.hpp"
-#include "http/v3/handler.hpp"
-#include "proactor/proactor.hpp"
-#include "reactor/reactor.hpp"
+#include "dialer.hpp"
+#include "proactor.hpp"
+#include "handler/dns/handler.hpp"
+#include "handler/http/v1/handler.hpp"
+#include "handler/http/v3/handler.hpp"
+#include "handler/outbound.hpp"
+#include "reactor.hpp"
 #include <gtest/gtest.h>
 #include <type_traits>
 #include <version>
@@ -242,8 +245,14 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<HandlerConnection>);
     static_assert(Resettable<HandlerDatagram>);
     static_assert(Resettable<AcceptorBase<HandlerConnection>>);
-    static_assert(Resettable<AcceptorSocket<HandlerConnection>>);
     static_assert(Resettable<AcceptorSsl<HandlerDatagram>>);
+    static_assert(Resettable<DialerBase<HandlerConnection>>);
+    static_assert(Resettable<DialerSsl<HandlerConnection>>);
+    static_assert(Resettable<HandlerOutboundDirect>);
+    static_assert(Resettable<HandlerOutboundTrojan>);
+    static_assert(Resettable<HandlerOutboundVless>);
+    static_assert(Resettable<HandlerOutboundSocks5>);
+    static_assert(Resettable<HandlerOutboundBlock>);
 
     static_assert(!Resettable<NonNoexceptReset>);
     static_assert(!Resettable<NonVoidReset>);
@@ -413,43 +422,81 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
 TEST(Constraints, AcceptorConceptsEvaluationOnCompleteTypes)
 {
     using BaseAcc = AcceptorBase<HandlerConnection>;
-    using SockAcc = AcceptorSocket<HandlerConnection>;
     using SslAcc = AcceptorSsl<HandlerDatagram>;
     using QuicAcc = AcceptorQuic<HandlerDatagram>;
 
     // 概念约束测试：DerivedFromAcceptorBase
     static_assert(DerivedFromAcceptorBase<BaseAcc>);
-    static_assert(DerivedFromAcceptorBase<SockAcc>);
     static_assert(DerivedFromAcceptorBase<SslAcc>);
     static_assert(DerivedFromAcceptorBase<QuicAcc>);
     static_assert(!DerivedFromAcceptorBase<HandlerConnection>);
 
-    // 概念约束测试：SocketAcceptor
-    static_assert(SocketAcceptor<SockAcc>);
-    static_assert(!SocketAcceptor<BaseAcc>);
-    static_assert(!SocketAcceptor<SslAcc>);
-    static_assert(!SocketAcceptor<QuicAcc>);
+    // 概念约束测试：BaseAcceptor
+    static_assert(BaseAcceptor<BaseAcc>);
+    static_assert(!BaseAcceptor<SslAcc>);
+    static_assert(!BaseAcceptor<QuicAcc>);
 
     // 概念约束测试：SslAcceptor
     static_assert(SslAcceptor<SslAcc>);
     static_assert(!SslAcceptor<BaseAcc>);
-    static_assert(!SslAcceptor<SockAcc>);
     static_assert(!SslAcceptor<QuicAcc>);
 
     // 概念约束测试：QuicAcceptor
     static_assert(QuicAcceptor<QuicAcc>);
     static_assert(!QuicAcceptor<BaseAcc>);
-    static_assert(!QuicAcceptor<SockAcc>);
     static_assert(!QuicAcceptor<SslAcc>);
 
     EXPECT_TRUE(DerivedFromAcceptorBase<BaseAcc>);
-    EXPECT_TRUE(SocketAcceptor<SockAcc>);
+    EXPECT_TRUE(BaseAcceptor<BaseAcc>);
     EXPECT_TRUE(SslAcceptor<SslAcc>);
     EXPECT_TRUE(QuicAcceptor<QuicAcc>);
-    EXPECT_FALSE(SocketAcceptor<SslAcc>);
-    EXPECT_FALSE(SocketAcceptor<QuicAcc>);
-    EXPECT_FALSE(SslAcceptor<SockAcc>);
-    EXPECT_FALSE(QuicAcceptor<SockAcc>);
+    EXPECT_FALSE(BaseAcceptor<SslAcc>);
+    EXPECT_FALSE(BaseAcceptor<QuicAcc>);
+    EXPECT_FALSE(SslAcceptor<BaseAcc>);
+    EXPECT_FALSE(QuicAcceptor<BaseAcc>);
+}
+
+TEST(Constraints, DialerAndOutboundConceptsEvaluation)
+{
+    using BaseDial = DialerBase<HandlerConnection>;
+    using SslDial = DialerSsl<HandlerConnection>;
+
+    // 概念约束测试：DerivedFromDialerBase & BaseDialer
+    static_assert(DerivedFromDialerBase<BaseDial>);
+    static_assert(DerivedFromDialerBase<SslDial>);
+    static_assert(!DerivedFromDialerBase<HandlerConnection>);
+
+    static_assert(BaseDialer<BaseDial>);
+    static_assert(!BaseDialer<SslDial>);
+
+    EXPECT_TRUE(DerivedFromDialerBase<BaseDial>);
+    EXPECT_TRUE(DerivedFromDialerBase<SslDial>);
+    EXPECT_TRUE(BaseDialer<BaseDial>);
+    EXPECT_FALSE(BaseDialer<SslDial>);
+
+    // 出站协议处理器约束测试：全部满足 HandlerConstraint 与 MandatoryMethodConnection
+    static_assert(HandlerConstraint<HandlerOutboundDirect>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundDirect>);
+
+    static_assert(HandlerConstraint<HandlerOutboundTrojan>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundTrojan>);
+
+    static_assert(HandlerConstraint<HandlerOutboundVless>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundVless>);
+
+    static_assert(HandlerConstraint<HandlerOutboundSocks5>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundSocks5>);
+
+    static_assert(HandlerConstraint<HandlerOutboundBlock>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundBlock>);
+
+    // DNS 协议处理器族约束测试
+    static_assert(HandlerConstraint<HandlerDns>);
+    static_assert(MandatoryMethodConnection<HandlerDns>);
+    static_assert(HandlerConstraint<HandlerDatagramDns>);
+    static_assert(MandatoryMethodDatagram<HandlerDatagramDns>);
+    static_assert(HandlerConstraint<HandlerOutboundDns>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundDns>);
 }
 
 TEST(Constraints, EnginesAcceptPureDatagramHandlers)
@@ -457,8 +504,8 @@ TEST(Constraints, EnginesAcceptPureDatagramHandlers)
     // 回归防线：引擎曾声称接受 DerivedFromHandlerDatagram，但内部无条件用
     // Connection<H> 作为成员类型，导致纯报文处理器通过约束后依然编译失败。
     // 现在非流式处理器映射到 NoConnection，UDP 路径不再需要流式设施。
-    using PureAcc = AcceptorSocket<PureDatagramHandler>;
-    using StreamAcc = AcceptorSocket<HandlerConnection>;
+    using PureAcc = AcceptorBase<PureDatagramHandler>;
+    using StreamAcc = AcceptorBase<HandlerConnection>;
 
     static_assert(!MandatoryMethodConnection<PureDatagramHandler>);
     static_assert(DerivedFromHandlerDatagram<PureDatagramHandler>);
@@ -568,10 +615,10 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     poison.server.port = 1;
     mynet::publishNetConfig(poison);
 
-    mynet::Reactor<mynet::AcceptorSocket<mynet::HandlerConnection>> reactorStream;
-    mynet::Reactor<mynet::AcceptorSocket<mynet::HandlerDatagram>> reactorDatagram;
-    mynet::Proactor<mynet::AcceptorSocket<mynet::HandlerConnection>> proactorStream;
-    mynet::Proactor<mynet::AcceptorSocket<mynet::HandlerDatagram>> proactorDatagram;
+    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> reactorStream;
+    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerDatagram>> reactorDatagram;
+    mynet::Proactor<mynet::AcceptorBase<mynet::HandlerConnection>> proactorStream;
+    mynet::Proactor<mynet::AcceptorBase<mynet::HandlerDatagram>> proactorDatagram;
 
     mynet::Reactor<mynet::AcceptorSsl<mynet::HandlerConnection>> reactorTls;
     mynet::Proactor<mynet::AcceptorSsl<mynet::HandlerConnection>> proactorTls;

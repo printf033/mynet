@@ -3,7 +3,7 @@
 #include "datagram.hpp"
 #include "error.hpp"
 #include "log_config.hpp"
-#include "proactor/proactor.hpp"
+#include "proactor.hpp"
 
 // io_uring 驱动的 UDP 数据报回显服务端。用法：
 //
@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     example::UdpEchoHandler handler;
-    if (auto res = Proactor<AcceptorSocket<example::UdpEchoHandler>>().runUdp(listen.ip, listen.port(), handler); !res)
+    if (auto res = Proactor<AcceptorBase<example::UdpEchoHandler>>().runUdp(listen.ip, listen.port(), handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());
