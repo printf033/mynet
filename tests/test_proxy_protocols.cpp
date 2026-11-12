@@ -850,3 +850,212 @@ TEST(HandlerBlockTest, BlockRejects)
     block.process();
     EXPECT_TRUE(block.closeAfterResponse());
 }
+
+// =============================================================================
+// 14. Transparent 代理测试 (Redirect / TProxy / DatagramTProxy & Sniffing)
+// =============================================================================
+
+class MockRedirectHandler : public HandlerInboundRedirect
+{
+public:
+    ProxyAddress mockDst = ProxyAddress::fromHostPort("104.16.132.229", 443);
+    std::optional<ProxyAddress> fetchOriginalDst() override
+    {
+        return mockDst;
+    }
+};
+
+class MockTProxyHandler : public HandlerInboundTProxy
+{
+public:
+    ProxyAddress mockDst = ProxyAddress::fromHostPort("1.1.1.1", 80);
+    std::optional<ProxyAddress> fetchOriginalDst() override
+    {
+        return mockDst;
+    }
+};
+
+static std::vector<uint8_t> makeTlsClientHello(std::string_view serverName)
+{
+    std::vector<uint8_t> extSni;
+    extSni.push_back(0x00);
+    extSni.push_back(0x00); // Extension Type: Server Name (0)
+    const uint16_t sniExtLen = static_cast<uint16_t>(5 + serverName.size());
+    extSni.push_back(static_cast<uint8_t>(sniExtLen >> 8));
+    extSni.push_back(static_cast<uint8_t>(sniExtLen & 0xFF));
+
+    const uint16_t sniListLen = static_cast<uint16_t>(3 + serverName.size());
+    extSni.push_back(static_cast<uint8_t>(sniListLen >> 8));
+    extSni.push_back(static_cast<uint8_t>(sniListLen & 0xFF));
+    extSni.push_back(0x00); // HostName type
+    const uint16_t nameLen = static_cast<uint16_t>(serverName.size());
+    extSni.push_back(static_cast<uint8_t>(nameLen >> 8));
+    extSni.push_back(static_cast<uint8_t>(nameLen & 0xFF));
+    extSni.insert(extSni.end(), serverName.begin(), serverName.end());
+
+    std::vector<uint8_t> hs;
+    hs.push_back(0x01); // Handshake Type: ClientHello
+    hs.push_back(0x00);
+    hs.push_back(0x00);
+    hs.push_back(0x00);
+
+    hs.push_back(0x03);
+    hs.push_back(0x03); // TLS 1.2 client version
+
+    for (int i = 0; i < 32; ++i)
+    {
+        hs.push_back(0x11);
+    }
+
+    hs.push_back(0x00); // Session ID len 0
+
+    hs.push_back(0x00);
+    hs.push_back(0x02);
+    hs.push_back(0x13);
+    hs.push_back(0x01);
+
+    hs.push_back(0x01);
+    hs.push_back(0x00);
+
+    const uint16_t extTotalLen = static_cast<uint16_t>(extSni.size());
+    hs.push_back(static_cast<uint8_t>(extTotalLen >> 8));
+    hs.push_back(static_cast<uint8_t>(extTotalLen & 0xFF));
+    hs.insert(hs.end(), extSni.begin(), extSni.end());
+
+    const uint32_t hsLen = static_cast<uint32_t>(hs.size() - 4);
+    hs[1] = static_cast<uint8_t>((hsLen >> 16) & 0xFF);
+    hs[2] = static_cast<uint8_t>((hsLen >> 8) & 0xFF);
+    hs[3] = static_cast<uint8_t>(hsLen & 0xFF);
+
+    std::vector<uint8_t> record;
+    record.push_back(0x16);
+    record.push_back(0x03);
+    record.push_back(0x01);
+    const uint16_t recLen = static_cast<uint16_t>(hs.size());
+    record.push_back(static_cast<uint8_t>(recLen >> 8));
+    record.push_back(static_cast<uint8_t>(recLen & 0xFF));
+    record.insert(record.end(), hs.begin(), hs.end());
+
+    return record;
+}
+
+TEST(HandlerTransparentTest, RedirectWithTlsSniSniffing)
+{
+    MockRedirectHandler handler;
+    ProxyAddress reportedTarget{};
+    bool callbackInvoked = false;
+
+    handler.setOnRequest([&](uint8_t cmd, const ProxyAddress &target) {
+        EXPECT_EQ(cmd, 0x01);
+        reportedTarget = target;
+        callbackInvoked = true;
+    });
+
+    // 初始 resolve 原始目的
+    handler.process();
+    EXPECT_EQ(handler.stage(), TransparentStage::SNIFFING);
+    EXPECT_FALSE(callbackInvoked);
+
+    auto tlsPkt = makeTlsClientHello("openai.com");
+    feed(handler, std::string_view(reinterpret_cast<const char *>(tlsPkt.data()), tlsPkt.size()));
+    handler.process();
+
+    EXPECT_EQ(handler.stage(), TransparentStage::STREAMING);
+    EXPECT_TRUE(callbackInvoked);
+    EXPECT_EQ(reportedTarget.type, AddressType::DOMAIN);
+    EXPECT_EQ(reportedTarget.host, "openai.com");
+    EXPECT_EQ(reportedTarget.port, 443);
+}
+
+TEST(HandlerTransparentTest, TProxyWithHttpHostSniffing)
+{
+    MockTProxyHandler handler;
+    ProxyAddress reportedTarget{};
+    bool callbackInvoked = false;
+
+    handler.setOnRequest([&](uint8_t, const ProxyAddress &target) {
+        reportedTarget = target;
+        callbackInvoked = true;
+    });
+
+    handler.process();
+    EXPECT_EQ(handler.stage(), TransparentStage::SNIFFING);
+
+    std::string httpReq = "GET / HTTP/1.1\r\nHost: rust-lang.org:8080\r\n\r\n";
+    feed(handler, httpReq);
+    handler.process();
+
+    EXPECT_EQ(handler.stage(), TransparentStage::STREAMING);
+    EXPECT_TRUE(callbackInvoked);
+    EXPECT_EQ(reportedTarget.type, AddressType::DOMAIN);
+    EXPECT_EQ(reportedTarget.host, "rust-lang.org");
+    EXPECT_EQ(reportedTarget.port, 8080);
+}
+
+TEST(HandlerTransparentTest, FallbackToDnsReverseCache)
+{
+    // 向反向 DNS 缓存写入一条记录
+    in_addr ip{};
+    ::inet_pton(AF_INET, "104.16.132.229", &ip);
+    dns::DnsReverseCache::instance().insert(ip, "cached-cdn.net", 300);
+
+    MockRedirectHandler handler;
+    ProxyAddress reportedTarget{};
+    bool callbackInvoked = false;
+
+    handler.setOnRequest([&](uint8_t, const ProxyAddress &target) {
+        reportedTarget = target;
+        callbackInvoked = true;
+    });
+
+    handler.process();
+    // 注入非 TLS/HTTP 的私有协议数据
+    std::string nonSniffablePayload(64, '\xAA');
+    feed(handler, nonSniffablePayload);
+    handler.process();
+
+    EXPECT_EQ(handler.stage(), TransparentStage::STREAMING);
+    EXPECT_TRUE(callbackInvoked);
+    // 应当成功降级命中反向 DNS 缓存并升级为域名
+    EXPECT_EQ(reportedTarget.type, AddressType::DOMAIN);
+    EXPECT_EQ(reportedTarget.host, "cached-cdn.net");
+    EXPECT_EQ(reportedTarget.port, 443);
+}
+
+TEST(HandlerTransparentTest, DatagramTProxyPacketHandling)
+{
+    bool packetReceived = false;
+    sockaddr_in clientPeer{};
+    clientPeer.sin_family = AF_INET;
+    clientPeer.sin_port = htons(12345);
+    ::inet_pton(AF_INET, "192.168.1.100", &clientPeer.sin_addr);
+
+    sockaddr_in origDst{};
+    origDst.sin_family = AF_INET;
+    origDst.sin_port = htons(53);
+    ::inet_pton(AF_INET, "8.8.8.8", &origDst.sin_addr);
+
+    HandlerInboundDatagramTProxy tproxy(
+        [&](const sockaddr_in &client, const ProxyAddress &target, const char *data, size_t n) {
+            packetReceived = true;
+            EXPECT_EQ(client.sin_port, htons(12345));
+            EXPECT_EQ(target.type, AddressType::DOMAIN);
+            EXPECT_EQ(target.host, "mytest.org");
+            EXPECT_EQ(target.port, 53);
+            EXPECT_GT(n, 0u);
+            (void)data;
+        });
+
+    // 构造发往 8.8.8.8:53 的 DNS 查询包
+    std::vector<uint8_t> dnsQuery = {
+        0x33, 0x44, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        6, 'm', 'y', 't', 'e', 's', 't',
+        3, 'o', 'r', 'g', 0x00,
+        0x00, 0x01, 0x00, 0x01
+    };
+
+    tproxy.onDatagramWithDst(clientPeer, origDst,
+                             reinterpret_cast<const char *>(dnsQuery.data()), dnsQuery.size());
+    EXPECT_TRUE(packetReceived);
+}

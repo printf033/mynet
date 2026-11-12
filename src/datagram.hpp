@@ -416,6 +416,9 @@ namespace mynet
             truncatedDatagrams_ = 0;
             sentDatagrams_ = 0;
             sendFailures_ = 0;
+#if defined(__linux__)
+            batchRecvBuf_.reset();
+#endif
 #ifdef MYNET_HAVE_QUIC
             if (quicListener_ != nullptr)
             {
@@ -574,6 +577,9 @@ namespace mynet
             handler_->onDatagram(peer, data, n);
         }
 
+        inline void setBatchIo(bool enable) noexcept { batchIoEnabled_ = enable; }
+        [[nodiscard]] inline bool isBatchIoEnabled() const noexcept { return batchIoEnabled_; }
+
         /**
          * @brief 排空处理器积压的待发报文队列（包含 EAGAIN/EWOULDBLOCK 时未发出的暂存报文）
          *
@@ -624,6 +630,78 @@ namespace mynet
                     break;
                 }
             }
+
+#if defined(__linux__)
+            // 模块二：UDP 批量发送优化 (sendmmsg)
+            while (batchIoEnabled_ && handler_->outgoingCount() > 1)
+            {
+                std::array<Protocol<HandlerDatagram>, kDatagramBatchSize> batchPackets;
+                mmsghdr sendMsgs[kDatagramBatchSize]{};
+                iovec sendIovs[kDatagramBatchSize]{};
+                size_t count = 0;
+
+                while (count < kDatagramBatchSize && handler_->hasOutgoing())
+                {
+                    batchPackets[count] = handler_->takeOutgoing();
+                    sendIovs[count].iov_base = const_cast<char *>(batchPackets[count].bytes.data());
+                    sendIovs[count].iov_len = batchPackets[count].bytes.size();
+                    sendMsgs[count].msg_hdr.msg_name = &batchPackets[count].peer;
+                    sendMsgs[count].msg_hdr.msg_namelen = sizeof(sockaddr_in);
+                    sendMsgs[count].msg_hdr.msg_iov = &sendIovs[count];
+                    sendMsgs[count].msg_hdr.msg_iovlen = 1;
+                    sendMsgs[count].msg_hdr.msg_control = nullptr;
+                    sendMsgs[count].msg_hdr.msg_controllen = 0;
+                    sendMsgs[count].msg_hdr.msg_flags = 0;
+                    ++count;
+                }
+
+                if (count == 0)
+                {
+                    break;
+                }
+
+                int ret = ::sendmmsg(fd, sendMsgs, count, MSG_DONTWAIT);
+                if (ret > 0)
+                {
+                    sentDatagrams_ += static_cast<size_t>(ret);
+                    sent += static_cast<size_t>(ret);
+                    if (static_cast<size_t>(ret) < count)
+                    {
+                        pendingPacket_ = std::move(batchPackets[static_cast<size_t>(ret)]);
+                        hasPendingPacket_ = true;
+                        for (size_t i = static_cast<size_t>(ret) + 1; i < count; ++i)
+                        {
+                            handler_->sendTo(batchPackets[i].peer, std::move(batchPackets[i].bytes));
+                        }
+                        return sent;
+                    }
+                }
+                else
+                {
+                    if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    {
+                        pendingPacket_ = std::move(batchPackets[0]);
+                        hasPendingPacket_ = true;
+                        for (size_t i = 1; i < count; ++i)
+                        {
+                            handler_->sendTo(batchPackets[i].peer, std::move(batchPackets[i].bytes));
+                        }
+                        return sent;
+                    }
+                    if (ret < 0 && errno == EINTR)
+                    {
+                        for (size_t i = 0; i < count; ++i)
+                        {
+                            handler_->sendTo(batchPackets[i].peer, std::move(batchPackets[i].bytes));
+                        }
+                        continue;
+                    }
+                    ++sendFailures_;
+                    LOG_WARN("Datagram: sendmmsg failed: {}", errnoText(errno));
+                    break;
+                }
+            }
+#endif
 
             while (handler_->hasOutgoing())
             {
@@ -711,6 +789,62 @@ namespace mynet
                 return IO_STATUS::KEEP;
             }
 #endif
+
+#if defined(__linux__)
+            // 模块二：UDP 批量接收优化 (recvmmsg)
+            if (batchIoEnabled_)
+            {
+                if (!batchRecvBuf_) [[unlikely]]
+                {
+                    batchRecvBuf_ = std::make_unique<BatchRecvBuffer>();
+                }
+                const size_t maxPerPacket = std::min(recvCapacity(), size_t(65536));
+                for (;;)
+                {
+                    for (size_t i = 0; i < kDatagramBatchSize; ++i)
+                    {
+                        batchRecvBuf_->iovs[i].iov_base = batchRecvBuf_->buffers[i];
+                        batchRecvBuf_->iovs[i].iov_len = maxPerPacket;
+                        batchRecvBuf_->msgs[i].msg_hdr.msg_name = &batchRecvBuf_->addrs[i];
+                        batchRecvBuf_->msgs[i].msg_hdr.msg_namelen = sizeof(sockaddr_in);
+                        batchRecvBuf_->msgs[i].msg_hdr.msg_iov = &batchRecvBuf_->iovs[i];
+                        batchRecvBuf_->msgs[i].msg_hdr.msg_iovlen = 1;
+                        batchRecvBuf_->msgs[i].msg_hdr.msg_control = nullptr;
+                        batchRecvBuf_->msgs[i].msg_hdr.msg_controllen = 0;
+                        batchRecvBuf_->msgs[i].msg_hdr.msg_flags = 0;
+                        batchRecvBuf_->msgs[i].msg_len = 0;
+                    }
+
+                    int ret = ::recvmmsg(fd, batchRecvBuf_->msgs, kDatagramBatchSize, MSG_DONTWAIT, nullptr);
+                    if (ret < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            break;
+                        }
+                        if (errno == EINTR)
+                        {
+                            continue;
+                        }
+                        LOG_WARN("Datagram::handleRead: recvmmsg on fd {} failed: {}", fd, errnoText(errno));
+                        break;
+                    }
+                    if (ret == 0)
+                    {
+                        break;
+                    }
+
+                    for (int i = 0; i < ret; ++i)
+                    {
+                        receiveFrom(batchRecvBuf_->addrs[i], batchRecvBuf_->buffers[i],
+                                    static_cast<size_t>(batchRecvBuf_->msgs[i].msg_len));
+                    }
+                }
+                [[maybe_unused]] auto _ = handleWrite(fd);
+                return IO_STATUS::KEEP;
+            }
+#endif
+
             char *window = recvBuffer();
             const size_t windowBytes = recvCapacity();
             for (;;)
@@ -989,11 +1123,26 @@ namespace mynet
         std::vector<char> recvWindow_{};
         Protocol<HandlerDatagram> pendingPacket_{};
         bool hasPendingPacket_ = false;
+        bool batchIoEnabled_ = true;
         uint64_t receivedDatagrams_ = 0;
         uint64_t receivedBytes_ = 0;
         uint64_t truncatedDatagrams_ = 0;
         uint64_t sentDatagrams_ = 0;
         uint64_t sendFailures_ = 0;
+
+#if defined(__linux__)
+        static constexpr size_t kDatagramBatchSize = 32;
+
+        struct BatchRecvBuffer
+        {
+            mmsghdr msgs[kDatagramBatchSize]{};
+            iovec iovs[kDatagramBatchSize]{};
+            sockaddr_in addrs[kDatagramBatchSize]{};
+            alignas(64) char buffers[kDatagramBatchSize][65536]{};
+        };
+
+        std::unique_ptr<BatchRecvBuffer> batchRecvBuf_{};
+#endif
 #ifdef MYNET_HAVE_QUIC
         SSL *quicListener_ = nullptr;
         std::vector<std::unique_ptr<QuicConnState>> quicConns_{};

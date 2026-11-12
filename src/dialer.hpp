@@ -33,8 +33,16 @@ namespace mynet
         int fd = -1;
         using Handler = HandlerType;
         sockaddr_in targetAddr{};
+        uint32_t fwmark{0};      ///< Linux SO_MARK 策略路由标记（防环路）
+        bool transparent{false}; ///< Linux IP_TRANSPARENT 支持（绑定原始源 IP）
 
         virtual ~DialerBase() noexcept { reset(); }
+
+        inline void setMark(uint32_t mark) noexcept { fwmark = mark; }
+        [[nodiscard]] inline uint32_t mark() const noexcept { return fwmark; }
+
+        inline void setTransparent(bool enable) noexcept { transparent = enable; }
+        [[nodiscard]] inline bool isTransparent() const noexcept { return transparent; }
 
         inline void reset() noexcept
         {
@@ -133,6 +141,22 @@ namespace mynet
                 }
             }
 
+            if (fwmark > 0)
+            {
+                if (::setsockopt(fd, SOL_SOCKET, SO_MARK, &fwmark, sizeof(fwmark)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialTcp: setsockopt(SO_MARK={}) failed: {}", fwmark, errnoText(errno));
+                }
+            }
+
+            if (transparent)
+            {
+                if (::setsockopt(fd, SOL_IP, IP_TRANSPARENT, &opt, sizeof(opt)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialTcp: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
+                }
+            }
+
             int rc = ::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in));
             if (rc == 0)
             {
@@ -151,7 +175,7 @@ namespace mynet
         /**
          * @brief 创建非阻塞已连接 UDP 套接字（已关联目标四元组，可用 send/recv 直读）
          */
-        [[nodiscard]] Result<> dialUdp(const char *ip, int port) noexcept
+        [[nodiscard]] Result<> dialUdp(const char *ip, int port, const char *bindInterface = nullptr) noexcept
         {
             contract_assert(ip != nullptr);
             contract_assert(port >= 0 && port <= ((1 << 16) - 1));
@@ -167,13 +191,13 @@ namespace mynet
             }
             targetAddr.sin_port = ::htons(static_cast<uint16_t>(port));
 
-            return dialUdp(targetAddr);
+            return dialUdp(targetAddr, bindInterface);
         }
 
         /**
          * @brief 从目标地址结构体创建非阻塞已连接 UDP 套接字
          */
-        [[nodiscard]] Result<> dialUdp(const sockaddr_in &target) noexcept
+        [[nodiscard]] Result<> dialUdp(const sockaddr_in &target, const char *bindInterface = nullptr) noexcept
         {
             reset();
             ::signal(SIGPIPE, SIG_IGN);
@@ -185,6 +209,32 @@ namespace mynet
                 LOG_ERROR("dialUdp: socket() failed: {}", errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SOCKET_FAILED);
+            }
+
+            if (bindInterface != nullptr && bindInterface[0] != '\0')
+            {
+                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, bindInterface, ::strlen(bindInterface)) < 0)
+                    [[unlikely]]
+                {
+                    LOG_WARN("dialUdp: setsockopt(SO_BINDTODEVICE={}) failed: {}", bindInterface, errnoText(errno));
+                }
+            }
+
+            if (fwmark > 0)
+            {
+                if (::setsockopt(fd, SOL_SOCKET, SO_MARK, &fwmark, sizeof(fwmark)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialUdp: setsockopt(SO_MARK={}) failed: {}", fwmark, errnoText(errno));
+                }
+            }
+
+            if (transparent)
+            {
+                constexpr int opt = 1;
+                if (::setsockopt(fd, SOL_IP, IP_TRANSPARENT, &opt, sizeof(opt)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialUdp: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
+                }
             }
 
             if (::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in)) < 0) [[unlikely]]

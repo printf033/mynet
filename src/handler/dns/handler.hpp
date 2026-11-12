@@ -10,6 +10,7 @@
 
 #include "connection.hpp"
 #include "datagram.hpp"
+#include "cache.hpp"
 #include "dns.hpp"
 #include "handler/inbound.hpp"
 #include "handler/outbound.hpp"
@@ -96,7 +97,8 @@ namespace mynet::handler::dns
 
                 if (parsed->header.isResponse())
                 {
-                    // 客户端收到响应场景
+                    // 客户端收到响应场景：自动注入反向域名缓存
+                    DnsReverseCache::instance().insertFromDnsMessage(*parsed);
                     lastResponse_ = std::move(parsed);
                 }
                 else
@@ -181,7 +183,11 @@ namespace mynet::handler::dns
                 return;
             }
 
-            if (!parsed->header.isResponse() && responder_)
+            if (parsed->header.isResponse())
+            {
+                DnsReverseCache::instance().insertFromDnsMessage(*parsed);
+            }
+            else if (responder_)
             {
                 if (auto reply = responder_(*parsed); reply.has_value())
                 {
@@ -262,6 +268,7 @@ namespace mynet::handler::dns
                     auto resp = DnsMessage::decode(payload);
                     if (resp.has_value() && resp->header.id == txid_)
                     {
+                        DnsReverseCache::instance().insertFromDnsMessage(*resp);
                         responseMessage_ = std::move(resp);
                         requestConsume(2 + msgLen);
                         stage_ = OutboundStage::STREAMING;
@@ -325,6 +332,7 @@ namespace mynet::handler::dns
             auto resp = DnsMessage::decode(payload);
             if (resp.has_value() && resp->header.id == txid_)
             {
+                DnsReverseCache::instance().insertFromDnsMessage(*resp);
                 responseMessage_ = std::move(resp);
             }
         }

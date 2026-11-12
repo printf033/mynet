@@ -546,3 +546,56 @@ TEST(Datagram, HandleReadAndWriteApis)
     handler.reset();
     EXPECT_FALSE(handler.hasOutgoing());
 }
+
+TEST(Datagram, BatchIoRecvmmsgAndSendmmsg)
+{
+    UdpPair pair;
+    ASSERT_TRUE(pair.ok());
+
+    int flags = ::fcntl(pair.rx, F_GETFL, 0);
+    ASSERT_GE(flags, 0);
+    ASSERT_EQ(::fcntl(pair.rx, F_SETFL, flags | O_NONBLOCK), 0);
+
+    RecordingHandler handler;
+    Datagram<RecordingHandler> session;
+    session.bind(handler);
+    EXPECT_TRUE(session.isBatchIoEnabled());
+
+    // 1. 发送 16 个 UDP 报文到 rx 端测试 recvmmsg 批处理
+    constexpr size_t kBatchCount = 16;
+    for (size_t i = 0; i < kBatchCount; ++i)
+    {
+        std::string payload = "batch-packet-" + std::to_string(i);
+        ssize_t s = ::sendto(pair.tx, payload.data(), payload.size(), 0,
+                             reinterpret_cast<const sockaddr *>(&pair.rxAddr),
+                             sizeof(pair.rxAddr));
+        ASSERT_EQ(s, static_cast<ssize_t>(payload.size()));
+    }
+
+    // 单次/循环调用 handleRead 批处理读入
+    EXPECT_EQ(session.handleRead(pair.rx), IO_STATUS::KEEP);
+    EXPECT_EQ(handler.calls, kBatchCount);
+    EXPECT_EQ(handler.lastPayload, "batch-packet-15");
+
+    // 2. 向 handler 灌入 16 条外发数据报测试 sendmmsg 批处理
+    for (size_t i = 0; i < kBatchCount; ++i)
+    {
+        std::string reply = "batch-reply-" + std::to_string(i);
+        handler.sendTo(pair.rxAddr, std::move(reply));
+    }
+    EXPECT_EQ(handler.outgoingCount(), kBatchCount);
+
+    size_t flushed = session.flushTo(pair.tx);
+    EXPECT_EQ(flushed, kBatchCount);
+    EXPECT_EQ(session.sentDatagrams(), kBatchCount);
+    EXPECT_FALSE(session.hasPending());
+
+    // 验证接收端确实完整收到了 16 条报文
+    for (size_t i = 0; i < kBatchCount; ++i)
+    {
+        char buf[64] = {};
+        ssize_t rn = ::recv(pair.rx, buf, sizeof(buf), 0);
+        ASSERT_GT(rn, 0);
+        EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), "batch-reply-" + std::to_string(i));
+    }
+}

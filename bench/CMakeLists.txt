@@ -8,3 +8,4 @@ endfunction()
 
 mynet_bench(bench)
 mynet_bench(bench_network)
+mynet_bench(bench_dae_optimizations)

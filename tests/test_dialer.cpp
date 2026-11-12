@@ -391,3 +391,25 @@ TEST(HandlerDnsTest, OutboundDatagramDnsClient)
     ASSERT_EQ(client.response()->answers.size(), 1u);
     EXPECT_EQ(client.response()->answers[0].ipString(), "1.1.1.1");
 }
+
+TEST(DialerBaseTest, StrategyRoutingOptionsFwmarkAndTransparent)
+{
+    struct DummyHandler : HandlerConnection
+    {
+        void process() {}
+    };
+
+    DialerBase<DummyHandler> dialer;
+    EXPECT_EQ(dialer.mark(), 0u);
+    EXPECT_FALSE(dialer.isTransparent());
+
+    dialer.setMark(0x1F2E);
+    EXPECT_EQ(dialer.mark(), 0x1F2Eu);
+
+    dialer.setTransparent(true);
+    EXPECT_TRUE(dialer.isTransparent());
+
+    dialer.reset();
+    // reset clears fd and targetAddr
+    EXPECT_EQ(dialer.fd, -1);
+}

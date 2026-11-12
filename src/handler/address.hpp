@@ -358,6 +358,38 @@ namespace mynet::handler
 
             return std::nullopt;
         }
+
+        /**
+         * @brief 从已连接套接字提取 Linux TProxy 原始目的地址 (getsockname 或 SO_ORIGINAL_DST 回落)
+         */
+        static std::optional<ProxyAddress> fromTProxyDst(int fd) noexcept
+        {
+            if (fd < 0)
+            {
+                return std::nullopt;
+            }
+
+            sockaddr_storage ss{};
+            socklen_t slen = sizeof(ss);
+            if (::getsockname(fd, reinterpret_cast<sockaddr *>(&ss), &slen) == 0)
+            {
+                if (ss.ss_family == AF_INET)
+                {
+                    const auto *sin = reinterpret_cast<const sockaddr_in *>(&ss);
+                    if (sin->sin_addr.s_addr != INADDR_ANY)
+                    {
+                        return fromIPv4(sin->sin_addr.s_addr, ntohs(sin->sin_port));
+                    }
+                }
+                else if (ss.ss_family == AF_INET6)
+                {
+                    const auto *sin6 = reinterpret_cast<const sockaddr_in6 *>(&ss);
+                    return fromIPv6(reinterpret_cast<const uint8_t *>(&sin6->sin6_addr), ntohs(sin6->sin6_port));
+                }
+            }
+
+            return fromOriginalDst(fd);
+        }
     };
 
 } // namespace mynet::handler

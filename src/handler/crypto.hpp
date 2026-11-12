@@ -433,4 +433,281 @@ namespace mynet::handler::crypto
         return ok;
     }
 
+    /**
+     * @brief RFC 5869 HKDF-SHA256 Extract 步骤（PRK = HMAC-SHA256(salt, ikm)）
+     */
+    inline std::optional<std::array<uint8_t, 32>> hkdfSha256Extract(std::span<const uint8_t> salt,
+                                                                    std::span<const uint8_t> ikm) noexcept
+    {
+        std::array<uint8_t, 32> zeroSalt{};
+        std::span<const uint8_t> actualSalt = salt.empty() ? std::span<const uint8_t>(zeroSalt) : salt;
+        return hmacSha256(actualSalt, ikm);
+    }
+
+    /**
+     * @brief RFC 5869 HKDF-SHA256 Expand 步骤
+     */
+    inline bool hkdfSha256Expand(std::span<const uint8_t> prk, std::span<const uint8_t> info,
+                                 std::span<uint8_t> out) noexcept
+    {
+        if (out.empty())
+        {
+            return true;
+        }
+
+        size_t generated = 0;
+        uint8_t counter = 1;
+        std::array<uint8_t, 32> prevBlock{};
+        bool hasPrev = false;
+
+        while (generated < out.size())
+        {
+            std::vector<uint8_t> stepData;
+            if (hasPrev)
+            {
+                stepData.insert(stepData.end(), prevBlock.begin(), prevBlock.end());
+            }
+            stepData.insert(stepData.end(), info.begin(), info.end());
+            stepData.push_back(counter);
+
+            auto block = hmacSha256(prk, stepData);
+            if (!block.has_value())
+            {
+                return false;
+            }
+
+            const size_t toCopy = std::min<size_t>(out.size() - generated, 32);
+            std::memcpy(out.data() + generated, block->data(), toCopy);
+            generated += toCopy;
+            prevBlock = *block;
+            hasPrev = true;
+            ++counter;
+        }
+
+        return true;
+    }
+
+    /**
+     * @brief RFC 5869 HKDF-SHA256 Extract & Expand
+     */
+    inline bool hkdfSha256(std::span<const uint8_t> secret, std::span<const uint8_t> salt,
+                           std::span<const uint8_t> info, std::span<uint8_t> out) noexcept
+    {
+        // 1. Extract: PRK = HMAC-SHA256(salt, secret)
+        std::array<uint8_t, 32> zeroSalt{};
+        std::span<const uint8_t> actualSalt = salt.empty() ? std::span<const uint8_t>(zeroSalt) : salt;
+
+        auto prk = hmacSha256(actualSalt, secret);
+        if (!prk.has_value())
+        {
+            return false;
+        }
+
+        // 2. Expand
+        return hkdfSha256Expand(*prk, info, out);
+    }
+
+    /**
+     * @brief RFC 8446 / RFC 9000 HKDF-Expand-Label (基于 SHA-256)
+     */
+    inline bool hkdfExpandLabel(std::span<const uint8_t> secret, std::string_view label,
+                                std::span<const uint8_t> context, size_t length,
+                                std::span<uint8_t> out) noexcept
+    {
+        if (out.size() != length)
+        {
+            return false;
+        }
+
+        std::vector<uint8_t> hkdfLabel;
+        hkdfLabel.reserve(2 + 1 + 6 + label.size() + 1 + context.size());
+        // 2B length
+        hkdfLabel.push_back(static_cast<uint8_t>((length >> 8) & 0xFF));
+        hkdfLabel.push_back(static_cast<uint8_t>(length & 0xFF));
+        // 1B label length = 6 ("tls13 ") + label.size()
+        hkdfLabel.push_back(static_cast<uint8_t>(6 + label.size()));
+        hkdfLabel.insert(hkdfLabel.end(), {'t', 'l', 's', '1', '3', ' '});
+        hkdfLabel.insert(hkdfLabel.end(), label.begin(), label.end());
+        // 1B context length
+        hkdfLabel.push_back(static_cast<uint8_t>(context.size()));
+        if (!context.empty())
+        {
+            hkdfLabel.insert(hkdfLabel.end(), context.begin(), context.end());
+        }
+
+        return hkdfSha256Expand(secret, hkdfLabel, out);
+    }
+
+    /**
+     * @brief AES-128-ECB 单块加密（用于 QUIC 报头掩码生成 RFC 9000）
+     */
+    inline bool aes128EcbEncryptBlock(std::span<const uint8_t, 16> key,
+                                      std::span<const uint8_t, 16> in,
+                                      std::span<uint8_t, 16> out) noexcept
+    {
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx)
+        {
+            return false;
+        }
+
+        bool ok = false;
+        do
+        {
+            if (EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), nullptr, key.data(), nullptr) != 1)
+            {
+                break;
+            }
+            EVP_CIPHER_CTX_set_padding(ctx, 0);
+
+            int outLen = 0;
+            if (EVP_EncryptUpdate(ctx, out.data(), &outLen, in.data(), 16) != 1)
+            {
+                break;
+            }
+            int finalLen = 0;
+            if (EVP_EncryptFinal_ex(ctx, out.data() + outLen, &finalLen) != 1)
+            {
+                break;
+            }
+            ok = true;
+        } while (false);
+
+        EVP_CIPHER_CTX_free(ctx);
+        return ok;
+    }
+
+    /**
+     * @brief AES-128-GCM 加密（支持 AAD 关联数据，用于 QUIC 报文封装与测试）
+     */
+    inline bool aes128GcmEncryptWithAad(std::span<const uint8_t, 16> key,
+                                        std::span<const uint8_t, 12> nonce,
+                                        std::span<const uint8_t> aad,
+                                        std::span<const uint8_t> plaintext,
+                                        std::vector<uint8_t> &ciphertext,
+                                        std::span<uint8_t, 16> tag) noexcept
+    {
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx)
+        {
+            return false;
+        }
+
+        bool ok = false;
+        do
+        {
+            if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1)
+            {
+                break;
+            }
+            if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1)
+            {
+                break;
+            }
+            if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce.data()) != 1)
+            {
+                break;
+            }
+
+            int outLen = 0;
+            if (!aad.empty())
+            {
+                if (EVP_EncryptUpdate(ctx, nullptr, &outLen, aad.data(), static_cast<int>(aad.size())) != 1)
+                {
+                    break;
+                }
+            }
+
+            ciphertext.resize(plaintext.size());
+            if (!plaintext.empty())
+            {
+                if (EVP_EncryptUpdate(ctx, ciphertext.data(), &outLen, plaintext.data(),
+                                      static_cast<int>(plaintext.size())) != 1)
+                {
+                    break;
+                }
+            }
+            int finalLen = 0;
+            if (EVP_EncryptFinal_ex(ctx, ciphertext.data() + outLen, &finalLen) != 1)
+            {
+                break;
+            }
+            if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, tag.data()) != 1)
+            {
+                break;
+            }
+            ok = true;
+        } while (false);
+
+        EVP_CIPHER_CTX_free(ctx);
+        return ok;
+    }
+
+    /**
+     * @brief AES-128-GCM 解密（带 AAD 关联数据校验，用于 QUIC Initial RFC 9000 报文解密）
+     */
+    inline bool aes128GcmDecryptWithAad(std::span<const uint8_t, 16> key,
+                                        std::span<const uint8_t, 12> nonce,
+                                        std::span<const uint8_t> aad,
+                                        std::span<const uint8_t> ciphertext,
+                                        std::span<const uint8_t, 16> tag,
+                                        std::vector<uint8_t> &plaintext) noexcept
+    {
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        if (!ctx)
+        {
+            return false;
+        }
+
+        bool ok = false;
+        do
+        {
+            if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1)
+            {
+                break;
+            }
+            if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1)
+            {
+                break;
+            }
+            if (EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce.data()) != 1)
+            {
+                break;
+            }
+
+            int outLen = 0;
+            if (!aad.empty())
+            {
+                if (EVP_DecryptUpdate(ctx, nullptr, &outLen, aad.data(), static_cast<int>(aad.size())) != 1)
+                {
+                    break;
+                }
+            }
+
+            plaintext.resize(ciphertext.size());
+            if (!ciphertext.empty())
+            {
+                if (EVP_DecryptUpdate(ctx, plaintext.data(), &outLen, ciphertext.data(),
+                                      static_cast<int>(ciphertext.size())) != 1)
+                {
+                    break;
+                }
+            }
+            if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, const_cast<uint8_t *>(tag.data())) != 1)
+            {
+                break;
+            }
+            int finalLen = 0;
+            if (EVP_DecryptFinal_ex(ctx, plaintext.data() + outLen, &finalLen) != 1)
+            {
+                break;
+            }
+            plaintext.resize(outLen + finalLen);
+            ok = true;
+        } while (false);
+
+        EVP_CIPHER_CTX_free(ctx);
+        return ok;
+    }
+
 } // namespace mynet::handler::crypto
