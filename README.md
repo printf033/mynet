@@ -289,7 +289,7 @@ FrameDecoder::next (payload 16384B)          1104.7 ns/op    14,831.4 MB/s
 read+appendBigEndian32                          0.7 ns/op             --
 ObjectPool acquire+release (128)                3.8 ns/op             --
 HandlerConnection::pushResponse+takeResponse (1KiB)  22.5 ns/op    45,605.2 MB/s
-HandlerConnection::process echo (1KiB)               47.1 ns/op    21,760.2 MB/s
+EchoBenchHandler::process (1KiB)                     47.1 ns/op    21,760.2 MB/s
 HandlerHttp2 open+echo+close (64 streams)            553.4 ns/op             --
 ```
 
@@ -483,12 +483,12 @@ mynet/
 │   │   ├── lua.hpp             # Sandboxed Lua config loader & hot reload (reloadConfig)
 │   │   └── log.hpp             # Logging setup (mylog -> stderr)
 │   └── handler/                # Protocol and Application Handler Suite (All Handlers)
-│       ├── handler.hpp         # Convenience master aggregator header
 │       ├── inbound.hpp         # Inbound protocol base classes (HandlerInboundConnection / HandlerInboundDatagram)
 │       ├── outbound.hpp        # Outbound protocol base classes (HandlerOutboundConnection / HandlerOutboundDatagram)
 │       ├── address.hpp         # Proxy & network target endpoint abstraction (ProxyAddress)
 │       ├── crypto.hpp          # Crypto primitives & hashing (SHA-224, MD5, AEAD, UUID)
 │       ├── direct.hpp / block.hpp # Direct forwarding and blackhole block handlers (HandlerInboundDirect / HandlerOutboundDirect...)
+│       ├── transparent.hpp     # Linux Netfilter TProxy / Redirect original destination proxy (HandlerInboundRedirect / HandlerInboundTProxy)
 │       ├── dns/                # RFC 1035 / RFC 3596 DNS protocol codec & handlers
 │       │   ├── dns.hpp         # Wire message serialization, parsing & 0xC0xx compression
 │       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
@@ -498,16 +498,17 @@ mynet/
 │       │   ├── v3/             # HTTP/3 QUIC 1-RTT short header, QPACK, varint & stream tables
 │       │   └── http.hpp        # HTTP Proxy tunneling handler (HandlerInboundHttpProxy)
 │       ├── socks/              # SOCKS protocol family (HandlerInboundSocks / HandlerInboundSocks4 / HandlerInboundSocks5 / HandlerOutboundSocks5)
-│       ├── trojan/             # Trojan protocol inbound/outbound authentication & tunneling (HandlerInboundTrojan / HandlerOutboundTrojan)
-│       ├── vless/              # VLESS v0 protocol UUID authentication & zero-copy passthrough (HandlerInboundVless / HandlerOutboundVless)
-│       ├── vmess/              # VMess protocol HMAC-MD5 header authentication (HandlerInboundVmess)
-│       ├── hysteria2/          # Hysteria 2 protocol handshake & forwarding (HandlerInboundHysteria2 / HandlerOutboundHysteria2)
-│       ├── tuic/               # TUIC v5 protocol handling (HandlerInboundTuic)
-│       ├── shadowsocks/        # Shadowsocks AEAD handler (HandlerInboundShadowsocks)
-│       ├── shadowtls/          # ShadowTLS SNI sniffing & HMAC challenge multiplexer (HandlerInboundShadowTls)
-│       ├── snell/              # Snell v1~v4 protocol handling (HandlerInboundSnell)
-│       ├── transparent/        # Linux Netfilter TProxy / Redirect original destination proxy (HandlerInboundRedirect / HandlerInboundTProxy)
-│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound (HandlerInboundMixed)
+│       ├── sniffing/           # Deep packet sniffing engine (TLS SNI, HTTP Host, QUIC, DNS, STUN, BT, SSH...)
+│       └── proxy/              # Private & tunnel proxy protocols
+│           ├── trojan.hpp      # Trojan protocol inbound/outbound authentication & tunneling
+│           ├── vless.hpp       # VLESS v0 protocol UUID authentication & zero-copy passthrough
+│           ├── vmess.hpp       # VMess protocol HMAC-MD5 header authentication
+│           ├── hysteria2.hpp   # Hysteria 2 protocol handshake & forwarding
+│           ├── tuic.hpp        # TUIC v5 protocol handling
+│           ├── shadowsocks.hpp # Shadowsocks AEAD handler
+│           ├── shadowtls.hpp   # ShadowTLS SNI sniffing & HMAC challenge multiplexer
+│           ├── snell.hpp       # Snell v1~v4 protocol handling
+│           └── mixed.hpp       # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound
 │
 ├── config/                     # Runtime configuration
 │   └── config.lua              # Documented sandboxed Lua configuration (all sections)

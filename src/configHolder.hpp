@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compat.hpp"
 #include <atomic>
 #include <cstdint>
 #include <mutex>

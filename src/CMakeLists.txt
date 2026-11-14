@@ -15,7 +15,18 @@ target_compile_options(mynet INTERFACE
     $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-Wall -Wextra -Wpedantic>
 )
 
-find_package(OpenSSL REQUIRED)
+if(ANDROID)
+    find_library(CRYPTO_LIB crypto)
+    find_library(SSL_LIB ssl)
+    if(NOT TARGET OpenSSL::SSL)
+        add_library(OpenSSL::SSL INTERFACE IMPORTED)
+        target_link_libraries(OpenSSL::SSL INTERFACE ${SSL_LIB} ${CRYPTO_LIB})
+    endif()
+    option(MYNET_ENABLE_URING "Enable Linux io_uring Proactor engine" OFF)
+else()
+    find_package(OpenSSL REQUIRED)
+    option(MYNET_ENABLE_URING "Enable Linux io_uring Proactor engine" ON)
+endif()
 find_package(Threads REQUIRED)
 
 # -----------------------------------------------------------------------------
@@ -26,9 +37,10 @@ find_package(Threads REQUIRED)
 # 未命中则维持 SSL_read 同步慢路径，行为零回归。
 # 必须在 find_package(OpenSSL) 之后，否则探测链接不到 libssl。
 # -----------------------------------------------------------------------------
-include(CheckCXXSourceCompiles)
-set(CMAKE_REQUIRED_LIBRARIES OpenSSL::SSL)
-set(MYNET_KTLS_PROBE_SOURCE [[
+if(NOT ANDROID)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_LIBRARIES OpenSSL::SSL)
+    set(MYNET_KTLS_PROBE_SOURCE [[
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 int main()
@@ -43,23 +55,25 @@ int main()
     return 0;
 }
 ]])
-check_cxx_source_compiles("${MYNET_KTLS_PROBE_SOURCE}" MYNET_HAVE_KTLS)
-unset(CMAKE_REQUIRED_LIBRARIES)
-if(MYNET_HAVE_KTLS)
-    target_compile_definitions(mynet INTERFACE MYNET_HAVE_KTLS=1)
+    check_cxx_source_compiles("${MYNET_KTLS_PROBE_SOURCE}" MYNET_HAVE_KTLS)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+    if(MYNET_HAVE_KTLS)
+        target_compile_definitions(mynet INTERFACE MYNET_HAVE_KTLS=1)
+    endif()
 endif()
 
 # D4：Debug 配置下自动定义 MYNET_DEBUG，启用 ObjectPool 线程归属断言等诊断；
 # Release/RelWithDebInfo/MinSizeRel 不定义，断言与所有者记录整体编译剔除，零开销。
 target_compile_definitions(mynet INTERFACE
     $<$<CONFIG:Debug>:MYNET_DEBUG=1>
+    $<$<BOOL:${MYNET_ENABLE_URING}>:MYNET_ENABLE_URING=1>
 )
 
 target_link_libraries(mynet INTERFACE
     mylog::mylog
     OpenSSL::SSL
     Threads::Threads
-    uring
+    $<$<BOOL:${MYNET_ENABLE_URING}>:uring>
     llhttp
 )
 

@@ -114,12 +114,12 @@ namespace mynet
 
         virtual ~HandlerDatagram() noexcept = default;
 
-        HandlerDatagram(const HandlerDatagram &) = delete ("a datagram handler owns the outgoing queue for one socket");
+        HandlerDatagram(const HandlerDatagram &) = delete; // a datagram handler owns the outgoing queue for one socket
         HandlerDatagram &
-        operator=(const HandlerDatagram &) = delete ("a datagram handler owns the outgoing queue for one socket");
-        HandlerDatagram(HandlerDatagram &&) = delete ("a datagram handler owns the outgoing queue for one socket");
+        operator=(const HandlerDatagram &) = delete; // a datagram handler owns the outgoing queue for one socket
+        HandlerDatagram(HandlerDatagram &&) = delete; // a datagram handler owns the outgoing queue for one socket
         HandlerDatagram &
-        operator=(HandlerDatagram &&) = delete ("a datagram handler owns the outgoing queue for one socket");
+        operator=(HandlerDatagram &&) = delete; // a datagram handler owns the outgoing queue for one socket
 
         /**
          * @brief 单个完整数据报到达业务入口钩子（派生类实现具体的协议解析、转发或回显）
@@ -353,14 +353,10 @@ namespace mynet
         Datagram() noexcept = default;
         ~Datagram() noexcept { reset(); }
 
-        Datagram(const Datagram &) =
-            delete ("a datagram binding owns a handler reference and the receive window of one socket");
-        Datagram &operator=(const Datagram &) =
-            delete ("a datagram binding owns a handler reference and the receive window of one socket");
-        Datagram(Datagram &&) =
-            delete ("a datagram binding owns a handler reference and the receive window of one socket");
-        Datagram &operator=(Datagram &&) =
-            delete ("a datagram binding owns a handler reference and the receive window of one socket");
+        Datagram(const Datagram &) = delete; // a datagram binding owns a handler reference and the receive window of one socket
+        Datagram &operator=(const Datagram &) = delete; // a datagram binding owns a handler reference and the receive window of one socket
+        Datagram(Datagram &&) = delete; // a datagram binding owns a handler reference and the receive window of one socket
+        Datagram &operator=(Datagram &&) = delete; // a datagram binding owns a handler reference and the receive window of one socket
 
         /**
          * @brief 计算接收窗口容量（纯函数，便于单独验证边界）

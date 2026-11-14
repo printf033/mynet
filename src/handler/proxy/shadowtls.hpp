@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file proxy/shadowtls/shadowtls.hpp
+ * @file handler/proxy/shadowtls.hpp
  * @brief ShadowTLS (v1/v2/v3) 协议服务端状态机处理器。
  */
 

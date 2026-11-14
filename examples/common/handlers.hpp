@@ -19,7 +19,7 @@ namespace mynet::example
     /**
      * @brief 流式回显处理器
      *
-     * HandlerConnection::echo() 本身即字节流回显，无需额外代码。
+     * process() 显式实现字节流回显。
      * 声明 kEnableSplice 后，明文 TCP 上由 handler 在 onConnect(fd) 钩子中
      * 将零拷贝目标设定为对端套接字（socket -> pipe -> socket），数据不进入用户态；
      * TLS 下自动退回用户态回显。
@@ -30,6 +30,20 @@ namespace mynet::example
         static constexpr bool kEnableSplice = true;
 
         void onConnect(int fd) noexcept override { setSpliceTarget(fd); }
+
+        void process()
+        {
+            const size_t n = requestBytes();
+            if (n == 0)
+            {
+                return;
+            }
+            if (!pushResponse(std::string_view(requestBegin(), n)))
+            {
+                LOG_WARN("SpliceEchoHandler: response queue full, echoing dropped");
+            }
+            requestClear();
+        }
 
         void reset() noexcept override { HandlerConnection::reset(); }
     };

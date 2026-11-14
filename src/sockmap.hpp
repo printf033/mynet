@@ -1,31 +1,44 @@
 #pragma once
 
 /**
- * @file handler/sockmap.hpp
- * @brief eBPF BPF_MAP_TYPE_SOCKMAP 内核套接字流卸载与 Splice 零拷贝双模抽象
+ * @file sockmap.hpp
+ * @brief eBPF BPF_MAP_TYPE_SOCKMAP 内核套接字流卸载与 Splice 零拷贝双模抽象（实验性原型接口）
  *
- * 借鉴 dae 的 TCP Stream Offload (control/tcp_offload_linux.go)：
- * 1. 在具备 eBPF 环境的主机上，将握手完成的 clientFd 与 upstreamFd 写入 sockmap；
- *    由内核 sk_skb/tcp_offload_redirect 在套接字层直接重定向转发，达成 0 上下文切换。
- * 2. 在非 eBPF 或降级模式下，无缝回退至 mynet 原生 Linux splice(2) 管道零拷贝直通。
+ * 【现状与技术定位说明】：
+ * 1. 本类为借鉴 dae TCP Stream Offload 设计的实验性套接字映射接口原型（提供用户态 BPF map 系统调用封装）。
+ * 2. 完整的 eBPF 内核重定向必须依赖内核态挂载的 sk_skb 程序（BPF_PROG_TYPE_SK_SKB /
+ *    BPF_SK_SKB_STREAM_VERDICT，如通过 tc / bpftool 或外部 daemon 预先挂载至 sockmap 描述符）。
+ *    mynet 当前未内置编译、加载或挂载 eBPF 字节码程序，因此单纯写入 sockmap 不会自动产生内核转发行为。
+ * 3. 在当前项目的主线业务代理链路中（如 HandlerInboundRedirect / HandlerInboundTProxy），
+ *    实际运行的零拷贝转发路径 100% 由原生 Linux splice(2) 双向管道零拷贝直通驱动。
+ * 4. enableOffloadOrSplice() 作为双模策略接口：当未提供已挂载转发程序的 sockmapFd 时（默认 -1），
+ *    平滑回退至 splice(2) 零拷贝直通。
  */
 
-#include "../connection.hpp"
+#include "connection.hpp"
 #include "config/log.hpp"
 #include <cstdint>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #if defined(__linux__)
 #include <linux/bpf.h>
+#include <linux/magic.h>
 #include <sys/syscall.h>
+#include <sys/vfs.h>
+
+#ifndef BPF_FS_MAGIC
+#define BPF_FS_MAGIC 0xcafe4a11
+#endif
 #endif
 
-namespace mynet::handler::sockmap
+namespace mynet
 {
 
     /**
-     * @brief eBPF Sockmap 管理器
+     * @brief eBPF Sockmap 用户态接口管理器（实验性原型 / Splice 降级抽象）
+     *
+     * 注意：仅向 sockmap 写入套接字 fd 不会自动重定向数据；完整的内核转发需预先将
+     * BPF_SK_SKB_STREAM_VERDICT 程序挂载到 sockmapFd 上。未提供有效描述符时默认回退至 splice(2)。
      */
     class SockmapManager
     {
@@ -36,11 +49,27 @@ namespace mynet::handler::sockmap
         [[nodiscard]] static bool isSupported() noexcept
         {
 #if defined(__linux__)
-            struct stat st{};
-            if (::stat("/sys/fs/bpf", &st) == 0 && S_ISDIR(st.st_mode))
+            struct statfs fs{};
+            if (::statfs("/sys/fs/bpf", &fs) == 0 &&
+                static_cast<unsigned long>(fs.f_type) == static_cast<unsigned long>(BPF_FS_MAGIC))
             {
                 return true;
             }
+
+#if defined(__NR_bpf)
+            union bpf_attr attr{};
+            attr.map_type = BPF_MAP_TYPE_SOCKMAP;
+            attr.key_size = sizeof(uint32_t);
+            attr.value_size = sizeof(uint32_t);
+            attr.max_entries = 1;
+
+            long mapFd = ::syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
+            if (mapFd >= 0)
+            {
+                ::close(static_cast<int>(mapFd));
+                return true;
+            }
+#endif
 #endif
             return false;
         }
@@ -161,4 +190,14 @@ namespace mynet::handler::sockmap
         }
     };
 
-} // namespace mynet::handler::sockmap
+} // namespace mynet
+
+namespace mynet::sockmap
+{
+    using mynet::SockmapManager;
+}
+
+namespace mynet::handler::sockmap
+{
+    using mynet::SockmapManager;
+}

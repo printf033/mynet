@@ -175,14 +175,11 @@ namespace mynet
 
         virtual ~HandlerConnection() noexcept = default;
 
-        HandlerConnection(const HandlerConnection &) =
-            delete ("a connection handler holds parser state bound to one connection");
-        HandlerConnection &operator=(const HandlerConnection &) =
-            delete ("a connection handler holds parser state bound to one connection");
-        HandlerConnection(HandlerConnection &&) =
-            delete ("a connection handler holds parser state bound to one connection");
+        HandlerConnection(const HandlerConnection &) = delete; // a connection handler holds parser state bound to one connection
+        HandlerConnection &operator=(const HandlerConnection &) = delete; // a connection handler holds parser state bound to one connection
+        HandlerConnection(HandlerConnection &&) = delete; // a connection handler holds parser state bound to one connection
         HandlerConnection &
-        operator=(HandlerConnection &&) = delete ("a connection handler holds parser state bound to one connection");
+        operator=(HandlerConnection &&) = delete; // a connection handler holds parser state bound to one connection
 
         /**
          * @brief 重置处理器状态（派生类重置专属解析器后应调用本实现）
@@ -495,25 +492,9 @@ namespace mynet
         virtual void onParseError([[maybe_unused]] const char *reason) noexcept {}
 
         /**
-         * @brief 默认业务处理入口：当派生协议未定制处理逻辑时，默认回显 (Echo) 请求数据
+         * @brief 默认业务处理入口：无操作，具体业务由派生处理器实现
          */
-        inline void process() { echo(); }
-
-        /**
-         * @brief 默认执行逻辑：标准 Echo 协议回显
-         */
-        void echo()
-        {
-            if (requestBuffer_.empty()) [[unlikely]]
-            {
-                return;
-            }
-            if (!pushResponse(requestBuffer_.readableView())) [[unlikely]]
-            {
-                LOG_WARN("HandlerConnection::echo: response queue full, echoing dropped");
-            }
-            requestBuffer_.reset();
-        }
+        inline void process() {}
 
     protected:
         RequestBuffer requestBuffer_;
@@ -637,14 +618,10 @@ namespace mynet
         Connection() noexcept = default;
         ~Connection() noexcept { reset(); }
 
-        Connection(const Connection &) =
-            delete ("a connection owns a socket, its TLS state and its handler; there is nothing to share");
-        Connection &operator=(const Connection &) =
-            delete ("a connection owns a socket, its TLS state and its handler; there is nothing to share");
-        Connection(Connection &&) noexcept =
-            delete ("a connection owns a socket, its TLS state and its handler; it stays put in its session");
-        Connection &operator=(Connection &&) noexcept =
-            delete ("a connection owns a socket, its TLS state and its handler; it stays put in its session");
+        Connection(const Connection &) = delete; // a connection owns a socket, its TLS state and its handler; there is nothing to share
+        Connection &operator=(const Connection &) = delete; // a connection owns a socket, its TLS state and its handler; there is nothing to share
+        Connection(Connection &&) noexcept = delete; // a connection owns a socket, its TLS state and its handler; it stays put in its session
+        Connection &operator=(Connection &&) noexcept = delete; // a connection owns a socket, its TLS state and its handler; it stays put in its session
 
         inline void reset() noexcept
         {

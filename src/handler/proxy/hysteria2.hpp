@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file handler/hysteria2/hysteria2.hpp
+ * @file handler/proxy/hysteria2.hpp
  * @brief Hysteria 2 代理协议入站状态机处理器 (HandlerInboundHysteria2) 与出站协议处理器 (HandlerOutboundHysteria2)。
  */
 

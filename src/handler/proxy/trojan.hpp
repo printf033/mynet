@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file handler/trojan/trojan.hpp
+ * @file handler/proxy/trojan.hpp
  * @brief Trojan 代理协议入站状态机处理器 (HandlerInboundTrojan) 与出站协议处理器 (HandlerOutboundTrojan)。
  */
 

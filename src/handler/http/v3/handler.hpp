@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file http/v3/handler.hpp
+ * @file handler/http/v3/handler.hpp
  * @brief RFC 9114 HTTP/3 统一协议处理器实现（基于 QUIC/UDP 数据报与逻辑流多路复用）。
  *
  * 架构参考 HTTP/2 模块成熟设计，全面基于 mynet 基础库基础设施：
@@ -113,16 +113,12 @@ namespace mynet
                 clearAllStreams();
             }
 
-            HandlerHttp3(const HandlerHttp3 &) =
-                delete ("an http3 handler owns socket, streams and parser state");
+            HandlerHttp3(const HandlerHttp3 &) = delete; // an http3 handler owns socket, streams and parser state
             HandlerHttp3 &
-            operator=(const HandlerHttp3 &) =
-                delete ("an http3 handler owns socket, streams and parser state");
-            HandlerHttp3(HandlerHttp3 &&) =
-                delete ("an http3 handler owns socket, streams and parser state");
+            operator=(const HandlerHttp3 &) = delete; // an http3 handler owns socket, streams and parser state
+            HandlerHttp3(HandlerHttp3 &&) = delete; // an http3 handler owns socket, streams and parser state
             HandlerHttp3 &
-            operator=(HandlerHttp3 &&) =
-                delete ("an http3 handler owns socket, streams and parser state");
+            operator=(HandlerHttp3 &&) = delete; // an http3 handler owns socket, streams and parser state
 
             void reset() noexcept override
             {

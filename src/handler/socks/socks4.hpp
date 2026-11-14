@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file proxy/socks/socks4.hpp
+ * @file handler/socks/socks4.hpp
  * @brief SOCKS4 / SOCKS4a 代理协议服务端状态机处理器。
  */
 

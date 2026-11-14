@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compat.hpp"
 #include "reflection.hpp"
 #include <array>
 #include <cerrno>
@@ -60,10 +61,14 @@ namespace mynet
     };
 
     /**
-     * @brief 编译期校验 ERR 枚举总数与反射信息一致
+     * @brief 编译期校验 ERR 枚举总数与反射信息一致（支持无反射编译器兜底）
      */
+#if MYLOG_HAS_REFLECTION
     inline constexpr size_t kErrCount = mylog::reflect::countEnumMembers<ERR>();
     static_assert(kErrCount == 36, "Expected 36 library runtime error enumerators");
+#else
+    inline constexpr size_t kErrCount = 36;
+#endif
 
     /**
      * @brief 非阻塞传输终止原因枚举
@@ -82,8 +87,12 @@ namespace mynet
     /**
      * @brief 编译期校验 IO_END 枚举总数与反射信息一致
      */
+#if MYLOG_HAS_REFLECTION
     inline constexpr size_t kIoEndCount = mylog::reflect::countEnumMembers<IO_END>();
     static_assert(kIoEndCount == 4, "Expected 4 IO end outcomes");
+#else
+    inline constexpr size_t kIoEndCount = 4;
+#endif
 
     /**
      * @brief I/O 事件处理后套接字保留决策
@@ -97,8 +106,12 @@ namespace mynet
     /**
      * @brief 编译期校验 IO_STATUS 枚举总数与反射信息一致
      */
+#if MYLOG_HAS_REFLECTION
     inline constexpr size_t kIoStatusCount = mylog::reflect::countEnumMembers<IO_STATUS>();
     static_assert(kIoStatusCount == 2, "Expected 2 IO status outcomes");
+#else
+    inline constexpr size_t kIoStatusCount = 2;
+#endif
 
     namespace detail
     {

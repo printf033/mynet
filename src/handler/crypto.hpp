@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file proxy/crypto.hpp
+ * @file handler/crypto.hpp
  * @brief 代理协议通用加密、摘要与认证辅助工具（基于 OpenSSL 3.x）
  */
 
@@ -11,6 +11,7 @@
 #include <cstring>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <optional>
 #include <span>
 #include <string>
@@ -66,8 +67,8 @@ namespace mynet::handler::crypto
     inline std::string sha224Hex(std::string_view input)
     {
         std::array<uint8_t, 28> hash{};
-        size_t len = 0;
-        if (EVP_Q_digest(nullptr, "SHA224", nullptr, input.data(), input.size(), hash.data(), &len) != 1)
+        unsigned int len = 0;
+        if (EVP_Digest(input.data(), input.size(), hash.data(), &len, EVP_sha224(), nullptr) != 1)
         {
             return {};
         }
@@ -80,8 +81,8 @@ namespace mynet::handler::crypto
     inline std::optional<std::array<uint8_t, 32>> sha256(std::span<const uint8_t> input) noexcept
     {
         std::array<uint8_t, 32> hash{};
-        size_t len = 0;
-        if (EVP_Q_digest(nullptr, "SHA256", nullptr, input.data(), input.size(), hash.data(), &len) != 1 || len != 32)
+        unsigned int len = 0;
+        if (EVP_Digest(input.data(), input.size(), hash.data(), &len, EVP_sha256(), nullptr) != 1 || len != 32)
         {
             return std::nullopt;
         }
@@ -95,9 +96,9 @@ namespace mynet::handler::crypto
                                                              std::span<const uint8_t> data) noexcept
     {
         std::array<uint8_t, 32> out{};
-        size_t outLen = 0;
-        if (EVP_Q_mac(nullptr, "HMAC", nullptr, "SHA256", nullptr, key.data(), key.size(), data.data(), data.size(),
-                      out.data(), out.size(), &outLen) == nullptr ||
+        unsigned int outLen = 0;
+        if (HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()), data.data(), data.size(),
+                 out.data(), &outLen) == nullptr ||
             outLen != 32)
         {
             return std::nullopt;
@@ -111,8 +112,8 @@ namespace mynet::handler::crypto
     inline std::optional<std::array<uint8_t, 16>> md5(std::span<const uint8_t> input) noexcept
     {
         std::array<uint8_t, 16> hash{};
-        size_t len = 0;
-        if (EVP_Q_digest(nullptr, "MD5", nullptr, input.data(), input.size(), hash.data(), &len) != 1 || len != 16)
+        unsigned int len = 0;
+        if (EVP_Digest(input.data(), input.size(), hash.data(), &len, EVP_md5(), nullptr) != 1 || len != 16)
         {
             return std::nullopt;
         }
@@ -126,9 +127,9 @@ namespace mynet::handler::crypto
                                                           std::span<const uint8_t> data) noexcept
     {
         std::array<uint8_t, 16> out{};
-        size_t outLen = 0;
-        if (EVP_Q_mac(nullptr, "HMAC", nullptr, "MD5", nullptr, key.data(), key.size(), data.data(), data.size(),
-                      out.data(), out.size(), &outLen) == nullptr ||
+        unsigned int outLen = 0;
+        if (HMAC(EVP_md5(), key.data(), static_cast<int>(key.size()), data.data(), data.size(),
+                 out.data(), &outLen) == nullptr ||
             outLen != 16)
         {
             return std::nullopt;
@@ -142,9 +143,9 @@ namespace mynet::handler::crypto
     inline bool hmacSha1(std::span<const uint8_t> key, std::span<const uint8_t> data,
                          std::span<uint8_t, 20> out) noexcept
     {
-        size_t outLen = 0;
-        return EVP_Q_mac(nullptr, "HMAC", nullptr, "SHA1", nullptr, key.data(), key.size(), data.data(), data.size(),
-                         out.data(), out.size(), &outLen) != nullptr &&
+        unsigned int outLen = 0;
+        return HMAC(EVP_sha1(), key.data(), static_cast<int>(key.size()), data.data(), data.size(),
+                    out.data(), &outLen) != nullptr &&
                outLen == 20;
     }
 

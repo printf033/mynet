@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file proxy/vmess/vmess.hpp
+ * @file handler/proxy/vmess.hpp
  * @brief VMess 代理协议服务端状态机处理器。
  */
 

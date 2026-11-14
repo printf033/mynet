@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file handler/tuic/tuic.hpp
+ * @file handler/proxy/tuic.hpp
  * @brief TUIC (v5) 代理协议入站状态机处理器 (HandlerInboundTuic)。
  */
 

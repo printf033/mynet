@@ -24,7 +24,7 @@ namespace
      *
      * splice 路由由具体处理器类型选择：Connection::isSpliceEnabled() 要求
      * HandlerType::kEnableSplice 为真且运行期 spliceEnabled() 为真。
-     * 回显逻辑本身来自 HandlerConnection::process()，无需重写。
+     * process() 显式实现回显；基类默认不处理请求。
      */
     class SpliceEchoHandler : public HandlerConnection
     {
@@ -32,6 +32,16 @@ namespace
         static constexpr bool kEnableSplice = true;
 
         void onConnect(int fd) noexcept override { setSpliceTarget(fd); }
+
+        void process()
+        {
+            const size_t n = requestBytes();
+            if (n > 0)
+            {
+                [[maybe_unused]] auto result = pushResponse(std::string_view(requestBegin(), n));
+                requestClear();
+            }
+        }
 
         void reset() noexcept override { HandlerConnection::reset(); }
     };
@@ -79,22 +89,14 @@ namespace
     static_assert(MandatoryMethodDatagram<CombinedEchoHandler>);
 } // namespace
 
-TEST(HandlerConnection, EchoEchoesWhateverWasAppended)
+TEST(HandlerConnection, DefaultProcessDoesNotHandleRequests)
 {
     HandlerConnection handler;
     feed(handler, "hello");
+    handler.process();
     EXPECT_FALSE(handler.hasResponse());
-    handler.echo();
-    ASSERT_TRUE(handler.hasResponse());
-    EXPECT_EQ(handler.takeResponse(), "hello");
-    EXPECT_EQ(handler.requestBytes(), size_t{0}); // 回显操作已完整消费请求
-}
-
-TEST(HandlerConnection, EchoOnAnEmptyBufferProducesNothing)
-{
-    HandlerConnection handler;
-    handler.echo();
-    EXPECT_FALSE(handler.hasResponse());
+    EXPECT_EQ(handler.requestBytes(), size_t{5});
+    EXPECT_EQ(std::string(handler.requestBegin(), handler.requestBytes()), "hello");
 }
 
 TEST(HandlerConnection, ResponseQueueIsFifo)
@@ -144,10 +146,10 @@ TEST(HandlerConnection, DirectWritableZeroCopyIngress)
     handler.commitRequest(16);
 
     EXPECT_EQ(handler.requestBytes(), 16u);
-    handler.echo();
-    ASSERT_TRUE(handler.hasResponse());
-    EXPECT_EQ(handler.takeResponse(), "direct-zero-copy");
-    EXPECT_EQ(handler.requestBytes(), 0u);
+    handler.process();
+    EXPECT_FALSE(handler.hasResponse());
+    EXPECT_EQ(handler.requestBytes(), 16u);
+    EXPECT_EQ(std::string(handler.requestBegin(), handler.requestBytes()), "direct-zero-copy");
 }
 
 TEST(HandlerConnection, RequestConsumeAndClearMoveTheCursor)

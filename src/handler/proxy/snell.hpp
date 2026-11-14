@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file handler/snell/snell.hpp
+ * @file handler/proxy/snell.hpp
  * @brief Snell 代理协议入站状态机处理器 (HandlerInboundSnell)。
  */
 

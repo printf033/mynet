@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file handler/transparent/transparent.hpp
+ * @file handler/transparent.hpp
  * @brief Linux Netfilter 透明代理入站状态机处理器与 UDP TProxy 报文流水线
  *
  * 借鉴 dae 与 sing-box 设计：
@@ -10,11 +10,11 @@
  * 3. HandlerInboundDatagramTProxy: UDP TProxy 数据报透明代理 (IP_RECVORIGDSTADDR + QUIC/DNS 嗅探)
  */
 
-#include "../address.hpp"
-#include "../inbound.hpp"
-#include "../sniffing.hpp"
-#include "../dns/cache.hpp"
-#include "../../datagram.hpp"
+#include "address.hpp"
+#include "inbound.hpp"
+#include "sniffing/sniffer.hpp"
+#include "dns/cache.hpp"
+#include "../datagram.hpp"
 #include <cstdint>
 #include <functional>
 #include <netinet/in.h>
@@ -172,14 +172,15 @@ namespace mynet::handler
                 return;
             }
 
-            // 检查首字节是否可能属于已知可嗅探协议 (TCP 仅嗅探 TLS / HTTP / BitTorrent / SSH)
+            // 检查首字节是否可能属于已知可嗅探协议 (TCP 嗅探 TLS / HTTP / BitTorrent / SSH / RDP)
             const uint8_t b0 = data[0];
             const bool couldBeTls = (b0 == 0x16);
             const bool couldBeHttp = (b0 == 'G' || b0 == 'P' || b0 == 'H' || b0 == 'D' ||
                                       b0 == 'C' || b0 == 'O' || b0 == 'T');
             const bool couldBeBt = (b0 == 19);
             const bool couldBeSsh = (b0 == 'S');
-            const bool couldBeSniffable = couldBeTls || couldBeHttp || couldBeBt || couldBeSsh;
+            const bool couldBeRdp = (b0 == 0x03);
+            const bool couldBeSniffable = couldBeTls || couldBeHttp || couldBeBt || couldBeSsh || couldBeRdp;
 
             // 报文长度已超过嗅探窗口，或已知不可能属于嗅探协议，执行 DNS 反向还原兜底
             if (avail >= maxSniffBytes_ || !couldBeSniffable || avail >= 512)
@@ -244,7 +245,7 @@ namespace mynet::handler
     /**
      * @brief UDP TProxy 数据报透明代理入站处理器
      *
-     * 负责解析带有 IP_RECVORIGDSTADDR / IPV6_RECVORIGDSTADDR 原始目的地址控制消息的 UDP 报文，
+     * 负责解析带有 IP_RECVORIGDSTADDR 原始目的地址控制消息的 UDP 报文，
      * 联动 QUIC Initial 与 DNS 嗅探器还原目标域名。
      */
     class HandlerInboundDatagramTProxy : public HandlerInboundDatagram
@@ -328,7 +329,7 @@ namespace mynet::handler
         }
 
         /**
-         * @brief 从 msghdr 辅助控制信息中提取原始目的 IPv4 地址 (Linux IP_ORIGDSTADDR)
+         * @brief 从 msghdr 辅助控制信息中提取原始目的 IPv4 地址 (Linux IP_ORIGDSTADDR / IP_RECVORIGDSTADDR)
          */
         [[nodiscard]] static std::optional<sockaddr_in> extractOrigDst(const msghdr &msg) noexcept
         {

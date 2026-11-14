@@ -16,7 +16,7 @@
    * 2.6 [策略路由标记与防环路机制（SO_MARK & IP_TRANSPARENT）](#26-策略路由标记与防环路机制so_mark--ip_transparent)
 3. [mynet 现状差距与瓶颈诊断](#3-mynet-现状差距与瓶颈诊断)
 4. [系统性优化实施方案与技术规范](#4-系统性优化实施方案与技术规范)
-   * 4.1 [模块一：现代化 C++26 零拷贝嗅探引擎（src/handler/sniffing.hpp）](#41-模块一现代化-c26-零拷贝嗅探引擎srchandlersniffinghpp)
+   * 4.1 [模块一：现代化 C++26 零拷贝嗅探引擎（src/handler/sniffing/sniffer.hpp）](#41-模块一现代化-c26-零拷贝嗅探引擎srchandlersniffingsnifferhpp)
    * 4.2 [模块二：UDP 批量收发流水线（src/datagram.hpp）](#42-模块二udp-批量收发流水线srcdatagramhpp)
    * 4.3 [模块三：透明代理与策略套接字增强（transparent.hpp & dialer.hpp）](#43-模块三透明代理与策略套接字增强transparenthpp--dialerhpp)
    * 4.4 [模块四：DNS 响应逆向域名缓存（src/handler/dns/cache.hpp）](#44-模块四dns-响应逆向域名缓存srchandlerdnscachehpp)
@@ -137,7 +137,7 @@
 
 ## 4. 系统性优化实施方案与技术规范
 
-### 4.1 模块一：现代化 C++26 零拷贝嗅探引擎（`src/handler/sniffing.hpp`）
+### 4.1 模块一：现代化 C++26 零拷贝嗅探引擎（`src/handler/sniffing/sniffer.hpp`）
 
 #### 4.1.1 核心设计目标
 * **纯 C++26 编写**：采用 `std::span<const uint8_t>` 与 `std::string_view`，整个嗅探过程**零堆内存分配**。
@@ -281,7 +281,7 @@ if (transparent) {
 
 ```mermaid
 flowchart TD
-    M1["阶段 1: 零拷贝域名嗅探引擎 (sniffing.hpp)"] --> M2["阶段 2: 透明代理与嗅探器集成 (transparent.hpp)"]
+    M1["阶段 1: 零拷贝域名嗅探引擎 (sniffing/sniffer.hpp)"] --> M2["阶段 2: 透明代理与嗅探器集成 (transparent.hpp)"]
     M2 --> M3["阶段 3: UDP recvmmsg / sendmmsg 批处理优化 (datagram.hpp)"]
     M3 --> M4["阶段 4: 套接字策略与 UDP TProxy (dialer.hpp & transparent.hpp)"]
     M4 --> M5["阶段 5: DNS 逆向 IP->Domain 映射缓存 (dns/cache.hpp)"]
@@ -290,10 +290,10 @@ flowchart TD
 
 | 阶段 | 核心任务 | 交付产物 | 预期收益 |
 | :--- | :--- | :--- | :--- |
-| **Phase 1** | 实现 TLS/HTTP/QUIC 零拷贝嗅探器 | `src/handler/sniffing.hpp`<br>`tests/test_sniffing.cpp` | 为透明代理提供域名识别核心库，单元测试 100% 覆盖 |
-| **Phase 2** | 透明代理集成嗅探器与自动升级 | `src/handler/transparent/transparent.hpp`<br>`tests/test_proxy_protocols.cpp` | 拦截流量自动提取 SNI 并升级目标为域名，彻底解决 CDN/分流失效 |
+| **Phase 1** | 实现 TLS/HTTP/QUIC 零拷贝嗅探器 | `src/handler/sniffing/sniffer.hpp`<br>`tests/test_sniffing.cpp` | 为透明代理提供域名识别核心库，单元测试 100% 覆盖 |
+| **Phase 2** | 透明代理集成嗅探器与自动升级 | `src/handler/transparent.hpp`<br>`tests/test_proxy_protocols.cpp` | 拦截流量自动提取 SNI 并升级目标为域名，彻底解决 CDN/分流失效 |
 | **Phase 3** | UDP 批量收发流水线改造 | `src/datagram.hpp`<br>`tests/test_datagram.cpp` | UDP 大吞吐（QUIC/Hysteria2/DNS）系统调用与 CPU 占用下降 80%+ |
-| **Phase 4** | 策略标记与 UDP TProxy 原生支持 | `src/dialer.hpp`<br>`src/handler/transparent/transparent.hpp` | 支持 `SO_MARK` 防环路与原生 UDP 透明代理接管 |
+| **Phase 4** | 策略标记与 UDP TProxy 原生支持 | `src/dialer.hpp`<br>`src/handler/transparent.hpp` | 支持 `SO_MARK` 防环路与原生 UDP 透明代理接管 |
 | **Phase 5** | 反向 DNS 域名解析缓存 | `src/handler/dns/cache.hpp` | 针对非 TLS/HTTP 流量实现基于 DNS 历史记录的域名还原 |
 
 ---

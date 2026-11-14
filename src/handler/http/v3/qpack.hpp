@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file http/v3/qpack.hpp
+ * @file handler/http/v3/qpack.hpp
  * @brief RFC 9204 QPACK 头部压缩静态表与字段编解码器。
  */
 

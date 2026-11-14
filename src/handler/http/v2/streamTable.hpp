@@ -1,5 +1,5 @@
 /**
- * @file streamTable.hpp
+ * @file handler/http/v2/streamTable.hpp
  * @brief 定容开放寻址流表：多路复用器流 ID → StreamSlot 的零分配热路径存储。
  *
  * 设计取舍（安全、高效、高性能）：
@@ -46,16 +46,12 @@ namespace mynet
         public:
             StreamTable() noexcept = default;
             ~StreamTable() noexcept { release(); }
-            StreamTable(const StreamTable &) =
-                delete ("a stream table exclusively owns its slots and stream identities");
+            StreamTable(const StreamTable &) = delete; // a stream table exclusively owns its slots and stream identities
             StreamTable &
-            operator=(const StreamTable &) =
-                delete ("a stream table exclusively owns its slots and stream identities");
-            StreamTable(StreamTable &&) =
-                delete ("stream slot pointers remain valid externally; moving causes dangling pointers");
+            operator=(const StreamTable &) = delete; // a stream table exclusively owns its slots and stream identities
+            StreamTable(StreamTable &&) = delete; // stream slot pointers remain valid externally; moving causes dangling pointers
             StreamTable &
-            operator=(StreamTable &&) =
-                delete ("stream slot pointers remain valid externally; moving causes dangling pointers");
+            operator=(StreamTable &&) = delete; // stream slot pointers remain valid externally; moving causes dangling pointers
 
             /**
              * @brief 一次性分配 2 的幂个槽位（幂等：重复 init 前自动释放旧槽）。

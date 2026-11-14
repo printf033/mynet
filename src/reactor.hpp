@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file reactor/reactor.hpp
+ * @file reactor.hpp
  * @brief 基于 epoll 的高性能反应器（Reactor）事件解复用器与服务器事件循环。
  */
 
@@ -60,8 +60,8 @@ namespace mynet
 
         ~Reactor() noexcept { reset(); }
 
-        Reactor(const Reactor &) = delete ("a reactor owns the epoll registration of every live connection");
-        Reactor &operator=(const Reactor &) = delete ("a reactor owns the epoll registration of every live connection");
+        Reactor(const Reactor &) = delete; // a reactor owns the epoll registration of every live connection
+        Reactor &operator=(const Reactor &) = delete; // a reactor owns the epoll registration of every live connection
 
         /**
          * @brief 获取底层的事件循环引用。

@@ -49,10 +49,8 @@ namespace mynet
 
         ~TimerQueue() noexcept = default;
 
-        TimerQueue(const TimerQueue &) =
-            delete ("a timer queue owns a mutex and live callbacks; there is nothing to copy");
-        TimerQueue &operator=(const TimerQueue &) =
-            delete ("a timer queue owns a mutex and live callbacks; there is nothing to copy");
+        TimerQueue(const TimerQueue &) = delete; // a timer queue owns a mutex and live callbacks; there is nothing to copy
+        TimerQueue &operator=(const TimerQueue &) = delete; // a timer queue owns a mutex and live callbacks; there is nothing to copy
 
         /**
          * @brief 注册一个新的定时器任务（线程安全）

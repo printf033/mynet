@@ -7,5 +7,7 @@ function(mynet_bench name)
 endfunction()
 
 mynet_bench(bench)
-mynet_bench(bench_network)
+if(MYNET_ENABLE_URING)
+    mynet_bench(bench_network)
+endif()
 mynet_bench(bench_dae_optimizations)

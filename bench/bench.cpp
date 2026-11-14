@@ -265,7 +265,22 @@ namespace
 
     void benchHandlerQueue()
     {
-        HandlerConnection handler;
+        class EchoBenchHandler : public HandlerConnection
+        {
+        public:
+            void process()
+            {
+                const size_t n = requestBytes();
+                if (n == 0)
+                {
+                    return;
+                }
+                [[maybe_unused]] auto result = pushResponse(std::string_view(requestBegin(), n));
+                requestClear();
+            }
+        };
+
+        EchoBenchHandler handler;
         const std::string body(1 << 10, 'x');
         const Sample pushTake = run(
             [&](size_t iterations)
@@ -287,12 +302,12 @@ namespace
                 for (size_t i = 0; i < iterations; ++i)
                 {
                     [[maybe_unused]] auto _ = handler.appendRequest(body.data(), static_cast<ssize_t>(body.size()));
-                    handler.echo();
+                    handler.process();
                     sink += handler.takeResponse().size();
                 }
                 g_sink += sink;
             });
-        report("HandlerConnection::echo (1KiB)", echo, static_cast<double>(1 << 10));
+        report("EchoBenchHandler::process (1KiB)", echo, static_cast<double>(1 << 10));
     }
 
     // ---- HTTP/2 多路复用器 (HandlerHttp2) 基准测试 ----

@@ -290,7 +290,7 @@ FrameDecoder::next (负载 16384B)                1104.7 ns/op         14,831.4 
 read+appendBigEndian32 (网络序处理)                0.7 ns/op                  --
 ObjectPool acquire+release (128个对象)             3.8 ns/op                  --
 HandlerConnection::pushResponse+takeResponse (1KiB)     22.5 ns/op         45,605.2 MB/s
-HandlerConnection::process echo (1KiB 回显)             47.1 ns/op         21,760.2 MB/s
+EchoBenchHandler::process (1KiB 回显)                   47.1 ns/op         21,760.2 MB/s
 HandlerHttp2 open+echo+close (64条流)                   553.4 ns/op                  --
 ```
 
@@ -484,12 +484,12 @@ mynet/
 │   │   ├── lua.hpp             # 沙箱化 Lua 配置加载与热重载（reloadConfig）
 │   │   └── log.hpp             # 日志输出配置（mylog 输出至 stderr）
 │   └── handler/                # 业务与协议处理器百宝箱 (All Handlers)
-│       ├── handler.hpp         # 全量 Handler 便捷聚合头文件
 │       ├── inbound.hpp         # 入站协议基类 (HandlerInboundConnection / HandlerInboundDatagram)
 │       ├── outbound.hpp        # 出站协议基类 (HandlerOutboundConnection / HandlerOutboundDatagram)
 │       ├── address.hpp         # 代理与网络目标端点地址抽象 (ProxyAddress)
 │       ├── crypto.hpp          # 加密与哈希原语 (SHA-224, MD5, AEAD, UUID)
 │       ├── direct.hpp / block.hpp # 直连路由与黑洞阻断处理器 (HandlerInboundDirect / HandlerOutboundDirect...)
+│       ├── transparent.hpp     # Linux Netfilter TProxy / Redirect 原始目的地址透明代理 (HandlerInboundRedirect / HandlerInboundTProxy)
 │       ├── dns/                # RFC 1035 / RFC 3596 DNS 协议编解码与处理器
 │       │   ├── dns.hpp         # 二进制报文序列化、反序列化、指针压缩 (0xC0xx)
 │       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
@@ -499,16 +499,17 @@ mynet/
 │       │   ├── v3/             # HTTP/3 QUIC 1-RTT 短首部、QPACK、变长整数与流表
 │       │   └── http.hpp        # HTTP Proxy 隧道代理处理器 (HandlerInboundHttpProxy)
 │       ├── socks/              # SOCKS 协议族 (HandlerInboundSocks / HandlerInboundSocks4 / HandlerInboundSocks5 / HandlerOutboundSocks5)
-│       ├── trojan/             # Trojan 协议出入站鉴权与隧道转发 (HandlerInboundTrojan / HandlerOutboundTrojan)
-│       ├── vless/              # VLESS 协议 UUID 鉴权与零拷贝透传 (HandlerInboundVless / HandlerOutboundVless)
-│       ├── vmess/              # VMess 协议 HMAC-MD5 头部鉴权 (HandlerInboundVmess)
-│       ├── hysteria2/          # Hysteria 2 协议认证握手与转发 (HandlerInboundHysteria2 / HandlerOutboundHysteria2)
-│       ├── tuic/               # TUIC v5 协议处理 (HandlerInboundTuic)
-│       ├── shadowsocks/        # Shadowsocks AEAD 处理器 (HandlerInboundShadowsocks)
-│       ├── shadowtls/          # ShadowTLS SNI 嗅探与 HMAC 挑战分流 (HandlerInboundShadowTls)
-│       ├── snell/              # Snell v1~v4 协议处理 (HandlerInboundSnell)
-│       ├── transparent/        # Linux Netfilter TProxy / Redirect 原始目的地址透明代理 (HandlerInboundRedirect / HandlerInboundTProxy)
-│       └── mixed/              # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站 (HandlerInboundMixed)
+│       ├── sniffing/           # 深度数据包与域名嗅探引擎 (TLS SNI, HTTP Host, QUIC, DNS, STUN...)
+│       └── proxy/              # 私有与隧道代理协议族
+│           ├── trojan.hpp      # Trojan 协议出入站鉴权与隧道转发
+│           ├── vless.hpp       # VLESS 协议 UUID 鉴权与零拷贝透传
+│           ├── vmess.hpp       # VMess 协议 HMAC-MD5 头部鉴权
+│           ├── hysteria2.hpp   # Hysteria 2 协议认证握手与转发
+│           ├── tuic.hpp        # TUIC v5 协议处理
+│           ├── shadowsocks.hpp # Shadowsocks AEAD 处理器
+│           ├── shadowtls.hpp   # ShadowTLS SNI 嗅探与 HMAC 挑战分流
+│           ├── snell.hpp       # Snell v1~v4 协议处理
+│           └── mixed.hpp       # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站
 │
 ├── config/                     # 运行时配置
 │   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）

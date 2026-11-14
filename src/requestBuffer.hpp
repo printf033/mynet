@@ -37,10 +37,8 @@ namespace mynet
 
         ~RequestBuffer() noexcept { deallocate(); }
 
-        RequestBuffer(const RequestBuffer &) =
-            delete ("a request buffer owns one heap block sized for its connection; a copy would alias the bytes");
-        RequestBuffer &operator=(const RequestBuffer &) =
-            delete ("a request buffer owns one heap block sized for its connection; a copy would alias the bytes");
+        RequestBuffer(const RequestBuffer &) = delete; // a request buffer owns one heap block sized for its connection; a copy would alias the bytes
+        RequestBuffer &operator=(const RequestBuffer &) = delete; // a request buffer owns one heap block sized for its connection; a copy would alias the bytes
 
         RequestBuffer(RequestBuffer &&other) noexcept
             : data_(std::exchange(other.data_, nullptr)),

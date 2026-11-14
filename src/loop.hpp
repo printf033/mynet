@@ -128,10 +128,8 @@ namespace mynet
             }
         }
 
-        EventLoop(const EventLoop &) =
-            delete ("the loop owns an epoll set and a wakeup fd; a copy would double-close both");
-        EventLoop &operator=(const EventLoop &) =
-            delete ("the loop owns an epoll set and a wakeup fd; a copy would double-close both");
+        EventLoop(const EventLoop &) = delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
+        EventLoop &operator=(const EventLoop &) = delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
 
         [[nodiscard]] inline int epollFd() const noexcept { return epollFd_; }
         [[nodiscard]] inline bool running() const noexcept { return running_.load(std::memory_order_acquire); }

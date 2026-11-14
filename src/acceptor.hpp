@@ -52,6 +52,8 @@ namespace mynet
          * @param ip 目标 IPv4 字符串字面量（契约保证非空）
          * @param port 目标端口号（契约保证在 [0, 65535] 范围内）
          * @param backlog 挂起连接队列上限深度
+         * @param reuseAddr 是否开启 SO_REUSEADDR（默认 true）
+         * @param reusePort 是否开启 SO_REUSEPORT（默认 true）
          * @return Result<> 成功返回 {}，失败返回具体系统调用失败错误枚举
          */
         [[nodiscard]] Result<> listenTcp(const char *ip, int port, int backlog, bool reuseAddr = true,

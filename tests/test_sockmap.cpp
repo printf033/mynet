@@ -1,11 +1,11 @@
-#include "handler/sockmap.hpp"
+#include "sockmap.hpp"
 #include "connection.hpp"
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 using namespace mynet;
-using namespace mynet::handler::sockmap;
+using namespace mynet::sockmap;
 
 namespace
 {
@@ -45,4 +45,6 @@ TEST(SockmapTest, InvalidFdRejection)
     MockConnectionHandler handler;
     EXPECT_FALSE(SockmapManager::enableOffloadOrSplice(handler, -1, -1, -1));
     EXPECT_FALSE(SockmapManager::attachPair(-1, 0, 1));
+    EXPECT_FALSE(SockmapManager::updateSockmap(-1, 0, 1));
+    EXPECT_FALSE(SockmapManager::deleteSockmap(-1, 0));
 }

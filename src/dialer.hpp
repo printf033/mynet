@@ -131,6 +131,7 @@ namespace mynet
             // TCP Keepalive & NODELAY
             constexpr int opt = 1;
             [[maybe_unused]] auto _ = ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+            [[maybe_unused]] auto _keepalive = ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
 
             if (bindInterface != nullptr && bindInterface[0] != '\0')
             {
@@ -174,6 +175,10 @@ namespace mynet
 
         /**
          * @brief 创建非阻塞已连接 UDP 套接字（已关联目标四元组，可用 send/recv 直读）
+         *
+         * @param ip 目标服务端 IPv4 地址字面量
+         * @param port 目标服务端端口号
+         * @param bindInterface 可选的出口网卡绑定（SO_BINDTODEVICE）
          */
         [[nodiscard]] Result<> dialUdp(const char *ip, int port, const char *bindInterface = nullptr) noexcept
         {
@@ -196,6 +201,9 @@ namespace mynet
 
         /**
          * @brief 从目标地址结构体创建非阻塞已连接 UDP 套接字
+         *
+         * @param target 目标 sockaddr_in 地址结构
+         * @param bindInterface 可选的出口网卡绑定（SO_BINDTODEVICE）
          */
         [[nodiscard]] Result<> dialUdp(const sockaddr_in &target, const char *bindInterface = nullptr) noexcept
         {

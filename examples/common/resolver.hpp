@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file resolver.hpp
+ * @file common/resolver.hpp
  * @brief 异步与非阻塞 DNS 域名解析器（RFC 1035），支持缓存、TTL 与多对端解析。
  */
 

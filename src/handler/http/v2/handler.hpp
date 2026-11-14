@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file http/v2/handler.hpp
+ * @file handler/http/v2/handler.hpp
  * @brief HTTP/2 协议处理器：分帧、流表与基于信用的流多路复用。
  *
  * 本文件是 HTTP/2 的唯一实现入口，包含 mux 协议常量、STREAM_ERROR 与
@@ -102,13 +102,12 @@ namespace mynet
 
         HandlerHttp2() noexcept = default;
         ~HandlerHttp2() noexcept override = default;
-        HandlerHttp2(const HandlerHttp2 &) =
-            delete ("an http2 handler owns the stream table and the frames bound to it");
+        HandlerHttp2(const HandlerHttp2 &) = delete; // an http2 handler owns the stream table and the frames bound to it
         HandlerHttp2 &
-        operator=(const HandlerHttp2 &) = delete ("an http2 handler owns the stream table and the frames bound to it");
-        HandlerHttp2(HandlerHttp2 &&) = delete ("an http2 handler owns the stream table and the frames bound to it");
+        operator=(const HandlerHttp2 &) = delete; // an http2 handler owns the stream table and the frames bound to it
+        HandlerHttp2(HandlerHttp2 &&) = delete; // an http2 handler owns the stream table and the frames bound to it
         HandlerHttp2 &
-        operator=(HandlerHttp2 &&) = delete ("an http2 handler owns the stream table and the frames bound to it");
+        operator=(HandlerHttp2 &&) = delete; // an http2 handler owns the stream table and the frames bound to it
 
         /**
          * @brief 设置允许的最大并发活跃流数量。
@@ -301,33 +300,6 @@ namespace mynet
             streamCreditUnit_ = std::max<uint32_t>(1u, static_cast<uint32_t>(initialWindow_));
             connSendWindow_ = static_cast<int64_t>(mux::kInitialWindowSize);
             connRecvWindow_ = connRecvLimit_;
-        }
-
-        /// 历史别名兼容
-        inline void applyMultiplexerConfig() noexcept { applyHttp2Config(); }
-
-        /**
-         * @brief 驱动当前所有活跃流上的处理器执行 process() 并泵送响应
-         */
-        inline void echo() noexcept
-        {
-            if (streams_.ready())
-            {
-                for (size_t i = 0; i < streams_.capacity(); ++i)
-                {
-                    const uint32_t id = streams_.keyAt(i);
-                    if (id != 0)
-                    {
-                        StreamSlot *slot = streams_.find(id);
-                        if (slot != nullptr && slot->handler != nullptr)
-                        {
-                            slot->handler->process();
-                            pumpStream(id, *slot);
-                        }
-                    }
-                }
-            }
-            (void)flushOut();
         }
 
         /**

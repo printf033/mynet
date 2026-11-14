@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file http/v2/hpack.hpp
+ * @file handler/http/v2/hpack.hpp
  * @brief RFC 7541 HPACK 首部压缩编解码器（静态表、动态表与 Huffman 解码）。
  *
  * 真实的 HTTP/2 客户端（curl/nghttp2、浏览器）总是以 HPACK 压缩首部块发送请求，

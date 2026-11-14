@@ -91,14 +91,10 @@ namespace mynet
         ObjectPool() noexcept = default;
         ~ObjectPool() noexcept { reset(); }
 
-        ObjectPool(const ObjectPool &) =
-            delete ("the pool hands out stable slots; a copy would orphan every outstanding pointer");
-        ObjectPool &operator=(const ObjectPool &) =
-            delete ("the pool hands out stable slots; a copy would orphan every outstanding pointer");
-        ObjectPool(ObjectPool &&) noexcept =
-            delete ("the pool hands out stable slots; moving would orphan every outstanding pointer");
-        ObjectPool &operator=(ObjectPool &&) noexcept =
-            delete ("the pool hands out stable slots; moving would orphan every outstanding pointer");
+        ObjectPool(const ObjectPool &) = delete; // the pool hands out stable slots; a copy would orphan every outstanding pointer
+        ObjectPool &operator=(const ObjectPool &) = delete; // the pool hands out stable slots; a copy would orphan every outstanding pointer
+        ObjectPool(ObjectPool &&) noexcept = delete; // the pool hands out stable slots; moving would orphan every outstanding pointer
+        ObjectPool &operator=(ObjectPool &&) noexcept = delete; // the pool hands out stable slots; moving would orphan every outstanding pointer
 
         /**
          * @brief 初始化对象池容量并预先完成所有槽位构建

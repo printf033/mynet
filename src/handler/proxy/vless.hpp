@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file handler/vless/vless.hpp
+ * @file handler/proxy/vless.hpp
  * @brief VLESS (v0) 代理协议入站状态机处理器 (HandlerInboundVless) 与出站协议处理器 (HandlerOutboundVless)。
  */
 

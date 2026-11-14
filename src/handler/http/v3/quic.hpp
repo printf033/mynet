@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file http/v3/quic.hpp
+ * @file handler/http/v3/quic.hpp
  * @brief RFC 9000 QUIC 报文封装与传输帧原语（短首部报文、STREAM 帧与连接管理）。
  */
 

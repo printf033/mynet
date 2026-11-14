@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file http/v1/handler.hpp
+ * @file handler/http/v1/handler.hpp
  * @brief HTTP/1.x 协议处理器实现，基于 llhttp 状态机进行文本报文流解析。
  */
 
@@ -42,11 +42,11 @@ namespace mynet
 
             ~HandlerHttp() noexcept override = default;
 
-            HandlerHttp(const HandlerHttp &) = delete ("a handler holds parser state bound to one connection");
+            HandlerHttp(const HandlerHttp &) = delete; // a handler holds parser state bound to one connection
             HandlerHttp &
-            operator=(const HandlerHttp &) = delete ("a handler holds parser state bound to one connection");
-            HandlerHttp(HandlerHttp &&) = delete ("a handler holds parser state bound to one connection");
-            HandlerHttp &operator=(HandlerHttp &&) = delete ("a handler holds parser state bound to one connection");
+            operator=(const HandlerHttp &) = delete; // a handler holds parser state bound to one connection
+            HandlerHttp(HandlerHttp &&) = delete; // a handler holds parser state bound to one connection
+            HandlerHttp &operator=(HandlerHttp &&) = delete; // a handler holds parser state bound to one connection
 
             inline void init() noexcept
             {

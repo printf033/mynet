@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file http/v3/streamTable.hpp
+ * @file handler/http/v3/streamTable.hpp
  * @brief RFC 9114 HTTP/3 流类型判定、生命周期跟踪与流表管理器。
  */
 
@@ -128,9 +128,9 @@ namespace mynet
             }
 
             ~StreamTable() noexcept = default;
-            StreamTable(const StreamTable &) = delete ("a stream table owns its slots and stream states");
+            StreamTable(const StreamTable &) = delete; // a stream table owns its slots and stream states
             StreamTable &
-            operator=(const StreamTable &) = delete ("a stream table owns its slots and stream states");
+            operator=(const StreamTable &) = delete; // a stream table owns its slots and stream states
             StreamTable(StreamTable &&) noexcept = default;
             StreamTable &operator=(StreamTable &&) noexcept = default;
 

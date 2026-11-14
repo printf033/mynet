@@ -1,5 +1,13 @@
 #include "dialer.hpp"
-#include "handler/handler.hpp"
+#include "handler/address.hpp"
+#include "handler/block.hpp"
+#include "handler/direct.hpp"
+#include "handler/dns/dns.hpp"
+#include "handler/dns/handler.hpp"
+#include "handler/proxy/hysteria2.hpp"
+#include "handler/proxy/trojan.hpp"
+#include "handler/proxy/vless.hpp"
+#include "handler/socks/socks5.hpp"
 #include "../examples/common/resolver.hpp"
 #include <gtest/gtest.h>
 #include <string>

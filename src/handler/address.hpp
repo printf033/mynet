@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file proxy/address.hpp
+ * @file handler/address.hpp
  * @brief 通用代理目标网络地址抽象，兼容 SOCKS5 / Trojan / VLESS 规范。
  */
 
@@ -384,7 +384,10 @@ namespace mynet::handler
                 else if (ss.ss_family == AF_INET6)
                 {
                     const auto *sin6 = reinterpret_cast<const sockaddr_in6 *>(&ss);
-                    return fromIPv6(reinterpret_cast<const uint8_t *>(&sin6->sin6_addr), ntohs(sin6->sin6_port));
+                    if (!IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr))
+                    {
+                        return fromIPv6(reinterpret_cast<const uint8_t *>(&sin6->sin6_addr), ntohs(sin6->sin6_port));
+                    }
                 }
             }
 

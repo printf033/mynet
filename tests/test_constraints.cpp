@@ -5,7 +5,17 @@
 #include "datagram.hpp"
 #include "dialer.hpp"
 #include "proactor.hpp"
-#include "handler/handler.hpp"
+#include "handler/block.hpp"
+#include "handler/direct.hpp"
+#include "handler/dns/handler.hpp"
+#include "handler/http/v1/handler.hpp"
+#include "handler/http/v3/handler.hpp"
+#include "handler/inbound.hpp"
+#include "handler/outbound.hpp"
+#include "handler/proxy/hysteria2.hpp"
+#include "handler/proxy/trojan.hpp"
+#include "handler/proxy/vless.hpp"
+#include "handler/socks/socks5.hpp"
 #include "reactor.hpp"
 #include <gtest/gtest.h>
 #include <type_traits>
@@ -534,36 +544,30 @@ TEST(Constraints, EnginesAcceptPureDatagramHandlers)
 
     // 引擎仍可两两实例化（这是之前失败的编译点）
     static_assert(!Reactor<PureAcc>::kStreaming);
-    static_assert(!Proactor<PureAcc>::kStreaming);
     static_assert(Reactor<StreamAcc>::kStreaming);
-    static_assert(Proactor<StreamAcc>::kStreaming);
 
     Reactor<PureAcc> reactorUdp;
-    Proactor<PureAcc> proactorUdp;
     Reactor<StreamAcc> reactorTcp;
-    Proactor<StreamAcc> proactorTcp;
     (void)reactorUdp;
-    (void)proactorUdp;
     (void)reactorTcp;
-    (void)proactorTcp;
 
-    // 流式入口的可用性边界：纯报文处理器只能走 runUdp。
-    // 若漏加 kStreaming，runTcp 会对纯报文处理器开一个口子，在运行期落到
-    // datagram 分支并在 TCP fd 上零长 recvmsg 自旋（Proactor 曾遗漏此约束）。
     static_assert(CanRunUdp<Reactor<PureAcc>, PureDatagramHandler>);
-    static_assert(CanRunUdp<Proactor<PureAcc>, PureDatagramHandler>);
     static_assert(!CanRunTcp<Reactor<PureAcc>>);
-    static_assert(!CanRunTcp<Proactor<PureAcc>>);
-
-    // 流式处理器两条路径都可用
     static_assert(CanRunTcp<Reactor<StreamAcc>>);
-    static_assert(CanRunTcp<Proactor<StreamAcc>>);
-
-    // 反向边界：纯流式处理器不得走 UDP 入口。
-    // 这条锁住的是 runUdp 上的约束本身：一旦该 requires 被删掉，
-    // 纯流式处理器就会静默流入 UDP 路径（运行期缺 onDatagram 行为）。
     static_assert(!CanRunUdp<Reactor<StreamAcc>, HandlerConnection>);
+
+#if defined(MYNET_ENABLE_URING)
+    static_assert(!Proactor<PureAcc>::kStreaming);
+    static_assert(Proactor<StreamAcc>::kStreaming);
+    Proactor<PureAcc> proactorUdp;
+    Proactor<StreamAcc> proactorTcp;
+    (void)proactorUdp;
+    (void)proactorTcp;
+    static_assert(CanRunUdp<Proactor<PureAcc>, PureDatagramHandler>);
+    static_assert(!CanRunTcp<Proactor<PureAcc>>);
+    static_assert(CanRunTcp<Proactor<StreamAcc>>);
     static_assert(!CanRunUdp<Proactor<StreamAcc>, HandlerConnection>);
+#endif
 
     EXPECT_FALSE(Reactor<PureAcc>::kStreaming);
     EXPECT_TRUE(Reactor<StreamAcc>::kStreaming);
@@ -637,12 +641,14 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
 
     mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> reactorStream;
     mynet::Reactor<mynet::AcceptorBase<mynet::HandlerDatagram>> reactorDatagram;
+    mynet::Reactor<mynet::AcceptorSsl<mynet::HandlerConnection>> reactorTls;
+    mynet::Reactor<mynet::AcceptorQuic<mynet::HandlerDatagram>> reactorQuic;
+
+#if defined(MYNET_ENABLE_URING)
     mynet::Proactor<mynet::AcceptorBase<mynet::HandlerConnection>> proactorStream;
     mynet::Proactor<mynet::AcceptorBase<mynet::HandlerDatagram>> proactorDatagram;
-
-    mynet::Reactor<mynet::AcceptorSsl<mynet::HandlerConnection>> reactorTls;
     mynet::Proactor<mynet::AcceptorSsl<mynet::HandlerConnection>> proactorTls;
-    mynet::Reactor<mynet::AcceptorQuic<mynet::HandlerDatagram>> reactorQuic;
+#endif
 
     // 每次调用都会立刻失败（监听/加载证书），因此不会真的进入事件循环。
     [[maybe_unused]] auto r1 = reactorStream.runTcp("1.2.3.4", 0);
@@ -650,18 +656,22 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     [[maybe_unused]] auto r3 = reactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
     [[maybe_unused]] auto r3_zero = reactorDatagram.runUdp(datagramHandler);
     [[maybe_unused]] auto rq = reactorQuic.runQuic("1.2.3.4", 0, datagramHandler);
+#if defined(MYNET_ENABLE_URING)
     [[maybe_unused]] auto r4 = proactorStream.runTcp("1.2.3.4", 0);
     [[maybe_unused]] auto r5 = proactorStream.runTcp();
     [[maybe_unused]] auto r5_udp = proactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
     [[maybe_unused]] auto r5_udp_zero = proactorDatagram.runUdp(datagramHandler);
+#endif
 
     [[maybe_unused]] auto r6 = reactorTls.runSsl();
     [[maybe_unused]] auto r7 = reactorTls.runSsl("missing.crt", "missing.key");
     [[maybe_unused]] auto r8 = reactorTls.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
 
+#if defined(MYNET_ENABLE_URING)
     [[maybe_unused]] auto r9 = proactorTls.runSsl();
     [[maybe_unused]] auto r10 = proactorTls.runSsl("missing.crt", "missing.key");
     [[maybe_unused]] auto r11 = proactorTls.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
+#endif
 
     mynet::publishNetConfig(saved);
     SUCCEED();

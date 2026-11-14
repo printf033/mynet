@@ -23,15 +23,13 @@
 namespace mynet::example
 {
     /**
-     * @brief 不自动回显的流处理器
+     * @brief 保留请求体供 HTTP/2 上层处理的流处理器
      *
-     * HandlerConnection::echo() 会把请求字节推入响应队列并清空请求缓冲；
-     * 这里提供空 process()，让请求体留在缓冲区中由 onStreamEnd 统一处理。
+     * HandlerConnection::process() 默认无操作，因此请求体留在缓冲区中，
+     * 由 onStreamEnd 统一处理。
      */
     class Http2BufferedHandler : public HandlerConnection
     {
-    public:
-        void process() noexcept {}
     };
 
     /**

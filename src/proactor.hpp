@@ -1,7 +1,9 @@
 #pragma once
 
+#if defined(MYNET_ENABLE_URING)
+
 /**
- * @file proactor/proactor.hpp
+ * @file proactor.hpp
  * @brief 高性能 Linux io_uring 前摄器（Proactor）服务器实现。
  */
 
@@ -62,13 +64,11 @@ namespace mynet
 
         ~Proactor() noexcept { reset(); }
 
-        Proactor(const Proactor &) = delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
+        Proactor(const Proactor &) = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
         Proactor &
-        operator=(const Proactor &) = delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
-        Proactor(Proactor &&) noexcept =
-            delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
-        Proactor &operator=(Proactor &&) noexcept =
-            delete ("a proactor owns the io_uring ring and the buffers handed to the kernel");
+        operator=(const Proactor &) = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
+        Proactor(Proactor &&) noexcept = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
+        Proactor &operator=(Proactor &&) noexcept = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
 
         /**
          * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
@@ -1304,3 +1304,5 @@ namespace mynet
     };
 
 } // namespace mynet
+
+#endif // MYNET_ENABLE_URING

@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file proxy/shadowsocks/shadowsocks.hpp
+ * @file handler/proxy/shadowsocks.hpp
  * @brief Shadowsocks AEAD 代理协议服务端状态机处理器（RFC/SIP002 规范）。
  */
 

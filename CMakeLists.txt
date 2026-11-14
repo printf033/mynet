@@ -35,6 +35,8 @@ endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options(-fcontracts -freflection -fno-exceptions)
     add_link_options(-fcontracts)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-fno-exceptions)
 endif()
 
 # -----------------------------------------------------------------------------

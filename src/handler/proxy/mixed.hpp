@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file handler/mixed/mixed.hpp
+ * @file handler/proxy/mixed.hpp
  * @brief Mixed 混合代理协议入站状态机处理器 (HandlerInboundMixed)（同时支持 SOCKS4/SOCKS5 与 HTTP Proxy）。
  */
 

@@ -28,7 +28,7 @@ namespace mynet::handler::sniffing
         {
             return false;
         }
-        return (verMinor == 0xff || verMinor == 0xfd); // DTLS 1.0 or DTLS 1.2
+        return (verMinor == 0xff || verMinor == 0xfd || verMinor == 0xfc); // DTLS 1.0 (0xFEFF), DTLS 1.2 (0xFEFD), or DTLS 1.3 (0xFEFC, RFC 9147)
     }
 
 } // namespace mynet::handler::sniffing

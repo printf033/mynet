@@ -1,4 +1,4 @@
-// HandlerHttp2<HandlerConnection>：在单条物理字节流上承载多个独立的流式交互。
+// HandlerHttp2<EchoTestHandler>：在单条物理字节流上承载多个独立的流式交互。
 // 这些测试模拟网络连接的行为驱动它——将完整的帧追加到请求缓冲区，
 // 并从响应队列中读回其回复，这是上层唯一实际依赖的接口。
 #include "configHolder.hpp"
@@ -58,6 +58,20 @@ namespace
         return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
                (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
     }
+
+    class EchoTestHandler : public HandlerConnection
+    {
+    public:
+        void process()
+        {
+            const size_t n = requestBytes();
+            if (n > 0)
+            {
+                [[maybe_unused]] auto result = pushResponse(std::string_view(requestBegin(), n));
+                requestClear();
+            }
+        }
+    };
 
     // 记录上层协议前端可重写的钩子函数，
     // 以便测试能针对通知上层的事件进行断言，而非侵入内部实现。
@@ -156,7 +170,7 @@ namespace
         }
     };
 
-    class ProbeMux : public HandlerHttp2<HandlerConnection>
+    class ProbeMux : public HandlerHttp2<EchoTestHandler>
     {
     public:
         std::vector<uint32_t> opens;
@@ -166,8 +180,8 @@ namespace
         std::optional<STREAM_ERROR> error;
         std::string why;
 
-        using HandlerHttp2<HandlerConnection>::connRecvWindow_;
-        using HandlerHttp2<HandlerConnection>::stream;
+        using HandlerHttp2<EchoTestHandler>::connRecvWindow_;
+        using HandlerHttp2<EchoTestHandler>::stream;
 
         [[nodiscard]] uint32_t streamRecvLimit() const noexcept { return streamRecvLimit_; }
 
@@ -1471,51 +1485,6 @@ TEST(HandlerHttp2, SendHeadersDataAndResponse)
     // 4. 对不存在的流发送失败
     EXPECT_FALSE(mux.sendHeaders(99, "h", false));
     EXPECT_FALSE(mux.sendData(99, "d", false));
-}
-
-TEST(HandlerHttp2, EchoMultiStream)
-{
-    class TestHttp2EchoMux : public HandlerHttp2<HandlerConnection>
-    {
-    public:
-        using HandlerHttp2::stream;
-    };
-
-    TestHttp2EchoMux mux;
-    // 建立流 1
-    std::string bytes(TestHttp2EchoMux::kClientPreface);
-    appendFrame(bytes, makeFrame(FRAME_TYPE::SETTINGS, 0, 0, {}));
-    appendFrame(bytes, makeFrame(FRAME_TYPE::HEADERS, 1, FrameFlags::kEndHeaders, kGetHeadersBlock));
-    [[maybe_unused]] auto _ = mux.appendRequest(bytes.data(), bytes.size());
-    mux.process();
-    while (mux.hasResponse())
-    {
-        [[maybe_unused]] auto dummy = mux.takeResponse();
-    }
-
-    auto *slot = mux.stream(1);
-    ASSERT_NE(slot, nullptr);
-    ASSERT_NE(slot->handler, nullptr);
-
-    // 向流 1 缓冲区灌入待回显数据
-    [[maybe_unused]] auto _2 = slot->handler->appendRequest("echo-test-bytes", 15);
-
-    // 触发 HTTP/2 级多流 echo
-    mux.echo();
-    ASSERT_TRUE(mux.hasResponse());
-    std::string resp = mux.takeResponse();
-    EXPECT_FALSE(resp.empty());
-
-    // 解析回复中的 DATA 帧
-    RequestBuffer in;
-    [[maybe_unused]] auto _3 = in.append(resp);
-    FrameDecoder decoder;
-    auto parsed = decoder.next(in);
-    ASSERT_TRUE(parsed.has_value());
-    ASSERT_TRUE(parsed->has_value());
-    EXPECT_EQ((*parsed)->type, FRAME_TYPE::DATA);
-    EXPECT_EQ((*parsed)->streamId, 1u);
-    EXPECT_EQ((*parsed)->payload, "echo-test-bytes");
 }
 
 TEST(HandlerHttp2, ConfiguredInitialWindowIsAdvertisedAndApplied)
