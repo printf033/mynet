@@ -249,6 +249,12 @@ Every field also declares **when** it takes effect, and that declaration is data
 | `datagram` | `maxDatagramBytes`, `maxPendingOutgoing` | Hot |
 | `http2` | `maxConcurrentStreams`, `initialWindowSize`, `maxFrameSize` | Hot |
 | `security` | `certFile`, `keyFile`, `caFile`, `ciphers`, `alpnProtocols` | Startup |
+| `forwarder` | `enableSplice`, `spliceChunkSize`, `bufferChunkSize`, `sessionIdleTimeoutSecs`, `udpSessionTimeoutSecs` | Hot |
+| `dns` | `servers`, `ttlSecs`, `enableCache` | Hot |
+| `dns` | `port` | Startup |
+| `router` | `defaultOutbound`, `rules` | Hot |
+| `inbounds` | List of inbound endpoints (`tag`, `protocol`, `host`, `port`, `enableSniffing`) | Hot |
+| `outbounds` | List of outbound endpoints (`tag`, `type`, `host`, `port`, `selector`) | Hot |
 
 `server.maxConnections` is the single source of truth for capacity: the Reactor sizes its connection pool from it and the Proactor its session pool. `server.host`/`port` are consumed by the zero-argument `runTcp()` / `runSsl()`, and `security.certFile`/`keyFile` by `runSsl()` with no path arguments — that overload refuses to start rather than silently falling back to plaintext when the paths are unset.
 

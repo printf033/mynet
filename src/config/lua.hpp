@@ -68,6 +68,15 @@ namespace mynet
             return std::clamp(val, minVal, maxVal);
         }
 
+        inline size_t tableLength(lua_State *L, int idx) noexcept
+        {
+#if LUA_VERSION_NUM >= 502
+            return lua_rawlen(L, idx);
+#else
+            return lua_objlen(L, idx);
+#endif
+        }
+
         inline bool readNumberField(lua_State *L, int tableIdx, const char *key, lua_Integer &out, bool &valid)
         {
             lua_getfield(L, tableIdx, key);
@@ -131,6 +140,56 @@ namespace mynet
             if (str != nullptr)
             {
                 out.assign(str, len);
+            }
+            lua_pop(L, 1);
+            return true;
+        }
+
+        inline bool readStringList(lua_State *L, int tableIdx, const char *key, std::vector<std::string> &out, bool &valid)
+        {
+            lua_getfield(L, tableIdx, key);
+            const int type = lua_type(L, -1);
+            if (type == LUA_TNIL)
+            {
+                lua_pop(L, 1);
+                return false;
+            }
+            if (type == LUA_TSTRING)
+            {
+                size_t len = 0;
+                const char *str = lua_tolstring(L, -1, &len);
+                if (str != nullptr)
+                {
+                    out.clear();
+                    out.emplace_back(str, len);
+                }
+                lua_pop(L, 1);
+                return true;
+            }
+            if (type != LUA_TTABLE)
+            {
+                printError("field '{}' expected table or string, got {}", key, lua_typename(L, type));
+                valid = false;
+                lua_pop(L, 1);
+                return false;
+            }
+            const int listIdx = lua_gettop(L);
+            const size_t len = tableLength(L, listIdx);
+            out.clear();
+            out.reserve(len);
+            for (size_t i = 1; i <= len; ++i)
+            {
+                lua_rawgeti(L, listIdx, i);
+                if (lua_type(L, -1) == LUA_TSTRING)
+                {
+                    size_t slen = 0;
+                    const char *s = lua_tolstring(L, -1, &slen);
+                    if (s != nullptr)
+                    {
+                        out.emplace_back(s, slen);
+                    }
+                }
+                lua_pop(L, 1);
             }
             lua_pop(L, 1);
             return true;
@@ -592,6 +651,263 @@ namespace mynet
             return valid;
         }
 
+        inline bool loadForwarderSection(lua_State *L, int idx, ForwarderConfig &cfg)
+        {
+            bool valid = true;
+            bool flag = false;
+            lua_Integer num = 0;
+
+            if (readBoolField(L, idx, "enableSplice", flag, valid))
+            {
+                cfg.enableSplice = flag;
+            }
+            if (readNumberField(L, idx, "spliceChunkSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1024, 16 << 20);
+                cfg.spliceChunkSize = static_cast<size_t>(v);
+            }
+            if (readNumberField(L, idx, "bufferChunkSize", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 512, 16 << 20);
+                cfg.bufferChunkSize = static_cast<size_t>(v);
+            }
+            if (readNumberField(L, idx, "sessionIdleTimeoutSecs", num, valid) ||
+                readNumberField(L, idx, "idleTimeoutSecs", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 0, 86400 * 7);
+                cfg.sessionIdleTimeoutSecs = static_cast<int>(v);
+            }
+            if (readNumberField(L, idx, "udpSessionTimeoutSecs", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 0, 86400);
+                cfg.udpSessionTimeoutSecs = static_cast<int>(v);
+            }
+
+            return valid;
+        }
+
+        inline bool loadDnsSection(lua_State *L, int idx, DnsConfig &cfg)
+        {
+            bool valid = true;
+            bool flag = false;
+            lua_Integer num = 0;
+            std::vector<std::string> serverList;
+
+            if (readStringList(L, idx, "servers", serverList, valid))
+            {
+                cfg.servers = std::move(serverList);
+            }
+            if (readNumberField(L, idx, "port", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 65535);
+                cfg.port = static_cast<uint16_t>(v);
+            }
+            if (readNumberField(L, idx, "ttlSecs", num, valid) ||
+                readNumberField(L, idx, "ttl", num, valid))
+            {
+                const lua_Integer v = clampValue<lua_Integer>(num, 1, 86400 * 30);
+                cfg.ttlSecs = static_cast<uint32_t>(v);
+            }
+            if (readBoolField(L, idx, "enableCache", flag, valid))
+            {
+                cfg.enableCache = flag;
+            }
+
+            return valid;
+        }
+
+        inline bool loadRouterSection(lua_State *L, int idx, RouterConfig &cfg)
+        {
+            bool valid = true;
+            std::string defOut;
+            if (readStringField(L, idx, "defaultOutbound", defOut, valid) ||
+                readStringField(L, idx, "default", defOut, valid))
+            {
+                cfg.defaultOutbound = std::move(defOut);
+            }
+
+            lua_getfield(L, idx, "rules");
+            if (lua_istable(L, -1))
+            {
+                const int rulesIdx = lua_gettop(L);
+                const size_t rulesLen = tableLength(L, rulesIdx);
+                cfg.rules.clear();
+                cfg.rules.reserve(rulesLen);
+
+                for (size_t i = 1; i <= rulesLen; ++i)
+                {
+                    lua_rawgeti(L, rulesIdx, i);
+                    if (lua_istable(L, -1))
+                    {
+                        const int rIdx = lua_gettop(L);
+                        RouteRuleConfig rule{};
+                        std::string s;
+                        bool b = false;
+
+                        if (readStringField(L, rIdx, "outbound", s, valid) ||
+                            readStringField(L, rIdx, "tag", s, valid))
+                        {
+                            rule.outbound = std::move(s);
+                        }
+                        readStringList(L, rIdx, "domains", rule.domains, valid);
+                        readStringList(L, rIdx, "domainSuffixes", rule.domainSuffixes, valid);
+                        readStringList(L, rIdx, "domainKeywords", rule.domainKeywords, valid);
+                        readStringList(L, rIdx, "ipCidrs", rule.ipCidrs, valid);
+                        readStringList(L, rIdx, "portRanges", rule.portRanges, valid);
+                        readStringList(L, rIdx, "protocols", rule.protocols, valid);
+                        if (readStringField(L, rIdx, "network", s, valid))
+                        {
+                            rule.network = std::move(s);
+                        }
+                        readStringList(L, rIdx, "inboundTags", rule.inboundTags, valid);
+                        if (readBoolField(L, rIdx, "invert", b, valid))
+                        {
+                            rule.invert = b;
+                        }
+
+                        cfg.rules.push_back(std::move(rule));
+                    }
+                    lua_pop(L, 1);
+                }
+            }
+            else if (lua_type(L, -1) != LUA_TNIL)
+            {
+                printError("router.rules must be a table");
+                valid = false;
+            }
+            lua_pop(L, 1);
+
+            return valid;
+        }
+
+        inline bool loadInboundsSection(lua_State *L, int idx, std::vector<InboundConfig> &inbounds)
+        {
+            bool valid = true;
+            if (!lua_istable(L, idx))
+            {
+                printError("global 'inbounds' must be a table");
+                return false;
+            }
+
+            const size_t len = tableLength(L, idx);
+            inbounds.clear();
+            inbounds.reserve(len);
+
+            for (size_t i = 1; i <= len; ++i)
+            {
+                lua_rawgeti(L, idx, i);
+                if (lua_istable(L, -1))
+                {
+                    const int itemIdx = lua_gettop(L);
+                    InboundConfig inCfg{};
+                    std::string s;
+                    lua_Integer num = 0;
+                    bool flag = false;
+
+                    if (readStringField(L, itemIdx, "tag", s, valid))
+                    {
+                        inCfg.tag = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "protocol", s, valid) ||
+                        readStringField(L, itemIdx, "type", s, valid))
+                    {
+                        inCfg.protocol = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "host", s, valid) ||
+                        readStringField(L, itemIdx, "listen", s, valid))
+                    {
+                        inCfg.host = std::move(s);
+                    }
+                    if (readNumberField(L, itemIdx, "port", num, valid))
+                    {
+                        const lua_Integer v = clampValue<lua_Integer>(num, 0, 65535);
+                        inCfg.port = static_cast<uint16_t>(v);
+                    }
+                    if (readStringField(L, itemIdx, "username", s, valid))
+                    {
+                        inCfg.username = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "password", s, valid))
+                    {
+                        inCfg.password = std::move(s);
+                    }
+                    if (readBoolField(L, itemIdx, "sniffing", flag, valid) ||
+                        readBoolField(L, itemIdx, "enableSniffing", flag, valid))
+                    {
+                        inCfg.enableSniffing = flag;
+                    }
+
+                    inbounds.push_back(std::move(inCfg));
+                }
+                lua_pop(L, 1);
+            }
+            return valid;
+        }
+
+        inline bool loadOutboundsSection(lua_State *L, int idx, std::vector<OutboundConfig> &outbounds)
+        {
+            bool valid = true;
+            if (!lua_istable(L, idx))
+            {
+                printError("global 'outbounds' must be a table");
+                return false;
+            }
+
+            const size_t len = tableLength(L, idx);
+            outbounds.clear();
+            outbounds.reserve(len);
+
+            for (size_t i = 1; i <= len; ++i)
+            {
+                lua_rawgeti(L, idx, i);
+                if (lua_istable(L, -1))
+                {
+                    const int itemIdx = lua_gettop(L);
+                    OutboundConfig outCfg{};
+                    std::string s;
+                    lua_Integer num = 0;
+
+                    if (readStringField(L, itemIdx, "tag", s, valid))
+                    {
+                        outCfg.tag = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "type", s, valid) ||
+                        readStringField(L, itemIdx, "protocol", s, valid))
+                    {
+                        outCfg.type = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "host", s, valid) ||
+                        readStringField(L, itemIdx, "server", s, valid))
+                    {
+                        outCfg.host = std::move(s);
+                    }
+                    if (readNumberField(L, itemIdx, "port", num, valid))
+                    {
+                        const lua_Integer v = clampValue<lua_Integer>(num, 0, 65535);
+                        outCfg.port = static_cast<uint16_t>(v);
+                    }
+                    if (readStringField(L, itemIdx, "username", s, valid))
+                    {
+                        outCfg.username = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "password", s, valid))
+                    {
+                        outCfg.password = std::move(s);
+                    }
+                    readStringList(L, itemIdx, "outbounds", outCfg.outbounds, valid);
+                    if (readStringField(L, itemIdx, "defaultTag", s, valid) ||
+                        readStringField(L, itemIdx, "default", s, valid))
+                    {
+                        outCfg.defaultTag = std::move(s);
+                    }
+
+                    outbounds.push_back(std::move(outCfg));
+                }
+                lua_pop(L, 1);
+            }
+            return valid;
+        }
+
     } // namespace detail
 
     /**
@@ -798,6 +1114,86 @@ namespace mynet
         else if (lua_type(L, -1) != LUA_TNIL)
         {
             detail::printError("global 'proxy' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "forwarder");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadForwarderSection(L, idx, newCfg.forwarder))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'forwarder' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "dns");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadDnsSection(L, idx, newCfg.dns))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'dns' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "router");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadRouterSection(L, idx, newCfg.router))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'router' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "inbounds");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadInboundsSection(L, idx, newCfg.inbounds))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'inbounds' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "outbounds");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadOutboundsSection(L, idx, newCfg.outbounds))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'outbounds' must be a table");
             valid = false;
         }
         lua_pop(L, 1);

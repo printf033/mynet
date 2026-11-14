@@ -40,20 +40,6 @@ namespace mynet
 {
 
     /**
-     * @brief 入站监听配置规范
-     */
-    struct InboundConfig
-    {
-        std::string tag{"mixed-in"};            ///< 入站标签名称 (供分流规则匹配)
-        std::string protocol{"mixed"};          ///< 入站协议类型 ("mixed", "socks5", "http", "trojan", "direct", "tproxy")
-        std::string host{"0.0.0.0"};            ///< 监听绑定地址
-        uint16_t port{1080};                    ///< 监听端口
-        std::string username{};                 ///< 鉴权用户名 (可选)
-        std::string password{};                 ///< 鉴权密码或密钥 (可选)
-        bool enableSniffing{true};              ///< 是否启用首包域名与协议嗅探
-    };
-
-    /**
      * @brief 内核调度分流结果状态
      */
     enum class CoreDispatchStatus : uint8_t
@@ -109,6 +95,116 @@ namespace mynet
               router_(std::make_shared<Router>("direct")),
               forwarder_(std::make_shared<Forwarder>(fwdOpts))
         {
+        }
+
+        explicit Core(const NetConfig &cfg)
+            : Core()
+        {
+            applyConfig(cfg);
+        }
+
+        /**
+         * @brief 根据全局 NetConfig 完整装配入站、出站、路由规则与转发器
+         */
+        inline void applyConfig(const NetConfig &cfg)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            inboundConfigs_ = cfg.inbounds;
+
+            // 装配入站节点
+            for (const auto &inCfg : cfg.inbounds)
+            {
+                if (inCfg.protocol == "mixed")
+                {
+                    inboundManager_->registerInbound(std::make_shared<MixedInbound>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "socks5")
+                {
+                    inboundManager_->registerInbound(std::make_shared<Socks5Inbound>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "http")
+                {
+                    inboundManager_->registerInbound(std::make_shared<HttpInbound>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "trojan")
+                {
+                    inboundManager_->registerInbound(std::make_shared<TrojanInbound>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "tproxy")
+                {
+                    inboundManager_->registerInbound(std::make_shared<TProxyInbound>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "direct")
+                {
+                    inboundManager_->registerInbound(std::make_shared<DirectInbound>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
+                }
+            }
+
+            // 装配出站节点
+            for (const auto &outCfg : cfg.outbounds)
+            {
+                if (outCfg.type == "direct")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<DirectOutbound>(outCfg.tag));
+                }
+                else if (outCfg.type == "block")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<BlockOutbound>(outCfg.tag));
+                }
+                else if (outCfg.type == "socks5")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<Socks5Outbound>(
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.username, outCfg.password));
+                }
+                else if (outCfg.type == "trojan")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<TrojanOutbound>(
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.password));
+                }
+                else if (outCfg.type == "selector")
+                {
+                    auto sel = std::make_shared<SelectorOutbound>(
+                        outCfg.tag, outCfg.outbounds, outboundManager_.get());
+                    if (!outCfg.defaultTag.empty())
+                    {
+                        sel->setSelected(outCfg.defaultTag);
+                    }
+                    outboundManager_->registerOutbound(sel);
+                }
+            }
+
+            // 装配策略路由规则
+            if (!cfg.router.defaultOutbound.empty())
+            {
+                router_->setDefaultOutbound(cfg.router.defaultOutbound);
+            }
+            for (const auto &r : cfg.router.rules)
+            {
+                auto rule = RouteRule::to(r.outbound);
+                for (const auto &d : r.domains) rule.domain(d);
+                for (const auto &s : r.domainSuffixes) rule.domainSuffix(s);
+                for (const auto &k : r.domainKeywords) rule.domainKeyword(k);
+                for (const auto &c : r.ipCidrs) rule.cidr(c);
+                for (const auto &p : r.portRanges)
+                {
+                    if (auto parsed = PortRange::parse(p); parsed.has_value())
+                    {
+                        rule.portRange(parsed->start, parsed->end);
+                    }
+                }
+                for (const auto &proto : r.protocols) rule.protocol(proto);
+                if (r.network == "tcp") rule.forNetwork(NetworkType::TCP);
+                else if (r.network == "udp") rule.forNetwork(NetworkType::UDP);
+                for (const auto &inTag : r.inboundTags) rule.fromInbound(inTag);
+                if (r.invert) rule.setInvert(true);
+                router_->addRule(std::move(rule));
+            }
         }
 
         ~Core() noexcept { stop(); }

@@ -250,6 +250,12 @@ tlsServer.runSsl();
 | `datagram`   | `maxDatagramBytes`、`maxPendingOutgoing`                                                                                                       | 热       |
 | `http2`      | `maxConcurrentStreams`、`initialWindowSize`、`maxFrameSize`                                                                                  | 热       |
 | `security`   | `certFile`、`keyFile`、`caFile`、`ciphers`、`alpnProtocols`                                                                              | 启动     |
+| `forwarder`  | `enableSplice`、`spliceChunkSize`、`bufferChunkSize`、`sessionIdleTimeoutSecs`、`udpSessionTimeoutSecs`                                        | 热       |
+| `dns`        | `servers`、`ttlSecs`、`enableCache`                                                                                                            | 热       |
+| `dns`        | `port`                                                                                                                                         | 启动     |
+| `router`     | `defaultOutbound`、`rules`                                                                                                                     | 热       |
+| `inbounds`   | 入站节点列表 (`tag`、`protocol`、`host`、`port`、`enableSniffing`)                                                                              | 热       |
+| `outbounds`  | 出站节点列表 (`tag`、`type`、`host`、`port`、`selector`)                                                                                        | 热       |
 
 `server.maxConnections` 是容量的唯一真源：Reactor 用它做连接池槽位数，Proactor 用它做会话池槽位数。`server.host`/`port` 由无参的 `runTcp()` / `runSsl()` 消费，`security.certFile`/`keyFile` 由不带路径参数的 `runSsl()` 消费——那个重载在路径未配置时会直接拒绝启动，而不是悄悄降级成明文。
 

@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace mynet
 {
@@ -303,6 +304,84 @@ namespace mynet
     };
 
     /**
+     * @brief 双向流式与数据报中继转发引擎配置
+     */
+    struct ForwarderConfig
+    {
+        bool enableSplice = true;          ///< 是否启用 Linux splice(2) 内核零拷贝
+        size_t spliceChunkSize = 64 << 10; ///< Linux splice(2) 单次移动分块大小 (64 KiB)
+        size_t bufferChunkSize = 16 << 10; ///< 用户态缓冲回退双向泵送分块大小 (16 KiB)
+        int sessionIdleTimeoutSecs = 300;  ///< 流式转发会话空闲超时 (秒)
+        int udpSessionTimeoutSecs = 60;    ///< 数据报转发会话空闲超时 (秒)
+    };
+
+    /**
+     * @brief 策略路由单条规则配置
+     */
+    struct RouteRuleConfig
+    {
+        std::string outbound = "direct";          ///< 命中的目标出站标签 (如 "direct", "block", "proxy-out")
+        std::vector<std::string> domains{};        ///< 完整域名精确匹配列表
+        std::vector<std::string> domainSuffixes{}; ///< 域名后缀匹配列表 (如 "google.com")
+        std::vector<std::string> domainKeywords{}; ///< 域名关键字匹配列表 (如 "adserver")
+        std::vector<std::string> ipCidrs{};        ///< IP CIDR 子网列表 (如 "192.168.0.0/16")
+        std::vector<std::string> portRanges{};     ///< 端口/范围列表 (如 "80", "8000-8080")
+        std::vector<std::string> protocols{};      ///< 嗅探协议名称列表 (如 "tls", "http", "quic")
+        std::string network = "any";              ///< 传输层网络协议 ("any", "tcp", "udp")
+        std::vector<std::string> inboundTags{};    ///< 入站来源标签列表 (如 "mixed-in")
+        bool invert = false;                      ///< 是否反转匹配条件 (NOT)
+    };
+
+    /**
+     * @brief 策略路由全局引擎配置
+     */
+    struct RouterConfig
+    {
+        std::string defaultOutbound = "direct"; ///< 规则未命中时的默认出站节点标签
+        std::vector<RouteRuleConfig> rules{};   ///< 策略路由规则列表
+    };
+
+    /**
+     * @brief DNS 解析与高速缓存配置
+     */
+    struct DnsConfig
+    {
+        std::vector<std::string> servers = {"8.8.8.8", "1.1.1.1"}; ///< 上游 DNS 服务器列表
+        uint16_t port = 53;                                       ///< 默认 DNS 端口
+        uint32_t ttlSecs = 300;                                   ///< 默认 DNS 记录缓存存活期 (秒)
+        bool enableCache = true;                                  ///< 是否启用 DNS 查询结果内存缓存
+    };
+
+    /**
+     * @brief 入站监听节点配置规范
+     */
+    struct InboundConfig
+    {
+        std::string tag = "mixed-in";   ///< 入站标签名称 (供分流规则匹配)
+        std::string protocol = "mixed"; ///< 入站协议类型 ("mixed", "socks5", "http", "trojan", "direct", "tproxy")
+        std::string host = "0.0.0.0";   ///< 监听绑定地址
+        uint16_t port = 1080;           ///< 监听端口
+        std::string username{};        ///< 鉴权用户名 (可选)
+        std::string password{};        ///< 鉴权密码或密钥 (可选)
+        bool enableSniffing = true;     ///< 是否启用首包域名与协议嗅探
+    };
+
+    /**
+     * @brief 出站落地节点配置规范
+     */
+    struct OutboundConfig
+    {
+        std::string tag = "direct";           ///< 出站标签名称
+        std::string type = "direct";          ///< 节点类型 ("direct", "block", "socks5", "trojan", "selector")
+        std::string host{};                   ///< 远端服务器地址或域名 (代理节点使用)
+        uint16_t port = 0;                    ///< 远端服务器端口
+        std::string username{};               ///< 鉴权用户名 (SOCKS5 等可选)
+        std::string password{};               ///< 鉴权密码或密钥 (Trojan / SOCKS5 等可选)
+        std::vector<std::string> outbounds{}; ///< 选择器子出站节点标签列表 (Selector 专用)
+        std::string defaultTag{};             ///< 选择器默认活动节点 (Selector 专用)
+    };
+
+    /**
      * @brief mynet 全局综合网络配置
      */
     struct NetConfig
@@ -317,6 +396,11 @@ namespace mynet
         Http2Config http2{};
         Http3Config http3{};
         ProxyConfig proxy{};
+        ForwarderConfig forwarder{};
+        RouterConfig router{};
+        DnsConfig dns{};
+        std::vector<InboundConfig> inbounds{};
+        std::vector<OutboundConfig> outbounds{};
     };
 
     /**
@@ -396,6 +480,20 @@ namespace mynet
         {"http3.port", ReloadMode::Startup},
         // ---- proxy ----
         {"proxy.autoReplyConnectSuccess", ReloadMode::Hot},
+        // ---- forwarder ----
+        {"forwarder.enableSplice", ReloadMode::Hot},
+        {"forwarder.spliceChunkSize", ReloadMode::Hot},
+        {"forwarder.bufferChunkSize", ReloadMode::Hot},
+        {"forwarder.sessionIdleTimeoutSecs", ReloadMode::Hot},
+        {"forwarder.udpSessionTimeoutSecs", ReloadMode::Hot},
+        // ---- router ----
+        {"router.defaultOutbound", ReloadMode::Hot},
+        {"router.rules", ReloadMode::Hot},
+        // ---- dns ----
+        {"dns.servers", ReloadMode::Hot},
+        {"dns.port", ReloadMode::Startup},
+        {"dns.ttlSecs", ReloadMode::Hot},
+        {"dns.enableCache", ReloadMode::Hot},
     };
 
     /**
@@ -524,6 +622,61 @@ namespace mynet
      */
     [[nodiscard]] constexpr bool validProxyConfig(const ProxyConfig & /*cfg*/) noexcept
     {
+        return true;
+    }
+
+    /**
+     * @brief 校验转发中继引擎配置是否合法
+     */
+    [[nodiscard]] constexpr bool validForwarderConfig(const ForwarderConfig &cfg) noexcept
+    {
+        return cfg.spliceChunkSize >= 1 && cfg.bufferChunkSize >= 1 &&
+               cfg.sessionIdleTimeoutSecs >= 0 && cfg.udpSessionTimeoutSecs >= 0;
+    }
+
+    /**
+     * @brief 校验策略路由全局引擎配置是否合法
+     */
+    [[nodiscard]] inline bool validRouterConfig(const RouterConfig &cfg) noexcept
+    {
+        return !cfg.defaultOutbound.empty();
+    }
+
+    /**
+     * @brief 校验 DNS 解析与缓存配置是否合法
+     */
+    [[nodiscard]] inline bool validDnsConfig(const DnsConfig &cfg) noexcept
+    {
+        return cfg.port > 0 && cfg.ttlSecs > 0;
+    }
+
+    /**
+     * @brief 校验入站节点配置列表是否合法
+     */
+    [[nodiscard]] inline bool validInboundsConfig(const std::vector<InboundConfig> &inbounds) noexcept
+    {
+        for (const auto &inCfg : inbounds)
+        {
+            if (inCfg.tag.empty() || inCfg.protocol.empty())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @brief 校验出站节点配置列表是否合法
+     */
+    [[nodiscard]] inline bool validOutboundsConfig(const std::vector<OutboundConfig> &outbounds) noexcept
+    {
+        for (const auto &outCfg : outbounds)
+        {
+            if (outCfg.tag.empty() || outCfg.type.empty())
+            {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -658,6 +811,51 @@ namespace mynet
         return snapshot.refConfig().proxy;
     }
 
+    /**
+     * @brief 获取当前全局转发器配置的无锁快照
+     */
+    [[nodiscard]] inline const ForwarderConfig &getForwarderConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().forwarder;
+    }
+
+    /**
+     * @brief 获取当前全局策略路由配置的无锁快照
+     */
+    [[nodiscard]] inline const RouterConfig &getRouterConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().router;
+    }
+
+    /**
+     * @brief 获取当前全局 DNS 配置的无锁快照
+     */
+    [[nodiscard]] inline const DnsConfig &getDnsConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().dns;
+    }
+
+    /**
+     * @brief 获取当前全局入站监听节点列表的无锁快照
+     */
+    [[nodiscard]] inline const std::vector<InboundConfig> &getInboundsConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().inbounds;
+    }
+
+    /**
+     * @brief 获取当前全局出站落地节点列表的无锁快照
+     */
+    [[nodiscard]] inline const std::vector<OutboundConfig> &getOutboundsConfig() noexcept
+    {
+        thread_local NetConfigSnapshot snapshot(NetConfigHolder::getInstance());
+        return snapshot.refConfig().outbounds;
+    }
+
     // =========================================================================
     // 配置发布函数（Publishers）
     // 按分层逻辑严格对齐：
@@ -789,6 +987,61 @@ namespace mynet
         contract_assert(validProxyConfig(cfg));
         auto netCfg = getNetConfig();
         netCfg.proxy = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的转发中继专属配置
+     */
+    inline void publishForwarderConfig(ForwarderConfig cfg)
+    {
+        contract_assert(validForwarderConfig(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.forwarder = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的策略路由全局配置
+     */
+    inline void publishRouterConfig(RouterConfig cfg)
+    {
+        contract_assert(validRouterConfig(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.router = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的 DNS 解析配置
+     */
+    inline void publishDnsConfig(DnsConfig cfg)
+    {
+        contract_assert(validDnsConfig(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.dns = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的入站监听节点列表配置
+     */
+    inline void publishInboundsConfig(std::vector<InboundConfig> cfg)
+    {
+        contract_assert(validInboundsConfig(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.inbounds = std::move(cfg);
+        publishNetConfig(std::move(netCfg));
+    }
+
+    /**
+     * @brief 原子发布新的出站落地节点列表配置
+     */
+    inline void publishOutboundsConfig(std::vector<OutboundConfig> cfg)
+    {
+        contract_assert(validOutboundsConfig(cfg));
+        auto netCfg = getNetConfig();
+        netCfg.outbounds = std::move(cfg);
         publishNetConfig(std::move(netCfg));
     }
 

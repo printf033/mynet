@@ -3,6 +3,8 @@
 #include "config/lua.hpp"
 #include "reactor.hpp"
 #include "config/tls.hpp"
+#include "core.hpp"
+#include "handler/direct.hpp"
 #include <arpa/inet.h>
 #include <chrono>
 #include <filesystem>
@@ -112,6 +114,73 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
                                     "proxy = {\n"
                                     "  autoReplyConnectSuccess = false\n"
                                     "}\n"
+                                    "forwarder = {\n"
+                                    "  enableSplice = true,\n"
+                                    "  spliceChunkSize = 65536,\n"
+                                    "  bufferChunkSize = 16384,\n"
+                                    "  sessionIdleTimeoutSecs = 120,\n"
+                                    "  udpSessionTimeoutSecs = 30\n"
+                                    "}\n"
+                                    "dns = {\n"
+                                    "  servers = {\"8.8.8.8\", \"1.1.1.1\"},\n"
+                                    "  port = 5353,\n"
+                                    "  ttlSecs = 600,\n"
+                                    "  enableCache = true\n"
+                                    "}\n"
+                                    "router = {\n"
+                                    "  defaultOutbound = \"direct\",\n"
+                                    "  rules = {\n"
+                                    "    {\n"
+                                    "      outbound = \"block\",\n"
+                                    "      domainKeywords = {\"adserver\"},\n"
+                                    "      domainSuffixes = {\"doubleclick.net\"}\n"
+                                    "    },\n"
+                                    "    {\n"
+                                    "      outbound = \"proxy-out\",\n"
+                                    "      ipCidrs = {\"1.1.1.1/32\"},\n"
+                                    "      portRanges = {\"443\", \"80-90\"},\n"
+                                    "      protocols = {\"tls\"},\n"
+                                    "      network = \"tcp\"\n"
+                                    "    }\n"
+                                    "  }\n"
+                                    "}\n"
+                                    "inbounds = {\n"
+                                    "  {\n"
+                                    "    tag = \"mixed-in\",\n"
+                                    "    protocol = \"mixed\",\n"
+                                    "    host = \"127.0.0.1\",\n"
+                                    "    port = 7890,\n"
+                                    "    enableSniffing = true\n"
+                                    "  },\n"
+                                    "  {\n"
+                                    "    tag = \"socks-in\",\n"
+                                    "    protocol = \"socks5\",\n"
+                                    "    host = \"127.0.0.1\",\n"
+                                    "    port = 1080\n"
+                                    "  }\n"
+                                    "}\n"
+                                    "outbounds = {\n"
+                                    "  {\n"
+                                    "    tag = \"direct\",\n"
+                                    "    type = \"direct\"\n"
+                                    "  },\n"
+                                    "  {\n"
+                                    "    tag = \"block\",\n"
+                                    "    type = \"block\"\n"
+                                    "  },\n"
+                                    "  {\n"
+                                    "    tag = \"proxy-out\",\n"
+                                    "    type = \"socks5\",\n"
+                                    "    server = \"127.0.0.1\",\n"
+                                    "    port = 1081\n"
+                                    "  },\n"
+                                    "  {\n"
+                                    "    tag = \"selector-out\",\n"
+                                    "    type = \"selector\",\n"
+                                    "    outbounds = {\"proxy-out\", \"direct\"},\n"
+                                    "    default = \"proxy-out\"\n"
+                                    "  }\n"
+                                    "}\n"
                                     "logger = {\n"
                                     "  suppressLevel = \"warn\"\n"
                                     "}\n");
@@ -164,6 +233,42 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
     EXPECT_EQ(cfg.http3.maxRequestBodyBytes, 8388608u);
 
     EXPECT_FALSE(cfg.proxy.autoReplyConnectSuccess);
+
+    EXPECT_TRUE(cfg.forwarder.enableSplice);
+    EXPECT_EQ(cfg.forwarder.spliceChunkSize, 65536u);
+    EXPECT_EQ(cfg.forwarder.bufferChunkSize, 16384u);
+    EXPECT_EQ(cfg.forwarder.sessionIdleTimeoutSecs, 120);
+    EXPECT_EQ(cfg.forwarder.udpSessionTimeoutSecs, 30);
+
+    ASSERT_EQ(cfg.dns.servers.size(), 2u);
+    EXPECT_EQ(cfg.dns.servers[0], "8.8.8.8");
+    EXPECT_EQ(cfg.dns.port, 5353u);
+    EXPECT_EQ(cfg.dns.ttlSecs, 600u);
+    EXPECT_TRUE(cfg.dns.enableCache);
+
+    EXPECT_EQ(cfg.router.defaultOutbound, "direct");
+    ASSERT_EQ(cfg.router.rules.size(), 2u);
+    EXPECT_EQ(cfg.router.rules[0].outbound, "block");
+    ASSERT_EQ(cfg.router.rules[0].domainKeywords.size(), 1u);
+    EXPECT_EQ(cfg.router.rules[0].domainKeywords[0], "adserver");
+    EXPECT_EQ(cfg.router.rules[1].outbound, "proxy-out");
+    EXPECT_EQ(cfg.router.rules[1].network, "tcp");
+
+    ASSERT_EQ(cfg.inbounds.size(), 2u);
+    EXPECT_EQ(cfg.inbounds[0].tag, "mixed-in");
+    EXPECT_EQ(cfg.inbounds[0].port, 7890u);
+    EXPECT_TRUE(cfg.inbounds[0].enableSniffing);
+    EXPECT_EQ(cfg.inbounds[1].tag, "socks-in");
+    EXPECT_EQ(cfg.inbounds[1].port, 1080u);
+
+    ASSERT_EQ(cfg.outbounds.size(), 4u);
+    EXPECT_EQ(cfg.outbounds[0].tag, "direct");
+    EXPECT_EQ(cfg.outbounds[1].tag, "block");
+    EXPECT_EQ(cfg.outbounds[2].tag, "proxy-out");
+    EXPECT_EQ(cfg.outbounds[2].type, "socks5");
+    EXPECT_EQ(cfg.outbounds[3].tag, "selector-out");
+    EXPECT_EQ(cfg.outbounds[3].type, "selector");
+    ASSERT_EQ(cfg.outbounds[3].outbounds.size(), 2u);
 
     EXPECT_EQ(static_cast<int>(mylog::getCurrentSuppressLevel()), static_cast<int>(mylog::LEVEL::WARN));
 
@@ -539,6 +644,16 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     poison.http3.maxHeaderBlockBytes = 3;
     poison.http3.maxHeaderEntries = 3;
     poison.http3.port = 3;
+    poison.forwarder.enableSplice = !poison.forwarder.enableSplice;
+    poison.forwarder.spliceChunkSize = 3;
+    poison.forwarder.bufferChunkSize = 3;
+    poison.forwarder.sessionIdleTimeoutSecs = 3;
+    poison.forwarder.udpSessionTimeoutSecs = 3;
+    poison.dns.servers = {"9.9.9.9"};
+    poison.dns.port = 3;
+    poison.dns.ttlSecs = 3;
+    poison.dns.enableCache = !poison.dns.enableCache;
+    poison.router.defaultOutbound = "poison";
     mynet::publishNetConfig(poison);
 
     const bool reloaded = mynet::reloadConfig(shipped, false);
@@ -612,6 +727,22 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     EXPECT_EQ(loaded.http3.maxHeaderBlockBytes, baseline.http3.maxHeaderBlockBytes);
     EXPECT_EQ(loaded.http3.maxHeaderEntries, baseline.http3.maxHeaderEntries);
     EXPECT_EQ(loaded.http3.port, baseline.http3.port);
+
+    EXPECT_EQ(loaded.forwarder.enableSplice, baseline.forwarder.enableSplice);
+    EXPECT_EQ(loaded.forwarder.spliceChunkSize, baseline.forwarder.spliceChunkSize);
+    EXPECT_EQ(loaded.forwarder.bufferChunkSize, baseline.forwarder.bufferChunkSize);
+    EXPECT_EQ(loaded.forwarder.sessionIdleTimeoutSecs, baseline.forwarder.sessionIdleTimeoutSecs);
+    EXPECT_EQ(loaded.forwarder.udpSessionTimeoutSecs, baseline.forwarder.udpSessionTimeoutSecs);
+
+    EXPECT_EQ(loaded.dns.servers, baseline.dns.servers);
+    EXPECT_EQ(loaded.dns.port, baseline.dns.port);
+    EXPECT_EQ(loaded.dns.ttlSecs, baseline.dns.ttlSecs);
+    EXPECT_EQ(loaded.dns.enableCache, baseline.dns.enableCache);
+
+    EXPECT_EQ(loaded.router.defaultOutbound, baseline.router.defaultOutbound);
+    EXPECT_EQ(loaded.router.rules.size(), baseline.router.rules.size());
+    EXPECT_EQ(loaded.inbounds.size(), baseline.inbounds.size());
+    EXPECT_EQ(loaded.outbounds.size(), baseline.outbounds.size());
 }
 
 TEST(ConfigLua, EventCapacityFollowsMaxEventsExactly)
@@ -839,6 +970,9 @@ TEST(ConfigLua, EveryConfigFieldIsRegisteredWithAReloadMode)
     collectFieldPaths<mynet::Http2Config>("http2", actual);
     collectFieldPaths<mynet::Http3Config>("http3", actual);
     collectFieldPaths<mynet::ProxyConfig>("proxy", actual);
+    collectFieldPaths<mynet::ForwarderConfig>("forwarder", actual);
+    collectFieldPaths<mynet::RouterConfig>("router", actual);
+    collectFieldPaths<mynet::DnsConfig>("dns", actual);
 
     std::vector<std::string> registered;
     registered.reserve(std::size(mynet::kConfigReloadMap));
@@ -1045,4 +1179,54 @@ TEST(ConfigLua, SecurityCaFileEnablesClientCertificateVerification)
         EXPECT_FALSE(mynet::detail::configureTlsContext(ctx, options, true).has_value());
         SSL_CTX_free(ctx);
     }
+}
+
+TEST(ConfigLua, CoreLoadLuaConfigEndToEnd)
+{
+    const std::filesystem::path configPath = "test_config_proxy_core.lua";
+    writeTestConfigFile(configPath,
+                        "router = {\n"
+                        "  defaultOutbound = \"direct\",\n"
+                        "  rules = {\n"
+                        "    {\n"
+                        "      outbound = \"block\",\n"
+                        "      domainKeywords = {\"ads\"}\n"
+                        "    }\n"
+                        "  }\n"
+                        "}\n"
+                        "inbounds = {\n"
+                        "  {\n"
+                        "    tag = \"mixed-in\",\n"
+                        "    protocol = \"mixed\",\n"
+                        "    host = \"127.0.0.1\",\n"
+                        "    port = 7890\n"
+                        "  }\n"
+                        "}\n"
+                        "outbounds = {\n"
+                        "  {\n"
+                        "    tag = \"proxy-node\",\n"
+                        "    type = \"socks5\",\n"
+                        "    server = \"127.0.0.1\",\n"
+                        "    port = 1080\n"
+                        "  }\n"
+                        "}\n");
+
+    EXPECT_TRUE(mynet::reloadConfig(configPath));
+    const auto netCfg = mynet::getNetConfig();
+
+    mynet::Core core(netCfg);
+    EXPECT_TRUE(core.inbounds().has("mixed-in"));
+    EXPECT_TRUE(core.outbounds().has("direct"));
+    EXPECT_TRUE(core.outbounds().has("block"));
+    EXPECT_TRUE(core.outbounds().has("proxy-node"));
+    EXPECT_EQ(core.router().defaultOutbound(), "direct");
+
+    // 规则匹配测试
+    auto target = mynet::handler::ProxyAddress::fromDomain("test.ads.net", 80);
+    mynet::handler::HandlerInboundDirect inbound(target);
+    auto res = core.dispatch(inbound, -1, "mixed-in");
+    EXPECT_EQ(res.status, mynet::CoreDispatchStatus::BLOCKED);
+    EXPECT_EQ(res.outboundTag, "block");
+
+    std::filesystem::remove(configPath);
 }
