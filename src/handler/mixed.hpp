@@ -1,14 +1,14 @@
 #pragma once
 
 /**
- * @file handler/proxy/mixed.hpp
+ * @file handler/mixed.hpp
  * @brief Mixed 混合代理协议入站状态机处理器 (HandlerInboundMixed)（同时支持 SOCKS4/SOCKS5 与 HTTP Proxy）。
  */
 
-#include "../http/http.hpp"
-#include "../inbound.hpp"
-#include "../socks/socks4.hpp"
-#include "../socks/socks5.hpp"
+#include "http/http.hpp"
+#include "inbound.hpp"
+#include "socks/socks4.hpp"
+#include "socks/socks5.hpp"
 
 namespace mynet::handler
 {

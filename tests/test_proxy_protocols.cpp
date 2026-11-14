@@ -9,7 +9,7 @@
 #include "handler/inbound.hpp"
 #include "handler/outbound.hpp"
 #include "handler/proxy/hysteria2.hpp"
-#include "handler/proxy/mixed.hpp"
+#include "handler/mixed.hpp"
 #include "handler/proxy/shadowsocks.hpp"
 #include "handler/proxy/shadowtls.hpp"
 #include "handler/proxy/snell.hpp"

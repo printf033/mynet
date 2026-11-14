@@ -490,6 +490,7 @@ mynet/
 │       ├── crypto.hpp          # 加密与哈希原语 (SHA-224, MD5, AEAD, UUID)
 │       ├── direct.hpp / block.hpp # 直连路由与黑洞阻断处理器 (HandlerInboundDirect / HandlerOutboundDirect...)
 │       ├── transparent.hpp     # Linux Netfilter TProxy / Redirect 原始目的地址透明代理 (HandlerInboundRedirect / HandlerInboundTProxy)
+│       ├── mixed.hpp           # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站 (HandlerInboundMixed)
 │       ├── dns/                # RFC 1035 / RFC 3596 DNS 协议编解码与处理器
 │       │   ├── dns.hpp         # 二进制报文序列化、反序列化、指针压缩 (0xC0xx)
 │       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
@@ -508,8 +509,7 @@ mynet/
 │           ├── tuic.hpp        # TUIC v5 协议处理
 │           ├── shadowsocks.hpp # Shadowsocks AEAD 处理器
 │           ├── shadowtls.hpp   # ShadowTLS SNI 嗅探与 HMAC 挑战分流
-│           ├── snell.hpp       # Snell v1~v4 协议处理
-│           └── mixed.hpp       # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站
+│           └── snell.hpp       # Snell v1~v4 协议处理
 │
 ├── config/                     # 运行时配置
 │   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）

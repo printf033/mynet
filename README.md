@@ -489,6 +489,7 @@ mynet/
 │       ├── crypto.hpp          # Crypto primitives & hashing (SHA-224, MD5, AEAD, UUID)
 │       ├── direct.hpp / block.hpp # Direct forwarding and blackhole block handlers (HandlerInboundDirect / HandlerOutboundDirect...)
 │       ├── transparent.hpp     # Linux Netfilter TProxy / Redirect original destination proxy (HandlerInboundRedirect / HandlerInboundTProxy)
+│       ├── mixed.hpp           # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound (HandlerInboundMixed)
 │       ├── dns/                # RFC 1035 / RFC 3596 DNS protocol codec & handlers
 │       │   ├── dns.hpp         # Wire message serialization, parsing & 0xC0xx compression
 │       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
@@ -507,8 +508,7 @@ mynet/
 │           ├── tuic.hpp        # TUIC v5 protocol handling
 │           ├── shadowsocks.hpp # Shadowsocks AEAD handler
 │           ├── shadowtls.hpp   # ShadowTLS SNI sniffing & HMAC challenge multiplexer
-│           ├── snell.hpp       # Snell v1~v4 protocol handling
-│           └── mixed.hpp       # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound
+│           └── snell.hpp       # Snell v1~v4 protocol handling
 │
 ├── config/                     # Runtime configuration
 │   └── config.lua              # Documented sandboxed Lua configuration (all sections)
