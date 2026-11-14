@@ -79,6 +79,7 @@ namespace mynet
         mutable std::mutex mutex_{};
         std::vector<InboundConfig> inboundConfigs_{};
         std::vector<OutboundConfig> outboundConfigs_{};
+        RouterConfig routerConfig_{};
         std::atomic<bool> running_{false};
 
     public:
@@ -112,6 +113,7 @@ namespace mynet
             std::lock_guard<std::mutex> lock(mutex_);
             inboundConfigs_ = cfg.inbounds;
             outboundConfigs_ = cfg.outbounds;
+            routerConfig_ = cfg.router;
 
             // 装配入站节点
             for (const auto &inCfg : cfg.inbounds)
@@ -311,6 +313,12 @@ namespace mynet
         {
             std::lock_guard<std::mutex> lock(mutex_);
             return outboundConfigs_;
+        }
+
+        [[nodiscard]] inline RouterConfig routerConfig() const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return routerConfig_;
         }
 
         /**
