@@ -21,24 +21,29 @@ TEST(CoreTest, InitializationAndLifecycle)
     EXPECT_EQ(core.activeSessions(), 0u);
     EXPECT_EQ(core.totalBytes(), 0u);
 
-    core.start();
+    ASSERT_TRUE(core.start().has_value());
     EXPECT_TRUE(core.isRunning());
 
     // 预置的 direct 和 block 出站应存在
     EXPECT_TRUE(core.outbounds().has("direct"));
     EXPECT_TRUE(core.outbounds().has("block"));
 
-    // 入站配置管理
+    // 入站管理器注册与查询
+    core.inbounds().registerInbound(std::make_shared<Socks5Inbound>("my-socks-in", "127.0.0.1", 1080));
+    EXPECT_TRUE(core.inbounds().has("my-socks-in"));
+    EXPECT_EQ(core.inbounds().size(), 1u);
+
+    // 入站配置声明管理
     InboundConfig inCfg;
-    inCfg.tag = "my-socks-in";
+    inCfg.tag = "cfg-socks-in";
     inCfg.protocol = "socks5";
     inCfg.port = 1080;
-    core.addInbound(inCfg);
+    core.addInboundConfig(inCfg);
 
-    auto inbounds = core.inbounds();
-    ASSERT_EQ(inbounds.size(), 1u);
-    EXPECT_EQ(inbounds[0].tag, "my-socks-in");
-    EXPECT_EQ(inbounds[0].port, 1080);
+    auto inboundConfigs = core.inboundConfigs();
+    ASSERT_EQ(inboundConfigs.size(), 1u);
+    EXPECT_EQ(inboundConfigs[0].tag, "cfg-socks-in");
+    EXPECT_EQ(inboundConfigs[0].port, 1080);
 
     core.stop();
     EXPECT_FALSE(core.isRunning());
@@ -51,7 +56,7 @@ TEST(CoreTest, InitializationAndLifecycle)
 TEST(CoreTest, DispatchBlockRule)
 {
     Core core;
-    core.start();
+    ASSERT_TRUE(core.start().has_value());
 
     // 添加拦截广告分流规则
     core.router().addRule(RouteRule::to("block").domainKeyword("adserver"));
@@ -72,7 +77,7 @@ TEST(CoreTest, DispatchBlockRule)
 TEST(CoreTest, DispatchSniffingAssistedRoute)
 {
     Core core;
-    core.start();
+    ASSERT_TRUE(core.start().has_value());
 
     // 规则：针对 netflix.com 流量分流至 block (便于无真实节点下的闭环断言)
     core.router().addRule(RouteRule::to("block").domainSuffix("netflix.com"));
@@ -182,7 +187,7 @@ TEST(CoreTest, EndToEndDirectDispatchAndPump)
     uint16_t port = ntohs(listenAddr.sin_port);
 
     Core core;
-    core.start();
+    ASSERT_TRUE(core.start().has_value());
 
     auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), port);
     HandlerInboundDirect inbound(target);

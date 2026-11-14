@@ -467,8 +467,9 @@ mynet/
 │   ├── acceptor.hpp            # Inbound listener root (AcceptorBase / AcceptorSsl / AcceptorQuic)
 │   ├── dialer.hpp              # Outbound dialing infrastructure (DialerBase / DialerSsl / DialerQuic)
 │   ├── core.hpp                # Unified network proxy kernel facade (Core / sniffing, routing, outbound dispatch & zero-copy bridge)
-│   ├── router.hpp              # Policy routing & rule matching engine (Router / RouteRule / CIDR / Domain multi-dim / Sniffing)
+│   ├── inboundManager.hpp      # Inbound listener node abstractions & registry (InboundManager / Mixed / Socks5 / Http / Trojan / TProxy)
 │   ├── outboundManager.hpp     # Outbound node abstractions & registry (OutboundManager / Direct / Block / Socks5 / Trojan / Selector)
+│   ├── router.hpp              # Policy routing & rule matching engine (Router / RouteRule / CIDR / Domain multi-dim / Sniffing)
 │   ├── forwarder.hpp           # Bidirectional stream & datagram forwarding engine (Forwarder / Splice zero-copy & pump)
 │   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection base
 │   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram base

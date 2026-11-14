@@ -18,6 +18,7 @@
 
 #include "error.hpp"
 #include "forwarder.hpp"
+#include "inboundManager.hpp"
 #include "outboundManager.hpp"
 #include "router.hpp"
 #include "handler/inbound.hpp"
@@ -84,25 +85,28 @@ namespace mynet
     class Core
     {
     private:
-        std::shared_ptr<Router> router_{nullptr};
+        std::shared_ptr<InboundManager> inboundManager_{nullptr};
         std::shared_ptr<OutboundManager> outboundManager_{nullptr};
+        std::shared_ptr<Router> router_{nullptr};
         std::shared_ptr<Forwarder> forwarder_{nullptr};
 
         mutable std::mutex mutex_{};
-        std::vector<InboundConfig> inbounds_{};
+        std::vector<InboundConfig> inboundConfigs_{};
         std::atomic<bool> running_{false};
 
     public:
         Core()
-            : router_(std::make_shared<Router>("direct")),
+            : inboundManager_(std::make_shared<InboundManager>()),
               outboundManager_(std::make_shared<OutboundManager>()),
+              router_(std::make_shared<Router>("direct")),
               forwarder_(std::make_shared<Forwarder>())
         {
         }
 
         explicit Core(ForwarderOptions fwdOpts)
-            : router_(std::make_shared<Router>("direct")),
+            : inboundManager_(std::make_shared<InboundManager>()),
               outboundManager_(std::make_shared<OutboundManager>()),
+              router_(std::make_shared<Router>("direct")),
               forwarder_(std::make_shared<Forwarder>(fwdOpts))
         {
         }
@@ -114,11 +118,14 @@ namespace mynet
         Core(Core &&) = delete;
         Core &operator=(Core &&) = delete;
 
-        [[nodiscard]] inline Router &router() noexcept { return *router_; }
-        [[nodiscard]] inline const Router &router() const noexcept { return *router_; }
+        [[nodiscard]] inline InboundManager &inbounds() noexcept { return *inboundManager_; }
+        [[nodiscard]] inline const InboundManager &inbounds() const noexcept { return *inboundManager_; }
 
         [[nodiscard]] inline OutboundManager &outbounds() noexcept { return *outboundManager_; }
         [[nodiscard]] inline const OutboundManager &outbounds() const noexcept { return *outboundManager_; }
+
+        [[nodiscard]] inline Router &router() noexcept { return *router_; }
+        [[nodiscard]] inline const Router &router() const noexcept { return *router_; }
 
         [[nodiscard]] inline Forwarder &forwarder() noexcept { return *forwarder_; }
         [[nodiscard]] inline const Forwarder &forwarder() const noexcept { return *forwarder_; }
@@ -128,15 +135,27 @@ namespace mynet
             return running_.load(std::memory_order_acquire);
         }
 
-        inline void start() noexcept
+        inline Result<> start(int backlog = 128)
         {
-            running_.store(true, std::memory_order_release);
+            if (running_.exchange(true, std::memory_order_acq_rel))
+            {
+                return {};
+            }
+            if (inboundManager_ != nullptr)
+            {
+                return inboundManager_->startAll(backlog);
+            }
+            return {};
         }
 
         inline void stop() noexcept
         {
             if (running_.exchange(false, std::memory_order_acq_rel))
             {
+                if (inboundManager_ != nullptr)
+                {
+                    inboundManager_->stopAll();
+                }
                 if (forwarder_ != nullptr)
                 {
                     forwarder_->closeAll();
@@ -145,18 +164,29 @@ namespace mynet
         }
 
         /**
-         * @brief 注册一个入站监听配置
+         * @brief 注册一个入站节点实例
          */
-        inline void addInbound(InboundConfig config)
+        inline void addInbound(std::shared_ptr<Inbound> inbound)
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            inbounds_.push_back(std::move(config));
+            if (inboundManager_ != nullptr)
+            {
+                inboundManager_->registerInbound(std::move(inbound));
+            }
         }
 
-        [[nodiscard]] inline std::vector<InboundConfig> inbounds() const
+        /**
+         * @brief 注册一个入站配置并保存规范
+         */
+        inline void addInboundConfig(InboundConfig config)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return inbounds_;
+            inboundConfigs_.push_back(std::move(config));
+        }
+
+        [[nodiscard]] inline std::vector<InboundConfig> inboundConfigs() const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return inboundConfigs_;
         }
 
         /**

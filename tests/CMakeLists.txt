@@ -36,6 +36,7 @@ mynet_unit_test(test_dns_cache)
 mynet_unit_test(test_sockmap)
 mynet_unit_test(test_forwarder)
 mynet_unit_test(test_router)
+mynet_unit_test(test_inbound_manager)
 mynet_unit_test(test_outbound_manager)
 mynet_unit_test(test_core)
 
