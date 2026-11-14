@@ -466,8 +466,10 @@ mynet/
 │   ├── CMakeLists.txt          # Header-only interface library definition (INTERFACE mynet & mynet_lua)
 │   ├── acceptor.hpp            # Inbound listener root (AcceptorBase / AcceptorSsl / AcceptorQuic)
 │   ├── dialer.hpp              # Outbound dialing infrastructure (DialerBase / DialerSsl / DialerQuic)
-│   ├── forwarder.hpp           # Bidirectional stream & datagram forwarding engine (Forwarder / Splice zero-copy & pump)
+│   ├── core.hpp                # Unified network proxy kernel facade (Core / sniffing, routing, outbound dispatch & zero-copy bridge)
 │   ├── router.hpp              # Policy routing & rule matching engine (Router / RouteRule / CIDR / Domain multi-dim / Sniffing)
+│   ├── outboundManager.hpp     # Outbound node abstractions & registry (OutboundManager / Direct / Block / Socks5 / Trojan / Selector)
+│   ├── forwarder.hpp           # Bidirectional stream & datagram forwarding engine (Forwarder / Splice zero-copy & pump)
 │   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection base
 │   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram base
 │   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine core

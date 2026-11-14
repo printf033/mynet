@@ -467,8 +467,10 @@ mynet/
 │   ├── CMakeLists.txt          # 纯头文件 Interface 接口库定义（INTERFACE mynet 与 mynet_lua）
 │   ├── acceptor.hpp            # 服务端入站监听基础设施 (AcceptorBase / AcceptorSsl / AcceptorQuic)
 │   ├── dialer.hpp              # 客户端出站建连基础设施 (DialerBase / DialerSsl / DialerQuic)
-│   ├── forwarder.hpp           # 双向流式与数据报中继转发引擎 (Forwarder / ForwarderStreamSession / Splice 零拷贝与缓冲泵送)
+│   ├── core.hpp                # 统一网络代理内核门面 (Core / 全链路嗅探分流、出站调度与零拷贝桥接)
 │   ├── router.hpp              # 策略路由与规则匹配引擎 (Router / RouteRule / CIDR / 域名多维匹配 / 嗅探协议协同)
+│   ├── outboundManager.hpp     # 出站节点抽象与管理器 (OutboundManager / Direct / Block / Socks5 / Trojan / Selector)
+│   ├── forwarder.hpp           # 双向流式与数据报中继转发引擎 (Forwarder / ForwarderStreamSession / Splice 零拷贝与缓冲泵送)
 │   ├── connection.hpp          # TCP/TLS 传输层核心 + 连接处理器基类 (HandlerConnection)
 │   ├── datagram.hpp            # UDP 传输层 Datagram<H> + 报文处理器基类 (HandlerDatagram)
 │   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎核心

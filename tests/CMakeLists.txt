@@ -36,6 +36,8 @@ mynet_unit_test(test_dns_cache)
 mynet_unit_test(test_sockmap)
 mynet_unit_test(test_forwarder)
 mynet_unit_test(test_router)
+mynet_unit_test(test_outbound_manager)
+mynet_unit_test(test_core)
 
 if(MYNET_ENABLE_LUA)
     add_executable(test_config_lua test_config_lua.cpp)
