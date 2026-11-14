@@ -467,6 +467,7 @@ mynet/
 │   ├── acceptor.hpp            # Inbound listener root (AcceptorBase / AcceptorSsl / AcceptorQuic)
 │   ├── dialer.hpp              # Outbound dialing infrastructure (DialerBase / DialerSsl / DialerQuic)
 │   ├── forwarder.hpp           # Bidirectional stream & datagram forwarding engine (Forwarder / Splice zero-copy & pump)
+│   ├── router.hpp              # Policy routing & rule matching engine (Router / RouteRule / CIDR / Domain multi-dim / Sniffing)
 │   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection base
 │   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram base
 │   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine core
