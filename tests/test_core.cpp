@@ -233,3 +233,43 @@ TEST(CoreTest, EndToEndDirectDispatchAndPump)
     core.stop();
     EXPECT_EQ(core.activeSessions(), 0u);
 }
+
+// =============================================================================
+// 5. 拓扑闭包校验与出入站双向生命周期联动
+// =============================================================================
+
+TEST(CoreTest, StartFailsOnDanglingRouteRuleOutbound)
+{
+    Core core;
+    // 添加一条指向不存在节点的悬空规则
+    core.router().addRule(RouteRule::to("phantom-proxy").domainSuffix("bad.com"));
+
+    // start() 应当执行 Fail-Fast 拓扑校验，拒绝启动
+    auto res = core.start();
+    EXPECT_FALSE(res.has_value());
+    EXPECT_FALSE(core.isRunning());
+}
+
+TEST(CoreTest, StartAndStopManagesBothInboundsAndOutbounds)
+{
+    Core core;
+    auto in = std::make_shared<Socks5Inbound>("test-in", "127.0.0.1", 0);
+    auto out = std::make_shared<DirectOutbound>("custom-direct");
+    core.inbounds().registerInbound(in);
+    core.outbounds().registerOutbound(out);
+
+    EXPECT_FALSE(in->isRunning());
+    EXPECT_FALSE(out->isRunning());
+
+    ASSERT_TRUE(core.start().has_value());
+    EXPECT_TRUE(core.isRunning());
+    EXPECT_TRUE(in->isRunning());
+    EXPECT_TRUE(out->isRunning());
+    EXPECT_TRUE(core.outbounds().isRunning());
+
+    core.stop();
+    EXPECT_FALSE(core.isRunning());
+    EXPECT_FALSE(in->isRunning());
+    EXPECT_FALSE(out->isRunning());
+    EXPECT_FALSE(core.outbounds().isRunning());
+}

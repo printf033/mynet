@@ -237,14 +237,57 @@ namespace mynet
 
         inline Result<> start(int backlog = 128)
         {
-            if (running_.exchange(true, std::memory_order_acq_rel))
+            if (running_.load(std::memory_order_acquire))
             {
                 return {};
             }
+
+            // 1. 拓扑闭包校验 (Fail-Fast: 检查路由默认出站与各规则目标出站是否均已注册)
+            if (router_ != nullptr && outboundManager_ != nullptr)
+            {
+                if (!router_->defaultOutbound().empty() && !outboundManager_->has(router_->defaultOutbound()))
+                {
+                    LOG_ERROR("Core start failed: default outbound '{}' not registered in OutboundManager",
+                              router_->defaultOutbound());
+                    return std::unexpected(ERR::CONNECT_FAILED);
+                }
+                for (const auto &rule : router_->rules())
+                {
+                    if (!rule.outboundTag.empty() && !outboundManager_->has(rule.outboundTag))
+                    {
+                        LOG_ERROR("Core start failed: route rule outbound '{}' not registered in OutboundManager",
+                                  rule.outboundTag);
+                        return std::unexpected(ERR::CONNECT_FAILED);
+                    }
+                }
+            }
+
+            // 2. 出站系统启动 (生命周期就绪与活动选择器装配)
+            if (outboundManager_ != nullptr)
+            {
+                auto outRes = outboundManager_->startAll();
+                if (!outRes)
+                {
+                    return outRes;
+                }
+            }
+
+            // 3. 入站系统批量监听 (监听套接字绑定与非阻塞开始就绪)
             if (inboundManager_ != nullptr)
             {
-                return inboundManager_->startAll(backlog);
+                auto inRes = inboundManager_->startAll(backlog);
+                if (!inRes)
+                {
+                    // 回滚已启动的出站
+                    if (outboundManager_ != nullptr)
+                    {
+                        outboundManager_->stopAll();
+                    }
+                    return inRes;
+                }
             }
+
+            running_.store(true, std::memory_order_release);
             return {};
         }
 
@@ -252,15 +295,34 @@ namespace mynet
         {
             if (running_.exchange(false, std::memory_order_acq_rel))
             {
+                // 1. 关断入站监听 (停止接入新流量)
                 if (inboundManager_ != nullptr)
                 {
                     inboundManager_->stopAll();
                 }
+                // 2. 关断活跃中继会话 (安全释放描述符与零拷贝管道)
                 if (forwarder_ != nullptr)
                 {
                     forwarder_->closeAll();
                 }
+                // 3. 关断出站系统生命周期
+                if (outboundManager_ != nullptr)
+                {
+                    outboundManager_->stopAll();
+                }
             }
+        }
+
+        /**
+         * @brief 定期排空超时的中继与 UDP 会话资源
+         */
+        inline size_t sweepIdleSessions(int maxAgeSecs = 60) noexcept
+        {
+            if (forwarder_ != nullptr)
+            {
+                return forwarder_->sweepIdleDatagramSessions(std::chrono::seconds(maxAgeSecs));
+            }
+            return 0;
         }
 
         /**

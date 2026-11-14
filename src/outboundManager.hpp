@@ -96,6 +96,7 @@ namespace mynet
     protected:
         std::string tag_{};
         std::string type_{};
+        std::atomic<bool> running_{false};
 
     public:
         Outbound(std::string tag, std::string type)
@@ -107,6 +108,24 @@ namespace mynet
 
         [[nodiscard]] inline const std::string &tag() const noexcept { return tag_; }
         [[nodiscard]] inline const std::string &type() const noexcept { return type_; }
+        [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
+
+        /**
+         * @brief 启动出站节点生命周期
+         */
+        virtual Result<> start() noexcept
+        {
+            running_.store(true, std::memory_order_release);
+            return {};
+        }
+
+        /**
+         * @brief 停止出站节点生命周期
+         */
+        virtual void stop() noexcept
+        {
+            running_.store(false, std::memory_order_release);
+        }
 
         /**
          * @brief 发起流式出站建连 (TCP / TLS / 代理协议)
@@ -423,6 +442,15 @@ namespace mynet
             return false;
         }
 
+        Result<> start() noexcept override
+        {
+            if (selectedTag_.empty() && !candidateTags_.empty())
+            {
+                selectedTag_ = candidateTags_.front();
+            }
+            return Outbound::start();
+        }
+
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
         Result<int> dialDatagram(const handler::ProxyAddress &target) override;
     };
@@ -438,6 +466,7 @@ namespace mynet
         mutable std::mutex mutex_{};
         std::unordered_map<std::string, std::shared_ptr<Outbound>> outbounds_{};
         std::string defaultTag_{"direct"};
+        std::atomic<bool> running_{false};
 
     public:
         OutboundManager()
@@ -447,12 +476,57 @@ namespace mynet
             registerOutbound(std::make_shared<BlockOutbound>("block"));
         }
 
-        ~OutboundManager() noexcept = default;
+        ~OutboundManager() noexcept
+        {
+            stopAll();
+        }
 
         OutboundManager(const OutboundManager &) = delete;
         OutboundManager &operator=(const OutboundManager &) = delete;
         OutboundManager(OutboundManager &&) = delete;
         OutboundManager &operator=(OutboundManager &&) = delete;
+
+        /**
+         * @brief 批量启动所有注册的出站节点生命周期
+         */
+        Result<> startAll() noexcept
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto &[tag, ob] : outbounds_)
+            {
+                if (ob != nullptr)
+                {
+                    auto res = ob->start();
+                    if (!res)
+                    {
+                        return res;
+                    }
+                }
+            }
+            running_.store(true, std::memory_order_release);
+            return {};
+        }
+
+        /**
+         * @brief 批量停止所有出站节点生命周期
+         */
+        void stopAll() noexcept
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto &[tag, ob] : outbounds_)
+            {
+                if (ob != nullptr)
+                {
+                    ob->stop();
+                }
+            }
+            running_.store(false, std::memory_order_release);
+        }
+
+        [[nodiscard]] inline bool isRunning() const noexcept
+        {
+            return running_.load(std::memory_order_acquire);
+        }
 
         [[nodiscard]] inline std::string_view defaultTag() const noexcept { return defaultTag_; }
         inline void setDefaultTag(std::string tag)

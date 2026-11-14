@@ -593,6 +593,12 @@ namespace mynet
             return defaultOutbound_;
         }
 
+        [[nodiscard]] inline std::vector<RouteRule> rules() const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return rules_;
+        }
+
         inline void setDefaultOutbound(std::string tag)
         {
             std::lock_guard<std::mutex> lock(mutex_);
