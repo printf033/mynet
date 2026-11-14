@@ -78,6 +78,7 @@ namespace mynet
 
         mutable std::mutex mutex_{};
         std::vector<InboundConfig> inboundConfigs_{};
+        std::vector<OutboundConfig> outboundConfigs_{};
         std::atomic<bool> running_{false};
 
     public:
@@ -110,6 +111,7 @@ namespace mynet
         {
             std::lock_guard<std::mutex> lock(mutex_);
             inboundConfigs_ = cfg.inbounds;
+            outboundConfigs_ = cfg.outbounds;
 
             // 装配入站节点
             for (const auto &inCfg : cfg.inbounds)
@@ -271,6 +273,17 @@ namespace mynet
         }
 
         /**
+         * @brief 注册一个出站节点实例
+         */
+        inline void addOutbound(std::shared_ptr<Outbound> outbound)
+        {
+            if (outboundManager_ != nullptr)
+            {
+                outboundManager_->registerOutbound(std::move(outbound));
+            }
+        }
+
+        /**
          * @brief 注册一个入站配置并保存规范
          */
         inline void addInboundConfig(InboundConfig config)
@@ -283,6 +296,21 @@ namespace mynet
         {
             std::lock_guard<std::mutex> lock(mutex_);
             return inboundConfigs_;
+        }
+
+        /**
+         * @brief 注册一个出站配置并保存规范
+         */
+        inline void addOutboundConfig(OutboundConfig config)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            outboundConfigs_.push_back(std::move(config));
+        }
+
+        [[nodiscard]] inline std::vector<OutboundConfig> outboundConfigs() const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return outboundConfigs_;
         }
 
         /**

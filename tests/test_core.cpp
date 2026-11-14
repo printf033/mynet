@@ -45,6 +45,19 @@ TEST(CoreTest, InitializationAndLifecycle)
     EXPECT_EQ(inboundConfigs[0].tag, "cfg-socks-in");
     EXPECT_EQ(inboundConfigs[0].port, 1080);
 
+    // 出站配置声明管理
+    OutboundConfig outCfg;
+    outCfg.tag = "cfg-socks-out";
+    outCfg.type = "socks5";
+    outCfg.host = "127.0.0.1";
+    outCfg.port = 1081;
+    core.addOutboundConfig(outCfg);
+
+    auto outboundConfigs = core.outboundConfigs();
+    ASSERT_EQ(outboundConfigs.size(), 1u);
+    EXPECT_EQ(outboundConfigs[0].tag, "cfg-socks-out");
+    EXPECT_EQ(outboundConfigs[0].port, 1081);
+
     core.stop();
     EXPECT_FALSE(core.isRunning());
 }
