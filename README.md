@@ -70,68 +70,235 @@
 
 ## Architecture
 
-`mynet` adopts a unified event-driven non-blocking and dual-transport symmetric architecture, decoupling inbound listening (`AcceptorBase`), outbound dialing (`DialerBase`), dual I/O engines (`Reactor` / `Proactor`), transport sessions (`Connection` / `DatagramContext`), and the rich protocol handler suite (`src/handler/`).
+`mynet` adopts a unified event-driven non-blocking and dual-transport symmetric architecture, decoupling inbound listening (`InboundBase` / `AcceptorBase`), outbound dialing (`OutboundBase` / `DialerBase`), dual I/O engines (`Reactor` / `Proactor`), transport sessions (`Connection` / `DatagramContext`), the single-source-of-truth routing hub (`Router`), the unified data plane (`Forwarder`), and the modular per-protocol suite (`src/<proto>/`).
 
-The following comprehensive Mermaid sequence diagram illustrates the complete lifecycle — from inbound connection handshake, zero-heap `ObjectPool` allocation, userspace zero-copy ingress, protocol state machine execution, through outbound DNS resolution, 4-tuple establishment, outbound protocol handshake (Trojan / VLESS / SOCKS5), kernel zero-copy `splice` forwarding, backpressure flow control, to safe resource reclamation:
+### 1. System Architecture & Topology
+
+The following Mermaid topology diagram illustrates the end-to-end component layout across all control, ingress, inspection, routing, data-plane forwarding, and outbound dialing tiers:
+
+```mermaid
+flowchart TD
+    %% Ingress Sources
+    subgraph INGRESS_LAYER["1. Ingress & Traffic Sources"]
+        direction LR
+        AppClients["Application Clients (Browser / Curl / App)"]
+        GwClients["Gateway Intercepted Traffic (TProxy / TUN Interface)"]
+    end
+
+    %% Control Plane & Configuration
+    subgraph CONTROL_PLANE["6. Control Plane & Orchestration"]
+        direction LR
+        Config["Sandboxed Lua Config (config.lua / Generation Snapshots)"]
+        Controller["RESTful Controller (Clash / sing-box API :9090)"]
+    end
+
+    %% Inbound Listening Layer
+    subgraph INBOUND_LAYER["2. Unified Inbound Plane (Inbound Infrastructure)"]
+        direction TB
+        InboundMgr["InboundManager (InboundBase Lifecycle Registry)"]
+        subgraph PROTO_IN["Inbound Protocol Adapters (src/<proto>/inbound.hpp)"]
+            direction TB
+            InSocks["InboundSocks5"]
+            InHttp["InboundHttp"]
+            InTrojan["InboundTrojan"]
+            InVless["InboundVless"]
+            InHy2["InboundHysteria2"]
+            InSS["InboundShadowsocks"]
+            InMixed["InboundMixed (Adaptive Sniffing Inbound)"]
+            InTrans["InboundTransparent (TProxy / Redirect)"]
+            InTun["InboundTun (Linux TUN Interface)"]
+            InDirect["InboundDirect"]
+        end
+        AcceptorCore["AcceptorBase Multiplexed Listeners (TCP / UDP / KTLS)"]
+    end
+
+    %% Dual Asynchronous I/O Engines
+    subgraph IO_ENGINE["3. Dual Asynchronous I/O Engines & Infrastructure"]
+        direction TB
+        subgraph ENGINES["Pluggable Event-Driven Engines"]
+            ReactorEngine["Reactor Engine (Linux epoll Edge-Triggered EPOLLET)"]
+            ProactorEngine["Proactor Engine (Linux io_uring Completion Queue + buf_ring)"]
+        end
+        subgraph MEMORY_POOL["Zero-Heap-Allocation Memory Pool System"]
+            ObjPool["ObjectPool (Pinned Stable Memory Slots, Zero malloc)"]
+            ReqBuf["RequestBuffer (Contiguous Sliding-Window Buffer)"]
+            RespQ["ResponseQueue (Fixed-Capacity Zero-Alloc Ring Buffer)"]
+        end
+    end
+
+    %% Protocol Inspection & Resolution
+    subgraph INSPECTION_LAYER["4. Protocol Inspection & Address Resolution"]
+        direction LR
+        SnifferEngine["Sniffer Zero-Copy Inspector (TLS SNI / HTTP Host / QUIC Initial)"]
+        FakeIPPool["FakeIP Virtual Pool (198.18.0.0/15 + Bidirectional LRU Mapping)"]
+        DnsCache["DNS Reverse Resolution Cache (IpDomainCache)"]
+    end
+
+    %% Single Source of Truth Router
+    subgraph ROUTING_HUB["5. Routing Decision Hub (Single Source of Truth Router)"]
+        direction TB
+        RouterEngine["Router Single Source of Truth Hub"]
+        subgraph RULES["Multi-Dimensional Routing Rules"]
+            RuleDomain["Domain Rules (Full / Suffix / Keyword / Regex)"]
+            RuleGeoIP["GeoIP Country CIDR Trie (Radix Tree)"]
+            RuleGeoSite["GeoSite Domain Categories"]
+            RuleCIDR["CIDR / IP / Port / Protocol Matching"]
+        end
+        EbpfOffload["TC eBPF Kernel Bypass (Kernel LPM Trie Sync)"]
+    end
+
+    %% Unified Data Plane Forwarder
+    subgraph DATA_PLANE["7. Unified Data Plane Forwarder"]
+        direction TB
+        ForwarderEngine["Forwarder Bi-directional Forwarding Engine"]
+        subgraph FORWARD_MODES["Three Core Forwarding Modes"]
+            SpliceMode["Splice Mode: Kernel Pipe Zero-Copy Direct (splice / vmsplice)"]
+            BufferPumpMode["Buffer Pump Mode: Memory Pump + Backpressure (Crypto/Framing)"]
+            EbpfBypassMode["eBPF Mode: TC Driver-Level Kernel Fast Path (TC_ACT_OK)"]
+        end
+    end
+
+    %% Outbound Infrastructure
+    subgraph OUTBOUND_LAYER["8. Unified Outbound Infrastructure"]
+        direction TB
+        OutboundMgr["OutboundManager (OutboundBase Dialing Registry)"]
+        subgraph SCHEDULERS["High-Level Outbound Schedulers"]
+            OutSelector["OutboundSelector (Manual / API Node Selection)"]
+            OutUrlTest["OutboundUrlTest (Lowest Latency RTT Probing)"]
+            OutFallback["OutboundFallback (Ordered Fault-Tolerance Failover)"]
+        end
+        subgraph PROTO_OUT["Outbound Protocol Endpoints (DialerOptions: fwmark/interface)"]
+            OutDirect["OutboundDirect (Direct Internet Exit)"]
+            OutBlock["OutboundBlock (Blackhole Sink)"]
+            OutSocks["OutboundSocks5"]
+            OutTrojan["OutboundTrojan"]
+            OutVless["OutboundVless"]
+            OutHy2["OutboundHysteria2"]
+            OutSS["OutboundShadowsocks"]
+        end
+        DialerEngine["DialerBase Parameterized Dialers (SO_MARK Anti-Loop)"]
+    end
+
+    %% Upstream & Targets
+    subgraph EGRESS_TARGETS["9. Upstream & Targets"]
+        direction LR
+        TargetDirect["Direct Public Internet"]
+        TargetProxy["Remote Proxy Server Nodes (Upstream)"]
+        TargetBlock["Blackhole Sink (Discard)"]
+    end
+
+    %% Flow Topology
+    AppClients -->|Proxy Connections| InboundMgr
+    GwClients -->|Transparent / TUN| InboundMgr
+    InboundMgr --> AcceptorCore
+    AcceptorCore --> PROTO_IN
+    PROTO_IN --> ENGINES
+    ENGINES <--> MEMORY_POOL
+    ENGINES --> INSPECTION_LAYER
+    INSPECTION_LAYER --> ROUTING_HUB
+    ROUTING_HUB -->|LPM Trie Sync| EbpfOffload
+    ROUTING_HUB -->|Routing Decisions| ForwarderEngine
+    ForwarderEngine --> FORWARD_MODES
+
+    FORWARD_MODES -->|Dispatch Outbound| OutboundMgr
+    OutboundMgr --> SCHEDULERS
+    SCHEDULERS --> PROTO_OUT
+    PROTO_OUT --> DialerEngine
+    DialerEngine --> EGRESS_TARGETS
+
+    %% Control Plane Connections
+    Config -.->|Generation Snapshot| RouterEngine
+    Config -.->|Initialize Config| InboundMgr
+    Config -.->|Initialize Config| OutboundMgr
+    Controller -.->|Node Switch / Query| OutboundMgr
+    Controller -.->|Trigger Reload| Config
+```
+
+---
+
+### 2. End-to-End Request Lifecycle Sequence
+
+The following comprehensive Mermaid sequence diagram illustrates the complete end-to-end lifecycle — from client connection handshake, zero-heap `ObjectPool` allocation, userspace zero-copy ingress, protocol inspection, single-source-of-truth router decision, outbound node scheduling, 4-tuple establishment, outbound protocol handshake (Trojan / VLESS / SOCKS5 etc.), kernel zero-copy `splice` forwarding, backpressure flow control, to safe resource reclamation:
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client as "Client / Peer"
-    participant Acceptor as "Acceptor (AcceptorBase / Ssl / Quic)"
+    participant Inbound as "Inbound (InboundBase / AcceptorBase)"
     participant Engine as "I/O Engine (Reactor / Proactor)"
     participant Pool as "Pool (ObjectPool / BufferRing)"
     participant Conn as "Connection (Connection / RequestBuffer)"
-    participant Handler as "Handler (HTTP/DNS/SOCKS/Trojan)"
-    participant Dialer as "Dialer (DialerBase / Ssl / Quic)"
+    participant Sniffer as "Sniffer / FakeIP / DNS"
+    participant Router as "Router (Single Source of Truth / eBPF)"
+    participant Forwarder as "Forwarder (Unified Data Plane)"
+    participant Outbound as "Outbound (OutboundBase / DialerBase)"
     actor Upstream as "Upstream Server / Target"
 
     %% Phase 1: Inbound Handshake & Pool Allocation
-    Note over Client, Acceptor: Phase 1: Inbound Handshake & ObjectPool Allocation
-    Acceptor->>Acceptor: listenTcp() / listenUdp() start non-blocking listener (SOCK_NONBLOCK)
-    Client->>Acceptor: TCP SYN / UDP Datagram / TLS Handshake
-    Acceptor-->>Engine: Trigger readiness (epoll EPOLLIN / io_uring accept CQE)
-    Engine->>Pool: acquire() pinned connection slot (zero heap alloc)
-    Pool-->>Engine: Return stable pointer to Connection / Session
+    Note over Client, Inbound: Phase 1: Inbound Handshake & ObjectPool Allocation
+    Inbound->>Inbound: listen() start non-blocking listener (AcceptorBase)
+    Client->>Inbound: TCP SYN / UDP Datagram / TLS Handshake
+    Inbound-->>Engine: Trigger readiness (epoll EPOLLIN / io_uring accept CQE)
+    Engine->>Pool: acquire() pinned connection slot (stable pointer, zero malloc)
+    Pool-->>Engine: Return Connection / Session stable pointer
     Engine->>Conn: Bind client socket fd and initialize state
     opt TLS / QUIC Encrypted Transport
         Client->>Conn: TLS ClientHello / 1-RTT Handshake (ALPN / SNI)
         Conn->>Conn: Complete SSL handshake (supports Linux KTLS offload)
     end
 
-    %% Phase 2: Ingress Data Reception & Protocol Parsing
-    Note over Client, Handler: Phase 2: Zero-Copy Ingress Reception & Protocol Dispatch
-    Client->>Engine: Ingress payload (HTTP 1/2/3, DNS, SOCKS5, Trojan, VLESS...)
+    %% Phase 2: Zero-Copy Ingress & Sniffing
+    Note over Client, Sniffer: Phase 2: Zero-Copy Ingress Reception & Protocol Sniffing
+    Client->>Engine: Ingress payload (SOCKS5 / HTTP / Trojan / VLESS / Transparent)
     Engine->>Conn: prepareRequestWritable() direct write slice allocation
-    Engine->>Conn: appendRequest() direct kernel receive (no stack buffer memcpy)
-    Conn->>Handler: process() trigger protocol state machine
-    Handler->>Handler: Parse headers, verify credentials, extract target (ProxyAddress)
-
-    %% Phase 3: Outbound Resolution, Dialing & Handshake
-    alt Proxy Tunneling / Outbound Client Mode
-        Note over Handler, Upstream: Phase 3: Outbound Resolution, 4-Tuple & Protocol Handshake
-        Handler->>Dialer: Outbound dial request (Target: example.com:443)
-        Dialer->>Dialer: dialTcp() / dialUdp() (optional SO_BINDTODEVICE binding)
-        Dialer->>Upstream: Non-blocking connect() establish 4-tuple
-        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS, writable event ready)
-        Dialer->>Dialer: checkConnectError() verify socket connected
-        opt Upstream Proxy / Encrypted Handshake (Trojan / Vless / Socks5 / TLS)
-            Handler->>Upstream: Send outbound protocol header (HandlerOutbound*)
-            Upstream-->>Handler: Handshake response (transition to STREAMING)
-        end
-        Note over Conn, Upstream: Phase 4: Bi-directional Streaming & Zero-Copy Forwarding
-        alt Linux Kernel Zero-Copy (splice)
-            Conn->>Upstream: enableSpliceForward(targetFd) activate pipe splice forwarding
-        else Userspace Relay
-            Conn->>Upstream: pushResponse() streaming pipeline relay
-        end
-    else Local Application Server (HTTP Web API / DNS Local Server)
-        Note over Conn, Handler: Local Response Generation
-        Handler->>Conn: pushResponse() into ring buffer (ResponseQueue, zero-alloc)
+    Engine->>Conn: appendRequest() direct kernel receive (zero memcpy)
+    Conn->>Inbound: createHandler() trigger protocol state machine
+    opt Transparent Proxy or Target is IP
+        Inbound->>Sniffer: Zero-copy packet sniffing (TLS SNI / HTTP Host / QUIC Initial)
+        Sniffer-->>Inbound: Restore target domain name (or reverse query via FakeIP / DNS cache)
     end
 
-    %% Phase 5: Response Egress & Safe Recycle
-    Note over Client, Pool: Phase 5: Response Egress, Backpressure & Resource Recycle
+    %% Phase 3: Single Source of Truth Routing Decision
+    Note over Inbound, Router: Phase 3: Single Source of Truth Routing & eBPF Offload
+    Inbound->>Router: match(target, protocol, port) submit target descriptor
+    Router->>Router: Match GeoIP / GeoSite / CIDR / Domain / Protocol rules
+    opt Matched 'direct' with eBPF enabled
+        Router->>Router: Sync direct CIDR rules to kernel LPM Trie map
+    end
+    Router-->>Forwarder: Dispatch outbound tag (direct / block / proxy-node)
+
+    %% Phase 4: Outbound Scheduling & Dialing
+    alt Matched Block Rule (Block Outbound)
+        Note over Forwarder, Outbound: Traffic Interception (Block Blackhole)
+        Forwarder->>Outbound: Route to OutboundBlock
+        Outbound-->>Conn: Mark error & terminate connection
+    else Requires Forwarding or Proxy Dialing (Direct / Proxy Outbound)
+        Note over Forwarder, Upstream: Phase 4: Outbound Scheduling, 4-Tuple & Protocol Handshake
+        Forwarder->>Outbound: Dispatch outbound endpoint (OutboundDirect / Trojan / Vless / Socks5 ...)
+        opt Outbound Group (Selector / UrlTest / Fallback)
+            Outbound->>Outbound: Select node by user preference / lowest RTT latency / ordered failover
+        end
+        Outbound->>Outbound: Apply DialerOptions (inject SO_MARK to avoid routing loops)
+        Outbound->>Upstream: Non-blocking dialTcp() / dialUdp() connect()
+        Upstream-->>Outbound: TCP SYN-ACK 4-tuple established
+        opt Upstream Proxy / Encrypted Handshake (Trojan / Vless / Shadowsocks / Hysteria2)
+            Outbound->>Upstream: Send outbound protocol header (HandlerOutbound*)
+            Upstream-->>Outbound: Handshake response (transition to STREAMING)
+        end
+
+        %% Phase 5: Unified Bi-directional Forwarding
+        Note over Conn, Upstream: Phase 5: Bi-directional Forwarding Modes
+        alt Plaintext Direct Connection (Splice Mode)
+            Forwarder->>Forwarder: enableSpliceForward(targetFd)
+            Conn<<->>Upstream: Bi-directional kernel pipe zero-copy direct forwarding (splice)
+        else Encrypted / Transformed Protocols (Buffer Pump Mode)
+            Forwarder->>Forwarder: enableBufferPump(inConn, outConn)
+            Conn<<->>Upstream: Memory buffer pump + high/low watermark backpressure flow control
+        end
+    end
+
+    %% Phase 6: Response Egress & Safe Recycle
+    Note over Client, Pool: Phase 6: Response Egress, Backpressure & Resource Recycle
     opt Backpressure Control
         Conn->>Engine: High-water mark exceeded, readCredit() pauses ingress
     end
@@ -143,7 +310,7 @@ sequenceDiagram
         Engine->>Engine: Verify inFlight == 0 (no outstanding kernel I/O)
     end
     Engine->>Pool: release(conn) return slot to ObjectPool index stack
-    Note over Pool: Slot immediately reusable for next incoming connection
+    Note over Pool: Slot immediately reusable for next incoming connection (zero malloc/free)
 ```
 
 ---
@@ -176,13 +343,13 @@ sequenceDiagram
 - **`ObjectPool<Object>`**: Pre-allocates a contiguous array of slots via `std::unique_ptr<Slot[]>` with an index-based free stack. Objects are pinned in memory so epoll data pointers and io_uring completion context pointers remain 100% stable, completely bypassing heap allocation during connection accept/release cycles.
 - **`RequestBuffer`**: A zero-exception, self-managed contiguous byte buffer (`operator new[](std::nothrow)`) with sliding-window auto-compaction and direct zero-copy write window (`writableBytes()`, `writableBegin()`, `commitWritten()`, `ensureWritable()`, `readableView()`). Storage is compacted in-place only when dead prefix space exceeds 4 KiB and occupies at least half of the allocation, amortizing compaction overhead while keeping memory footprints bounded.
 - **`ResponseQueue`**: Fixed-capacity contiguous circular ring buffer (`src/responseQueue.hpp`) providing $O(1)$ zero-allocation enqueue/dequeue operations with bounded memory footprints.
-- **`StreamTable<T>`**: Open-addressing flat hash table (`src/handler/http/v2/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
+- **`StreamTable<T>`**: Open-addressing flat hash table (`src/http/v2/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
 
 ### 4. HTTP/2 Framing & Stream Multiplexer
 
 - **Wire Compatibility**: `FrameDecoder` and `appendFrame` parse and construct 9-byte HTTP/2 standard frames (`DATA`, `HEADERS`, `PRIORITY`, `RST_STREAM`, `SETTINGS`, `PUSH_PROMISE`, `PING`, `GOAWAY`, `WINDOW_UPDATE`).
 - **Client Connection Preface**: the 24-byte RFC 9113 §3.4 preface is validated before any frame is decoded (it may arrive split across reads); a wrong preface is answered with `GOAWAY(PROTOCOL_ERROR)` instead of being misparsed as a 5 MiB frame.
-- **HPACK (`handler/http/v2/hpack.hpp`)**: RFC 7541 decoding — static table, dynamic table with eviction, table-size updates and Huffman strings — plus a stateless encoder used by `sendResponse`. Compression failures end the connection with `COMPRESSION_ERROR`; an over-large header list resets only that stream.
+- **HPACK (`http/v2/hpack.hpp`)**: RFC 7541 decoding — static table, dynamic table with eviction, table-size updates and Huffman strings — plus a stateless encoder used by `sendResponse`. Compression failures end the connection with `COMPRESSION_ERROR`; an over-large header list resets only that stream.
 - **Fragmented Header Blocks**: `HEADERS` without `END_HEADERS` is assembled from same-stream `CONTINUATION` frames (fragment boundaries may fall inside an HPACK field). Per RFC 9113 §6.2 any interleaved frame — including one on another stream — ends the connection, which is also the CVE-2024-27983 defense; a zero-length `CONTINUATION` flood hits a 32-empty-frame cap (total fragments capped at 4096), and a header list that decodes past the advertised limit is answered with `RST_STREAM` — the block is still fully HPACK-decoded first, so the connection's dynamic table never desynchronises.
 - **Header List Limits**: `sendSettings` advertises `SETTINGS_MAX_HEADER_LIST_SIZE` with the same value the decoder enforces, so a compliant peer never trips the limit mid-block. The peer's advertised limit is honoured on the way out: `sendResponse` refuses a header list the peer said it will not accept, and outbound `HEADERS` are split into `CONTINUATION` frames by the peer's `SETTINGS_MAX_FRAME_SIZE`.
 - **`HandlerHttp2<StreamHandler>`**: Enables many independent logical request/response streams over a single byte stream.
@@ -209,7 +376,7 @@ sequenceDiagram
 
 ### 7. Configuration Ownership: No Hard-Coded Engine Defaults
 
-Every tunable that decides *how much* a server engine allocates or how deep its kernel queues run lives in exactly one place: `configHolder.hpp` (the compiled-in baseline) parsed and clamped by `config/config.lua` via `reloadConfig()`. `Reactor` and `Proactor` carry no default arguments of their own — the two-argument call reads the current `NetConfig` snapshot:
+Every tunable that decides *how much* a server engine allocates or how deep its kernel queues run lives in exactly one place: `configHolder.hpp` (the compiled-in baseline) parsed and clamped by `config/config.lua` via `reloadConfig()`. `Reactor` and `Proactor` carry no default arguments of their own — the two-argument call reads the current `MynetConfig` snapshot:
 
 ```cpp
 // Nothing is loaded for you: the baseline in configHolder.hpp is what a fresh
@@ -234,7 +401,7 @@ tlsServer.runSsl();
 
 Without that `reloadConfig()` call the library still runs, on the compiled-in baseline — which is exactly the same value set the shipped `config.lua` carries (a test enforces it field by field). What a reader should *not* assume is that editing `config.lua` alone changes a running server.
 
-Every field also declares **when** it takes effect, and that declaration is data, not documentation: `kConfigReloadMap` in `configHolder.hpp` maps every dotted path to a `ReloadMode`, and a test enumerates `NetConfig` by static reflection to prove no field is missing from it.
+Every field also declares **when** it takes effect, and that declaration is data, not documentation: `kConfigReloadMap` in `configHolder.hpp` maps every dotted path to a `ReloadMode`, and a test enumerates `MynetConfig` by static reflection to prove no field is missing from it.
 
 - **`Hot`** — picked up by `reloadConfig()` immediately. The reading site is on a per-connection or per-I/O path (`Connection`, `Datagram`, `HandlerHttp2`), so new connections and in-flight I/O see the new value right away.
 - **`Startup`** — read once inside `listen()` / `serve()` / `runSsl()`. `reloadConfig()` updates the snapshot, but a running engine keeps the values it started with; restart the server to apply.
@@ -427,7 +594,7 @@ int main() {
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "handler/http/v2/handler.hpp"
+#include "http/v2/handler.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -473,53 +640,52 @@ mynet/
 │   ├── acceptor.hpp            # Inbound listener root (AcceptorBase / AcceptorSsl / AcceptorQuic)
 │   ├── dialer.hpp              # Outbound dialing infrastructure (DialerBase / DialerSsl / DialerQuic)
 │   ├── core.hpp                # Unified network proxy kernel facade (Core / sniffing, routing, outbound dispatch & zero-copy bridge)
-│   ├── inboundManager.hpp      # Inbound listener node abstractions & registry (InboundManager / Mixed / Socks5 / Http / Trojan / TProxy)
-│   ├── outboundManager.hpp     # Outbound node abstractions & registry (OutboundManager / Direct / Block / Socks5 / Trojan / Selector)
-│   ├── router.hpp              # Policy routing & rule matching engine (Router / RouteRule / CIDR / Domain multi-dim / Sniffing)
-│   ├── forwarder.hpp           # Bidirectional stream & datagram forwarding engine (Forwarder / Splice zero-copy & pump)
 │   ├── connection.hpp          # TCP/TLS connection engine + HandlerConnection base
 │   ├── datagram.hpp            # UDP transport (Datagram<H>) + HandlerDatagram base
-│   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine core
+│   ├── reactor.hpp             # epoll-based Edge-Triggered Reactor engine core & EventLoop
 │   ├── proactor.hpp            # io_uring-based completion Proactor engine core
-│   ├── loop.hpp                # epoll EventLoop with eventfd wakeups
 │   ├── timer.hpp               # Lazy-cancellation binary min-heap timer queue
 │   ├── requestBuffer.hpp       # Low-allocation auto-compacting byte buffer
 │   ├── responseQueue.hpp       # Zero-allocation fixed-capacity circular response queue
 │   ├── objectPool.hpp          # Fixed-capacity stable-pointer object pool
 │   ├── constraints.hpp         # Generic concepts (Resettable / HandlerConstraint / MandatoryMethod*)
 │   ├── error.hpp               # Strongly-typed Err & IoEnd + errno/OpenSSL text helpers
-│   ├── configHolder.hpp        # Global network configuration & generation snapshots (NetConfig / ConfigHolder)
+│   ├── configHolder.hpp        # Global network configuration & generation snapshots (MynetConfig / ConfigHolder)
 │   ├── config/                 # Third-party adapters and runtime configuration subsystem
 │   │   ├── tls.hpp             # OpenSSL / KTLS kernel offload & multi-SNI handshake support
 │   │   ├── lua.hpp             # Sandboxed Lua config loader & hot reload (reloadConfig)
 │   │   └── log.hpp             # Logging setup (mylog -> stderr)
-│   └── handler/                # Protocol and Application Handler Suite (All Handlers)
-│       ├── inbound.hpp         # Inbound protocol base classes (HandlerInboundConnection / HandlerInboundDatagram)
-│       ├── outbound.hpp        # Outbound protocol base classes (HandlerOutboundConnection / HandlerOutboundDatagram)
-│       ├── address.hpp         # Proxy & network target endpoint abstraction (ProxyAddress)
-│       ├── crypto.hpp          # Crypto primitives & hashing (SHA-224, MD5, AEAD, UUID)
-│       ├── direct.hpp / block.hpp # Direct forwarding and blackhole block handlers (HandlerInboundDirect / HandlerOutboundDirect...)
-│       ├── transparent.hpp     # Linux Netfilter TProxy / Redirect original destination proxy (HandlerInboundRedirect / HandlerInboundTProxy)
-│       ├── mixed.hpp           # SOCKS4 / SOCKS5 / HTTP auto-sniffing adaptive inbound (HandlerInboundMixed)
-│       ├── dns/                # RFC 1035 / RFC 3596 DNS protocol codec & handlers
-│       │   ├── dns.hpp         # Wire message serialization, parsing & 0xC0xx compression
-│       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
-│       ├── http/               # HTTP protocol suite
-│       │   ├── v1/handler.hpp  # HTTP/1.x protocol handler (HandlerHttp) via llhttp
-│       │   ├── v2/             # HTTP/2 framing, HPACK tables, stream multiplexer & credit control
-│       │   ├── v3/             # HTTP/3 QUIC 1-RTT short header, QPACK, varint & stream tables
-│       │   └── http.hpp        # HTTP Proxy tunneling handler (HandlerInboundHttpProxy)
-│       ├── socks/              # SOCKS protocol family (HandlerInboundSocks / HandlerInboundSocks4 / HandlerInboundSocks5 / HandlerOutboundSocks5)
-│       ├── sniffing/           # Deep packet sniffing engine (TLS SNI, HTTP Host, QUIC, DNS, STUN, BT, SSH...)
-│       └── proxy/              # Private & tunnel proxy protocols
-│           ├── trojan.hpp      # Trojan protocol inbound/outbound authentication & tunneling
-│           ├── vless.hpp       # VLESS v0 protocol UUID authentication & zero-copy passthrough
-│           ├── vmess.hpp       # VMess protocol HMAC-MD5 header authentication
-│           ├── hysteria2.hpp   # Hysteria 2 protocol handshake & forwarding
-│           ├── tuic.hpp        # TUIC v5 protocol handling
-│           ├── shadowsocks.hpp # Shadowsocks AEAD handler
-│           ├── shadowtls.hpp   # ShadowTLS SNI sniffing & HMAC challenge multiplexer
-│           └── snell.hpp       # Snell v1~v4 protocol handling
+│   ├── inbound.hpp             # Inbound protocol base classes (HandlerInboundConnection / HandlerInboundDatagram)
+│   ├── outbound.hpp            # Outbound protocol base classes (HandlerOutboundConnection / HandlerOutboundDatagram)
+│   ├── inboundManager.hpp      # Inbound listening endpoint manager & registry (InboundBase / InboundManager)
+│   ├── outboundManager.hpp     # Outbound dialing endpoint manager & routing policies (OutboundBase / OutboundManager)
+│   ├── address.hpp             # Proxy & network target endpoint abstraction (ProxyAddress)
+│   ├── crypto.hpp              # Crypto primitives & hashing (SHA-224, MD5, AEAD, UUID)
+│   ├── router.hpp              # Policy routing & rule matching engine (Router / RouteRule / CIDR / Domain multi-dim / Sniffing)
+│   ├── forwarder.hpp           # Bidirectional stream & datagram forwarding engine (Forwarder / Splice zero-copy & pump)
+│   ├── sniffer.hpp             # Unified zero-copy packet sniffing dispatcher & ProtocolType definitions
+│   ├── ebpf.hpp                # eBPF TC bypass and kernel LPM Trie synchronization
+│   ├── fakeip.hpp              # FakeIP virtual pool & reverse DNS indexer
+│   ├── geo.hpp                 # GeoIP / GeoSite binary database matching
+│   ├── socks/                  # SOCKS4 / SOCKS5 protocol handlers & InboundSocks5 / OutboundSocks5
+│   ├── http/                   # HTTP/1.x, HTTP/2, HTTP/3 protocol handlers, InboundHttp & sniff.hpp
+│   ├── trojan/                 # Trojan protocol handlers & InboundTrojan / OutboundTrojan
+│   ├── vless/                  # VLESS protocol handlers & InboundVless / OutboundVless
+│   ├── hysteria2/              # Hysteria 2 protocol handlers & InboundHysteria2 / OutboundHysteria2
+│   ├── shadowsocks/            # Shadowsocks AEAD handlers & InboundShadowsocks / OutboundShadowsocks
+│   ├── direct/                 # InboundDirect / OutboundDirect zero-overhead bypass endpoints
+│   ├── block/                  # OutboundBlock blackhole drop endpoint
+│   ├── mixed/                  # InboundMixed adaptive protocol-sniffing inbound
+│   ├── transparent/            # InboundTransparent / InboundTun Linux transparent proxy
+│   ├── dns/                    # DNS wire protocol codec, cache, handlers & sniff.hpp
+│   ├── tls/                    # TLS SNI zero-copy sniffer (sniff.hpp)
+│   ├── dtls/                   # DTLS packet sniffer (sniff.hpp)
+│   ├── quic/                   # QUIC Initial packet decryption & SNI sniffer (sniff.hpp)
+│   ├── bittorrent/             # BitTorrent handshake sniffer (sniff.hpp)
+│   ├── ssh/                    # SSH banner sniffer (sniff.hpp)
+│   ├── stun/                   # STUN packet sniffer (sniff.hpp)
+│   ├── rdp/                    # RDP connection request sniffer (sniff.hpp)
+│   └── ntp/                    # NTP request packet sniffer (sniff.hpp)
 │
 ├── config/                     # Runtime configuration
 │   └── config.lua              # Documented sandboxed Lua configuration (all sections)

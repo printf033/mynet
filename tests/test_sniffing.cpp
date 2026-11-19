@@ -1,4 +1,4 @@
-#include "handler/sniffing/sniffer.hpp"
+#include "sniffer.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

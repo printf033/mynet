@@ -15,8 +15,10 @@
  */
 
 #include "error.hpp"
-#include "handler/address.hpp"
-#include "handler/sniffing/common.hpp"
+#include "geo.hpp"
+#include "address.hpp"
+#include "sniffer.hpp"
+#include "ruleset/srs.hpp"
 #include "config/log.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -129,102 +131,9 @@ namespace mynet
         }
     };
 
-    /**
-     * @brief IPv4 CIDR 子网掩码与范围判定
-     */
-    struct IpCidr
-    {
-        uint32_t networkBe{0}; ///< 网络字节序的网络地址
-        uint32_t maskBe{0};    ///< 网络字节序的子网掩码
-        uint8_t prefixLen{32}; ///< 前缀长度 (0 - 32)
-
-        IpCidr() noexcept = default;
-
-        IpCidr(uint32_t netBe, uint8_t prefix) noexcept
-            : networkBe(netBe),
-              prefixLen(std::min<uint8_t>(prefix, 32))
-        {
-            const uint32_t hostMask = (prefixLen == 0) ? 0U : (~0U << (32 - prefixLen));
-            maskBe = htonl(hostMask);
-            networkBe &= maskBe;
-        }
-
-        [[nodiscard]] inline bool matches(in_addr ip) const noexcept
-        {
-            return (ip.s_addr & maskBe) == networkBe;
-        }
-
-        [[nodiscard]] inline bool matches(uint32_t ipBe) const noexcept
-        {
-            return (ipBe & maskBe) == networkBe;
-        }
-
-        /**
-         * @brief 从标准 CIDR 格式字符串解析（如 "192.168.1.0/24" 或单 IP "10.0.0.1"）
-         */
-        static std::optional<IpCidr> parse(std::string_view cidrStr) noexcept
-        {
-            if (cidrStr.empty())
-            {
-                return std::nullopt;
-            }
-
-            size_t slashPos = cidrStr.find('/');
-            std::string ipPart(cidrStr.substr(0, slashPos));
-            in_addr addr{};
-            if (::inet_pton(AF_INET, ipPart.c_str(), &addr) != 1)
-            {
-                return std::nullopt;
-            }
-
-            uint8_t prefix = 32;
-            if (slashPos != std::string_view::npos)
-            {
-                std::string_view prefixPart = cidrStr.substr(slashPos + 1);
-                if (prefixPart.empty())
-                    return std::nullopt;
-                uint32_t val = 0;
-                for (char c : prefixPart)
-                {
-                    if (c < '0' || c > '9')
-                        return std::nullopt;
-                    val = val * 10 + static_cast<uint32_t>(c - '0');
-                    if (val > 32)
-                        return std::nullopt;
-                }
-                prefix = static_cast<uint8_t>(val);
-            }
-
-            return IpCidr(addr.s_addr, prefix);
-        }
-
-        /**
-         * @brief 判定目标是否为 RFC 1918 私有地址或回环地址 (Private / LAN / Loopback)
-         */
-        [[nodiscard]] static bool isPrivate(in_addr ip) noexcept
-        {
-            const uint32_t h = ntohl(ip.s_addr);
-            // 10.0.0.0/8
-            if ((h & 0xFF000000) == 0x0A000000)
-                return true;
-            // 172.16.0.0/12
-            if ((h & 0xFFF00000) == 0xAC100000)
-                return true;
-            // 192.168.0.0/16
-            if ((h & 0xFFFF0000) == 0xC0A80000)
-                return true;
-            // 127.0.0.0/8 (Loopback)
-            if ((h & 0xFF000000) == 0x7F000000)
-                return true;
-            // 169.254.0.0/16 (Link Local)
-            if ((h & 0xFFFF0000) == 0xA9FE0000)
-                return true;
-            // 0.0.0.0/8
-            if ((h & 0xFF000000) == 0x00000000)
-                return true;
-            return false;
-        }
-    };
+    /// 复用 address.hpp 单一真实源 (Single Source of Truth)
+    using IpCidr = handler::IpCidr;
+    using Ip6Cidr = handler::Ip6Cidr;
 
     /**
      * @brief 待路由决断的上下文特征包 (Route Context)
@@ -236,8 +145,11 @@ namespace mynet
         sockaddr_in clientAddr{};                              ///< 客户端源端点四元组信息
         handler::ProxyAddress target{};                        ///< 目标端点地址 (IP 或域名 + 端口)
         std::string_view sniffedDomain{};                      ///< 嗅探提取的真实域名 (SNI / HTTP Host)
+        std::string_view processName{};                        ///< 客户端发起进程名 (如 "curl", "chrome")
         handler::sniffing::ProtocolType sniffedProtocol{       ///< 嗅探识别的应用层协议
             handler::sniffing::ProtocolType::UNKNOWN};
+        uint8_t dscp{0};                                       ///< L3/L4 DSCP 优先级代码
+        bool decisionLocked{false};                            ///< 路由决策是否已被 must 规则锁定
 
         RouteContext() noexcept = default;
     };
@@ -261,6 +173,14 @@ namespace mynet
         std::vector<IpCidr> sourceIpCidrs{};        ///< 客户端源 IP CIDR 列表
         std::vector<PortRange> portRanges{};        ///< 目标端口或端口段列表
         std::vector<std::string> protocols{};       ///< 协议特征名 (如 "tls", "http", "bittorrent")
+        std::vector<std::string> geoIps{};          ///< GeoIP 国家或私网代码 (如 "cn", "private")
+        std::vector<std::string> geoSites{};        ///< GeoSite 域名分类资产 (如 "cn", "category-ads-all", "google")
+        std::string processName{};                  ///< 客户端进程名 (如 "curl", "chrome")
+        std::vector<std::string> ruleSets{};        ///< 关联的 sing-box SRS 规则集标签 (Rule-Set Tags)
+        std::vector<std::shared_ptr<ruleset::RuleSetSrs>> ruleSetInstances{}; ///< 规则集实例引用
+        std::optional<uint8_t> dscp{};              ///< 限制 DSCP 代码
+        bool isSniffPunt{false};                    ///< 是否为智能推断出的嗅探绕转规则
+        bool must{false};                           ///< 强制锁定规则命中判定，禁止后续嗅探或重路由覆盖 (借鉴 dae must 规则)
 
         mutable std::atomic<uint64_t> hitCount_{0}; ///< 本规则被命中计数
 
@@ -279,6 +199,14 @@ namespace mynet
               sourceIpCidrs(other.sourceIpCidrs),
               portRanges(other.portRanges),
               protocols(other.protocols),
+              geoIps(other.geoIps),
+              geoSites(other.geoSites),
+              processName(other.processName),
+              ruleSets(other.ruleSets),
+              ruleSetInstances(other.ruleSetInstances),
+              dscp(other.dscp),
+              isSniffPunt(other.isSniffPunt),
+              must(other.must),
               hitCount_(other.hitCount_.load(std::memory_order_relaxed))
         {
         }
@@ -298,6 +226,14 @@ namespace mynet
                 sourceIpCidrs = other.sourceIpCidrs;
                 portRanges = other.portRanges;
                 protocols = other.protocols;
+                geoIps = other.geoIps;
+                geoSites = other.geoSites;
+                processName = other.processName;
+                ruleSets = other.ruleSets;
+                ruleSetInstances = other.ruleSetInstances;
+                dscp = other.dscp;
+                isSniffPunt = other.isSniffPunt;
+                must = other.must;
                 hitCount_.store(other.hitCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
             }
             return *this;
@@ -322,6 +258,12 @@ namespace mynet
         RouteRule &forNetwork(NetworkType net) noexcept
         {
             network = net;
+            return *this;
+        }
+
+        RouteRule &forDscp(uint8_t val) noexcept
+        {
+            dscp = val;
             return *this;
         }
 
@@ -391,6 +333,36 @@ namespace mynet
             return *this;
         }
 
+        RouteRule &geoIp(std::string country)
+        {
+            geoIps.push_back(normalizeString(country));
+            return *this;
+        }
+
+        RouteRule &geoSite(std::string cat)
+        {
+            geoSites.push_back(normalizeString(cat));
+            return *this;
+        }
+
+        RouteRule &forProcess(std::string proc)
+        {
+            processName = std::move(proc);
+            return *this;
+        }
+
+        RouteRule &ruleSet(std::string tag)
+        {
+            ruleSets.push_back(std::move(tag));
+            return *this;
+        }
+
+        RouteRule &setMust(bool m = true) noexcept
+        {
+            must = m;
+            return *this;
+        }
+
         // =====================================================================
         // 匹配决断核心
         // =====================================================================
@@ -417,6 +389,12 @@ namespace mynet
                 }
                 if (!matched)
                     return invert ? true : false;
+            }
+
+            // 2.5 DSCP 优先级过滤 (借鉴 dae dscp)
+            if (dscp.has_value() && *dscp != ctx.dscp)
+            {
+                return invert ? true : false;
             }
 
             // 3. 客户端源 IP 匹配
@@ -506,6 +484,82 @@ namespace mynet
                     return invert ? true : false;
             }
 
+            // 8. GeoIP 国家与私网判定
+            if (!geoIps.empty())
+            {
+                bool matched = false;
+                if (ctx.target.type == handler::AddressType::IPV4 && ctx.target.ipv4_.s_addr != 0)
+                {
+                    for (const auto &gip : geoIps)
+                    {
+                        if (GeoIpMatcher::instance().matches(ctx.target.ipv4_, gip))
+                        {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matched)
+                    return invert ? true : false;
+            }
+
+            // 9. GeoSite 域名资产分类匹配
+            if (!geoSites.empty())
+            {
+                bool matched = false;
+                std::string_view dom = !ctx.sniffedDomain.empty() ? ctx.sniffedDomain : ctx.target.host;
+                if (!dom.empty())
+                {
+                    for (const auto &gsite : geoSites)
+                    {
+                        if (GeoSiteMatcher::instance().matches(dom, gsite))
+                        {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matched)
+                    return invert ? true : false;
+            }
+
+            // 10. 客户端发起进程名过滤
+            if (!processName.empty())
+            {
+                if (ctx.processName != processName)
+                {
+                    return invert ? true : false;
+                }
+            }
+
+            // 11. sing-box .srs 规则集 (Rule-Set) 匹配
+            if (!ruleSetInstances.empty())
+            {
+                bool matched = false;
+                std::string_view dom = !ctx.sniffedDomain.empty() ? ctx.sniffedDomain : ctx.target.host;
+                sockaddr_in targetAddr{};
+                if (ctx.target.type == handler::AddressType::IPV4)
+                {
+                    targetAddr.sin_family = AF_INET;
+                    targetAddr.sin_addr = ctx.target.ipv4_;
+                    targetAddr.sin_port = htons(ctx.target.port);
+                }
+                std::string_view netStr = (ctx.network == NetworkType::UDP) ? "udp" : "tcp";
+                for (const auto &rs : ruleSetInstances)
+                {
+                    if (rs != nullptr)
+                    {
+                        if (rs->match(dom, ctx.target.type == handler::AddressType::IPV4 ? &targetAddr : nullptr, ctx.target.port, netStr))
+                        {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matched)
+                    return invert ? true : false;
+            }
+
             // 命中成功（若未设置反转则命中；若设置反转则未命中间接命中）
             const bool finalMatch = !invert;
             if (finalMatch)
@@ -583,6 +637,13 @@ namespace mynet
         std::string defaultOutbound_{"direct"};
         mutable std::mutex mutex_{};
         std::vector<RouteRule> rules_{};
+        std::unordered_map<std::string, std::shared_ptr<ruleset::RuleSetSrs>> ruleSets_{};
+        struct DomainCacheEntry
+        {
+            size_t ruleIndex{SIZE_MAX};
+            std::string outboundTag{};
+        };
+        mutable std::unordered_map<std::string, DomainCacheEntry> domainMatchCache_{};
 
     public:
         Router() = default;
@@ -606,11 +667,48 @@ namespace mynet
         }
 
         /**
+         * @brief 注册一个 sing-box SRS 规则集
+         */
+        void addRuleSet(std::string tag, std::shared_ptr<ruleset::RuleSetSrs> rs)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ruleSets_[std::move(tag)] = std::move(rs);
+        }
+
+        [[nodiscard]] std::shared_ptr<ruleset::RuleSetSrs> getRuleSet(std::string_view tag) const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = ruleSets_.find(std::string(tag));
+            return (it != ruleSets_.end()) ? it->second : nullptr;
+        }
+
+        Result<> loadRuleSet(std::string tag, const std::string &path)
+        {
+            auto rs = ruleset::RuleSetSrs::loadFromFile(path);
+            if (!rs)
+            {
+                LOG_ERROR("Router::loadRuleSet: failed to load '{}' from '{}': {}", tag, path, ruleset::toString(rs.error()));
+                return std::unexpected(ERR::NOT_INITIALISED);
+            }
+            addRuleSet(std::move(tag), std::make_shared<ruleset::RuleSetSrs>(std::move(*rs)));
+            return {};
+        }
+
+        /**
          * @brief 向路由引擎追加一条策略分流规则（先添加的规则拥有更高优先级）
          */
         inline void addRule(RouteRule rule)
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            domainMatchCache_.clear();
+            for (const auto &tag : rule.ruleSets)
+            {
+                auto it = ruleSets_.find(tag);
+                if (it != ruleSets_.end())
+                {
+                    rule.ruleSetInstances.push_back(it->second);
+                }
+            }
             rules_.push_back(std::move(rule));
         }
 
@@ -620,6 +718,7 @@ namespace mynet
         inline void clearRules()
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            domainMatchCache_.clear();
             rules_.clear();
         }
 
@@ -627,6 +726,66 @@ namespace mynet
         {
             std::lock_guard<std::mutex> lock(mutex_);
             return rules_.size();
+        }
+
+        /**
+         * @brief 智能推断并注入嗅探绕转规则 (借鉴 dae InferSniffPunt)
+         */
+        size_t inferSniffPunt()
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            std::vector<RouteRule> newRules;
+            newRules.reserve(rules_.size() + 4);
+            size_t injectedCount = 0;
+
+            for (size_t i = 0; i < rules_.size(); ++i)
+            {
+                const auto &r = rules_[i];
+                if (r.outboundTag == "direct" && !r.sourceIpCidrs.empty() &&
+                    r.domains.empty() && r.domainSuffixes.empty() && r.domainKeywords.empty())
+                {
+                    bool hasEarlierDomainWhitelist = false;
+                    for (size_t j = 0; j < i; ++j)
+                    {
+                        const auto &prev = rules_[j];
+                        if (prev.outboundTag != "direct" && prev.outboundTag != "block" &&
+                            !prev.sourceIpCidrs.empty() &&
+                            (!prev.domains.empty() || !prev.domainSuffixes.empty() || !prev.domainKeywords.empty()))
+                        {
+                            for (const auto &s1 : r.sourceIpCidrs)
+                            {
+                                for (const auto &s2 : prev.sourceIpCidrs)
+                                {
+                                    if (s1.networkBe == s2.networkBe && s1.prefixLen == s2.prefixLen)
+                                    {
+                                        hasEarlierDomainWhitelist = true;
+                                        break;
+                                    }
+                                }
+                                if (hasEarlierDomainWhitelist) break;
+                            }
+                        }
+                        if (hasEarlierDomainWhitelist) break;
+                    }
+
+                    if (hasEarlierDomainWhitelist)
+                    {
+                        RouteRule puntRule;
+                        puntRule.outboundTag = "control_plane_routing";
+                        puntRule.sourceIpCidrs = r.sourceIpCidrs;
+                        puntRule.isSniffPunt = true;
+                        newRules.push_back(std::move(puntRule));
+                        injectedCount++;
+                    }
+                }
+                newRules.push_back(r);
+            }
+            if (injectedCount > 0)
+            {
+                rules_ = std::move(newRules);
+                domainMatchCache_.clear();
+            }
+            return injectedCount;
         }
 
         /**
@@ -638,14 +797,84 @@ namespace mynet
         [[nodiscard]] std::string_view match(const RouteContext &ctx) const noexcept
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto &rule : rules_)
+            std::string_view domainKey = !ctx.sniffedDomain.empty() ? ctx.sniffedDomain : (ctx.target.type == handler::AddressType::DOMAIN ? std::string_view(ctx.target.host) : "");
+            if (!domainKey.empty() && ctx.clientAddr.sin_addr.s_addr == 0 && ctx.dscp == 0)
             {
+                auto it = domainMatchCache_.find(std::string(domainKey));
+                if (it != domainMatchCache_.end())
+                {
+                    if (it->second.ruleIndex < rules_.size())
+                    {
+                        rules_[it->second.ruleIndex].hitCount_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    return it->second.outboundTag;
+                }
+            }
+            for (size_t i = 0; i < rules_.size(); ++i)
+            {
+                const auto &rule = rules_[i];
                 if (rule.matches(ctx))
                 {
+                    if (!domainKey.empty() && ctx.clientAddr.sin_addr.s_addr == 0 && ctx.dscp == 0 && domainMatchCache_.size() < 10000)
+                    {
+                        domainMatchCache_[std::string(domainKey)] = DomainCacheEntry{i, rule.outboundTag};
+                    }
                     return rule.outboundTag;
                 }
             }
+            if (!domainKey.empty() && ctx.clientAddr.sin_addr.s_addr == 0 && ctx.dscp == 0 && domainMatchCache_.size() < 10000)
+            {
+                domainMatchCache_[std::string(domainKey)] = DomainCacheEntry{SIZE_MAX, defaultOutbound_};
+            }
             return defaultOutbound_;
+        }
+
+        /**
+         * @brief 路由判决结果与锁定状态结构 (借鉴 dae must rule locking)
+         */
+        struct RouteDecision
+        {
+            std::string_view outboundTag{};
+            bool locked{false};
+        };
+
+        /**
+         * @brief 带 must 决策锁定感知的策略匹配
+         */
+        [[nodiscard]] RouteDecision matchWithDecision(const RouteContext &ctx) const noexcept
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (size_t i = 0; i < rules_.size(); ++i)
+            {
+                const auto &rule = rules_[i];
+                if (rule.matches(ctx))
+                {
+                    return RouteDecision{rule.outboundTag, rule.must};
+                }
+            }
+            return RouteDecision{defaultOutbound_, false};
+        }
+
+        /**
+         * @brief 智能判定是否需要执行应用层域名与协议嗅探 (借鉴 dae InferSniffPunt)
+         *
+         * 自动检查当前所有分流规则：
+         * 若所有规则均只基于 IP/CIDR、端口、进程等 L3/L4 特征，且没有任何规则涉及
+         * domains, domainSuffixes, domainKeywords, geoSites, ruleSets 或 protocols，
+         * 则无需等待 TLS ClientHello / HTTP Host 嗅探，直接放行/直连，实现最低延迟。
+         */
+        [[nodiscard]] bool shouldSniff() const noexcept
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto &r : rules_)
+            {
+                if (!r.domains.empty() || !r.domainSuffixes.empty() || !r.domainKeywords.empty() ||
+                    !r.geoSites.empty() || !r.ruleSets.empty() || !r.protocols.empty())
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /**

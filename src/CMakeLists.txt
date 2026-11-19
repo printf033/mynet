@@ -25,6 +25,7 @@ if(ANDROID)
     option(MYNET_ENABLE_URING "Enable Linux io_uring Proactor engine" OFF)
 else()
     find_package(OpenSSL REQUIRED)
+    find_package(ZLIB REQUIRED)
     option(MYNET_ENABLE_URING "Enable Linux io_uring Proactor engine" ON)
 endif()
 find_package(Threads REQUIRED)
@@ -72,10 +73,40 @@ target_compile_definitions(mynet INTERFACE
 target_link_libraries(mynet INTERFACE
     mylog::mylog
     OpenSSL::SSL
+    ZLIB::ZLIB
     Threads::Threads
     $<$<BOOL:${MYNET_ENABLE_URING}>:uring>
     llhttp
 )
+
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(LIBBPF QUIET IMPORTED_TARGET libbpf)
+    if(TARGET PkgConfig::LIBBPF)
+        target_link_libraries(mynet INTERFACE PkgConfig::LIBBPF)
+        target_compile_definitions(mynet INTERFACE MYNET_HAVE_LIBBPF=1)
+    elseif(LIBBPF_FOUND)
+        target_include_directories(mynet INTERFACE ${LIBBPF_INCLUDE_DIRS})
+        target_link_libraries(mynet INTERFACE ${LIBBPF_LIBRARIES})
+        target_compile_definitions(mynet INTERFACE MYNET_HAVE_LIBBPF=1)
+    endif()
+endif()
+
+find_program(CLANG_BPF_EXE clang)
+if(CLANG_BPF_EXE)
+    set(MYNET_BPF_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ebpf/kern/mynet_kernel.bpf.c")
+    set(MYNET_BPF_OBJ "${CMAKE_CURRENT_BINARY_DIR}/mynet_kernel.bpf.o")
+    set(MYNET_BPF_EMBED "${CMAKE_CURRENT_SOURCE_DIR}/ebpf/kern/mynet_kernel_bpf_embedded.hpp")
+    add_custom_command(
+        OUTPUT "${MYNET_BPF_OBJ}" "${MYNET_BPF_EMBED}"
+        COMMAND ${CLANG_BPF_EXE} -O2 -g -target bpf -c "${MYNET_BPF_SRC}" -o "${MYNET_BPF_OBJ}"
+        COMMAND ${CMAKE_COMMAND} -E echo "eBPF kernel bytecode compiled: ${MYNET_BPF_OBJ}"
+        DEPENDS "${MYNET_BPF_SRC}"
+        COMMENT "Compiling eBPF kernel program ${MYNET_BPF_SRC}"
+        VERBATIM
+    )
+    add_custom_target(mynet_bpf ALL DEPENDS "${MYNET_BPF_OBJ}")
+endif()
 
 # Sanitizer 辅助目标（用于 tests 和 examples）
 option(MYNET_SANITIZE "Enable ASan/UBSan for Debug builds" ${MYNET_IS_TOP_LEVEL})
@@ -108,3 +139,14 @@ if(MYNET_ENABLE_LUA)
     )
     target_compile_definitions(mynet_lua INTERFACE MYNET_HAVE_LUA=1)
 endif()
+
+# -----------------------------------------------------------------------------
+# Standalone Proxy Kernel Executable (mynetd)
+# -----------------------------------------------------------------------------
+add_executable(mynetd mynetd.cpp)
+if(MYNET_ENABLE_LUA)
+    target_link_libraries(mynetd PRIVATE mynet::mynet_lua mynet::mynet_sanitized)
+else()
+    target_link_libraries(mynetd PRIVATE mynet::mynet mynet::mynet_sanitized)
+endif()
+

@@ -1,5 +1,5 @@
-#include "handler/address.hpp"
-#include "handler/socks/socks5.hpp"
+#include "address.hpp"
+#include "socks/socks5.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -112,14 +112,14 @@ TEST(HandlerSocks5Test, ProxyConfigConstruction)
 
     // 握手
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.stage(), Socks5Stage::REQUEST);
     [[maybe_unused]] auto _ = handler.takeResponse();
 
     // CONNECT 请求
     std::vector<uint8_t> req = {0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0x00, 80};
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks5Stage::STREAMING);
     // 因为设置了 autoReplyConnectSuccess = false，此时不应自动向客户端回送响应
@@ -146,7 +146,7 @@ TEST(HandlerSocks5Test, NoAuthConnectIPv4Success)
     // 1. 发送握手请求：支持 NO_AUTH (0x00)
     std::vector<uint8_t> hello = {0x05, 0x01, 0x00};
     feed(handler, hello);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks5Stage::REQUEST);
     ASSERT_TRUE(handler.hasResponse());
@@ -159,7 +159,7 @@ TEST(HandlerSocks5Test, NoAuthConnectIPv4Success)
     // [0x05][0x01 CMD][0x00 RSV][0x01 IPV4][1, 2, 3, 4][0x00, 0x50]
     std::vector<uint8_t> req = {0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0x00, 0x50};
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(requestCalled);
     EXPECT_EQ(handler.stage(), Socks5Stage::STREAMING);
@@ -203,7 +203,7 @@ TEST(HandlerSocks5Test, NoAuthConnectDomainSuccess)
     stream.push_back(0xBB);
 
     feed(handler, stream);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(targetHost, "github.com");
     EXPECT_EQ(targetPort, 443);
@@ -227,7 +227,7 @@ TEST(HandlerSocks5Test, UsernamePasswordAuthSuccess)
     // 1. 客户端发送支持 USER_PASS (0x02) 与 NO_AUTH (0x00)
     std::vector<uint8_t> hello = {0x05, 0x02, 0x00, 0x02};
     feed(handler, hello);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks5Stage::AUTH);
     std::string resp1 = handler.takeResponse();
@@ -242,7 +242,7 @@ TEST(HandlerSocks5Test, UsernamePasswordAuthSuccess)
     auth.push_back(9); // pass len
     auth.insert(auth.end(), {'s', 'e', 'c', 'r', 'e', 't', '1', '2', '3'});
     feed(handler, auth);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks5Stage::REQUEST);
     std::string resp2 = handler.takeResponse();
@@ -259,14 +259,14 @@ TEST(HandlerSocks5Test, UsernamePasswordAuthFailure)
 
     // 握手
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x02});
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.stage(), Socks5Stage::AUTH);
     [[maybe_unused]] auto _ = handler.takeResponse();
 
     // 错误密码
     std::vector<uint8_t> auth = {0x01, 5, 'a', 'd', 'm', 'i', 'n', 5, 'w', 'r', 'o', 'n', 'g'};
     feed(handler, auth);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks5Stage::ERROR);
     std::string resp = handler.takeResponse();
@@ -281,7 +281,7 @@ TEST(HandlerSocks5Test, UnsupportedMethodRejected)
 
     // 客户端只声明支持 GSSAPI (0x01)，不支持 0x02
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x01});
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks5Stage::ERROR);
     std::string resp = handler.takeResponse();
@@ -293,13 +293,13 @@ TEST(HandlerSocks5Test, UnsupportedCommandRejected)
 {
     HandlerInboundSocks5 handler;
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
-    handler.process();
+    handler.handle();
     [[maybe_unused]] auto _ = handler.takeResponse();
 
     // 发送 BIND (CMD = 0x02) 命令
     std::vector<uint8_t> req = {0x05, 0x02, 0x00, 0x01, 127, 0, 0, 1, 0x00, 80};
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks5Stage::ERROR);
     std::string resp = handler.takeResponse();
@@ -317,11 +317,11 @@ TEST(HandlerSocks5Test, ByteByByteFeedRobustness)
         10,   0,    0,    1,    0x04, 0xD2 // 10.0.0.1:1234
     };
 
-    // 逐字节喂入并调用 process()
+    // 逐字节喂入并调用 handle()
     for (uint8_t b : allBytes)
     {
         feed(handler, std::vector<uint8_t>{b});
-        handler.process();
+        handler.handle();
     }
 
     EXPECT_TRUE(handler.isEstablished());
@@ -334,7 +334,7 @@ TEST(HandlerSocks5Test, ResetAndReuse)
 {
     HandlerInboundSocks5 handler;
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01, 8, 8, 8, 8, 0x00, 53});
-    handler.process();
+    handler.handle();
     EXPECT_TRUE(handler.isEstablished());
 
     // 重置
@@ -345,7 +345,7 @@ TEST(HandlerSocks5Test, ResetAndReuse)
 
     // 再次喂入能够重新握手
     feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.stage(), Socks5Stage::REQUEST);
 }
 

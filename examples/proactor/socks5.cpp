@@ -1,4 +1,4 @@
-#include "handler/socks/socks5.hpp"
+#include "socks/socks5.hpp"
 #include "common/endpoint.hpp"
 #include "error.hpp"
 #include "config/log.hpp"
@@ -28,9 +28,9 @@ namespace mynet::example
             }
         }
 
-        void process()
+        void handle()
         {
-            handler::HandlerInboundSocks5::process();
+            handler::HandlerInboundSocks5::handle();
             if (stage() == handler::Socks5Stage::STREAMING && requestBytes() > 0)
             {
                 std::string_view req(requestBegin(), requestBytes());

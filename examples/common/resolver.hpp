@@ -6,8 +6,8 @@
  */
 
 #include "error.hpp"
-#include "handler/address.hpp"
-#include "handler/dns/dns.hpp"
+#include "address.hpp"
+#include "dns/dns.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>

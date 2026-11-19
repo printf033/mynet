@@ -2,7 +2,7 @@
 
 /**
  * @file reactor.hpp
- * @brief 基于 epoll 的高性能反应器（Reactor）事件解复用器与服务器事件循环。
+ * @brief 基于 epoll 的高性能反应器（Reactor）事件解复用器、事件循环核心与多接收器调度。
  */
 
 #include "acceptor.hpp"
@@ -11,17 +11,25 @@
 #include "datagram.hpp"
 #include "error.hpp"
 #include "config/log.hpp"
-#include "loop.hpp"
 #include "objectPool.hpp"
+#include "timer.hpp"
 #include "config/tls.hpp"
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -30,10 +38,448 @@ namespace mynet
 {
 
     /**
+     * @brief 基于 epoll 与 eventfd 的高性能事件循环核心
+     *
+     * 职责高度内聚：
+     * 1. 决定何时被内核唤醒：结合 TimerQueue 动态计算超时，消除空转；
+     * 2. 线程安全跨线程穿透：基于 eventfd 注册于同一 epoll 集，runInLoop() 可从任何工作线程将任务送入本循环；
+     * 3. 严格的生命周期与描述符所有权隔离：仅负责就绪分发，绝不越权关闭未由自身创建的业务描述符。
+     */
+    class EventLoop
+    {
+    public:
+        using Task = std::function<void()>;
+        using EventCallback = std::function<void(uint32_t events, void *ptr)>;
+        using Clock = TimerQueue::Clock;
+        using Time = TimerQueue::Time;
+        using TimerCallback = TimerQueue::Callback;
+
+        ///
+        /// epoll 就绪事件数组的初始槽位数量。
+        ///
+        /// 只服务于**不显式设定容量**的使用方（例如 Client，它不接收 maxEvents
+        /// 配置）。Reactor 一侧会用 reactor.maxEvents 调 setEventCapacity() 覆盖
+        /// 这个值，因此它不构成引擎的默认值，也不进入 config.lua。
+        ///
+        static constexpr size_t kInitialEventCapacity = 1 << 10;
+
+        /**
+         * @brief 初始化 epoll 与跨线程唤醒 eventfd 描述符对（具备幂等性）
+         *
+         * @return Result<> 成功返回 {}，失败返回具体系统调用错误枚举
+         */
+        [[nodiscard]] inline Result<> init() noexcept
+        {
+            // 运行中禁止重建：此时 epoll 集与 eventfd 正被 run() 持有，
+            // 重建会摧毁活跃描述符并使 in-flight 事件全部悬垂
+            if (running_.load(std::memory_order_acquire)) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::init: refused to re-init while the loop is running");
+                return std::unexpected(ERR::LOOP_ALREADY_RUNNING);
+            }
+            if (epollFd_ >= 0 && wakeFd_ >= 0) [[likely]]
+            {
+                return {};
+            }
+            if (wakeFd_ >= 0)
+            {
+                ::close(wakeFd_);
+                wakeFd_ = -1;
+            }
+            if (epollFd_ >= 0)
+            {
+                ::close(epollFd_);
+                epollFd_ = -1;
+            }
+            epollFd_ = ::epoll_create1(EPOLL_CLOEXEC);
+            if (epollFd_ < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::init: epoll_create1() failed: {}", errnoText(errno));
+                return std::unexpected(ERR::EPOLL_CREATE_FAILED);
+            }
+            wakeFd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            if (wakeFd_ < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::init: eventfd() failed: {}", errnoText(errno));
+                ::close(epollFd_);
+                epollFd_ = -1;
+                return std::unexpected(ERR::EVENTFD_FAILED);
+            }
+            struct epoll_event event;
+            std::memset(&event, 0, sizeof event);
+            event.events = EPOLLIN;
+            event.data.u64 = kWakeToken;
+            if (::epoll_ctl(epollFd_, EPOLL_CTL_ADD, wakeFd_, &event) < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::init: epoll_ctl(ADD, wakeup fd {}) failed: {}", wakeFd_, errnoText(errno));
+                ::close(wakeFd_);
+                wakeFd_ = -1;
+                ::close(epollFd_);
+                epollFd_ = -1;
+                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+            }
+            return {};
+        }
+
+        EventLoop()
+        {
+            threadId_ = std::this_thread::get_id();
+            events_.resize(kInitialEventCapacity);
+            if (auto res = init(); !res) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop: constructor init failed: {}", toString(res.error()));
+            }
+        }
+
+        ~EventLoop() noexcept
+        {
+            if (wakeFd_ != -1)
+            {
+                ::close(wakeFd_);
+            }
+            if (epollFd_ != -1)
+            {
+                ::close(epollFd_);
+            }
+        }
+
+        EventLoop(const EventLoop &) = delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
+        EventLoop &operator=(const EventLoop &) = delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
+
+        [[nodiscard]] inline int epollFd() const noexcept { return epollFd_; }
+        [[nodiscard]] inline bool running() const noexcept { return running_.load(std::memory_order_acquire); }
+        [[nodiscard]] inline bool inLoopThread() const noexcept { return std::this_thread::get_id() == threadId_; }
+
+        inline void setEventCallback(EventCallback callback) { eventCallback_ = std::move(callback); }
+
+        /**
+         * @brief 当前单次 epoll_wait 的就绪事件数组容量（诊断用）。
+         */
+        [[nodiscard]] inline size_t eventCapacity() const noexcept { return events_.size(); }
+
+        /**
+         * @brief 精确设定单次 epoll_wait 的就绪事件数组容量。
+         *
+         * 必须**精确**而不是只增：引擎把 reactor.maxEvents 传进来，若配置写 512
+         * 而实际仍按 1024 收事件，这项配置就成了一句谎。下限 1，因为 epoll_wait
+         * 的 maxevents 必须大于 0。
+         *
+         * 注意 run() 在"本轮事件数恰好填满数组"时会翻倍扩容——那是满载时的
+         * 自适应，用于避免就绪事件被丢弃。因此本容量是**启动值**：空闲时就是
+         * reactor.maxEvents，只有真正打满过一轮之后才会增长到更高水位。
+         */
+        inline void setEventCapacity(size_t count)
+        {
+            const size_t target = count > 0 ? count : 1;
+            if (target != events_.size())
+            {
+                events_.resize(target);
+            }
+        }
+
+        /**
+         * @brief 向 epoll 注册待监听的描述符
+         */
+        [[nodiscard]] inline Result<> addFd(int fd, uint32_t events, void *ptr = nullptr) noexcept
+        {
+            if (epollFd_ < 0 || fd < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::addFd: invalid epollFd {} or fd {}", epollFd_, fd);
+                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+            }
+            struct epoll_event event;
+            std::memset(&event, 0, sizeof event);
+            event.events = events;
+            event.data.ptr = ptr;
+            if (::epoll_ctl(epollFd_, EPOLL_CTL_ADD, fd, &event) < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::addFd: epoll_ctl(ADD, fd {}, events {:#x}) failed: {}", fd, events,
+                          errnoText(errno));
+                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+            }
+            return {};
+        }
+
+        /**
+         * @brief 修改已监听描述符的事件掩码
+         */
+        [[nodiscard]] inline Result<> modFd(int fd, uint32_t events, void *ptr = nullptr) noexcept
+        {
+            if (epollFd_ < 0 || fd < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::modFd: invalid epollFd {} or fd {}", epollFd_, fd);
+                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+            }
+            struct epoll_event event;
+            std::memset(&event, 0, sizeof event);
+            event.events = events;
+            event.data.ptr = ptr;
+            if (::epoll_ctl(epollFd_, EPOLL_CTL_MOD, fd, &event) < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::modFd: epoll_ctl(MOD, fd {}, events {:#x}) failed: {}", fd, events,
+                          errnoText(errno));
+                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+            }
+            return {};
+        }
+
+        /**
+         * @brief 从 epoll 移除描述符监听
+         */
+        [[nodiscard]] inline Result<> delFd(int fd) noexcept
+        {
+            if (epollFd_ < 0 || fd < 0) [[unlikely]]
+            {
+                LOG_WARN("EventLoop::delFd: invalid epollFd {} or fd {}", epollFd_, fd);
+                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+            }
+            if (::epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr) < 0) [[unlikely]]
+            {
+                LOG_WARN("EventLoop::delFd: epoll_ctl(DEL, fd {}) failed: {}", fd, errnoText(errno));
+                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+            }
+            return {};
+        }
+
+        /**
+         * @brief 启动事件循环阻塞运行
+         *
+         * @return Result<> 正常退出返回 {}，非正常退出返回错误枚举
+         */
+        [[nodiscard]] inline Result<> run()
+        {
+            if (epollFd_ < 0) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::run: no epoll descriptor -- init() never succeeded");
+                return std::unexpected(ERR::NOT_INITIALISED);
+            }
+            bool expected = false;
+            if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) [[unlikely]]
+            {
+                LOG_ERROR("EventLoop::run: loop is already running");
+                return std::unexpected(ERR::LOOP_ALREADY_RUNNING);
+            }
+            threadId_ = std::this_thread::get_id();
+            quit_.store(false, std::memory_order_relaxed);
+            while (!quit_.load(std::memory_order_acquire))
+            {
+                const int timeout = nextTimeout();
+                const int n = ::epoll_wait(epollFd_, events_.data(), static_cast<int>(events_.size()), timeout);
+                if (n < 0) [[unlikely]]
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    LOG_ERROR("EventLoop::run: epoll_wait() failed: {}", errnoText(errno));
+                    running_.store(false, std::memory_order_release);
+                    return std::unexpected(ERR::EPOLL_WAIT_FAILED);
+                }
+                if (n == static_cast<int>(events_.size())) [[unlikely]]
+                {
+                    events_.resize(events_.size() * 2);
+                }
+
+                if (!timerQueue_.empty()) [[unlikely]]
+                {
+                    const Time now = Clock::now();
+                    timerQueue_.handleExpired(now);
+                }
+                if (hasPending_.load(std::memory_order_acquire)) [[unlikely]]
+                {
+                    doPendingTasks();
+                }
+
+                for (int i = 0; i < n; ++i)
+                {
+                    // 派发前快照当前事件：回调可能关闭连接并使 events_ 中
+                    // 同一轮稍后的 data.ptr 悬垂（连接对象可能已回池复用），
+                    // 快照本身是平凡值拷贝，消费逻辑不变
+                    const uint32_t ev = events_[i].events;
+                    const uint64_t token = events_[i].data.u64;
+                    if (token == kWakeToken) [[unlikely]]
+                    {
+                        drainWakeup();
+                        doPendingTasks();
+                        continue;
+                    }
+                    if (eventCallback_) [[likely]]
+                    {
+                        eventCallback_(ev, reinterpret_cast<void *>(static_cast<uintptr_t>(token)));
+                    }
+                }
+            }
+            running_.store(false, std::memory_order_release);
+            return {};
+        }
+
+        /**
+         * @brief 请求终止事件循环（线程安全）
+         */
+        inline void quit() noexcept
+        {
+            quit_.store(true, std::memory_order_release);
+            wakeup();
+        }
+
+        /**
+         * @brief 在循环所在线程中同步或异步投递执行任务
+         */
+        inline void runInLoop(Task task)
+        {
+            if (!task) [[unlikely]]
+            {
+                return;
+            }
+            if (inLoopThread())
+            {
+                task();
+            }
+            else
+            {
+                queueInLoop(std::move(task));
+            }
+        }
+
+        /**
+         * @brief 将任务压入待决任务队列并通过 eventfd 触发唤醒
+         */
+        inline void queueInLoop(Task task)
+        {
+            if (!task) [[unlikely]]
+            {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_.push_back(std::move(task));
+                hasPending_.store(true, std::memory_order_release);
+            }
+            wakeup();
+        }
+
+        [[nodiscard]] inline size_t pendingTasks()
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return pending_.size();
+        }
+
+        inline uint64_t runAfter(std::chrono::milliseconds delay, TimerCallback callback)
+        {
+            contract_assert(callback != nullptr);
+            return timerQueue_.addTimer(Clock::now() + delay, std::move(callback));
+        }
+
+        inline uint64_t runEvery(std::chrono::milliseconds interval, TimerCallback callback)
+        {
+            contract_assert(callback != nullptr);
+            return timerQueue_.addTimer(Clock::now() + interval, std::move(callback), interval);
+        }
+
+        inline uint64_t runAt(Time when, TimerCallback callback)
+        {
+            contract_assert(callback != nullptr);
+            return timerQueue_.addTimer(when, std::move(callback));
+        }
+
+        [[nodiscard]] inline Result<> cancelTimer(uint64_t id) { return timerQueue_.cancelTimer(id); }
+
+        [[nodiscard]] inline size_t timerCount() { return timerQueue_.size(); }
+
+    private:
+        inline int nextTimeout()
+        {
+            if (timerQueue_.empty()) [[likely]]
+            {
+                return -1;
+            }
+            const Time next = timerQueue_.nextExpire();
+            if (next == Time::max())
+            {
+                return -1;
+            }
+            const Time now = Clock::now();
+            if (next <= now)
+            {
+                return 0;
+            }
+            // next > now 保证差值非负；先分桶截断再做 duration_cast，
+            // 避免极大过期时间在有符号差值上未定义溢出
+            const auto diff = next - now;
+            if (diff > std::chrono::milliseconds(std::numeric_limits<int>::max()))
+            {
+                return std::numeric_limits<int>::max();
+            }
+            auto ms = std::chrono::ceil<std::chrono::milliseconds>(diff).count();
+            return static_cast<int>(ms);
+        }
+
+        inline void doPendingTasks()
+        {
+            if (!hasPending_.load(std::memory_order_acquire)) [[likely]]
+            {
+                return;
+            }
+            std::deque<Task> tasks;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (pending_.empty())
+                {
+                    hasPending_.store(false, std::memory_order_release);
+                    return;
+                }
+                tasks.swap(pending_);
+                hasPending_.store(false, std::memory_order_release);
+            }
+            for (Task &task : tasks)
+            {
+                if (task) [[likely]]
+                {
+                    task();
+                }
+            }
+        }
+
+        inline void wakeup() noexcept
+        {
+            if (wakeFd_ < 0) [[unlikely]]
+            {
+                return;
+            }
+            constexpr uint64_t one = 1;
+            [[maybe_unused]] const ssize_t ignored = ::write(wakeFd_, &one, sizeof one);
+        }
+
+        inline void drainWakeup() noexcept
+        {
+            uint64_t value = 0;
+            while (::read(wakeFd_, &value, sizeof value) > 0)
+            {
+                continue;
+            }
+        }
+
+        static constexpr uint64_t kWakeToken = ~uint64_t{0};
+
+        int epollFd_ = -1;
+        int wakeFd_ = -1;
+        std::atomic<bool> quit_{false};
+        std::atomic<bool> running_{false};
+        std::thread::id threadId_{};
+        std::vector<struct epoll_event> events_;
+        EventCallback eventCallback_{};
+        TimerQueue timerQueue_{};
+        std::atomic<bool> hasPending_{false};
+        std::mutex mutex_{};
+        std::deque<Task> pending_{};
+    };
+
+    /**
      * @class Reactor
      * @brief 基于单线程 epoll 的反应器引擎，管理套接字生命周期与 I/O 事件分发。
      *
      * 采用边沿触发（EPOLLET）模式驱动新连接接入、SSL 握手与 UDP 数据报收发。
+     * 支持原生单 Acceptor 模式与多入站接收器（Multi-Acceptor）统一事件驱动。
      *
      * @tparam Acceptor 满足 DerivedFromAcceptorBase 与 Resettable 约束的套接字接收器包装类型。
      */
@@ -85,6 +531,92 @@ namespace mynet
 
         inline void quit() noexcept { loop_.quit(); }
 
+        using AcceptCallback = std::function<void(int clientFd, const sockaddr_in &clientAddr)>;
+
+        struct ExtraListener
+        {
+            int fd{-1};
+            AcceptCallback onAccept{};
+        };
+
+        [[nodiscard]] inline Acceptor &acceptor() noexcept { return acceptor_; }
+        [[nodiscard]] inline const Acceptor &acceptor() const noexcept { return acceptor_; }
+
+        /**
+         * @brief 注册外部监听描述符（如各 Inbound::listenFd()）至当前 Reactor 事件循环
+         *
+         * 实现了将多个入站端口统一交由同一事件引擎多路复用驱动。
+         *
+         * @param listenFd 外部监听描述符
+         * @param onAccept 接入新客户端连接的回调函数；若为空则自动接入 Reactor 内部流式连接池
+         * @return Result<> 成功返回 {}，失败返回错误枚举
+         */
+        Result<> addListener(int listenFd, AcceptCallback onAccept = nullptr)
+        {
+            if (listenFd < 0)
+            {
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
+            if (extraListenersByFd_.contains(listenFd))
+            {
+                return {};
+            }
+
+            auto listener = std::make_shared<ExtraListener>();
+            listener->fd = listenFd;
+            listener->onAccept = std::move(onAccept);
+
+            if (loop_.running())
+            {
+                if (auto res = loop_.addFd(listenFd, EPOLLIN | EPOLLET, listener.get()); !res)
+                {
+                    return res;
+                }
+            }
+
+            extraListeners_.emplace(listener.get(), listener);
+            extraListenersByFd_.emplace(listenFd, listener);
+            return {};
+        }
+
+        /**
+         * @brief 注册外部 Acceptor 实例到事件循环
+         */
+        template <typename AnyHandler>
+        Result<> addAcceptor(AcceptorBase<AnyHandler> &acc, AcceptCallback onAccept = nullptr)
+        {
+            if (acc.fd < 0)
+            {
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
+            return addListener(acc.fd, std::move(onAccept));
+        }
+
+        /**
+         * @brief 移除外部监听描述符
+         */
+        Result<> removeListener(int listenFd)
+        {
+            auto it = extraListenersByFd_.find(listenFd);
+            if (it == extraListenersByFd_.end())
+            {
+                return {};
+            }
+            auto listener = it->second;
+            if (listener->fd >= 0)
+            {
+                [[maybe_unused]] auto _ = loop_.delFd(listener->fd);
+            }
+            extraListeners_.erase(listener.get());
+            extraListenersByFd_.erase(it);
+            return {};
+        }
+
+        [[nodiscard]] inline size_t listenerCount() const noexcept
+        {
+            return (acceptor_.fd >= 0 ? 1 : 0) + extraListenersByFd_.size();
+        }
+
         /**
          * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
@@ -95,7 +627,7 @@ namespace mynet
             // 深拷贝一份：get*Config() 返回的是 thread_local 快照的引用，并发的
             // reloadConfig() 会重新赋值该快照，令 host.c_str() 在调用栈更深处悬垂。
             // 拷贝成局部值后，指针的生命周期覆盖整个 run* 调用。
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runTcp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.server, cfg.reactor);
         }
 
@@ -108,7 +640,7 @@ namespace mynet
         [[nodiscard]] Result<> runTcp(const char *ip, int port)
             requires BaseAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runTcp(ip, port, cfg.server, cfg.reactor);
         }
 
@@ -151,7 +683,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl()
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             if (cfg.security.certFile.empty() || cfg.security.keyFile.empty()) [[unlikely]]
             {
                 LOG_ERROR("runSsl: security.certFile / security.keyFile are empty; "
@@ -168,7 +700,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *crt, const char *key)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), crt, key, cfg.server, cfg.reactor,
                           cfg.security);
         }
@@ -184,7 +716,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, cfg.security);
         }
 
@@ -201,7 +733,7 @@ namespace mynet
                                       const SecurityConfig &security)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, security);
         }
 
@@ -274,14 +806,14 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, sniManager, cfg.server, cfg.reactor);
         }
 
         [[nodiscard]] Result<> runSsl(SniCertificateManager &sniManager)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), sniManager, cfg.server,
                           cfg.reactor);
         }
@@ -294,7 +826,7 @@ namespace mynet
         [[nodiscard]] Result<> runUdp(Handler &handler)
             requires MandatoryMethodDatagram<Handler>
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runUdp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler, cfg.reactor);
         }
 
@@ -342,7 +874,7 @@ namespace mynet
         [[nodiscard]] Result<> runQuic(Handler &handler)
             requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runQuic(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler);
         }
 
@@ -352,7 +884,7 @@ namespace mynet
         [[nodiscard]] Result<> runQuic(const char *ip, int port, Handler &handler)
             requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             const char *crt = cfg.security.certFile.empty() ? "certs/ser.crt" : cfg.security.certFile.c_str();
             const char *key = cfg.security.keyFile.empty() ? "certs/ser.key" : cfg.security.keyFile.c_str();
             return runQuic(ip, port, crt, key, handler, cfg.reactor);
@@ -479,10 +1011,24 @@ namespace mynet
             }
             sweepScratch_.reserve(connSlots);
             loop_.setEventCallback([this](uint32_t events, void *ptr) { onEvent(events, ptr); });
-            if (auto res = loop_.addFd(acceptor_.fd, EPOLLIN | EPOLLET, &acceptor_); !res) [[unlikely]]
+            if (acceptor_.fd >= 0)
             {
-                LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", acceptor_.fd, errnoText(errno));
-                return std::unexpected(ERR::EPOLL_CTL_FAILED);
+                if (auto res = loop_.addFd(acceptor_.fd, EPOLLIN | EPOLLET, &acceptor_); !res) [[unlikely]]
+                {
+                    LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", acceptor_.fd, errnoText(errno));
+                    return std::unexpected(ERR::EPOLL_CTL_FAILED);
+                }
+            }
+            for (auto &[ptr, listener] : extraListeners_)
+            {
+                if (listener->fd >= 0)
+                {
+                    if (auto res = loop_.addFd(listener->fd, EPOLLIN | EPOLLET, listener.get()); !res) [[unlikely]]
+                    {
+                        LOG_ERROR("Reactor::serve: adding extra listener fd {} to loop failed: {}", listener->fd, errnoText(errno));
+                        return std::unexpected(ERR::EPOLL_CTL_FAILED);
+                    }
+                }
             }
             if (server.idleTimeoutSecs > 0)
             {
@@ -541,6 +1087,15 @@ namespace mynet
             {
                 [[maybe_unused]] auto _ = loop_.delFd(acceptor_.fd);
             }
+            for (auto &[ptr, listener] : extraListeners_)
+            {
+                if (listener->fd >= 0)
+                {
+                    [[maybe_unused]] auto _ = loop_.delFd(listener->fd);
+                }
+            }
+            extraListeners_.clear();
+            extraListenersByFd_.clear();
             for (auto &entry : index_)
             {
                 [[maybe_unused]] auto _ = loop_.delFd(entry.first);
@@ -593,9 +1148,62 @@ namespace mynet
                 }
                 return;
             }
+            auto itL = extraListeners_.find(ptr);
+            if (itL != extraListeners_.end())
+            {
+                if (events & EPOLLIN)
+                {
+                    drainExtraListener(*itL->second);
+                }
+                return;
+            }
             if constexpr (kStreaming)
             {
                 onConnection(static_cast<Conn *>(ptr), events);
+            }
+        }
+
+        inline void drainExtraListener(ExtraListener &listener)
+        {
+            while (true)
+            {
+                sockaddr_in addr{};
+                socklen_t len = sizeof(addr);
+                int clientFd = ::accept4(listener.fd, reinterpret_cast<sockaddr *>(&addr), &len,
+                                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+                if (clientFd < 0)
+                {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        break;
+                    }
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) [[unlikely]]
+                    {
+                        break;
+                    }
+                    LOG_ERROR("Reactor: accept4() on extra listener fd {} failed: {}", listener.fd, errnoText(errno));
+                    break;
+                }
+
+                if (listener.onAccept)
+                {
+                    listener.onAccept(clientFd, addr);
+                }
+                else
+                {
+                    if constexpr (kStreaming)
+                    {
+                        onNewConnection(clientFd, addr);
+                    }
+                    else
+                    {
+                        ::close(clientFd);
+                    }
+                }
             }
         }
 
@@ -852,6 +1460,8 @@ namespace mynet
         std::vector<std::string> alpnList_{};
         std::chrono::seconds idleTimeout_{0};
         uint64_t idleTimerId_ = 0;
+        std::unordered_map<void *, std::shared_ptr<ExtraListener>> extraListeners_{};
+        std::unordered_map<int, std::shared_ptr<ExtraListener>> extraListenersByFd_{};
     };
 
 } // namespace mynet

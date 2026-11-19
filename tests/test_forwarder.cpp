@@ -1,7 +1,7 @@
 #include "forwarder.hpp"
-#include "handler/address.hpp"
-#include "handler/direct.hpp"
-#include "handler/socks/socks5.hpp"
+#include "address.hpp"
+#include "direct/direct.hpp"
+#include "socks/socks5.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -32,7 +32,7 @@ TEST(ForwarderTest, StreamBridgeAndPump)
     // 1. 上行传输测试：入站接收数据 -> 泵送至出站
     const std::string clientData = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
     [[maybe_unused]] auto resUp = inbound.appendRequest(clientData);
-    inbound.process();
+    inbound.handle();
 
     EXPECT_GT(inbound.requestBytes(), 0u);
     EXPECT_FALSE(outbound.hasResponse());
@@ -50,7 +50,7 @@ TEST(ForwarderTest, StreamBridgeAndPump)
     // 2. 下行传输测试：出站接收响应 -> 泵送至入站
     const std::string remoteData = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello World!";
     [[maybe_unused]] auto resDown = outbound.appendRequest(remoteData);
-    outbound.process();
+    outbound.handle();
 
     EXPECT_GT(outbound.requestBytes(), 0u);
     EXPECT_FALSE(inbound.hasResponse());
@@ -81,7 +81,7 @@ TEST(ForwarderTest, PrebufferedHandshakeFlush)
     // 模拟客户端在 bridge 建立前就已经发送了早期数据 (Early Data)
     const std::string earlyPayload = "EARLY_PAYLOAD_DATA_STREAM";
     [[maybe_unused]] auto res = inbound.appendRequest(earlyPayload);
-    inbound.process();
+    inbound.handle();
     ASSERT_EQ(inbound.requestBytes(), earlyPayload.size());
 
     // 建立桥接时应当自动触发 flushPrebuffered
@@ -105,7 +105,7 @@ TEST(ForwarderTest, ClosePropagation)
     HandlerInboundDirect inbound;
     HandlerOutboundDirect outbound;
 
-    ForwarderOptions opts;
+    ForwarderConfig opts;
     opts.propagateClose = true;
     auto session = forwarder.bridge(inbound, outbound, opts);
 
@@ -246,9 +246,9 @@ TEST(ForwarderTest, AggregatedMetricsAndCloseAll)
 
     // 泵送一些数据
     [[maybe_unused]] auto _1 = in1.appendRequest("DATA_1");
-    in1.process();
+    in1.handle();
     [[maybe_unused]] auto _2 = in2.appendRequest("DATA_22");
-    in2.process();
+    in2.handle();
 
     size_t pumped = forwarder.pumpAll();
     EXPECT_EQ(pumped, 13u); // 6 + 7 = 13
@@ -263,4 +263,72 @@ TEST(ForwarderTest, AggregatedMetricsAndCloseAll)
     forwarder.closeAll();
     EXPECT_EQ(forwarder.activeStreamSessions(), 0u);
     EXPECT_EQ(forwarder.totalBytesUp(), 13u);
+}
+
+// =============================================================================
+// 8. 分散-聚集向量写入与前缀冲刷测试 (借鉴 dae writev scatter-gather header prefixing)
+// =============================================================================
+
+TEST(ForwarderTest, ScatterGatherPrefixedFlushing)
+{
+    int fds[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    int tx = fds[0];
+    int rx = fds[1];
+
+    std::vector<uint8_t> header = {'S', 'S', '-', 'H', 'D', 'R', ':'};
+    std::vector<uint8_t> payload = {'G', 'E', 'T', ' ', '/', ' ', 'H', 'T', 'T', 'P', '/', '1', '.', '1'};
+
+    ssize_t written = ScatterGatherFlusher::writePrefixed(tx, header, payload);
+    EXPECT_EQ(written, static_cast<ssize_t>(header.size() + payload.size()));
+
+    char recvBuf[64] = {};
+    ssize_t n = ::read(rx, recvBuf, sizeof(recvBuf));
+    ASSERT_EQ(n, static_cast<ssize_t>(header.size() + payload.size()));
+
+    std::string received(recvBuf, static_cast<size_t>(n));
+    EXPECT_EQ(received, "SS-HDR:GET / HTTP/1.1");
+
+    ::close(tx);
+    ::close(rx);
+}
+
+// =============================================================================
+// 9. FIONREAD 动态就绪载荷聚集前缀写入测试 (机制 71: tryRelayGatherWrite)
+// =============================================================================
+
+TEST(ForwarderTest, ScatterGatherPrefixedWithFionread)
+{
+    // 模拟三方套接字：srcClient -> srcServer (中继读端) / dstClient (中继写端) -> dstServer
+    int srcPair[2];
+    int dstPair[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, srcPair), 0);
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, dstPair), 0);
+
+    int clientWriter = srcPair[0];
+    int relaySrcReader = srcPair[1];
+    int relayDstWriter = dstPair[0];
+    int upstreamReader = dstPair[1];
+
+    // 客户端先写入一段后续载荷
+    const std::string payload = "HTTP_PAYLOAD_BODY_READY";
+    ASSERT_EQ(::write(clientWriter, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+
+    // 中继使用 writePrefixedWithGather 将协议前缀与源端待读载荷单次 writev 发送
+    std::vector<uint8_t> header = {'P', 'R', 'O', 'T', 'O', ':'};
+    std::vector<uint8_t> scratch(1024);
+
+    ssize_t written = ScatterGatherFlusher::writePrefixedWithGather(relayDstWriter, header, relaySrcReader, scratch);
+    EXPECT_EQ(written, static_cast<ssize_t>(header.size() + payload.size()));
+
+    char recvBuf[128] = {};
+    ssize_t n = ::read(upstreamReader, recvBuf, sizeof(recvBuf));
+    ASSERT_EQ(n, static_cast<ssize_t>(header.size() + payload.size()));
+    std::string result(recvBuf, static_cast<size_t>(n));
+    EXPECT_EQ(result, "PROTO:HTTP_PAYLOAD_BODY_READY");
+
+    ::close(clientWriter);
+    ::close(relaySrcReader);
+    ::close(relayDstWriter);
+    ::close(upstreamReader);
 }

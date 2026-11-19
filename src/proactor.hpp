@@ -21,12 +21,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <liburing.h>
 #include <optional>
 #include <poll.h>
 #include <stop_token>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -70,6 +72,93 @@ namespace mynet
         Proactor(Proactor &&) noexcept = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
         Proactor &operator=(Proactor &&) noexcept = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
 
+        using AcceptCallback = std::function<void(int clientFd, const sockaddr_in &clientAddr)>;
+
+        struct ExtraListener
+        {
+            int fd{-1};
+            AcceptCallback onAccept{};
+        };
+
+        [[nodiscard]] inline Acceptor &acceptor() noexcept { return acceptor_; }
+        [[nodiscard]] inline const Acceptor &acceptor() const noexcept { return acceptor_; }
+
+        /**
+         * @brief 注册外部监听描述符（如各 Inbound::listenFd()）至当前 Proactor 异步引擎
+         *
+         * 实现了将多个入站端口统一交由同一 io_uring 环异步并发驱动。
+         *
+         * @param listenFd 外部监听描述符
+         * @param onAccept 接入新客户端连接的回调函数；若为空则自动接入 Proactor 内部流式连接池
+         * @return Result<> 成功返回 {}，失败返回错误枚举
+         */
+        Result<> addListener(int listenFd, AcceptCallback onAccept = nullptr)
+        {
+            if (listenFd < 0)
+            {
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
+            if (extraListeners_.contains(listenFd))
+            {
+                return {};
+            }
+            auto listener = std::make_shared<ExtraListener>();
+            listener->fd = listenFd;
+            listener->onAccept = std::move(onAccept);
+
+            extraListeners_.emplace(listenFd, listener);
+
+            if (uringInited_ && !stopSource_.stop_requested())
+            {
+                if constexpr (kStreaming)
+                {
+                    if (auto rc = postOneAccept(listener->fd, listener->onAccept); !rc)
+                    {
+                        return rc;
+                    }
+                    int si = io_uring_submit(&uring_);
+                    if (si < 0)
+                    {
+                        LOG_ERROR("Proactor::addListener: io_uring_submit failed: {}", errnoText(-si));
+                        return std::unexpected(ERR::URING_SUBMIT_FAILED);
+                    }
+                }
+            }
+            return {};
+        }
+
+        /**
+         * @brief 注册外部 Acceptor 实例到 Proactor 异步引擎
+         */
+        template <typename AnyHandler>
+        Result<> addAcceptor(AcceptorBase<AnyHandler> &acc, AcceptCallback onAccept = nullptr)
+        {
+            if (acc.fd < 0)
+            {
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
+            return addListener(acc.fd, std::move(onAccept));
+        }
+
+        /**
+         * @brief 移除外部监听描述符
+         */
+        Result<> removeListener(int listenFd)
+        {
+            auto it = extraListeners_.find(listenFd);
+            if (it == extraListeners_.end())
+            {
+                return {};
+            }
+            extraListeners_.erase(it);
+            return {};
+        }
+
+        [[nodiscard]] inline size_t listenerCount() const noexcept
+        {
+            return (acceptor_.fd >= 0 ? 1 : 0) + extraListeners_.size();
+        }
+
         /**
          * @brief 完全以全局配置运行 TCP 服务器（监听地址取自 server.host/port）。
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
@@ -77,7 +166,7 @@ namespace mynet
         [[nodiscard]] Result<> runTcp()
             requires BaseAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runTcp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), cfg.server, cfg.proactor);
         }
 
@@ -90,7 +179,7 @@ namespace mynet
         [[nodiscard]] Result<> runTcp(const char *ip, int port)
             requires BaseAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runTcp(ip, port, cfg.server, cfg.proactor);
         }
 
@@ -133,7 +222,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl()
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             if (cfg.security.certFile.empty() || cfg.security.keyFile.empty()) [[unlikely]]
             {
                 LOG_ERROR("runSsl: security.certFile / security.keyFile are empty; "
@@ -150,7 +239,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *crt, const char *key)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), crt, key, cfg.server,
                           cfg.proactor, cfg.security);
         }
@@ -166,7 +255,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.proactor, cfg.security);
         }
 
@@ -183,7 +272,7 @@ namespace mynet
                                       const SecurityConfig &security)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.proactor, security);
         }
 
@@ -256,14 +345,14 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, sniManager, cfg.server, cfg.proactor);
         }
 
         [[nodiscard]] Result<> runSsl(SniCertificateManager &sniManager)
             requires SslAcceptor<Acceptor> && kStreaming
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), sniManager, cfg.server,
                           cfg.proactor);
         }
@@ -276,7 +365,7 @@ namespace mynet
         [[nodiscard]] Result<> runUdp(Handler &handler)
             requires MandatoryMethodDatagram<Handler>
         {
-            const NetConfig cfg = getNetConfig();
+            const MynetConfig cfg = getMynetConfig();
             return runUdp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler, cfg.proactor);
         }
 
@@ -367,8 +456,9 @@ namespace mynet
                 return std::unexpected(ERR::POOL_ALLOC_FAILED);
             }
             // 数据报路径不投递任何 accept，旧实现以 maxAcceptEvents=0 调用时
-            // 会退化成 1 槽。这里保留同样的 1 槽，而不是白占 maxAcceptEvents 份内存。
-            const size_t acceptSlots = datagram_.bound() ? 1 : proactor.maxAcceptEvents;
+            // 会退化成 1 槽。这里保留同样的 1 槽，同时为额外注册的监听器预留充足槽位。
+            const size_t acceptSlots =
+                datagram_.bound() ? 1 : (proactor.maxAcceptEvents + extraListeners_.size() * 4 + 32);
             if (auto poolRes = acceptPool_.init(acceptSlots); !poolRes) [[unlikely]]
             {
                 LOG_ERROR("Proactor::serve: initialising accept pool ({} slots) failed", acceptSlots);
@@ -415,7 +505,25 @@ namespace mynet
             Result<> armed = {};
             if constexpr (kStreaming)
             {
-                armed = datagram_.bound() ? postDatagramRecv() : postAccepts(maxAccepts_);
+                if (datagram_.bound())
+                {
+                    armed = postDatagramRecv();
+                }
+                else
+                {
+                    if (acceptor_.fd >= 0)
+                    {
+                        armed = postAccepts(maxAccepts_);
+                    }
+                    for (const auto &[lFd, lListener] : extraListeners_)
+                    {
+                        if (auto r = postOneAccept(lListener->fd, lListener->onAccept); !r)
+                        {
+                            LOG_WARN("Proactor::serve: initial accept for extra listener fd {} failed: {}",
+                                     lListener->fd, toString(r.error()));
+                        }
+                    }
+                }
             }
             else
             {
@@ -468,7 +576,7 @@ namespace mynet
                 io_uring_cq_advance(&uring_, count);
                 if constexpr (kStreaming)
                 {
-                    while (!datagram_.bound() && acceptOutstanding_ < maxAccepts_)
+                    while (!datagram_.bound() && acceptor_.fd >= 0 && acceptOutstanding_ < maxAccepts_)
                     {
                         if (!postOneAccept())
                         {
@@ -527,6 +635,7 @@ namespace mynet
                 uringInited_ = false;
             }
             acceptor_.reset();
+            extraListeners_.clear();
             datagram_.reset();
             cancelScratch_.clear();
             if constexpr (SslAcceptor<Acceptor>)
@@ -594,11 +703,15 @@ namespace mynet
         {
             AcceptOp() noexcept { this->kind = OP_KIND::ACCEPT; }
 
+            int listenFd{-1};
+            AcceptCallback onAccept{};
             sockaddr_in addr{};
             socklen_t addrLen = static_cast<socklen_t>(sizeof(sockaddr_in));
 
             inline void reset() noexcept
             {
+                listenFd = -1;
+                onAccept = nullptr;
                 addr = {};
                 addrLen = static_cast<socklen_t>(sizeof(sockaddr_in));
             }
@@ -733,10 +846,20 @@ namespace mynet
         [[nodiscard]] inline Result<> postOneAccept()
             requires kStreaming
         {
+            return postOneAccept(acceptor_.fd, nullptr);
+        }
+
+        [[nodiscard]] inline Result<> postOneAccept(int listenFd, AcceptCallback onAccept)
+            requires kStreaming
+        {
+            if (listenFd < 0) [[unlikely]]
+            {
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
             AcceptOp *op = acceptPool_.acquire();
             if (op == nullptr) [[unlikely]]
             {
-                LOG_WARN("Proactor::postOneAccept: all {} accept slots are in use", maxAccepts_);
+                LOG_WARN("Proactor::postOneAccept: all accept slots are in use");
                 return std::unexpected(ERR::URING_ACCEPT_EXHAUSTED);
             }
             io_uring_sqe *sqe = getSqe();
@@ -746,27 +869,66 @@ namespace mynet
                 acceptPool_.release(op);
                 return std::unexpected(ERR::URING_SQE_FAILED);
             }
+            op->listenFd = listenFd;
+            op->onAccept = std::move(onAccept);
+            op->addr = {};
             op->addrLen = static_cast<socklen_t>(sizeof(sockaddr_in));
-            io_uring_prep_accept(sqe, acceptor_.fd, reinterpret_cast<sockaddr *>(&op->addr), &op->addrLen,
+            io_uring_prep_accept(sqe, listenFd, reinterpret_cast<sockaddr *>(&op->addr), &op->addrLen,
                                  SOCK_NONBLOCK | SOCK_CLOEXEC);
             io_uring_sqe_set_data(sqe, op);
-            ++acceptOutstanding_;
+            if (listenFd == acceptor_.fd)
+            {
+                ++acceptOutstanding_;
+            }
             return {};
         }
 
         inline void onAcceptDone(io_uring_cqe *cqe, AcceptOp *op)
             requires kStreaming
         {
-            --acceptOutstanding_;
+            const int listenFd = op->listenFd;
+            const bool isPrimary = (listenFd == acceptor_.fd);
+            auto onAcceptCb = std::move(op->onAccept);
+
+            if (isPrimary)
+            {
+                --acceptOutstanding_;
+            }
+
             if (cqe->res >= 0)
             {
-                onNewConnection(cqe->res, op->addr);
+                if (!isPrimary && !extraListeners_.contains(listenFd))
+                {
+                    ::close(cqe->res);
+                }
+                else if (onAcceptCb)
+                {
+                    onAcceptCb(cqe->res, op->addr);
+                }
+                else
+                {
+                    onNewConnection(cqe->res, op->addr);
+                }
             }
             else
             {
-                LOG_DEBUG("Proactor::onAcceptDone: accept() failed: {}", errnoText(-cqe->res));
+                LOG_DEBUG("Proactor::onAcceptDone: accept() on listenFd {} failed: {}", listenFd, errnoText(-cqe->res));
             }
             acceptPool_.release(op);
+
+            // 若不是 primary 监听套接字且仍在 extraListeners_ 中注册，重新武装下一次 accept
+            if (!isPrimary && !stopSource_.stop_requested())
+            {
+                auto it = extraListeners_.find(listenFd);
+                if (it != extraListeners_.end())
+                {
+                    if (auto rc = postOneAccept(listenFd, it->second->onAccept); !rc)
+                    {
+                        LOG_WARN("Proactor::onAcceptDone: re-arming accept for fd {} failed: {}",
+                                 listenFd, toString(rc.error()));
+                    }
+                }
+            }
         }
 
         inline void onNewConnection(int fd, const sockaddr_in &addr)
@@ -931,7 +1093,7 @@ namespace mynet
                         }
                         else
                         {
-                            handler.process();
+                            handler.handle();
                         }
                         session->conn.touch();
                         recycleBuffer(bid);
@@ -1301,6 +1463,7 @@ namespace mynet
         DatagramOp datagramOp_{};
         std::chrono::seconds idleTimeout_{0};
         std::stop_source stopSource_{};
+        std::unordered_map<int, std::shared_ptr<ExtraListener>> extraListeners_{};
     };
 
 } // namespace mynet

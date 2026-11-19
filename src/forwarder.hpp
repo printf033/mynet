@@ -16,12 +16,14 @@
  */
 
 #include "connection.hpp"
+#include "configHolder.hpp"
 #include "datagram.hpp"
 #include "dialer.hpp"
+#include "ebpf.hpp"
 #include "error.hpp"
-#include "handler/address.hpp"
-#include "handler/inbound.hpp"
-#include "handler/outbound.hpp"
+#include "address.hpp"
+#include "inbound.hpp"
+#include "outbound.hpp"
 #include "config/log.hpp"
 #include <algorithm>
 #include <atomic>
@@ -36,6 +38,8 @@
 #include <span>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -48,7 +52,8 @@ namespace mynet
      */
     enum class ForwardMode : uint8_t
     {
-        AUTO,             ///< 自动检测：双端均支持 splice 且有套接字时优先 splice，否则回退到缓冲泵送
+        AUTO,             ///< 自动检测：依次尝试 KERNEL_SOCKMAP -> ZERO_COPY_SPLICE -> BUFFER_PUMP
+        KERNEL_SOCKMAP,   ///< eBPF Sockmap 内核套接字直接流卸载（0 上下文切换，0 内存拷贝）
         ZERO_COPY_SPLICE, ///< 强制 Linux splice(2) 内核管道零拷贝转发
         BUFFER_PUMP       ///< 强制用户态缓冲泵送（支持 TLS、协议重写、帧拆拼等）
     };
@@ -87,19 +92,12 @@ namespace mynet
 
         [[nodiscard]] inline uint64_t totalBytes() const noexcept { return bytesUp + bytesDown; }
         [[nodiscard]] inline uint64_t totalPackets() const noexcept { return packetsUp + packetsDown; }
+        [[nodiscard]] inline double idleSeconds(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) const noexcept
+        {
+            return std::chrono::duration<double>(now - lastActive).count();
+        }
 
         inline void touch() noexcept { lastActive = std::chrono::steady_clock::now(); }
-    };
-
-    /**
-     * @brief 转发配置选项
-     */
-    struct ForwarderOptions
-    {
-        bool enableSplice = true;            ///< 是否尝试开启 Linux splice 零拷贝
-        bool propagateClose = true;          ///< 单向关闭是否自动级联至对端
-        size_t maxPumpBytesPerRound = 65536; ///< 单轮用户态泵送最大字节数
-        std::chrono::seconds idleTimeout{300}; ///< 空闲超时阈值
     };
 
     /**
@@ -123,6 +121,126 @@ namespace mynet
     };
 
     /**
+     * @brief 分散-聚集向量写入与协议头前缀冲刷器 (借鉴 dae writev scatter-gather header prefixing)
+     *
+     * 在转发代理协议报文（如 Shadowsocks 盐/Nonce、Socks5 目标头、Trojan 校验散列等）时：
+     * 将协议头（前缀）与后续应用层载荷合并为一个系统调用 ::writev(2) 发送，
+     * 避免因两次 ::write(2) 造成的额外系统调用开销与小包拆分（Nagle 延迟）。
+     */
+    class ScatterGatherFlusher
+    {
+    public:
+        /**
+         * @brief 将多个非连续内存切片一次性原子写入套接字
+         */
+        static ssize_t writevBuffers(int fd, std::span<const iovec> iovs) noexcept
+        {
+            if (fd < 0 || iovs.empty()) return 0;
+            return ::writev(fd, iovs.data(), static_cast<int>(iovs.size()));
+        }
+
+        /**
+         * @brief 将前缀协议头与数据载荷以 writev 聚集发送
+         */
+        static ssize_t writePrefixed(int fd, std::span<const uint8_t> header, std::span<const uint8_t> payload) noexcept
+        {
+            if (fd < 0) return -1;
+            iovec iov[2];
+            iov[0].iov_base = const_cast<uint8_t *>(header.data());
+            iov[0].iov_len = header.size();
+            iov[1].iov_base = const_cast<uint8_t *>(payload.data());
+            iov[1].iov_len = payload.size();
+            return ::writev(fd, iov, 2);
+        }
+
+        /**
+         * @brief 配合 FIONREAD 动态从客户端套接字抓取伴随载荷，并与协议头一起原子发送 (机制 71: tryRelayGatherWrite)
+         *
+         * 检查源套接字缓冲区是否有伴随到达的应用层载荷：
+         * 若有，单次读取并与协议前缀以 writev 聚集原子发送，消灭两次系统调用与 Nagle 延时。
+         */
+        static ssize_t writePrefixedWithGather(int dstFd, std::span<const uint8_t> header, int srcFd,
+                                               std::span<uint8_t> scratchBuf) noexcept
+        {
+            if (dstFd < 0) return -1;
+            int pending = 0;
+            size_t payloadLen = 0;
+            if (srcFd >= 0 && ::ioctl(srcFd, FIONREAD, &pending) == 0 && pending > 0 && !scratchBuf.empty())
+            {
+                size_t toRead = std::min(static_cast<size_t>(pending), scratchBuf.size());
+                ssize_t n = ::read(srcFd, scratchBuf.data(), toRead);
+                if (n > 0)
+                {
+                    payloadLen = static_cast<size_t>(n);
+                }
+            }
+            if (payloadLen > 0)
+            {
+                return writePrefixed(dstFd, header, std::span<const uint8_t>(scratchBuf.data(), payloadLen));
+            }
+            return writePrefixed(dstFd, header, {});
+        }
+    };
+
+    namespace detail
+    {
+        [[nodiscard]] inline SpliceResult splicePipes(int srcFd, int dstFd, int pipeWriteFd, int pipeReadFd,
+                                                      size_t maxBytes = 65536) noexcept
+        {
+            if (srcFd < 0 || dstFd < 0 || pipeWriteFd < 0 || pipeReadFd < 0)
+            {
+                return {.bytesSpliced = -1, .eof = false, .err = EINVAL};
+            }
+
+            // 1. 从源端摄入管道
+            const ssize_t sIn = ::splice(srcFd, nullptr, pipeWriteFd, nullptr, maxBytes,
+                                         SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sIn < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    return {.bytesSpliced = 0, .eof = false, .err = EAGAIN};
+                }
+                return {.bytesSpliced = -1, .eof = false, .err = errno};
+            }
+            if (sIn == 0)
+            {
+                return {.bytesSpliced = 0, .eof = true, .err = 0};
+            }
+
+            // 2. 从管道刷出至目的端
+            size_t pending = static_cast<size_t>(sIn);
+            size_t written = 0;
+            while (pending > 0)
+            {
+                const ssize_t sOut = ::splice(pipeReadFd, nullptr, dstFd, nullptr, pending,
+                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sOut > 0)
+                {
+                    written += static_cast<size_t>(sOut);
+                    pending -= static_cast<size_t>(sOut);
+                    continue;
+                }
+                if (sOut < 0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = EAGAIN};
+                    }
+                    return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = errno};
+                }
+                break;
+            }
+
+            return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = 0};
+        }
+    } // namespace detail
+
+    /**
      * @brief 双向流式转发会话 (Stream Forwarding Session)
      *
      * 封装一对关联的入站处理器 (Inbound) 与出站处理器 (Outbound)，
@@ -139,26 +257,30 @@ namespace mynet
         ForwardSessionState state_{ForwardSessionState::INIT};
         ForwardMode configuredMode_{ForwardMode::AUTO};
         ForwardMode activeMode_{ForwardMode::BUFFER_PUMP};
-        ForwarderOptions options_{};
+        ForwarderConfig config_{};
         ForwarderStats stats_{};
 
         handler::HandlerInboundConnection *inbound_{nullptr};
         handler::HandlerOutboundConnection *outbound_{nullptr};
         int inboundFd_{-1};
         int outboundFd_{-1};
+        int sockmapFd_{-1};
+        int pipeUp_[2]{-1, -1};
+        int pipeDown_[2]{-1, -1};
         handler::ProxyAddress target_{};
 
         bool inboundClosed_{false};
         bool outboundClosed_{false};
+        bool sockmapPaused_{false};
 
         StateChangeCallback onStateChange_{nullptr};
         CloseCallback onClose_{nullptr};
 
     public:
-        explicit ForwarderStreamSession(uint64_t sessionId, ForwarderOptions opts = {}) noexcept
+        explicit ForwarderStreamSession(uint64_t sessionId, ForwarderConfig cfg = {}) noexcept
             : id_(sessionId),
-              configuredMode_(opts.enableSplice ? ForwardMode::AUTO : ForwardMode::BUFFER_PUMP),
-              options_(opts)
+              configuredMode_(cfg.enableSplice ? ForwardMode::AUTO : ForwardMode::BUFFER_PUMP),
+              config_(cfg)
         {
         }
 
@@ -173,12 +295,13 @@ namespace mynet
         [[nodiscard]] inline ForwardSessionState state() const noexcept { return state_; }
         [[nodiscard]] inline ForwardMode configuredMode() const noexcept { return configuredMode_; }
         [[nodiscard]] inline ForwardMode activeMode() const noexcept { return activeMode_; }
-        [[nodiscard]] inline const ForwarderOptions &options() const noexcept { return options_; }
+        [[nodiscard]] inline const ForwarderConfig &config() const noexcept { return config_; }
         [[nodiscard]] inline const ForwarderStats &stats() const noexcept { return stats_; }
         [[nodiscard]] inline ForwarderStats &stats() noexcept { return stats_; }
 
         [[nodiscard]] inline int inboundFd() const noexcept { return inboundFd_; }
         [[nodiscard]] inline int outboundFd() const noexcept { return outboundFd_; }
+        [[nodiscard]] inline int sockmapFd() const noexcept { return sockmapFd_; }
         [[nodiscard]] inline handler::HandlerInboundConnection *inbound() noexcept { return inbound_; }
         [[nodiscard]] inline handler::HandlerOutboundConnection *outbound() noexcept { return outbound_; }
         [[nodiscard]] inline const handler::ProxyAddress &target() const noexcept { return target_; }
@@ -186,6 +309,7 @@ namespace mynet
         inline void setTarget(const handler::ProxyAddress &target) noexcept { target_ = target; }
         inline void setInboundFd(int fd) noexcept { inboundFd_ = fd; }
         inline void setOutboundFd(int fd) noexcept { outboundFd_ = fd; }
+        inline void setSockmapFd(int fd) noexcept { sockmapFd_ = fd; }
 
         [[nodiscard]] inline bool isEstablished() const noexcept
         {
@@ -243,23 +367,8 @@ namespace mynet
             // 1. 握手残余数据预冲刷：排空握手期间在用户态缓冲区堆积的早期业务载荷
             size_t preFlushed = flushPrebuffered();
 
-            // 2. 判定是否满足 Linux splice 零拷贝条件
-            const bool canSplice = options_.enableSplice &&
-                                   (configuredMode_ != ForwardMode::BUFFER_PUMP) &&
-                                   !userSslActive &&
-                                   in.kEnableSplice &&
-                                   out.kEnableSplice &&
-                                   (inboundFd_ >= 0) &&
-                                   (outboundFd_ >= 0);
-
-            if (canSplice)
-            {
-                activateSplice();
-            }
-            else
-            {
-                activateBufferPump();
-            }
+            // 2. 统一阶梯自适应：Sockmap -> Splice -> Buffer Pump
+            activateAdaptiveMode(userSslActive);
 
             setState(ForwardSessionState::STREAMING);
             return preFlushed;
@@ -305,6 +414,159 @@ namespace mynet
             return total;
         }
 
+        void ensurePipes() noexcept
+        {
+            if (pipeUp_[0] < 0)
+            {
+                if (::pipe2(pipeUp_, O_NONBLOCK | O_CLOEXEC) < 0)
+                {
+                    pipeUp_[0] = pipeUp_[1] = -1;
+                }
+            }
+            if (pipeDown_[0] < 0)
+            {
+                if (::pipe2(pipeDown_, O_NONBLOCK | O_CLOEXEC) < 0)
+                {
+                    pipeDown_[0] = pipeDown_[1] = -1;
+                }
+            }
+        }
+
+        /**
+         * @brief 激活 eBPF Sockmap 内核流卸载 (0 唤醒，0 内存拷贝)
+         */
+        bool activateSockmap() noexcept
+        {
+#if defined(__linux__) && defined(__NR_bpf)
+            if (sockmapFd_ < 0 || inboundFd_ < 0 || outboundFd_ < 0)
+            {
+                return false;
+            }
+            // 预先准备双向管道，确保在 Sockmap 遇到局部阻塞或用户态需要排空时具备零拷贝 splice 保底能力
+            ensurePipes();
+            if (!ebpf::EbpfEngine::attachPair(sockmapFd_, inboundFd_, outboundFd_))
+            {
+                return false;
+            }
+            activeMode_ = ForwardMode::KERNEL_SOCKMAP;
+            if (inbound_ != nullptr)
+            {
+                inbound_->enableSpliceForward(outboundFd_);
+            }
+            if (outbound_ != nullptr)
+            {
+                outbound_->enableSpliceForward(inboundFd_);
+            }
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        /**
+         * @brief 解除 eBPF Sockmap 绑定
+         */
+        void deactivateSockmap() noexcept
+        {
+            if (sockmapFd_ >= 0 && inboundFd_ >= 0)
+            {
+                ebpf::EbpfEngine::detachPair(sockmapFd_, inboundFd_);
+            }
+        }
+
+        [[nodiscard]] inline bool isSockmapPaused() const noexcept { return sockmapPaused_; }
+
+        /**
+         * @brief 查询套接字当前内核发送缓冲区未确认/排队积压字节数
+         */
+        [[nodiscard]] size_t getSocketPendingOutBytes(int fd) const noexcept
+        {
+#if defined(__linux__) && defined(SIOCOUTQ)
+            if (fd < 0) return 0;
+            int unsent = 0;
+            if (::ioctl(fd, SIOCOUTQ, &unsent) == 0 && unsent > 0)
+            {
+                return static_cast<size_t>(unsent);
+            }
+#endif
+            return 0;
+        }
+
+        /**
+         * @brief 复用 Connection 配置的高水位线检查双端是否存在发送背压
+         */
+        [[nodiscard]] bool isBackpressured() const noexcept
+        {
+            const size_t highWater = getConnectionConfig().writeHighWaterMark;
+            if (outboundFd_ >= 0 && getSocketPendingOutBytes(outboundFd_) > highWater)
+            {
+                return true;
+            }
+            if (inboundFd_ >= 0 && getSocketPendingOutBytes(inboundFd_) > highWater)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * @brief eBPF Sockmap 模式与 Connection 统一背压自愈联动
+         */
+        void checkAndApplySockmapBackpressure() noexcept
+        {
+            const bool congested = isBackpressured();
+            if (activeMode_ == ForwardMode::KERNEL_SOCKMAP && congested)
+            {
+                // 检测到下游套接字发送缓冲区堆积超过既定高水位线，
+                // 主动暂停 Sockmap 内核流卸载，回退至 splice 管道与 Connection 用户态背压控流
+                deactivateSockmap();
+                activeMode_ = ForwardMode::ZERO_COPY_SPLICE;
+                sockmapPaused_ = true;
+            }
+            else if (sockmapPaused_ && !congested)
+            {
+                // 发送队列积压排空落回高水位线以内，恢复 Sockmap 内核极速直连
+                if (activateSockmap())
+                {
+                    sockmapPaused_ = false;
+                }
+            }
+        }
+
+        /**
+         * @brief 统一阶梯自适应激活最优转发通道：Sockmap -> Splice -> Buffer Pump
+         */
+        void activateAdaptiveMode(bool userSslActive = false) noexcept
+        {
+            const bool inCanSplice = (inbound_ == nullptr) || inbound_->kEnableSplice;
+            const bool outCanSplice = (outbound_ == nullptr) || outbound_->kEnableSplice;
+
+            const bool canSplice = config_.enableSplice &&
+                                   (configuredMode_ != ForwardMode::BUFFER_PUMP) &&
+                                   !userSslActive &&
+                                   inCanSplice &&
+                                   outCanSplice &&
+                                   (inboundFd_ >= 0) &&
+                                   (outboundFd_ >= 0);
+
+            const bool canOffload = (configuredMode_ == ForwardMode::AUTO || configuredMode_ == ForwardMode::KERNEL_SOCKMAP) &&
+                                    (sockmapFd_ >= 0) &&
+                                    canSplice;
+
+            if (canOffload && activateSockmap())
+            {
+                // Sockmap 挂载成功
+            }
+            else if (canSplice)
+            {
+                activateSplice();
+            }
+            else
+            {
+                activateBufferPump();
+            }
+        }
+
         /**
          * @brief 激活 Linux splice(2) 内核零拷贝双向直通
          */
@@ -319,6 +581,7 @@ namespace mynet
             {
                 outbound_->enableSpliceForward(inboundFd_);
             }
+            ensurePipes();
         }
 
         /**
@@ -357,7 +620,7 @@ namespace mynet
                 const size_t avail = inbound_->requestBytes();
                 if (avail > 0)
                 {
-                    const size_t toPump = std::min(avail, options_.maxPumpBytesPerRound);
+                    const size_t toPump = std::min(avail, config_.bufferChunkSize);
                     std::string_view chunk(inbound_->requestBegin(), toPump);
                     if (auto res = outbound_->pushResponse(chunk); res)
                     {
@@ -376,7 +639,7 @@ namespace mynet
                 const size_t avail = outbound_->requestBytes();
                 if (avail > 0)
                 {
-                    const size_t toPump = std::min(avail, options_.maxPumpBytesPerRound);
+                    const size_t toPump = std::min(avail, config_.bufferChunkSize);
                     std::string_view chunk(outbound_->requestBegin(), toPump);
                     if (auto res = inbound_->pushResponse(chunk); res)
                     {
@@ -387,6 +650,33 @@ namespace mynet
                         result.bytesDown += toPump;
                     }
                 }
+            }
+
+            // 2.3 背压自愈与流控复用：当套接字队列积压超过 writeHighWaterMark 时自动触发背压保护
+            if (sockmapFd_ >= 0)
+            {
+                checkAndApplySockmapBackpressure();
+            }
+
+            // 2.5 若活跃于套接字直通/零拷贝通道，驱动双向管道传输
+            if (inboundFd_ >= 0 && outboundFd_ >= 0 && !outboundClosed_ && !inboundClosed_)
+            {
+                const uint64_t upBefore = stats_.bytesUp;
+                const uint64_t downBefore = stats_.bytesDown;
+
+                auto trDown = transferOutboundToInbound();
+                if (trDown == TransferResult::ERROR || trDown == TransferResult::CLOSED)
+                {
+                    markOutboundClosed();
+                }
+                auto trUp = transferInboundToOutbound();
+                if (trUp == TransferResult::ERROR || trUp == TransferResult::CLOSED)
+                {
+                    markInboundClosed();
+                }
+
+                result.bytesUp += static_cast<size_t>(stats_.bytesUp - upBefore);
+                result.bytesDown += static_cast<size_t>(stats_.bytesDown - downBefore);
             }
 
             // 3. 半关闭与全关闭状态检测与级联
@@ -401,7 +691,7 @@ namespace mynet
         inline void markInboundClosed() noexcept
         {
             inboundClosed_ = true;
-            if (options_.propagateClose && outbound_ != nullptr)
+            if (config_.propagateClose && outbound_ != nullptr)
             {
                 outbound_->setCloseAfterResponse(true);
             }
@@ -414,7 +704,7 @@ namespace mynet
         inline void markOutboundClosed() noexcept
         {
             outboundClosed_ = true;
-            if (options_.propagateClose && inbound_ != nullptr)
+            if (config_.propagateClose && inbound_ != nullptr)
             {
                 inbound_->setCloseAfterResponse(true);
             }
@@ -451,6 +741,16 @@ namespace mynet
                 }
             }
 
+            if (pipeUp_[0] >= 0) { ::close(pipeUp_[0]); pipeUp_[0] = -1; }
+            if (pipeUp_[1] >= 0) { ::close(pipeUp_[1]); pipeUp_[1] = -1; }
+            if (pipeDown_[0] >= 0) { ::close(pipeDown_[0]); pipeDown_[0] = -1; }
+            if (pipeDown_[1] >= 0) { ::close(pipeDown_[1]); pipeDown_[1] = -1; }
+
+            if (activeMode_ == ForwardMode::KERNEL_SOCKMAP)
+            {
+                deactivateSockmap();
+            }
+
             setState(ForwardSessionState::CLOSED);
 
             if (onClose_)
@@ -459,13 +759,137 @@ namespace mynet
             }
         }
 
+        enum class TransferResult : uint8_t
+        {
+            OK = 0,
+            AGAIN = 1,
+            CLOSED = 2,
+            ERROR = 3
+        };
+
+        TransferResult transferInboundToOutbound() noexcept
+        {
+            if (inboundClosed_ || inboundFd_ < 0 || outboundFd_ < 0)
+            {
+                return TransferResult::CLOSED;
+            }
+
+            if ((activeMode_ == ForwardMode::ZERO_COPY_SPLICE || activeMode_ == ForwardMode::KERNEL_SOCKMAP) &&
+                pipeUp_[0] >= 0 && pipeUp_[1] >= 0)
+            {
+                auto res = detail::splicePipes(inboundFd_, outboundFd_, pipeUp_[1], pipeUp_[0], config_.spliceChunkSize);
+                if (res.bytesSpliced > 0)
+                {
+                    stats_.bytesUp += static_cast<size_t>(res.bytesSpliced);
+                    stats_.touch();
+                }
+                if (res.eof)
+                {
+                    markInboundClosed();
+                    return TransferResult::CLOSED;
+                }
+                if (res.err == EAGAIN || res.err == EWOULDBLOCK)
+                {
+                    return TransferResult::AGAIN;
+                }
+                if (res.err != 0)
+                {
+                    markInboundClosed();
+                    return TransferResult::ERROR;
+                }
+                return TransferResult::OK;
+            }
+
+            char buf[16384];
+            ssize_t n = ::read(inboundFd_, buf, sizeof(buf));
+            if (n > 0)
+            {
+                ssize_t w = ::write(outboundFd_, buf, static_cast<size_t>(n));
+                if (w > 0)
+                {
+                    stats_.bytesUp += static_cast<size_t>(w);
+                    stats_.touch();
+                    return TransferResult::OK;
+                }
+            }
+            else if (n == 0)
+            {
+                markInboundClosed();
+                return TransferResult::CLOSED;
+            }
+            else if (errno != EAGAIN && errno != EWOULDBLOCK)
+            {
+                markInboundClosed();
+                return TransferResult::ERROR;
+            }
+            return TransferResult::AGAIN;
+        }
+
+        TransferResult transferOutboundToInbound() noexcept
+        {
+            if (outboundClosed_ || inboundFd_ < 0 || outboundFd_ < 0)
+            {
+                return TransferResult::CLOSED;
+            }
+
+            if ((activeMode_ == ForwardMode::ZERO_COPY_SPLICE || activeMode_ == ForwardMode::KERNEL_SOCKMAP) &&
+                pipeDown_[0] >= 0 && pipeDown_[1] >= 0)
+            {
+                auto res = detail::splicePipes(outboundFd_, inboundFd_, pipeDown_[1], pipeDown_[0], config_.spliceChunkSize);
+                if (res.bytesSpliced > 0)
+                {
+                    stats_.bytesDown += static_cast<size_t>(res.bytesSpliced);
+                    stats_.touch();
+                }
+                if (res.eof)
+                {
+                    markOutboundClosed();
+                    return TransferResult::CLOSED;
+                }
+                if (res.err == EAGAIN || res.err == EWOULDBLOCK)
+                {
+                    return TransferResult::AGAIN;
+                }
+                if (res.err != 0)
+                {
+                    markOutboundClosed();
+                    return TransferResult::ERROR;
+                }
+                return TransferResult::OK;
+            }
+
+            char buf[16384];
+            ssize_t n = ::read(outboundFd_, buf, sizeof(buf));
+            if (n > 0)
+            {
+                ssize_t w = ::write(inboundFd_, buf, static_cast<size_t>(n));
+                if (w > 0)
+                {
+                    stats_.bytesDown += static_cast<size_t>(w);
+                    stats_.touch();
+                    return TransferResult::OK;
+                }
+            }
+            else if (n == 0)
+            {
+                markOutboundClosed();
+                return TransferResult::CLOSED;
+            }
+            else if (errno != EAGAIN && errno != EWOULDBLOCK)
+            {
+                markOutboundClosed();
+                return TransferResult::ERROR;
+            }
+            return TransferResult::AGAIN;
+        }
+
     private:
         inline void checkCloseCascade() noexcept
         {
             if (inbound_ != nullptr && inbound_->closeAfterResponse())
             {
                 inboundClosed_ = true;
-                if (options_.propagateClose && outbound_ != nullptr)
+                if (config_.propagateClose && outbound_ != nullptr)
                 {
                     outbound_->setCloseAfterResponse(true);
                 }
@@ -474,7 +898,7 @@ namespace mynet
             if (outbound_ != nullptr && outbound_->closeAfterResponse())
             {
                 outboundClosed_ = true;
-                if (options_.propagateClose && inbound_ != nullptr)
+                if (config_.propagateClose && inbound_ != nullptr)
                 {
                     inbound_->setCloseAfterResponse(true);
                 }
@@ -564,7 +988,7 @@ namespace mynet
     {
     private:
         std::atomic<uint64_t> nextSessionId_{1};
-        ForwarderOptions defaultOptions_{};
+        ForwarderConfig defaultConfig_{};
 
         mutable std::mutex streamMutex_{};
         std::unordered_map<uint64_t, std::shared_ptr<ForwarderStreamSession>> streamSessions_{};
@@ -576,11 +1000,12 @@ namespace mynet
         std::atomic<uint64_t> totalBytesDown_{0};
         std::atomic<uint64_t> totalPacketsUp_{0};
         std::atomic<uint64_t> totalPacketsDown_{0};
+        int sockmapFd_{-1};
 
     public:
         Forwarder() = default;
-        explicit Forwarder(ForwarderOptions options) noexcept
-            : defaultOptions_(options)
+        explicit Forwarder(ForwarderConfig config) noexcept
+            : defaultConfig_(config)
         {
         }
 
@@ -591,24 +1016,27 @@ namespace mynet
         Forwarder(Forwarder &&) = delete;
         Forwarder &operator=(Forwarder &&) = delete;
 
-        [[nodiscard]] inline const ForwarderOptions &options() const noexcept { return defaultOptions_; }
-        inline void setOptions(const ForwarderOptions &opts) noexcept { defaultOptions_ = opts; }
+        [[nodiscard]] inline const ForwarderConfig &config() const noexcept { return defaultConfig_; }
+        inline void setConfig(const ForwarderConfig &cfg) noexcept { defaultConfig_ = cfg; }
+        [[nodiscard]] inline int sockmapFd() const noexcept { return sockmapFd_; }
+        inline void setSockmapFd(int fd) noexcept { sockmapFd_ = fd; }
 
         /**
          * @brief 桥接入站流式处理器与出站流式处理器
          *
          * @param inbound 入站协议处理器（如 HandlerInboundSocks5, HandlerInboundTrojan, HandlerInboundDirect）
          * @param outbound 出站协议处理器（如 HandlerOutboundDirect, HandlerOutboundTrojan, HandlerOutboundSocks5）
-         * @param opts 显式转发选项覆盖（可选）
+         * @param cfg 显式转发配置覆盖（可选）
          * @return std::shared_ptr<ForwarderStreamSession> 转发会话句柄
          */
         std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnection &inbound,
                                                       handler::HandlerOutboundConnection &outbound,
-                                                      std::optional<ForwarderOptions> opts = std::nullopt)
+                                                      std::optional<ForwarderConfig> cfg = std::nullopt)
         {
-            const ForwarderOptions actualOpts = opts.value_or(defaultOptions_);
+            const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
             const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
-            auto session = std::make_shared<ForwarderStreamSession>(sid, actualOpts);
+            auto session = std::make_shared<ForwarderStreamSession>(sid, actualConfig);
+            session->setSockmapFd(sockmapFd_);
 
             [[maybe_unused]] auto preFlushed = session->attach(inbound, outbound, inbound.fd(), outbound.fd(), false);
             if (session->stats().bytesUp > 0)
@@ -639,11 +1067,12 @@ namespace mynet
                      std::derived_from<OutHandler, handler::HandlerOutboundConnection>
         std::shared_ptr<ForwarderStreamSession> bridge(Connection<InHandler> &inboundConn,
                                                       Connection<OutHandler> &outboundConn,
-                                                      std::optional<ForwarderOptions> opts = std::nullopt)
+                                                      std::optional<ForwarderConfig> cfg = std::nullopt)
         {
-            const ForwarderOptions actualOpts = opts.value_or(defaultOptions_);
+            const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
             const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
-            auto session = std::make_shared<ForwarderStreamSession>(sid, actualOpts);
+            auto session = std::make_shared<ForwarderStreamSession>(sid, actualConfig);
+            session->setSockmapFd(sockmapFd_);
 
             const bool userSsl = (inboundConn.ssl() != nullptr || outboundConn.ssl() != nullptr);
             [[maybe_unused]] auto preFlushed =
@@ -682,23 +1111,17 @@ namespace mynet
          * @brief 直接桥接两个裸套接字文件描述符（纯管道零拷贝或透传转发）
          */
         std::shared_ptr<ForwarderStreamSession> bridgeSockets(int inFd, int outFd,
-                                                             std::optional<ForwarderOptions> opts = std::nullopt)
+                                                             std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             contract_assert(inFd >= 0 && outFd >= 0);
-            const ForwarderOptions actualOpts = opts.value_or(defaultOptions_);
+            const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
             const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
-            auto session = std::make_shared<ForwarderStreamSession>(sid, actualOpts);
+            auto session = std::make_shared<ForwarderStreamSession>(sid, actualConfig);
+            session->setSockmapFd(sockmapFd_);
 
             session->setInboundFd(inFd);
             session->setOutboundFd(outFd);
-            if (actualOpts.enableSplice)
-            {
-                session->activateSplice();
-            }
-            else
-            {
-                session->activateBufferPump();
-            }
+            session->activateAdaptiveMode();
             session->setState(ForwardSessionState::STREAMING);
 
             {
@@ -821,7 +1244,7 @@ namespace mynet
          */
         size_t sweepIdleStreamSessions(std::optional<std::chrono::seconds> timeout = std::nullopt)
         {
-            const auto maxIdle = timeout.value_or(defaultOptions_.idleTimeout);
+            const auto maxIdle = timeout.value_or(std::chrono::seconds(defaultConfig_.sessionIdleTimeoutSecs));
             const auto now = std::chrono::steady_clock::now();
             std::vector<std::shared_ptr<ForwarderStreamSession>> toClose;
 
@@ -931,7 +1354,7 @@ namespace mynet
          */
         size_t sweepIdleDatagramSessions(std::optional<std::chrono::seconds> timeout = std::nullopt)
         {
-            const auto maxIdle = timeout.value_or(defaultOptions_.idleTimeout);
+            const auto maxIdle = timeout.value_or(std::chrono::seconds(defaultConfig_.udpSessionTimeoutSecs));
             const auto now = std::chrono::steady_clock::now();
             std::vector<std::shared_ptr<ForwarderDatagramSession>> toRemove;
 
@@ -973,57 +1396,7 @@ namespace mynet
         [[nodiscard]] static SpliceResult splicePipes(int srcFd, int dstFd, int pipeWriteFd, int pipeReadFd,
                                                       size_t maxBytes = 65536) noexcept
         {
-            if (srcFd < 0 || dstFd < 0 || pipeWriteFd < 0 || pipeReadFd < 0)
-            {
-                return {.bytesSpliced = -1, .eof = false, .err = EINVAL};
-            }
-
-            // 1. 从源端摄入管道
-            const ssize_t sIn = ::splice(srcFd, nullptr, pipeWriteFd, nullptr, maxBytes,
-                                         SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-            if (sIn < 0)
-            {
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                {
-                    return {.bytesSpliced = 0, .eof = false, .err = EAGAIN};
-                }
-                return {.bytesSpliced = -1, .eof = false, .err = errno};
-            }
-            if (sIn == 0)
-            {
-                return {.bytesSpliced = 0, .eof = true, .err = 0};
-            }
-
-            // 2. 从管道刷出至目的端
-            size_t pending = static_cast<size_t>(sIn);
-            size_t written = 0;
-            while (pending > 0)
-            {
-                const ssize_t sOut = ::splice(pipeReadFd, nullptr, dstFd, nullptr, pending,
-                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sOut > 0)
-                {
-                    written += static_cast<size_t>(sOut);
-                    pending -= static_cast<size_t>(sOut);
-                    continue;
-                }
-                if (sOut < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    {
-                        // 目标端写阻塞，返回已写字节数
-                        return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = EAGAIN};
-                    }
-                    return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = errno};
-                }
-                break;
-            }
-
-            return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = 0};
+            return detail::splicePipes(srcFd, dstFd, pipeWriteFd, pipeReadFd, maxBytes);
         }
 
         /**
@@ -1109,14 +1482,3 @@ namespace mynet
 
 } // namespace mynet
 
-namespace mynet::handler
-{
-    using mynet::Forwarder;
-    using mynet::ForwarderDatagramSession;
-    using mynet::ForwarderOptions;
-    using mynet::ForwarderStats;
-    using mynet::ForwarderStreamSession;
-    using mynet::ForwardMode;
-    using mynet::ForwardSessionState;
-    using mynet::SpliceResult;
-} // namespace mynet::handler

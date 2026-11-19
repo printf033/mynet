@@ -14,7 +14,7 @@
  */
 
 #include "connection.hpp"
-#include "handler/http/v2/handler.hpp"
+#include "http/v2/handler.hpp"
 #include "config/log.hpp"
 #include <cstdint>
 #include <string_view>
@@ -25,7 +25,7 @@ namespace mynet::example
     /**
      * @brief 保留请求体供 HTTP/2 上层处理的流处理器
      *
-     * HandlerConnection::process() 默认无操作，因此请求体留在缓冲区中，
+     * HandlerConnection::handle() 默认无操作，因此请求体留在缓冲区中，
      * 由 onStreamEnd 统一处理。
      */
     class Http2BufferedHandler : public HandlerConnection

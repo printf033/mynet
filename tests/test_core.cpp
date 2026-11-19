@@ -1,6 +1,6 @@
 #include "core.hpp"
-#include "handler/address.hpp"
-#include "handler/direct.hpp"
+#include "address.hpp"
+#include "direct/direct.hpp"
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -29,7 +29,7 @@ TEST(CoreTest, InitializationAndLifecycle)
     EXPECT_TRUE(core.outbounds().has("block"));
 
     // 入站管理器注册与查询
-    core.inbounds().registerInbound(std::make_shared<Socks5Inbound>("my-socks-in", "127.0.0.1", 1080));
+    core.inbounds().registerInbound(std::make_shared<InboundSocks5>("my-socks-in", "127.0.0.1", 1080));
     EXPECT_TRUE(core.inbounds().has("my-socks-in"));
     EXPECT_EQ(core.inbounds().size(), 1u);
 
@@ -253,8 +253,8 @@ TEST(CoreTest, StartFailsOnDanglingRouteRuleOutbound)
 TEST(CoreTest, StartAndStopManagesBothInboundsAndOutbounds)
 {
     Core core;
-    auto in = std::make_shared<Socks5Inbound>("test-in", "127.0.0.1", 0);
-    auto out = std::make_shared<DirectOutbound>("custom-direct");
+    auto in = std::make_shared<InboundSocks5>("test-in", "127.0.0.1", 0);
+    auto out = std::make_shared<OutboundDirect>("custom-direct");
     core.inbounds().registerInbound(in);
     core.outbounds().registerOutbound(out);
 
@@ -273,3 +273,35 @@ TEST(CoreTest, StartAndStopManagesBothInboundsAndOutbounds)
     EXPECT_FALSE(out->isRunning());
     EXPECT_FALSE(core.outbounds().isRunning());
 }
+
+// =============================================================================
+// 6. Core 数据面直接桥接与会话管理测试 (Direct Bridge & Session Lifecycle)
+// =============================================================================
+
+TEST(CoreTest, DirectBridgeAndSessionManagement)
+{
+    Core core;
+    ASSERT_TRUE(core.start().has_value());
+
+    HandlerInboundDirect inbound;
+    HandlerOutboundDirect outbound;
+
+    auto session = core.bridge(inbound, outbound);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(core.activeSessions(), 1u);
+
+    const std::string payload = "CORE_FACADE_BRIDGE_PAYLOAD";
+    [[maybe_unused]] auto _ = inbound.appendRequest(payload);
+    inbound.handle();
+
+    size_t pumped = core.tick();
+    EXPECT_EQ(pumped, payload.size());
+    ASSERT_TRUE(outbound.hasResponse());
+    EXPECT_EQ(outbound.takeResponse(), payload);
+
+    core.closeSession(session->id());
+    EXPECT_EQ(core.activeSessions(), 0u);
+
+    core.stop();
+}
+

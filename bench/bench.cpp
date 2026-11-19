@@ -14,8 +14,8 @@
 //
 // 运行命令：./bench 2>/dev/null （日志行输出至 stderr）
 #include "connection.hpp"
-#include "handler/http/v2/frame.hpp"
-#include "handler/http/v2/handler.hpp"
+#include "http/v2/frame.hpp"
+#include "http/v2/handler.hpp"
 #include "config/log.hpp"
 #include "objectPool.hpp"
 #include "requestBuffer.hpp"
@@ -268,7 +268,7 @@ namespace
         class EchoBenchHandler : public HandlerConnection
         {
         public:
-            void process()
+            void handle()
             {
                 const size_t n = requestBytes();
                 if (n == 0)
@@ -302,12 +302,12 @@ namespace
                 for (size_t i = 0; i < iterations; ++i)
                 {
                     [[maybe_unused]] auto _ = handler.appendRequest(body.data(), static_cast<ssize_t>(body.size()));
-                    handler.process();
+                    handler.handle();
                     sink += handler.takeResponse().size();
                 }
                 g_sink += sink;
             });
-        report("EchoBenchHandler::process (1KiB)", echo, static_cast<double>(1 << 10));
+        report("EchoBenchHandler::handle (1KiB)", echo, static_cast<double>(1 << 10));
     }
 
     // ---- HTTP/2 多路复用器 (HandlerHttp2) 基准测试 ----
@@ -324,7 +324,7 @@ namespace
         NoopMux mux;
         // 预热：真实客户端总是先发送 24 字节连接前言，帧解码器在其之后才开始工作。
         [[maybe_unused]] auto preface = mux.appendRequest(NoopMux::kClientPreface);
-        mux.process(); // 在测量路径之外预先宣告一次 SETTINGS 帧并消费前言
+        mux.handle(); // 在测量路径之外预先宣告一次 SETTINGS 帧并消费前言
         while (mux.hasResponse())
         {
             [[maybe_unused]] auto _ = mux.takeResponse();
@@ -347,7 +347,7 @@ namespace
                         if (nextId > 0x7fffffffU - 4U) [[unlikely]]
                         {
                             mux.reset();
-                            mux.process();
+                            mux.handle();
                             while (mux.hasResponse())
                                 sink += mux.takeResponse().size();
                             nextId = 1;
@@ -364,7 +364,7 @@ namespace
                                                  .flags = FrameFlags::kEndStream,
                                                  .payload = "payload"});
                         [[maybe_unused]] auto _ = mux.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-                        mux.process();
+                        mux.handle();
                         while (mux.hasResponse())
                             sink += mux.takeResponse().size();
                     }

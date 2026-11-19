@@ -261,6 +261,19 @@ namespace mynet
                 cfg.reusePort = flag;
             }
 
+            if (readStringField(L, idx, "engine", text, valid))
+            {
+                if (text == "reactor" || text == "proactor")
+                {
+                    cfg.engine = std::move(text);
+                }
+                else
+                {
+                    printError("server.engine must be 'reactor' or 'proactor'");
+                    valid = false;
+                }
+            }
+
             return valid;
         }
 
@@ -595,11 +608,6 @@ namespace mynet
             return valid;
         }
 
-        inline bool loadMultiplexerSection(lua_State *L, int idx, Http2Config &cfg)
-        {
-            return loadHttp2Section(L, idx, cfg);
-        }
-
         inline bool loadHttp3Section(lua_State *L, int idx, Http3Config &cfg)
         {
             bool valid = true;
@@ -660,6 +668,10 @@ namespace mynet
             if (readBoolField(L, idx, "enableSplice", flag, valid))
             {
                 cfg.enableSplice = flag;
+            }
+            if (readBoolField(L, idx, "propagateClose", flag, valid))
+            {
+                cfg.propagateClose = flag;
             }
             if (readNumberField(L, idx, "spliceChunkSize", num, valid))
             {
@@ -760,6 +772,13 @@ namespace mynet
                             rule.network = std::move(s);
                         }
                         readStringList(L, rIdx, "inboundTags", rule.inboundTags, valid);
+                        readStringList(L, rIdx, "geoIps", rule.geoIps, valid);
+                        readStringList(L, rIdx, "geoSites", rule.geoSites, valid);
+                        if (readStringField(L, rIdx, "processName", s, valid) ||
+                            readStringField(L, rIdx, "process", s, valid))
+                        {
+                            rule.processName = std::move(s);
+                        }
                         if (readBoolField(L, rIdx, "invert", b, valid))
                         {
                             rule.invert = b;
@@ -831,6 +850,26 @@ namespace mynet
                     {
                         inCfg.password = std::move(s);
                     }
+                    if (readStringField(L, itemIdx, "uuid", s, valid))
+                    {
+                        inCfg.uuid = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "ifName", s, valid))
+                    {
+                        inCfg.ifName = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "inetIp", s, valid))
+                    {
+                        inCfg.inetIp = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "inetMask", s, valid))
+                    {
+                        inCfg.inetMask = std::move(s);
+                    }
+                    if (readNumberField(L, itemIdx, "mtu", num, valid))
+                    {
+                        inCfg.mtu = static_cast<uint32_t>(clampValue<lua_Integer>(num, 576, 65535));
+                    }
                     if (readBoolField(L, itemIdx, "sniffing", flag, valid) ||
                         readBoolField(L, itemIdx, "enableSniffing", flag, valid))
                     {
@@ -894,17 +933,115 @@ namespace mynet
                     {
                         outCfg.password = std::move(s);
                     }
+                    if (readStringField(L, itemIdx, "method", s, valid) ||
+                        readStringField(L, itemIdx, "cipher", s, valid))
+                    {
+                        outCfg.method = std::move(s);
+                    }
                     readStringList(L, itemIdx, "outbounds", outCfg.outbounds, valid);
                     if (readStringField(L, itemIdx, "defaultTag", s, valid) ||
                         readStringField(L, itemIdx, "default", s, valid))
                     {
                         outCfg.defaultTag = std::move(s);
                     }
+                    if (readStringField(L, itemIdx, "uuid", s, valid))
+                    {
+                        outCfg.uuid = std::move(s);
+                    }
+                    if (readStringField(L, itemIdx, "url", s, valid))
+                    {
+                        outCfg.url = std::move(s);
+                    }
+                    if (readNumberField(L, itemIdx, "interval", num, valid) ||
+                        readNumberField(L, itemIdx, "intervalSecs", num, valid))
+                    {
+                        outCfg.intervalSecs = static_cast<uint32_t>(clampValue<lua_Integer>(num, 1, 86400));
+                    }
+                    if (readNumberField(L, itemIdx, "tolerance", num, valid) ||
+                        readNumberField(L, itemIdx, "toleranceMs", num, valid))
+                    {
+                        outCfg.toleranceMs = static_cast<uint32_t>(clampValue<lua_Integer>(num, 0, 10000));
+                    }
 
                     outbounds.push_back(std::move(outCfg));
                 }
                 lua_pop(L, 1);
             }
+            return valid;
+        }
+
+        inline bool loadEbpfSection(lua_State *L, int idx, EbpfConfig &cfg)
+        {
+            bool valid = true;
+            readBoolField(L, idx, "enabled", cfg.enabled, valid);
+            readStringField(L, idx, "wanInterface", cfg.wanInterface, valid);
+            readStringField(L, idx, "lanInterface", cfg.lanInterface, valid);
+            lua_Integer tproxyPort = 0;
+            if (readNumberField(L, idx, "tproxyPort", tproxyPort, valid))
+            {
+                cfg.tproxyPort = static_cast<uint16_t>(clampValue<lua_Integer>(tproxyPort, 1, 65535));
+            }
+            lua_Integer fwmark = 0;
+            if (readNumberField(L, idx, "fwmark", fwmark, valid))
+            {
+                cfg.fwmark = static_cast<uint32_t>(fwmark);
+            }
+            readBoolField(L, idx, "enableDirectBypass", cfg.enableDirectBypass, valid);
+            readBoolField(L, idx, "enableLpmGeoIp", cfg.enableLpmGeoIp, valid);
+            readBoolField(L, idx, "dropQuic", cfg.dropQuic, valid);
+            readStringField(L, idx, "bpfObjectPath", cfg.bpfObjectPath, valid);
+            readStringField(L, idx, "cgroupPath", cfg.cgroupPath, valid);
+            readBoolField(L, idx, "enableDoubleEpoch", cfg.enableDoubleEpoch, valid);
+            readBoolField(L, idx, "enableMapPinning", cfg.enableMapPinning, valid);
+            readStringField(L, idx, "bpffsDir", cfg.bpffsDir, valid);
+            readBoolField(L, idx, "asymmetricGateway", cfg.asymmetricGateway, valid);
+            readStringField(L, idx, "gatewayMac", cfg.gatewayMac, valid);
+            readStringField(L, idx, "wanMac", cfg.wanMac, valid);
+            readBoolField(L, idx, "enableConnStateJanitor", cfg.enableConnStateJanitor, valid);
+            readBoolField(L, idx, "enableSkAssign", cfg.enableSkAssign, valid);
+            readBoolField(L, idx, "enableUnconnectedUdpAttribution", cfg.enableUnconnectedUdpAttribution, valid);
+            readStringField(L, idx, "virtualInterface", cfg.virtualInterface, valid);
+            lua_Integer rateLimitMs = 0;
+            if (readNumberField(L, idx, "rateLimitWindowMs", rateLimitMs, valid))
+            {
+                cfg.rateLimitWindowMs = static_cast<uint16_t>(clampValue<lua_Integer>(rateLimitMs, 10, 60000));
+            }
+            return valid;
+        }
+
+        inline bool loadFakeIPSection(lua_State *L, int idx, FakeIPConfig &cfg)
+        {
+            bool valid = true;
+            readBoolField(L, idx, "enabled", cfg.enabled, valid);
+            readStringField(L, idx, "inetRange", cfg.inetRange, valid);
+            lua_Integer maxCap = 0;
+            if (readNumberField(L, idx, "maxCapacity", maxCap, valid))
+            {
+                cfg.maxCapacity = static_cast<size_t>(clampValue<lua_Integer>(maxCap, 1, 1000000));
+            }
+            return valid;
+        }
+
+        inline bool loadGeoSection(lua_State *L, int idx, GeoConfig &cfg)
+        {
+            bool valid = true;
+            readStringField(L, idx, "geoIpPath", cfg.geoIpPath, valid);
+            readStringField(L, idx, "geoSitePath", cfg.geoSitePath, valid);
+            readBoolField(L, idx, "autoReload", cfg.autoReload, valid);
+            return valid;
+        }
+
+        inline bool loadControllerSection(lua_State *L, int idx, ControllerConfig &cfg)
+        {
+            bool valid = true;
+            readBoolField(L, idx, "enabled", cfg.enabled, valid);
+            readStringField(L, idx, "host", cfg.host, valid);
+            lua_Integer port = 0;
+            if (readNumberField(L, idx, "port", port, valid))
+            {
+                cfg.port = static_cast<uint16_t>(clampValue<lua_Integer>(port, 1, 65535));
+            }
+            readStringField(L, idx, "secret", cfg.secret, valid);
             return valid;
         }
 
@@ -919,7 +1056,7 @@ namespace mynet
      * 3. 强制使用 "t" 模式加载文本脚本，杜绝恶意二进制字节码；
      * 4. 解析校验 server、reactor、connection、datagram、proactor、http2、security 等各配置节；
      * 5. 若配置脚本包含 logger 或 fileManager 配置节，自动联合重新加载 mylog 日志配置；
-     * 6. 校验全部通过后，原子发布到 NetConfigHolder；若失败则保持运行中配置不发生任何部分修改（All-or-Nothing）。
+     * 6. 校验全部通过后，原子发布到 MynetConfigHolder；若失败则保持运行中配置不发生任何部分修改（All-or-Nothing）。
      *
      * @param config Lua 配置文件所在路径
      * @param syncMylog 是否同步重新加载同文件中的 mylog 日志配置（默认 true）
@@ -949,7 +1086,7 @@ namespace mynet
             return false;
         }
 
-        NetConfig newCfg = getNetConfig();
+        MynetConfig newCfg = getMynetConfig();
         bool valid = true;
         bool hasMylogSection = false;
 
@@ -1066,11 +1203,6 @@ namespace mynet
         lua_pop(L, 1);
 
         lua_getglobal(L, "http2");
-        if (lua_isnil(L, -1))
-        {
-            lua_pop(L, 1);
-            lua_getglobal(L, "multiplexer"); // 兼容旧配置表名
-        }
         if (lua_istable(L, -1))
         {
             const int idx = lua_gettop(L);
@@ -1198,6 +1330,70 @@ namespace mynet
         }
         lua_pop(L, 1);
 
+        lua_getglobal(L, "ebpf");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadEbpfSection(L, idx, newCfg.ebpf))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'ebpf' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "fakeip");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadFakeIPSection(L, idx, newCfg.fakeip))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'fakeip' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "geo");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadGeoSection(L, idx, newCfg.geo))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'geo' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
+        lua_getglobal(L, "controller");
+        if (lua_istable(L, -1))
+        {
+            const int idx = lua_gettop(L);
+            if (!detail::loadControllerSection(L, idx, newCfg.controller))
+            {
+                valid = false;
+            }
+        }
+        else if (lua_type(L, -1) != LUA_TNIL)
+        {
+            detail::printError("global 'controller' must be a table");
+            valid = false;
+        }
+        lua_pop(L, 1);
+
         // 探测是否包含 mylog 日志配置节
         lua_getglobal(L, "logger");
         if (lua_istable(L, -1))
@@ -1235,7 +1431,7 @@ namespace mynet
 #endif
 
         // 全量校验通过，原子发布生效
-        publishNetConfig(std::move(newCfg));
+        publishMynetConfig(std::move(newCfg));
         return true;
     }
 

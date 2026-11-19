@@ -17,13 +17,16 @@
  */
 
 #include "error.hpp"
+#include "ebpf.hpp"
+#include "fakeip.hpp"
 #include "forwarder.hpp"
+#include "geo.hpp"
 #include "inboundManager.hpp"
 #include "outboundManager.hpp"
 #include "router.hpp"
-#include "handler/inbound.hpp"
-#include "handler/outbound.hpp"
-#include "handler/sniffing/sniffer.hpp"
+#include "inbound.hpp"
+#include "outbound.hpp"
+#include "sniffer.hpp"
 #include "config/log.hpp"
 #include <atomic>
 #include <chrono>
@@ -75,11 +78,11 @@ namespace mynet
         std::shared_ptr<OutboundManager> outboundManager_{nullptr};
         std::shared_ptr<Router> router_{nullptr};
         std::shared_ptr<Forwarder> forwarder_{nullptr};
+        std::shared_ptr<ebpf::EbpfEngine> ebpfEngine_{nullptr};
 
         mutable std::mutex mutex_{};
-        std::vector<InboundConfig> inboundConfigs_{};
-        std::vector<OutboundConfig> outboundConfigs_{};
-        RouterConfig routerConfig_{};
+        MynetConfig mynetConfig_{};
+        std::shared_ptr<const MynetConfig> mynetConfigShared_{std::make_shared<const MynetConfig>()};
         std::atomic<bool> running_{false};
 
     public:
@@ -91,89 +94,138 @@ namespace mynet
         {
         }
 
-        explicit Core(ForwarderOptions fwdOpts)
+        explicit Core(ForwarderConfig fwdCfg)
             : inboundManager_(std::make_shared<InboundManager>()),
               outboundManager_(std::make_shared<OutboundManager>()),
               router_(std::make_shared<Router>("direct")),
-              forwarder_(std::make_shared<Forwarder>(fwdOpts))
+              forwarder_(std::make_shared<Forwarder>(fwdCfg))
         {
         }
 
-        explicit Core(const NetConfig &cfg)
+        explicit Core(const MynetConfig &cfg)
             : Core()
         {
             applyConfig(cfg);
         }
 
         /**
-         * @brief 根据全局 NetConfig 完整装配入站、出站、路由规则与转发器
+         * @brief 根据全局 MynetConfig 完整装配入站、出站、路由规则与转发器
          */
-        inline void applyConfig(const NetConfig &cfg)
+        inline void applyConfig(const MynetConfig &cfg)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            inboundConfigs_ = cfg.inbounds;
-            outboundConfigs_ = cfg.outbounds;
-            routerConfig_ = cfg.router;
+            mynetConfig_ = cfg;
+            mynetConfigShared_ = std::make_shared<const MynetConfig>(cfg);
+            if (forwarder_ != nullptr)
+            {
+                forwarder_->setConfig(cfg.forwarder);
+            }
 
             // 装配入站节点
             for (const auto &inCfg : cfg.inbounds)
             {
-                if (inCfg.protocol == "mixed")
-                {
-                    inboundManager_->registerInbound(std::make_shared<MixedInbound>(
-                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                    if (inCfg.protocol == "mixed")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundMixed>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "socks5")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundSocks5>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "http")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundHttp>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "trojan")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundTrojan>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "tproxy")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundTransparent>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "direct")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundDirect>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "vless")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundVless>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.uuid, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "hysteria2")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundHysteria2>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "shadowsocks")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundShadowsocks>(
+                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username.empty() ? "aes-128-gcm" : inCfg.username,
+                            inCfg.password, inCfg.enableSniffing));
+                    }
+                    else if (inCfg.protocol == "tun")
+                    {
+                        inboundManager_->registerInbound(std::make_shared<InboundTun>(
+                            inCfg.tag, inCfg.ifName, inCfg.enableSniffing));
+                    }
                 }
-                else if (inCfg.protocol == "socks5")
-                {
-                    inboundManager_->registerInbound(std::make_shared<Socks5Inbound>(
-                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
-                }
-                else if (inCfg.protocol == "http")
-                {
-                    inboundManager_->registerInbound(std::make_shared<HttpInbound>(
-                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
-                }
-                else if (inCfg.protocol == "trojan")
-                {
-                    inboundManager_->registerInbound(std::make_shared<TrojanInbound>(
-                        inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
-                }
-                else if (inCfg.protocol == "tproxy")
-                {
-                    inboundManager_->registerInbound(std::make_shared<TProxyInbound>(
-                        inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
-                }
-                else if (inCfg.protocol == "direct")
-                {
-                    inboundManager_->registerInbound(std::make_shared<DirectInbound>(
-                        inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
-                }
-            }
 
             // 装配出站节点
             for (const auto &outCfg : cfg.outbounds)
             {
                 if (outCfg.type == "direct")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<DirectOutbound>(outCfg.tag));
+                    outboundManager_->registerOutbound(std::make_shared<OutboundDirect>(outCfg.tag));
                 }
                 else if (outCfg.type == "block")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<BlockOutbound>(outCfg.tag));
+                    outboundManager_->registerOutbound(std::make_shared<OutboundBlock>(outCfg.tag));
                 }
                 else if (outCfg.type == "socks5")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<Socks5Outbound>(
+                    outboundManager_->registerOutbound(std::make_shared<OutboundSocks5>(
                         outCfg.tag, outCfg.host, outCfg.port, outCfg.username, outCfg.password));
                 }
                 else if (outCfg.type == "trojan")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<TrojanOutbound>(
+                    outboundManager_->registerOutbound(std::make_shared<OutboundTrojan>(
                         outCfg.tag, outCfg.host, outCfg.port, outCfg.password));
+                }
+                else if (outCfg.type == "vless")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<OutboundVless>(
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.uuid));
+                }
+                else if (outCfg.type == "hysteria2")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<OutboundHysteria2>(
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.password));
+                }
+                else if (outCfg.type == "shadowsocks")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<OutboundShadowsocks>(
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.method.empty() ? "aes-128-gcm" : outCfg.method, outCfg.password));
+                }
+                else if (outCfg.type == "urltest")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<OutboundUrlTest>(
+                        outCfg.tag, outCfg.outbounds, outboundManager_.get(), outCfg.url, outCfg.intervalSecs, outCfg.toleranceMs));
+                }
+                else if (outCfg.type == "fallback")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<OutboundFallback>(
+                        outCfg.tag, outCfg.outbounds, outboundManager_.get()));
                 }
                 else if (outCfg.type == "selector")
                 {
-                    auto sel = std::make_shared<SelectorOutbound>(
+                    auto sel = std::make_shared<OutboundSelector>(
                         outCfg.tag, outCfg.outbounds, outboundManager_.get());
                     if (!outCfg.defaultTag.empty())
                     {
@@ -203,11 +255,44 @@ namespace mynet
                     }
                 }
                 for (const auto &proto : r.protocols) rule.protocol(proto);
+                for (const auto &gip : r.geoIps) rule.geoIp(gip);
+                for (const auto &gsite : r.geoSites) rule.geoSite(gsite);
+                if (!r.processName.empty()) rule.forProcess(r.processName);
                 if (r.network == "tcp") rule.forNetwork(NetworkType::TCP);
                 else if (r.network == "udp") rule.forNetwork(NetworkType::UDP);
                 for (const auto &inTag : r.inboundTags) rule.fromInbound(inTag);
                 if (r.invert) rule.setInvert(true);
                 router_->addRule(std::move(rule));
+            }
+
+            // 装配 eBPF 内核旁路与透明代理
+            if (cfg.ebpf.enabled)
+            {
+                enableEbpfLocked(cfg.ebpf);
+            }
+            else
+            {
+                ebpfEngine_.reset();
+                if (forwarder_ != nullptr)
+                {
+                    forwarder_->setSockmapFd(-1);
+                }
+            }
+
+            // 装配 FakeIP 虚拟地址池
+            if (cfg.fakeip.enabled)
+            {
+                FakeIPPool::instance().applyConfig(cfg.fakeip);
+            }
+
+            // 装配 Geo 资产规则文件
+            if (!cfg.geo.geoIpPath.empty())
+            {
+                GeoIpMatcher::instance().loadFromFile(cfg.geo.geoIpPath, "custom");
+            }
+            if (!cfg.geo.geoSitePath.empty())
+            {
+                GeoSiteMatcher::instance().loadFromFile(cfg.geo.geoSitePath, "custom");
             }
         }
 
@@ -227,8 +312,44 @@ namespace mynet
         [[nodiscard]] inline Router &router() noexcept { return *router_; }
         [[nodiscard]] inline const Router &router() const noexcept { return *router_; }
 
-        [[nodiscard]] inline Forwarder &forwarder() noexcept { return *forwarder_; }
-        [[nodiscard]] inline const Forwarder &forwarder() const noexcept { return *forwarder_; }
+        [[nodiscard]] inline std::shared_ptr<ebpf::EbpfEngine> ebpf() const noexcept { return ebpfEngine_; }
+        inline void setEbpf(std::shared_ptr<ebpf::EbpfEngine> engine) noexcept
+        {
+            ebpfEngine_ = std::move(engine);
+            if (forwarder_ != nullptr)
+            {
+                forwarder_->setSockmapFd(ebpfEngine_ ? ebpfEngine_->sockMapFd() : -1);
+            }
+        }
+
+        inline std::shared_ptr<ebpf::EbpfEngine> enableEbpfLocked(const EbpfConfig &cfg = {})
+        {
+            ebpfEngine_ = std::make_shared<ebpf::EbpfEngine>(cfg);
+            if (router_ != nullptr)
+            {
+                ebpfEngine_->syncFromRouter(*router_);
+            }
+            if (forwarder_ != nullptr)
+            {
+                forwarder_->setSockmapFd(ebpfEngine_->sockMapFd());
+            }
+            return ebpfEngine_;
+        }
+
+        inline std::shared_ptr<ebpf::EbpfEngine> enableEbpf(const EbpfConfig &cfg = {})
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return enableEbpfLocked(cfg);
+        }
+
+        inline void syncEbpfFromRouter()
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (ebpfEngine_ != nullptr && router_ != nullptr)
+            {
+                ebpfEngine_->syncFromRouter(*router_);
+            }
+        }
 
         [[nodiscard]] inline bool isRunning() const noexcept
         {
@@ -326,9 +447,34 @@ namespace mynet
         }
 
         /**
+         * @brief 直接桥接入站与出站协议处理器并纳入数据面流中继
+         */
+        inline std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnection &inbound,
+                                                              handler::HandlerOutboundConnection &outbound,
+                                                              std::optional<ForwarderConfig> cfg = std::nullopt)
+        {
+            if (forwarder_ != nullptr)
+            {
+                return forwarder_->bridge(inbound, outbound, cfg);
+            }
+            return nullptr;
+        }
+
+        /**
+         * @brief 主动关断指定的活跃会话并回收底层资源
+         */
+        inline void closeSession(uint64_t id, bool force = false)
+        {
+            if (forwarder_ != nullptr)
+            {
+                forwarder_->closeStreamSession(id, force);
+            }
+        }
+
+        /**
          * @brief 注册一个入站节点实例
          */
-        inline void addInbound(std::shared_ptr<Inbound> inbound)
+        inline void addInbound(std::shared_ptr<InboundBase> inbound)
         {
             if (inboundManager_ != nullptr)
             {
@@ -339,7 +485,7 @@ namespace mynet
         /**
          * @brief 注册一个出站节点实例
          */
-        inline void addOutbound(std::shared_ptr<Outbound> outbound)
+        inline void addOutbound(std::shared_ptr<OutboundBase> outbound)
         {
             if (outboundManager_ != nullptr)
             {
@@ -353,13 +499,13 @@ namespace mynet
         inline void addInboundConfig(InboundConfig config)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            inboundConfigs_.push_back(std::move(config));
+            mynetConfig_.inbounds.push_back(std::move(config));
         }
 
         [[nodiscard]] inline std::vector<InboundConfig> inboundConfigs() const
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return inboundConfigs_;
+            return mynetConfig_.inbounds;
         }
 
         /**
@@ -368,19 +514,31 @@ namespace mynet
         inline void addOutboundConfig(OutboundConfig config)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            outboundConfigs_.push_back(std::move(config));
+            mynetConfig_.outbounds.push_back(std::move(config));
         }
 
         [[nodiscard]] inline std::vector<OutboundConfig> outboundConfigs() const
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return outboundConfigs_;
+            return mynetConfig_.outbounds;
         }
 
         [[nodiscard]] inline RouterConfig routerConfig() const
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return routerConfig_;
+            return mynetConfig_.router;
+        }
+
+        [[nodiscard]] inline MynetConfig mynetConfig() const
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return mynetConfig_;
+        }
+
+        [[nodiscard]] inline std::shared_ptr<const MynetConfig> mynetConfigShared() const noexcept
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return mynetConfigShared_;
         }
 
         /**
@@ -407,6 +565,17 @@ namespace mynet
             }
             result.target = inbound.targetAddress().value_or(inbound.target());
 
+            // 1.1 FakeIP 虚拟地址反解：若目标地址为 198.18.0.0/15 FakeIP，秒级还原原始域名
+            if (result.target.type == handler::AddressType::IPV4 &&
+                FakeIPPool::instance().isFakeIp(result.target.ipv4_))
+            {
+                if (auto orig = FakeIPPool::instance().lookup(result.target.ipv4_); orig.has_value())
+                {
+                    result.target = handler::ProxyAddress::fromDomain(*orig, result.target.port);
+                    result.sniffedDomain = *orig;
+                }
+            }
+
             // 2. 深度数据包嗅探：从早期摄入用户态缓冲的数据中嗅探真实 SNI 与协议
             if (enableSniffing && inbound.requestBytes() > 0)
             {
@@ -424,7 +593,7 @@ namespace mynet
                 }
             }
 
-            // 3. 构建路由上下文并执行策略匹配
+            // 3. 构建路由上下文并执行策略匹配 (Router 为全网唯一策略中枢)
             RouteContext ctx;
             ctx.network = NetworkType::TCP;
             ctx.inboundTag = inboundTag;
@@ -434,6 +603,13 @@ namespace mynet
 
             std::string_view outboundTag = router_->match(ctx);
             result.outboundTag = std::string(outboundTag);
+
+            if (outboundTag == "block")
+            {
+                result.status = CoreDispatchStatus::BLOCKED;
+                inbound.setCloseAfterResponse(true);
+                return result;
+            }
 
             // 4. 出站拨号建连与协议状态机装配
             auto dialRes = outboundManager_->dialStream(outboundTag, result.target);
@@ -458,11 +634,8 @@ namespace mynet
             session->setOutboundFd(dialRes->fd);
             session->setTarget(result.target);
 
-            // 若满足条件，激活零拷贝或缓冲泵送
-            if (session->options().enableSplice && session->inboundFd() >= 0 && session->outboundFd() >= 0)
-            {
-                session->activateSplice();
-            }
+            // 统一阶梯自适应：自动协商 Sockmap -> Splice -> Buffer Pump
+            session->activateAdaptiveMode();
 
             result.session = std::move(session);
             result.status = CoreDispatchStatus::SUCCESS;

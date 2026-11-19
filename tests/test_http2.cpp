@@ -3,8 +3,8 @@
 // 并从响应队列中读回其回复，这是上层唯一实际依赖的接口。
 #include "configHolder.hpp"
 #include "connection.hpp"
-#include "handler/http/v2/frame.hpp"
-#include "handler/http/v2/handler.hpp"
+#include "http/v2/frame.hpp"
+#include "http/v2/handler.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
@@ -62,7 +62,7 @@ namespace
     class EchoTestHandler : public HandlerConnection
     {
     public:
-        void process()
+        void handle()
         {
             const size_t n = requestBytes();
             if (n > 0)
@@ -78,7 +78,7 @@ namespace
     class TwoPartHandler : public HandlerConnection
     {
     public:
-        void process()
+        void handle()
         {
             if (requestBytes() > 0)
             {
@@ -97,7 +97,7 @@ namespace
             std::string bytes;
             appendFrame(bytes, frame);
             [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-            process();
+            handle();
         }
 
         std::vector<Frame> takeFrames()
@@ -125,7 +125,7 @@ namespace
         void warmUp()
         {
             [[maybe_unused]] auto preface = appendRequest(kClientPreface);
-            process();
+            handle();
             [[maybe_unused]] auto _ = takeFrames();
             push(makeFrame(FRAME_TYPE::SETTINGS, 0, FrameFlags::kAck, {}));
         }
@@ -144,7 +144,7 @@ namespace
             std::string bytes;
             appendFrame(bytes, frame);
             [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-            process();
+            handle();
         }
 
         std::vector<Frame> takeFrames()
@@ -207,7 +207,7 @@ namespace
             std::string bytes;
             appendFrame(bytes, frame);
             [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-            process();
+            handle();
         }
 
         // 获取多路复用器写入的所有数据，并将其重新解码为帧列表。
@@ -238,7 +238,7 @@ namespace
         void warmUp()
         {
             [[maybe_unused]] auto preface = appendRequest(kClientPreface);
-            process();
+            handle();
             takeFrames();
         }
     };
@@ -253,7 +253,7 @@ namespace
 TEST(HandlerHttp2, FirstProcessAnnouncesSettings)
 {
     ProbeMux mux;
-    mux.process();
+    mux.handle();
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FRAME_TYPE::SETTINGS);
@@ -297,7 +297,7 @@ TEST(HandlerHttp2, FirstProcessAnnouncesSettings)
     EXPECT_TRUE(sawFrameSize);
     EXPECT_TRUE(sawHeaderList);
 
-    mux.process(); // 设置帧仅宣告一次，而非每次调用都重复宣告
+    mux.handle(); // 设置帧仅宣告一次，而非每次调用都重复宣告
     EXPECT_FALSE(mux.hasResponse());
 }
 
@@ -503,10 +503,10 @@ TEST(HandlerHttp2, DataBiggerThanTheReceiveWindowIsAFlowControlError)
 {
     // SETTINGS_MAX_FRAME_SIZE 只约束本端出站分片。要注入超过默认 16 KiB 的
     // 入站帧，必须抬高本端的接收上限（配置 -> applyHttp2Config）。
-    const mynet::NetConfig saved = mynet::getNetConfig();
-    mynet::NetConfig cfg = saved;
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
+    mynet::MynetConfig cfg = saved;
     cfg.http2.maxFrameSize = 1 << 20;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     ProbeMux mux;
     mux.applyHttp2Config();
@@ -518,7 +518,7 @@ TEST(HandlerHttp2, DataBiggerThanTheReceiveWindowIsAFlowControlError)
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(mux::kInitialWindowSize + 1, 'x')));
     const bool closed = mux.closeAfterResponse();
     const auto goaways = countOfType(mux.takeFrames(), FRAME_TYPE::GOAWAY);
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 
     EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
     EXPECT_TRUE(closed);
@@ -634,12 +634,12 @@ TEST(HandlerHttp2, AFrameSplitAcrossAppendsIsBufferedUntilWhole)
     ASSERT_GT(bytes.size(), size_t{5});
 
     [[maybe_unused]] auto _ = mux.appendRequest(bytes.data(), 5);
-    mux.process();
+    mux.handle();
     EXPECT_EQ(mux.openStreams(), 0u);
     EXPECT_TRUE(mux.headers.empty());
 
     [[maybe_unused]] auto _ = mux.appendRequest(bytes.data() + 5, static_cast<ssize_t>(bytes.size() - 5));
-    mux.process();
+    mux.handle();
     EXPECT_EQ(mux.openStreams(), 1u);
     ASSERT_EQ(mux.headers.size(), 1u);
     EXPECT_EQ(mux.headers[0].second, kGetHeadersBlock);
@@ -672,7 +672,7 @@ TEST(HandlerHttp2, ResetReturnsTheConnectionToAFreshState)
     EXPECT_EQ(mux.connectionSendWindow(), mux::kInitialWindowSize);
     EXPECT_FALSE(mux.goawayReceived());
 
-    mux.process(); // 重置后的连接重新对外宣告自身的设置帧
+    mux.handle(); // 重置后的连接重新对外宣告自身的设置帧
     const std::vector<Frame> frames = mux.takeFrames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FRAME_TYPE::SETTINGS);
@@ -955,7 +955,7 @@ TEST(HandlerHttp2, PingFloodTriggersEnhanceYourCalm)
     for (int i = 0; i < 70; ++i)
     {
         mux.push(makeFrame(FRAME_TYPE::PING, 0, 0, "12345678"));
-        // 连接层在每次 process() 之后搬运响应；这里同样每轮取走 ACK，
+        // 连接层在每次 handle() 之后搬运响应；这里同样每轮取走 ACK，
         // 否则出站背压会先停住解码，PING 泛洪就无从累积。
         mux.takeFrames();
         if (mux.error.has_value())
@@ -1250,12 +1250,12 @@ TEST(HandlerHttp2, GoawayClosesStreamsAboveLastStreamId)
 
 // ---- 慢读背压（readPaused）：出站响应未排空时暂停流级窗口信用恢复 ----
 
-// process() 一次性产出 128KiB 响应：超出对端默认发送窗口（65535），
+// handle() 一次性产出 128KiB 响应：超出对端默认发送窗口（65535），
 // 迫使出站数据驻留在流槽位（pending / handler 队列）中，模拟慢读对端。
 class BigReplyHandler : public HandlerConnection
 {
 public:
-    void process()
+    void handle()
     {
         if (requestBytes() > 0)
         {
@@ -1285,7 +1285,7 @@ public:
         std::string bytes;
         appendFrame(bytes, frame);
         [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-        process();
+        handle();
     }
 
     std::vector<Frame> takeFrames()
@@ -1316,7 +1316,7 @@ public:
     void warmUp()
     {
         [[maybe_unused]] auto preface = appendRequest(kClientPreface);
-        process();
+        handle();
         [[maybe_unused]] auto _ = takeFrames();
         push(makeFrame(FRAME_TYPE::SETTINGS, 0, FrameFlags::kAck, {}));
     }
@@ -1326,10 +1326,10 @@ TEST(HandlerHttp2, SlowReaderPausesStreamLevelWindowCredit)
 {
     // 本端接收上限抬到 1 MiB：测试注入 40 KiB 的 DATA 帧，超过默认 16 KiB
     // 会被（正确地）判为超长帧。对端 SETTINGS 只影响本端出站分片。
-    const mynet::NetConfig saved = mynet::getNetConfig();
-    mynet::NetConfig cfg = saved;
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
+    mynet::MynetConfig cfg = saved;
     cfg.http2.maxFrameSize = 1 << 20;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     BigReplyMux mux;
     mux.applyHttp2Config();
@@ -1374,7 +1374,7 @@ TEST(HandlerHttp2, SlowReaderPausesStreamLevelWindowCredit)
 
     // 窗口为 0 后再注入即触发流控错误：对端被真正阻断，放大链路被切断。
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, "x"));
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
     EXPECT_EQ(mux.error, STREAM_ERROR::FLOW_CONTROL_ERROR);
 }
 
@@ -1382,10 +1382,10 @@ TEST(HandlerHttp2, DrainingOutboundRestoresPausedStreamWindow)
 {
     // 本端接收上限抬到 1 MiB：测试注入 40 KiB 的 DATA 帧，超过默认 16 KiB
     // 会被（正确地）判为超长帧。对端 SETTINGS 只影响本端出站分片。
-    const mynet::NetConfig saved = mynet::getNetConfig();
-    mynet::NetConfig cfg = saved;
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
+    mynet::MynetConfig cfg = saved;
     cfg.http2.maxFrameSize = 1 << 20;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     BigReplyMux mux;
     mux.applyHttp2Config();
@@ -1430,7 +1430,7 @@ TEST(HandlerHttp2, DrainingOutboundRestoresPausedStreamWindow)
     const uint32_t increment = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
                                (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
     EXPECT_EQ(increment, 40u * 1024u);
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
     ASSERT_NE(mux.stream(1), nullptr);
     EXPECT_EQ(mux.stream(1)->recvWindow, mux::kInitialWindowSize);
 }
@@ -1492,15 +1492,15 @@ TEST(HandlerHttp2, ConfiguredInitialWindowIsAdvertisedAndApplied)
     // initialWindowSize 不是"配了就算"：它必须同时出现在 SETTINGS 里、
     // 真正提升 connection 级接收窗口、并成为新流的接收窗口初值。
     // 漏掉任何一环，配置都可能让上传在 64 KiB 处卡死或越过对端额度。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.http2.initialWindowSize = 131072;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     WindowMux mux;
     mux.applyHttp2Config();
-    mux.process();
+    mux.handle();
     const std::vector<Frame> frames = mux.takeFrames();
 
     // 1) SETTINGS 必须宣告配置值
@@ -1538,25 +1538,25 @@ TEST(HandlerHttp2, ConfiguredInitialWindowIsAdvertisedAndApplied)
     EXPECT_TRUE(raisedConnectionWindow) << "a connection-level WINDOW_UPDATE must raise stream-0 credit";
     EXPECT_EQ(mux.connRecvWindow_, 131072u);
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(HandlerHttp2, ConfiguredInitialWindowDoesNotInflateTheSendWindow)
 {
     // connSendWindow_ 是对端给我们的额度，connection 级只受 WINDOW_UPDATE 影响。
     // 用本端接收配置去初始化它，会让服务器越过对端窗口直接触发 FLOW_CONTROL_ERROR。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.http2.initialWindowSize = 131072;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     WindowMux mux;
     mux.applyHttp2Config();
     EXPECT_EQ(mux.connectionSendWindow(), mux::kInitialWindowSize)
         << "outbound credit must start from the protocol default, not our receive configuration";
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(HandlerHttp2, SmallInitialWindowDoesNotShrinkConnectionLevelCredit)
@@ -1564,15 +1564,15 @@ TEST(HandlerHttp2, SmallInitialWindowDoesNotShrinkConnectionLevelCredit)
     // connection 级窗口在 RFC 9113 里无法被"缩小"：对端始终以 65535 起算，
     // SETTINGS_INITIAL_WINDOW_SIZE 只作用于 stream 级。若本端把连接级记账值
     // 也设成小值，回补阈值就会算错，且与对端的实际视角不一致。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.http2.initialWindowSize = 4096;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     WindowMux mux;
     mux.applyHttp2Config();
-    mux.process();
+    mux.handle();
     const std::vector<Frame> frames = mux.takeFrames();
 
     EXPECT_EQ(mux.connRecvWindow_, mux::kInitialWindowSize)
@@ -1604,7 +1604,7 @@ TEST(HandlerHttp2, SmallInitialWindowDoesNotShrinkConnectionLevelCredit)
     }
     EXPECT_TRUE(advertised);
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(HandlerHttp2, SmallInitialWindowDoesNotRejectCompliantPeerDataFrames)
@@ -1612,11 +1612,11 @@ TEST(HandlerHttp2, SmallInitialWindowDoesNotRejectCompliantPeerDataFrames)
     // SETTINGS_INITIAL_WINDOW_SIZE 可以调小，但只在对端**收到并处理我们的 SETTINGS**
     // 之后生效。在此之前对端仍按协议默认 65535 发送；若本地流级窗口一开始就是
     // 4096，一个完整的 16 KiB DATA 帧会被判成 FLOW_CONTROL_ERROR 并触发 GOAWAY。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.http2.initialWindowSize = 4096;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     ProbeMux mux;
     mux.applyHttp2Config();
@@ -1633,7 +1633,7 @@ TEST(HandlerHttp2, SmallInitialWindowDoesNotRejectCompliantPeerDataFrames)
     EXPECT_FALSE(mux.error.has_value()) << "a compliant peer's 16 KiB frame must not be rejected";
     EXPECT_FALSE(mux.closeAfterResponse());
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 // ---- 真实客户端字节序列回归：前言 + HPACK(Huffman) + DATA -> 200 响应 ----
@@ -1644,7 +1644,7 @@ namespace
     class QuietStream : public HandlerConnection
     {
     public:
-        void process() noexcept {}
+        void handle() noexcept {}
     };
 
     class EchoMux : public HandlerHttp2<QuietStream>
@@ -1671,7 +1671,7 @@ namespace
         void feed(std::string_view wire)
         {
             [[maybe_unused]] auto _ = appendRequest(wire);
-            process();
+            handle();
         }
 
         [[nodiscard]] std::vector<Frame> drain()
@@ -1781,10 +1781,10 @@ TEST(HandlerHttp2, OversizedStreamRequestBodyIsRefused)
 {
     // connection.maxRequestBytes 只管连接级 handler；HTTP/2 的请求体驻留在
     // per-stream handler 里，必须由多路复用器显式拦截，否则单个上传可吃满内存。
-    const mynet::NetConfig saved = mynet::getNetConfig();
-    mynet::NetConfig cfg = saved;
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
+    mynet::MynetConfig cfg = saved;
     cfg.connection.maxRequestBytes = 1024;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     ProbeMux mux;
     mux.applyHttp2Config();
@@ -1794,7 +1794,7 @@ TEST(HandlerHttp2, OversizedStreamRequestBodyIsRefused)
 
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(2048, 'x')));
     const std::vector<Frame> frames = mux.takeFrames();
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FRAME_TYPE::RESET);
@@ -1814,7 +1814,7 @@ public:
         std::string bytes;
         appendFrame(bytes, frame);
         [[maybe_unused]] auto _ = this->appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-        this->process();
+        this->handle();
     }
 
     std::vector<Frame> takeFrames()
@@ -1842,7 +1842,7 @@ public:
     void warmUp()
     {
         this->appendRequest(HandlerHttp2<QuietStream>::kClientPreface);
-        this->process();
+        this->handle();
         [[maybe_unused]] auto _ = takeFrames();
     }
 };
@@ -1852,10 +1852,10 @@ TEST(HandlerHttp2, AggregateStreamRequestBodyLimitIsEnforced)
     // 验证连接级聚合上限：即使单流未达到 maxRequestBytes，多流并发累积
     // 超过连接级总配额时，超出预算的流将被 ENHANCE_YOUR_CALM 拒绝，
     // 而已缓冲的正常流与连接级流控记账完好无损。
-    const mynet::NetConfig saved = mynet::getNetConfig();
-    mynet::NetConfig cfg = saved;
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
+    mynet::MynetConfig cfg = saved;
     cfg.connection.maxRequestBytes = 2048;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     BufferedProbeMux mux;
     mux.applyHttp2Config();
@@ -1886,7 +1886,7 @@ TEST(HandlerHttp2, AggregateStreamRequestBodyLimitIsEnforced)
     EXPECT_NE(mux.stream(1), nullptr);
     EXPECT_EQ(mux.aggregateStreamRequestBytes(), 1200u);
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(HandlerHttp2, SetMaxRequestBytesHotReloadPropagatesToStreams)
@@ -1918,10 +1918,10 @@ TEST(HandlerHttp2, SmallAdvertisedWindowStillGrantsCredit)
 {
     // 宣告 16 KiB 时，对端发满 16 KiB 后本端必须回补：若回补阈值仍按本地
     // 记账基准 65535 的一半计算，窗口会停在 49151 且永不再涨，上传直接挂死。
-    const mynet::NetConfig saved = mynet::getNetConfig();
-    mynet::NetConfig cfg = saved;
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
+    mynet::MynetConfig cfg = saved;
     cfg.http2.initialWindowSize = 16384;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     ProbeMux mux;
     mux.applyHttp2Config();
@@ -1931,7 +1931,7 @@ TEST(HandlerHttp2, SmallAdvertisedWindowStillGrantsCredit)
 
     mux.push(makeFrame(FRAME_TYPE::DATA, 1, 0, std::string(9216, 'a'))); // 超过 16384/2
     const std::vector<Frame> frames = mux.takeFrames();
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 
     bool sawStreamUpdate = false;
     for (const Frame &frame : frames)
@@ -1949,7 +1949,7 @@ TEST(HandlerHttp2, SmallAdvertisedWindowStillGrantsCredit)
 class LargeReplyHandler : public HandlerConnection
 {
 public:
-    void process()
+    void handle()
     {
         if (requestBytes() > 0)
         {
@@ -1970,7 +1970,7 @@ public:
         std::string bytes;
         appendFrame(bytes, frame);
         [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-        process();
+        handle();
     }
 
     [[nodiscard]] std::vector<Frame> takeFrames()
@@ -1999,7 +1999,7 @@ public:
     void warmUp()
     {
         [[maybe_unused]] auto preface = appendRequest(kClientPreface);
-        process();
+        handle();
         [[maybe_unused]] auto _ = takeFrames();
         push(makeFrame(FRAME_TYPE::SETTINGS, 0, FrameFlags::kAck, {}));
     }
@@ -2082,9 +2082,9 @@ TEST(HandlerHttp2, LargeResponseResumesAfterTheResponseQueueDrains)
         // 模拟客户端补窗口（连接级与流级）
         mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 0, 0, increment));
         mux.push(makeFrame(FRAME_TYPE::WINDOW_UPDATE, 1, 0, increment));
-        if (!mux.needsProcess() && !ended)
+        if (!mux.needsHandle() && !ended)
         {
-            mux.process();
+            mux.handle();
         }
     }
 
@@ -2253,13 +2253,13 @@ TEST(HandlerHttp2, TrailersEndTheStreamWithoutLookingLikeASecondRequest)
             std::string bytes;
             appendFrame(bytes, frame);
             [[maybe_unused]] auto _ = appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-            process();
+            handle();
         }
     };
 
     TrailerMux mux;
     [[maybe_unused]] auto preface = mux.appendRequest(TrailerMux::kClientPreface);
-    mux.process();
+    mux.handle();
     while (mux.hasResponse())
         mux.takeResponse();
 

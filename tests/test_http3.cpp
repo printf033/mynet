@@ -1,4 +1,4 @@
-#include "handler/http/v3/handler.hpp"
+#include "http/v3/handler.hpp"
 #include <gtest/gtest.h>
 
 using namespace mynet;
@@ -706,8 +706,8 @@ TEST(Http3Frame, ZeroCopyFrameViewDecodesDirectlyFromBuffer)
 class TrackingHttp3Stream : public HandlerConnection
 {
 public:
-    size_t processCount = 0;
-    void process() noexcept { ++processCount; }
+    size_t handleCount = 0;
+    void handle() noexcept { ++handleCount; }
 };
 
 class HookTrackingHttp3Handler : public HandlerHttp3<TrackingHttp3Stream>

@@ -3,7 +3,7 @@
 #include "connection.hpp"
 #include "error.hpp"
 #include "config/log.hpp"
-#include "handler/http/v2/handler.hpp"
+#include "http/v2/handler.hpp"
 #include "reactor.hpp"
 
 // epoll 驱动的 HTTP/2 流多路复用服务端。用法：

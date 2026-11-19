@@ -32,7 +32,31 @@ namespace mynet
         using Handler = HandlerType;
         sockaddr_in addr{};
 
+        AcceptorBase() = default;
         virtual ~AcceptorBase() noexcept { reset(); }
+
+        AcceptorBase(const AcceptorBase &) = delete;
+        AcceptorBase &operator=(const AcceptorBase &) = delete;
+
+        AcceptorBase(AcceptorBase &&other) noexcept
+            : fd(other.fd), addr(other.addr)
+        {
+            other.fd = -1;
+            other.addr = {};
+        }
+
+        AcceptorBase &operator=(AcceptorBase &&other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                fd = other.fd;
+                addr = other.addr;
+                other.fd = -1;
+                other.addr = {};
+            }
+            return *this;
+        }
 
         inline void reset() noexcept
         {
@@ -42,6 +66,42 @@ namespace mynet
                 fd = -1;
             }
             addr = {};
+        }
+
+        inline void attach(int newFd, const sockaddr_in &newAddr = {}) noexcept
+        {
+            reset();
+            fd = newFd;
+            addr = newAddr;
+        }
+
+        [[nodiscard]] inline int release() noexcept
+        {
+            int ret = fd;
+            fd = -1;
+            addr = {};
+            return ret;
+        }
+
+        /**
+         * @brief 非阻塞接收一个接入的客户端连接
+         */
+        [[nodiscard]] Result<std::pair<int, sockaddr_in>> accept() noexcept
+        {
+            if (fd < 0) [[unlikely]]
+            {
+                return std::unexpected(ERR::ACCEPT_FAILED);
+            }
+
+            sockaddr_in clientAddr{};
+            socklen_t len = sizeof(clientAddr);
+            int clientFd = ::accept4(fd, reinterpret_cast<sockaddr *>(&clientAddr), &len,
+                                     SOCK_NONBLOCK | SOCK_CLOEXEC);
+            if (clientFd < 0) [[unlikely]]
+            {
+                return std::unexpected(ERR::ACCEPT_FAILED);
+            }
+            return std::make_pair(clientFd, clientAddr);
         }
 
         /**
@@ -115,6 +175,11 @@ namespace mynet
                 reset();
                 return std::unexpected(ERR::LISTEN_FAILED);
             }
+            if (port == 0)
+            {
+                socklen_t len = sizeof(addr);
+                ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
+            }
             return {};
         }
 
@@ -173,6 +238,11 @@ namespace mynet
                 LOG_ERROR("listenUdp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::BIND_FAILED);
+            }
+            if (port == 0)
+            {
+                socklen_t len = sizeof(addr);
+                ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
             }
             return {};
         }

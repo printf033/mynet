@@ -1,13 +1,13 @@
 #include "dialer.hpp"
-#include "handler/address.hpp"
-#include "handler/block.hpp"
-#include "handler/direct.hpp"
-#include "handler/dns/dns.hpp"
-#include "handler/dns/handler.hpp"
-#include "handler/proxy/hysteria2.hpp"
-#include "handler/proxy/trojan.hpp"
-#include "handler/proxy/vless.hpp"
-#include "handler/socks/socks5.hpp"
+#include "address.hpp"
+#include "block/block.hpp"
+#include "direct/direct.hpp"
+#include "dns/dns.hpp"
+#include "dns/handler.hpp"
+#include "hysteria2/hysteria2.hpp"
+#include "trojan/trojan.hpp"
+#include "vless/vless.hpp"
+#include "socks/socks5.hpp"
 #include "../examples/common/resolver.hpp"
 #include <gtest/gtest.h>
 #include <string>
@@ -127,13 +127,24 @@ TEST(DialerBaseTest, LifecycleAndReset)
     }
     dialer.reset();
     EXPECT_EQ(dialer.fd, -1);
+
+    // 测试 attach 与 release 机制
+    int dummyFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    ASSERT_GE(dummyFd, 0);
+    dialer.attach(dummyFd);
+    EXPECT_EQ(dialer.fd, dummyFd);
+
+    int releasedFd = dialer.release();
+    EXPECT_EQ(releasedFd, dummyFd);
+    EXPECT_EQ(dialer.fd, -1);
+    ::close(releasedFd);
 }
 
 // =============================================================================
 // 3. HandlerOutboundConnection 出站协议族测试
 // =============================================================================
 
-TEST(HandlerOutboundTest, DirectOutbound)
+TEST(HandlerOutboundTest, OutboundDirect)
 {
     auto target = ProxyAddress::fromDomain("example.com", 443);
     HandlerOutboundDirect direct(target);
@@ -143,7 +154,7 @@ TEST(HandlerOutboundTest, DirectOutbound)
     EXPECT_EQ(direct.target().toString(), "example.com:443");
 }
 
-TEST(HandlerOutboundTest, TrojanOutbound)
+TEST(HandlerOutboundTest, OutboundTrojan)
 {
     auto target = ProxyAddress::fromDomain("example.com", 443);
     HandlerOutboundTrojan trojan("password123", target);
@@ -151,8 +162,8 @@ TEST(HandlerOutboundTest, TrojanOutbound)
     EXPECT_FALSE(trojan.isEstablished());
     EXPECT_EQ(trojan.stage(), OutboundStage::INITIAL);
 
-    // 驱动 process() 发送出站头部
-    trojan.process();
+    // 驱动 handle() 发送出站头部
+    trojan.handle();
     EXPECT_TRUE(trojan.isEstablished());
     EXPECT_EQ(trojan.stage(), OutboundStage::STREAMING);
     ASSERT_TRUE(trojan.hasResponse());
@@ -164,14 +175,14 @@ TEST(HandlerOutboundTest, TrojanOutbound)
     EXPECT_TRUE(sent.ends_with("\r\n"));
 }
 
-TEST(HandlerOutboundTest, VlessOutbound)
+TEST(HandlerOutboundTest, OutboundVless)
 {
     auto target = ProxyAddress::fromDomain("vless.test", 8443);
     std::array<uint8_t, 16> uuid = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
     HandlerOutboundVless vless(uuid, target);
 
     EXPECT_FALSE(vless.isEstablished());
-    vless.process(); // 发送首包，进入 CONNECTING
+    vless.handle(); // 发送首包，进入 CONNECTING
     EXPECT_EQ(vless.stage(), OutboundStage::CONNECTING);
     ASSERT_TRUE(vless.hasResponse());
 
@@ -183,19 +194,19 @@ TEST(HandlerOutboundTest, VlessOutbound)
     // 服务端回送 2 字节握手响应 [0x00, 0x00]
     std::string serverResp("\x00\x00", 2);
     [[maybe_unused]] auto _ = vless.appendRequest(serverResp);
-    vless.process();
+    vless.handle();
 
     EXPECT_TRUE(vless.isEstablished());
     EXPECT_EQ(vless.stage(), OutboundStage::STREAMING);
 }
 
-TEST(HandlerOutboundTest, Socks5Outbound)
+TEST(HandlerOutboundTest, OutboundSocks5)
 {
     auto target = ProxyAddress::fromDomain("target.org", 80);
     HandlerOutboundSocks5 s5(target);
 
     // Step 1: 发送 greeting [0x05, 0x01, 0x00]
-    s5.process();
+    s5.handle();
     EXPECT_EQ(s5.stage(), OutboundStage::CONNECTING);
     ASSERT_TRUE(s5.hasResponse());
     std::string greeting = s5.takeResponse();
@@ -204,7 +215,7 @@ TEST(HandlerOutboundTest, Socks5Outbound)
     // Step 2: 服务端回复 [0x05, 0x00] (免密)
     std::string srvGreeting("\x05\x00", 2);
     [[maybe_unused]] auto _1 = s5.appendRequest(srvGreeting);
-    s5.process();
+    s5.handle();
 
     // 应该已推送 CONNECT 请求包
     ASSERT_TRUE(s5.hasResponse());
@@ -214,13 +225,13 @@ TEST(HandlerOutboundTest, Socks5Outbound)
     // Step 3: 服务端回复 CONNECT 成功响应 [0x05, 0x00, 0x00, 0x01, IP(4), PORT(2)]
     std::string srvConnectOk = std::string("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00", 10);
     [[maybe_unused]] auto _2 = s5.appendRequest(srvConnectOk);
-    s5.process();
+    s5.handle();
 
     EXPECT_TRUE(s5.isEstablished());
     EXPECT_EQ(s5.stage(), OutboundStage::STREAMING);
 }
 
-TEST(HandlerOutboundTest, BlockOutbound)
+TEST(HandlerOutboundTest, OutboundBlock)
 {
     HandlerOutboundBlock block;
     EXPECT_FALSE(block.isEstablished());
@@ -228,7 +239,7 @@ TEST(HandlerOutboundTest, BlockOutbound)
     EXPECT_TRUE(block.closeAfterResponse());
 }
 
-TEST(HandlerOutboundTest, Hysteria2Outbound)
+TEST(HandlerOutboundTest, OutboundHysteria2)
 {
     auto target = ProxyAddress::fromDomain("hysteria.test", 443);
     HandlerOutboundHysteria2 hy2("mypassword", target);
@@ -236,7 +247,7 @@ TEST(HandlerOutboundTest, Hysteria2Outbound)
     EXPECT_FALSE(hy2.isEstablished());
     EXPECT_EQ(hy2.stage(), OutboundStage::INITIAL);
 
-    hy2.process(); // 发送认证首包，进入 CONNECTING
+    hy2.handle(); // 发送认证首包，进入 CONNECTING
     EXPECT_EQ(hy2.stage(), OutboundStage::CONNECTING);
     ASSERT_TRUE(hy2.hasResponse());
 
@@ -249,7 +260,7 @@ TEST(HandlerOutboundTest, Hysteria2Outbound)
     // 服务端回送 1 字节握手成功 [0x00]
     std::string serverResp("\x00", 1);
     [[maybe_unused]] auto _ = hy2.appendRequest(serverResp);
-    hy2.process();
+    hy2.handle();
 
     EXPECT_TRUE(hy2.isEstablished());
     EXPECT_EQ(hy2.stage(), OutboundStage::STREAMING);
@@ -279,7 +290,7 @@ TEST(HandlerDnsTest, TcpDnsServerAndClient)
 
     // 服务端消费请求并应答
     [[maybe_unused]] auto _ = server.appendRequest(tcpReq);
-    server.process();
+    server.handle();
 
     ASSERT_TRUE(server.lastQuery().has_value());
     EXPECT_EQ(server.lastQuery()->header.id, 0x1234);
@@ -290,7 +301,7 @@ TEST(HandlerDnsTest, TcpDnsServerAndClient)
     // 客户端接收响应
     HandlerInboundConnectionDns client;
     [[maybe_unused]] auto _2 = client.appendRequest(srvResp);
-    client.process();
+    client.handle();
 
     ASSERT_TRUE(client.lastResponse().has_value());
     EXPECT_EQ(client.lastResponse()->header.id, 0x1234);
@@ -334,8 +345,8 @@ TEST(HandlerDnsTest, OutboundDnsClient)
     HandlerOutboundConnectionDns client("query.test", dns::kTypeA, 0x9999);
     EXPECT_EQ(client.stage(), OutboundStage::INITIAL);
 
-    // 驱动 process() 发出 TCP 查询包
-    client.process();
+    // 驱动 handle() 发出 TCP 查询包
+    client.handle();
     EXPECT_EQ(client.stage(), OutboundStage::CONNECTING);
     ASSERT_TRUE(client.hasResponse());
 
@@ -357,7 +368,7 @@ TEST(HandlerDnsTest, OutboundDnsClient)
     tcpResp.append(reinterpret_cast<const char *>(respRaw.data()), respRaw.size());
 
     [[maybe_unused]] auto _ = client.appendRequest(tcpResp);
-    client.process();
+    client.handle();
 
     EXPECT_TRUE(client.isEstablished());
     EXPECT_EQ(client.stage(), OutboundStage::STREAMING);
@@ -404,7 +415,7 @@ TEST(DialerBaseTest, StrategyRoutingOptionsFwmarkAndTransparent)
 {
     struct DummyHandler : HandlerConnection
     {
-        void process() {}
+        void handle() {}
     };
 
     DialerBase<DummyHandler> dialer;

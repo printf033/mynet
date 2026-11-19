@@ -59,6 +59,43 @@ namespace mynet
         return "UNKNOWN";
     }
 
+    /**
+     * @brief TCP 路由策略决断与实际出站传输绑定的解耦模型 (借鉴 dae TcpFlowBinding, 机制 72)
+     *
+     * 将连接状态明确解耦为两层：
+     * 1. TcpRouteBinding: 高层策略决断（不可变版本号 Policy Epoch、出站组、Mark、Must 强制标记）
+     * 2. TcpEgressBinding: 底层物理传输实例（Dialer 标签、解析的目标端点、嗅探到的 SNI 目标）
+     * 在出站节点发生自动故障转移时，既有活跃长连接的策略决断保持冻结，仅新建连接应用新 Egress 绑定，
+     * 彻底杜绝正在通信的活跃长连接被强行切断或重置。
+     */
+    struct TcpRouteBinding
+    {
+        uint32_t policyEpoch{0};
+        std::string outboundGroup{};
+        uint32_t fwmark{0};
+        bool must{false};
+        std::string matchedRule{};
+    };
+
+    struct TcpEgressBinding
+    {
+        std::string dialerTag{};
+        std::string remoteEndpoint{};
+        std::string sniffedSni{};
+        bool isDirect{false};
+    };
+
+    struct TcpFlowBinding
+    {
+        TcpRouteBinding route{};
+        TcpEgressBinding egress{};
+        uint64_t flowId{0};
+        std::chrono::steady_clock::time_point boundAt{std::chrono::steady_clock::now()};
+
+        [[nodiscard]] bool isFrozen() const noexcept { return flowId != 0; }
+        void freeze(uint64_t id) noexcept { flowId = id; }
+    };
+
     class HandlerConnection;
 
     /**
@@ -292,10 +329,10 @@ namespace mynet
         /**
          * @brief 处理器是否因出站背压而暂缓了解码、且凭当前状态仍能继续推进
          *
-         * 连接层在响应队列被搬运之后据此重新驱动 process()。默认 false：只有
+         * 连接层在响应队列被搬运之后据此重新驱动 handle()。默认 false：只有
          * 会主动分轮解码的处理器（如 HandlerHttp2）才需要覆写。
          */
-        [[nodiscard]] inline bool needsProcess() const noexcept { return false; }
+        [[nodiscard]] inline bool needsHandle() const noexcept { return false; }
 
         [[nodiscard]] inline size_t responseCount() const noexcept { return responseQueue_.size(); }
 
@@ -494,7 +531,7 @@ namespace mynet
         /**
          * @brief 默认业务处理入口：无操作，具体业务由派生处理器实现
          */
-        inline void process() {}
+        inline void handle() {}
 
     protected:
         RequestBuffer requestBuffer_;
@@ -577,7 +614,7 @@ namespace mynet
             { h.onMessageComplete() } noexcept;
             { h.onParseError(buf) } noexcept;
             { h.fd() } noexcept -> std::same_as<int>;
-            { h.process() };
+            { h.handle() };
         };
 
     /**
@@ -667,6 +704,7 @@ namespace mynet
             writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
             handler_.reset();
             handler_.setMaxRequestBytes(getConnectionConfig().maxRequestBytes);
+            config_.reset();
         }
 
         [[nodiscard]] inline int fd() const noexcept { return fd_; }
@@ -675,14 +713,17 @@ namespace mynet
             fd_ = fd;
             if (fd_ >= 0)
             {
-                if (getServerConfig().tcpNoDelay)
+                config_ = getMynetConfigShared();
+                const auto &srvCfg = config_ ? config_->server : getServerConfig();
+                const auto &connCfg = config_ ? config_->connection : getConnectionConfig();
+                if (srvCfg.tcpNoDelay)
                 {
                     constexpr int one = 1;
                     [[maybe_unused]] auto _ = ::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
                 }
                 applyQuickAck();
-                writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
-                handler_.setMaxRequestBytes(getConnectionConfig().maxRequestBytes);
+                writeHighWaterMark_ = connCfg.writeHighWaterMark;
+                handler_.setMaxRequestBytes(connCfg.maxRequestBytes);
                 handler_.onConnect(fd_);
             }
         }
@@ -695,6 +736,21 @@ namespace mynet
         [[nodiscard]] inline uint32_t events() const noexcept { return events_; }
         inline void setEvents(uint32_t events) noexcept { events_ = events; }
 
+        [[nodiscard]] inline const MynetConfig &config() const noexcept
+        {
+            return config_ ? *config_ : *getMynetConfigShared();
+        }
+
+        [[nodiscard]] inline const std::shared_ptr<const MynetConfig> &configShared() const noexcept
+        {
+            return config_;
+        }
+
+        [[nodiscard]] inline uint32_t configGeneration() const noexcept
+        {
+            return MynetConfigHolder::getInstance().getGeneration();
+        }
+
         /**
          * @brief 按配置重设 TCP_QUICKACK。
          *
@@ -704,7 +760,8 @@ namespace mynet
          */
         inline void applyQuickAck() noexcept
         {
-            if (fd_ >= 0 && getServerConfig().tcpQuickAck)
+            const auto &srvCfg = config_ ? config_->server : getServerConfig();
+            if (fd_ >= 0 && srvCfg.tcpQuickAck)
             {
                 constexpr int one = 1;
                 [[maybe_unused]] auto _ = ::setsockopt(fd_, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
@@ -713,7 +770,8 @@ namespace mynet
 
         [[nodiscard]] inline bool isSpliceEnabled() const noexcept
         {
-            if (!getServerConfig().enableSplice)
+            const auto &srvCfg = config_ ? config_->server : getServerConfig();
+            if (!srvCfg.enableSplice)
             {
                 return false;
             }
@@ -1303,7 +1361,7 @@ namespace mynet
                     readPaused_ = true;
                     return IO_STATUS::KEEP;
                 }
-                handler_.process();
+                handler_.handle();
                 collectResponses();
                 if (closeAfterWrite_)
                 {
@@ -1554,8 +1612,8 @@ namespace mynet
         inline void drainBackpressuredHandler() noexcept
         {
             if constexpr (requires {
-                              handler_.process();
-                              handler_.needsProcess();
+                              handler_.handle();
+                              handler_.needsHandle();
                           })
             {
                 // 上界 + 进展检测：任何"声称需要推进却推不动"的退化路径（例如响应
@@ -1564,14 +1622,14 @@ namespace mynet
                 const size_t maxDrainRounds = getConnectionConfig().maxDrainRounds;
                 for (size_t round = 0; round < maxDrainRounds; ++round)
                 {
-                    if (!handler_.needsProcess() || pendingBytes_ >= writeHighWaterMark_ || closeAfterWrite_ ||
+                    if (!handler_.needsHandle() || pendingBytes_ >= writeHighWaterMark_ || closeAfterWrite_ ||
                         peerGone_)
                     {
                         return;
                     }
                     const size_t bytesBefore = pendingBytes_;
                     const size_t bufferedBefore = handler_.requestBytes();
-                    handler_.process();
+                    handler_.handle();
                     collectResponses();
                     const bool progressed = pendingBytes_ > bytesBefore || handler_.requestBytes() < bufferedBefore;
                     if (!progressed)
@@ -1685,6 +1743,7 @@ namespace mynet
         uint64_t timerId_ = 0;
         std::chrono::steady_clock::time_point lastActive_{};
         uint32_t events_ = 0;
+        std::shared_ptr<const MynetConfig> config_{};
 
         inline static bool unexpectedEof() noexcept
         {

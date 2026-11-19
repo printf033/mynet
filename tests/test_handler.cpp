@@ -2,7 +2,7 @@
 // 读取数据的请求缓冲区、消费输出的响应队列，以及介于两者之间的背压信用额度。
 #include "connection.hpp"
 #include "datagram.hpp"
-#include "handler/http/v1/handler.hpp"
+#include "http/v1/handler.hpp"
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <string>
@@ -24,7 +24,7 @@ namespace
      *
      * splice 路由由具体处理器类型选择：Connection::isSpliceEnabled() 要求
      * HandlerType::kEnableSplice 为真且运行期 spliceEnabled() 为真。
-     * process() 显式实现回显；基类默认不处理请求。
+     * handle() 显式实现回显；基类默认不处理请求。
      */
     class SpliceEchoHandler : public HandlerConnection
     {
@@ -33,7 +33,7 @@ namespace
 
         void onConnect(int fd) noexcept override { setSpliceTarget(fd); }
 
-        void process()
+        void handle()
         {
             const size_t n = requestBytes();
             if (n > 0)
@@ -93,7 +93,7 @@ TEST(HandlerConnection, DefaultProcessDoesNotHandleRequests)
 {
     HandlerConnection handler;
     feed(handler, "hello");
-    handler.process();
+    handler.handle();
     EXPECT_FALSE(handler.hasResponse());
     EXPECT_EQ(handler.requestBytes(), size_t{5});
     EXPECT_EQ(std::string(handler.requestBegin(), handler.requestBytes()), "hello");
@@ -146,7 +146,7 @@ TEST(HandlerConnection, DirectWritableZeroCopyIngress)
     handler.commitRequest(16);
 
     EXPECT_EQ(handler.requestBytes(), 16u);
-    handler.process();
+    handler.handle();
     EXPECT_FALSE(handler.hasResponse());
     EXPECT_EQ(handler.requestBytes(), 16u);
     EXPECT_EQ(std::string(handler.requestBegin(), handler.requestBytes()), "direct-zero-copy");
@@ -189,7 +189,7 @@ TEST(HandlerHttp, ParsesRequestLineHeadersAndBody)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "POST /submit?x=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello");
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.url(), "/submit?x=1");
     EXPECT_EQ(handler.body(), "hello");
@@ -207,7 +207,7 @@ TEST(HandlerHttp, AnswersWithAMinimalKeepAliveEcho)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nhi");
-    handler.process();
+    handler.handle();
     ASSERT_TRUE(handler.hasResponse());
     const std::string response = handler.takeResponse();
     EXPECT_EQ(response.rfind("HTTP/1.1 200 OK\r\n", 0), size_t{0});
@@ -220,7 +220,7 @@ TEST(HandlerHttp, Http10WithoutConnectionKeepAliveIsNotKeepAlive)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET / HTTP/1.0\r\n\r\n");
-    handler.process();
+    handler.handle();
     EXPECT_FALSE(handler.keepAlive());
     // 回写字节级断言：HTTP/1.0 无 Connection 头时响应必须带 Connection: close，
     // 防止 onMessageComplete 动态回写逻辑回归为恒 keep-alive
@@ -235,7 +235,7 @@ TEST(HandlerHttp, Http11WithConnectionCloseSetsCloseAfterResponse)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
-    handler.process();
+    handler.handle();
     EXPECT_FALSE(handler.keepAlive());
     EXPECT_TRUE(handler.closeAfterResponse());
     ASSERT_TRUE(handler.hasResponse());
@@ -247,14 +247,14 @@ TEST(HandlerHttp, ARequestSplitAcrossTwoAppendsStillParses)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET /split HTTP/1.1\r\nHost: ex");
-    handler.process();
+    handler.handle();
     // llhttp 支持增量解析，因此在首次追加结束时请求行已被解析完成：
     // 当首部段仍处于打开状态时 URL 已可读，且首部值尚非最终完整值。
     // 本测试验证第二次追加会无缝续接同一条消息，而非被当作全新消息处理。
     EXPECT_EQ(handler.url(), "/split");
     EXPECT_NE(handler.headerValue("Host"), "example.com");
     feed(handler, "ample.com\r\n\r\n");
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.url(), "/split");
     EXPECT_EQ(handler.headerValue("Host"), "example.com");
 }
@@ -263,7 +263,7 @@ TEST(HandlerHttp, ParseErrorAnswers400AndCloses)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "\x01\x02 not a request \x03\r\n\r\n");
-    handler.process();
+    handler.handle();
     ASSERT_TRUE(handler.hasResponse());
     const std::string response = handler.takeResponse();
     EXPECT_NE(response.find("400 Bad Request"), std::string::npos);
@@ -288,7 +288,7 @@ TEST(HandlerHttp, EmptyHeaderValueIsPreserved)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Empty:\r\n\r\n");
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.headerValue("Host"), "localhost");
     EXPECT_EQ(handler.headerValue("X-Empty"), "");
     // 验证 X-Empty 确实存在于首部列表中
@@ -308,7 +308,7 @@ TEST(HandlerHttp, EmptyHeaderFollowedByAnotherHeaderDoesNotMerge)
 {
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     feed(handler, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Empty:\r\nX-Next: foo\r\n\r\n");
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.headerValue("Host"), "localhost");
     EXPECT_EQ(handler.headerValue("X-Empty"), "");
     EXPECT_EQ(handler.headerValue("X-Next"), "foo");
@@ -326,7 +326,7 @@ TEST(HandlerHttp, UrlTooLongReturns400)
     HandlerHttp<HTTP_MODE::REQUEST> handler;
     std::string longUrl = "GET /" + std::string(9000, 'a') + " HTTP/1.1\r\nHost: localhost\r\n\r\n";
     feed(handler, longUrl);
-    handler.process();
+    handler.handle();
     ASSERT_TRUE(handler.hasResponse());
     EXPECT_NE(handler.takeResponse().find("400 Bad Request"), std::string::npos);
     EXPECT_TRUE(handler.closeAfterResponse());
@@ -342,7 +342,7 @@ TEST(HandlerHttp, TooManyHeadersReturns400)
     }
     req += "\r\n";
     feed(handler, req);
-    handler.process();
+    handler.handle();
     ASSERT_TRUE(handler.hasResponse());
     EXPECT_NE(handler.takeResponse().find("400 Bad Request"), std::string::npos);
     EXPECT_TRUE(handler.closeAfterResponse());
@@ -358,7 +358,7 @@ TEST(HandlerHttp, TotalHeadersTooLongReturns400)
     }
     req += "\r\n";
     feed(handler, req);
-    handler.process();
+    handler.handle();
     ASSERT_TRUE(handler.hasResponse());
     EXPECT_NE(handler.takeResponse().find("400 Bad Request"), std::string::npos);
     EXPECT_TRUE(handler.closeAfterResponse());
@@ -475,7 +475,7 @@ TEST(Connection, SpliceDisabledFallback)
     ssize_t wn = ::write(sp[0], msg.data(), msg.size());
     ASSERT_EQ(wn, static_cast<ssize_t>(msg.size()));
 
-    // 执行 handleRead：降级进入用户态直写并 process()
+    // 执行 handleRead：降级进入用户态直写并 handle()
     IO_STATUS status = conn.handleRead();
     EXPECT_EQ(status, IO_STATUS::KEEP);
     EXPECT_TRUE(conn.hasPendingWrite());
@@ -834,10 +834,10 @@ TEST(HandlerHttp, SendResponseAndProcess)
     EXPECT_NE(resp.find("X-App: mynet\r\n"), std::string::npos);
     EXPECT_NE(resp.find("\r\n\r\nhello world"), std::string::npos);
 
-    // 2. 模拟请求解析完成后的 process() 业务响应行为
+    // 2. 模拟请求解析完成后的 handle() 业务响应行为
     std::string rawReq = "POST /echo HTTP/1.1\r\nContent-Length: 5\r\n\r\n12345";
     feed(handler, rawReq);
-    handler.process();
+    handler.handle();
     ASSERT_TRUE(handler.hasResponse());
     std::string echoResp = handler.takeResponse();
     EXPECT_NE(echoResp.find("HTTP/1.1 200 OK\r\n"), std::string::npos);
@@ -878,7 +878,7 @@ TEST(HandlerHttp, StreamingBodyPassThroughZeroCopy)
 
     std::string req1 = "POST /upload HTTP/1.1\r\nContent-Length: 10\r\n\r\n12345";
     feed(handler, req1);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.chunks.size(), 1u);
     EXPECT_EQ(handler.chunks[0], "12345");
@@ -888,9 +888,39 @@ TEST(HandlerHttp, StreamingBodyPassThroughZeroCopy)
     // 第二段数据到达
     std::string req2 = "67890";
     feed(handler, req2);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.chunks.size(), 2u);
     EXPECT_EQ(handler.chunks[1], "67890");
     EXPECT_TRUE(handler.body().empty());
+}
+
+// =============================================================================
+// TCP 路由策略与出站传输解耦绑定测试 (机制 72: TcpFlowBinding)
+// =============================================================================
+
+TEST(HandlerConnection, TcpFlowBindingDecoupling)
+{
+    TcpFlowBinding binding;
+    EXPECT_FALSE(binding.isFrozen());
+
+    // 1. 策略决断装配
+    binding.route.policyEpoch = 1;
+    binding.route.outboundGroup = "proxy_us";
+    binding.route.fwmark = 0x200;
+    binding.route.must = true;
+    binding.route.matchedRule = "domain(suffix: google.com) -> proxy_us";
+
+    // 2. 物理传输装配
+    binding.egress.dialerTag = "node_us_east_1";
+    binding.egress.remoteEndpoint = "192.0.2.1:443";
+    binding.egress.sniffedSni = "www.google.com";
+    binding.egress.isDirect = false;
+
+    // 3. 冻结已有长连接状态 (绑定全局 FlowId)
+    binding.freeze(10086);
+    EXPECT_TRUE(binding.isFrozen());
+    EXPECT_EQ(binding.flowId, 10086u);
+    EXPECT_EQ(binding.route.outboundGroup, "proxy_us");
+    EXPECT_EQ(binding.egress.dialerTag, "node_us_east_1");
 }

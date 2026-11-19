@@ -1,4 +1,4 @@
-#include "handler/mixed.hpp"
+#include "mixed/mixed.hpp"
 #include "common/endpoint.hpp"
 #include "error.hpp"
 #include "config/log.hpp"
@@ -35,9 +35,9 @@ namespace mynet::example
             }
         }
 
-        void process()
+        void handle()
         {
-            handler::HandlerInboundMixed::process();
+            handler::HandlerInboundMixed::handle();
             if (isEstablished() && requestBytes() > 0)
             {
                 std::string_view req(requestBegin(), requestBytes());

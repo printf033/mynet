@@ -1,6 +1,6 @@
 #include "router.hpp"
-#include "handler/address.hpp"
-#include "handler/sniffing/common.hpp"
+#include "address.hpp"
+#include "sniffer.hpp"
 #include <gtest/gtest.h>
 #include <arpa/inet.h>
 #include <string_view>
@@ -237,4 +237,60 @@ TEST(RouterTest, HitCounterAndPriority)
     ASSERT_EQ(rules.size(), 2u);
     EXPECT_EQ(rules[0].hitCount(), 5u);
     EXPECT_EQ(rules[1].hitCount(), 0u);
+}
+
+// =============================================================================
+// 7. 智能嗅探绕转与嗅探必要性判定测试 (借鉴 dae InferSniffPunt)
+// =============================================================================
+
+TEST(RouterTest, ShouldSniffInference)
+{
+    Router router("direct");
+
+    // 1. 无规则时，无需嗅探
+    EXPECT_FALSE(router.shouldSniff());
+
+    // 2. 只有 L3/L4 规则 (CIDR / Port) 时，无需嗅探，直接直连旁路
+    router.addRule(RouteRule::to("direct").cidr("192.168.0.0/16").port(80));
+    EXPECT_FALSE(router.shouldSniff());
+
+    // 3. 追加域名或协议规则时，自动唤醒嗅探
+    router.addRule(RouteRule::to("proxy").domainSuffix("google.com"));
+    EXPECT_TRUE(router.shouldSniff());
+}
+
+// =============================================================================
+// 8. must 规则强制决策锁定测试 (借鉴 dae must rule locking)
+// =============================================================================
+
+TEST(RouterTest, MustRuleLocking)
+{
+    Router router("direct");
+
+    // 规则 1: 针对 DNS 服务器 223.5.5.5:53 强制锁定为 direct (must = true)
+    router.addRule(RouteRule::to("direct")
+                       .cidr("223.5.5.5/32")
+                       .port(53)
+                       .setMust(true));
+
+    // 规则 2: 后续通用代理规则
+    router.addRule(RouteRule::to("proxy").port(53));
+
+    RouteContext ctx;
+    in_addr dnsIp{};
+    ::inet_pton(AF_INET, "223.5.5.5", &dnsIp);
+    ctx.target = ProxyAddress::fromIPv4(dnsIp.s_addr, 53);
+
+    auto dec = router.matchWithDecision(ctx);
+    EXPECT_EQ(dec.outboundTag, "direct");
+    EXPECT_TRUE(dec.locked); // must 生效，决断锁定
+
+    // 针对普通 8.8.8.8:53，未命中 must 规则，命中规则 2，不锁定
+    in_addr googleDns{};
+    ::inet_pton(AF_INET, "8.8.8.8", &googleDns);
+    ctx.target = ProxyAddress::fromIPv4(googleDns.s_addr, 53);
+
+    auto dec2 = router.matchWithDecision(ctx);
+    EXPECT_EQ(dec2.outboundTag, "proxy");
+    EXPECT_FALSE(dec2.locked);
 }

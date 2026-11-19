@@ -70,75 +70,242 @@
 
 ## 系统架构
 
-`mynet` 采用统一非阻塞事件驱动与双传输对称架构，将服务端入站监听（`AcceptorBase`）、客户端出站建连（`DialerBase`）、双异步 I/O 驱动引擎（`Reactor` / `Proactor`）、传输会话（`Connection` / `DatagramContext`）以及全套业务协议处理器族（`src/handler/`）解耦闭环。
+`mynet` 采用统一非阻塞事件驱动与双传输对称架构，将服务端入站监听（`InboundBase` / `AcceptorBase`）、客户端出站建连（`OutboundBase` / `DialerBase`）、双异步 I/O 驱动引擎（`Reactor` / `Proactor`）、传输会话（`Connection` / `DatagramContext`）、单一真理源路由决策中枢（`Router`）、统一数据搬运数据面（`Forwarder`）以及模块化独立协议族（`src/<proto>/`）解耦闭环。
 
-以下 Mermaid 详细时序图涵盖从入站连接接入、对象池零堆分配、用户态零拷贝数据直写、协议状态机解析、到出站 DNS 域名解析、四元组建连、出站协议握手（Trojan / VLESS / SOCKS5）、内核零拷贝 `splice` 管道转发、背压流控直到安全生命周期回收的全景流程：
+### 1. 全景系统架构与数据流拓扑图
+
+以下 Mermaid 拓扑图完整展现了从客户端流量接入、入站协议监听、异步 I/O 引擎与对象池调度、应用层协议嗅探、单一真理源分流路由、内核 eBPF 旁路下发、统一双向转发数据面（Splice / Buffer 泵）、高级出站调度集群（Selector / UrlTest / Fallback）到远端出口建连的全系统拓扑：
+
+```mermaid
+flowchart TD
+    %% 外部实体层
+    subgraph INGRESS_LAYER["1. 流量接入源 (Ingress & Traffic Sources)"]
+        direction LR
+        AppClients["应用客户端 (Browser / Curl / App)"]
+        GwClients["网关拦截流量 (TProxy / TUN 虚拟网卡)"]
+    end
+
+    %% 控制平面与配置体系
+    subgraph CONTROL_PLANE["6. 统一控制平面 (Control Plane & Orchestration)"]
+        direction LR
+        Config["Lua 运行时沙箱配置 (config.lua / Generation Snapshots)"]
+        Controller["RESTful Controller (Clash / sing-box API :9090)"]
+    end
+
+    %% 入站监听层
+    subgraph INBOUND_LAYER["2. 统一入站监听平面 (Inbound Infrastructure)"]
+        direction TB
+        InboundMgr["InboundManager (入站生命周期纳管 / InboundBase)"]
+        subgraph PROTO_IN["入站协议适配矩阵 (src/<proto>/inbound.hpp)"]
+            direction TB
+            InSocks["InboundSocks5"]
+            InHttp["InboundHttp"]
+            InTrojan["InboundTrojan"]
+            InVless["InboundVless"]
+            InHy2["InboundHysteria2"]
+            InSS["InboundShadowsocks"]
+            InMixed["InboundMixed (自适应探测入站)"]
+            InTrans["InboundTransparent (TProxy/Redirect)"]
+            InTun["InboundTun (Linux TUN 设备)"]
+            InDirect["InboundDirect (直连入站)"]
+        end
+        AcceptorCore["AcceptorBase 多路复用监听 (TCP / UDP / KTLS)"]
+    end
+
+    %% 异步 I/O 驱动引擎
+    subgraph IO_ENGINE["3. 双异步 I/O 引擎与基础设施 (Dual I/O Engines)"]
+        direction TB
+        subgraph ENGINES["可插拔异步事件驱动核心"]
+            ReactorEngine["Reactor 反应器 (Linux epoll 边沿触发 EPOLLET)"]
+            ProactorEngine["Proactor 前摄器 (Linux io_uring 完成队列 + buf_ring)"]
+        end
+        subgraph MEMORY_POOL["零堆分配内存池体系"]
+            ObjPool["ObjectPool (连续内存槽位, 终生地址固定, 零 malloc)"]
+            ReqBuf["RequestBuffer (连续堆内存自紧凑可写窗口)"]
+            RespQ["ResponseQueue (定容循环无堆分配队列)"]
+        end
+    end
+
+    %% 嗅探与地址逆向解析
+    subgraph INSPECTION_LAYER["4. 深度协议嗅探与地址增强 (Inspection & Resolution)"]
+        direction LR
+        SnifferEngine["Sniffer 零拷贝嗅探器 (TLS SNI / HTTP Host / QUIC Initial)"]
+        FakeIPPool["FakeIP 虚拟地址池 (198.18.0.0/15 + 双向 LRU 映射)"]
+        DnsCache["DNS 反向域名缓存 (IpDomainCache)"]
+    end
+
+    %% 统一策略路由中枢
+    subgraph ROUTING_HUB["5. 策略路由决策中枢 (Single Source of Truth Router)"]
+        direction TB
+        RouterEngine["Router 唯一真理源路由决策中枢"]
+        subgraph RULES["多维分流匹配规则矩阵"]
+            RuleDomain["域名规则 (Full / Suffix / Keyword / Regex)"]
+            RuleGeoIP["GeoIP 国家网段前缀树 (Radix Tree)"]
+            RuleGeoSite["GeoSite 资产分类规则"]
+            RuleCIDR["CIDR / IP 网段 / 端口 / 协议匹配"]
+        end
+        EbpfOffload["TC eBPF 直连旁路下发 (内核 LPM Trie 规则同步)"]
+    end
+
+    %% 统一双向转发数据面
+    subgraph DATA_PLANE["7. 统一双向数据搬运数据面 (Unified Data Plane Forwarder)"]
+        direction TB
+        ForwarderEngine["Forwarder 双向转发调度器"]
+        subgraph FORWARD_MODES["三种核心数据搬运模式"]
+            SpliceMode["Splice 模式: 内核双向管道零拷贝直通 (splice / vmsplice)"]
+            BufferPumpMode["Buffer 泵模式: 双向内存泵送 + 背压流控 (加解密/协议变形)"]
+            EbpfBypassMode["eBPF 模式: TC 驱动层内核旁路直接放行 (TC_ACT_OK)"]
+        end
+    end
+
+    %% 出站调度与建连平面
+    subgraph OUTBOUND_LAYER["8. 统一出站建连与调度平面 (Outbound Infrastructure)"]
+        direction TB
+        OutboundMgr["OutboundManager (出站统一纳管 / OutboundBase)"]
+        subgraph SCHEDULERS["高级出站调度器"]
+            OutSelector["OutboundSelector (手动/API 节点选择)"]
+            OutUrlTest["OutboundUrlTest (延迟 RTT 优选)"]
+            OutFallback["OutboundFallback (主备故障转移)"]
+        end
+        subgraph PROTO_OUT["出站协议端点矩阵 (DialerOptions: fwmark/interface)"]
+            OutDirect["OutboundDirect (直连出口)"]
+            OutBlock["OutboundBlock (黑洞拦截)"]
+            OutSocks["OutboundSocks5"]
+            OutTrojan["OutboundTrojan"]
+            OutVless["OutboundVless"]
+            OutHy2["OutboundHysteria2"]
+            OutSS["OutboundShadowsocks"]
+        end
+        DialerEngine["DialerBase 参数化出站拨号器 (SO_MARK 防环路)"]
+    end
+
+    %% 远端目标与互联网
+    subgraph EGRESS_TARGETS["9. 远端服务与互联网 (Upstream & Targets)"]
+        direction LR
+        TargetDirect["国内直连网络 / 公共互联网"]
+        TargetProxy["远端代理服务器集群 (Proxy Nodes)"]
+        TargetBlock["黑洞丢弃 (Sink / Discard)"]
+    end
+
+    %% 拓扑数据与控制流连线
+    AppClients -->|代理请求| InboundMgr
+    GwClients -->|透明代理/TUN| InboundMgr
+    InboundMgr --> AcceptorCore
+    AcceptorCore --> PROTO_IN
+    PROTO_IN --> ENGINES
+    ENGINES <--> MEMORY_POOL
+    ENGINES --> INSPECTION_LAYER
+    INSPECTION_LAYER --> ROUTING_HUB
+    ROUTING_HUB -->|下发 LPM Trie| EbpfOffload
+    ROUTING_HUB -->|路由决断| ForwarderEngine
+    ForwarderEngine --> FORWARD_MODES
+
+    FORWARD_MODES -->|驱动出站| OutboundMgr
+    OutboundMgr --> SCHEDULERS
+    SCHEDULERS --> PROTO_OUT
+    PROTO_OUT --> DialerEngine
+    DialerEngine --> EGRESS_TARGETS
+
+    %% 控制平面交互
+    Config -.->|代次快照分发| RouterEngine
+    Config -.->|初始化配置| InboundMgr
+    Config -.->|初始化配置| OutboundMgr
+    Controller -.->|动态切换节点/查询统计| OutboundMgr
+    Controller -.->|热重载触发| Config
+```
+
+---
+
+### 2. 端到端请求流转全景时序图
+
+以下 Mermaid 详细时序图涵盖从入站连接接入、对象池零堆分配、用户态零拷贝数据直写、协议状态机解析、域名嗅探与反解、Router 单一真理源路由决策、出站节点选择调度、四元组建连、出站协议握手（Trojan / VLESS / SOCKS5 等）、内核零拷贝 `splice` 管道转发、背压流控直到安全生命周期回收的全景流程：
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client as "客户端 (Client)"
-    participant Acceptor as "入站监听 (AcceptorBase / Ssl / Quic)"
+    participant Inbound as "入站端点 (InboundBase / AcceptorBase)"
     participant Engine as "I/O 引擎 (Reactor / Proactor)"
     participant Pool as "对象池 (ObjectPool / BufferRing)"
-    participant Conn as "传输会话 (Connection / RequestBuffer)"
-    participant Handler as "业务处理器 (Handler: HTTP/DNS/SOCKS/Trojan)"
-    participant Dialer as "出站拨号 (DialerBase / Ssl / Quic)"
-    actor Upstream as "远端服务器 (Upstream / Target)"
+    participant Conn as "会话连接 (Connection / RequestBuffer)"
+    participant Sniffer as "嗅探反解 (Sniffer / FakeIP / DNS)"
+    participant Router as "路由中枢 (Router / GeoIP / eBPF)"
+    participant Forwarder as "转发数据面 (Forwarder)"
+    participant Outbound as "出站建连 (OutboundBase / DialerBase)"
+    actor Upstream as "远端目标 (Upstream / Target)"
 
     %% 阶段 1: 入站连接建立与对象池分配
-    Note over Client, Acceptor: 阶段 1: 入站连接建立与对象池分配 (Inbound Handshake)
-    Acceptor->>Acceptor: listenTcp() / listenUdp() 启动非阻塞监听 (SOCK_NONBLOCK)
-    Client->>Acceptor: TCP SYN / UDP 数据报 / TLS 握手请求
-    Acceptor-->>Engine: 触发就绪事件 (epoll EPOLLIN / io_uring accept CQE)
-    Engine->>Pool: acquire() 获取预分配连接槽位 (连续内存, 零堆分配)
-    Pool-->>Engine: 返回固定内存地址的 Connection / Session 裸指针
+    Note over Client, Inbound: 阶段 1: 入站连接建立与对象池分配 (Inbound Handshake)
+    Inbound->>Inbound: listen() 启动非阻塞监听 (AcceptorBase)
+    Client->>Inbound: TCP SYN / UDP 数据报 / TLS 握手请求
+    Inbound-->>Engine: 触发就绪事件 (epoll EPOLLIN / io_uring accept CQE)
+    Engine->>Pool: acquire() 获取预分配连接槽位 (连续内存, 终生地址固定)
+    Pool-->>Engine: 返回 Connection / Session 裸指针
     Engine->>Conn: 绑定客户端 Socket fd 并初始化状态
     opt 开启 TLS / QUIC 加密传输
         Client->>Conn: 发起 TLS / 1-RTT 握手 (ALPN / SNI 协商)
         Conn->>Conn: 完成 SSL 握手 (支持 Linux KTLS 内核零拷贝卸载)
     end
 
-    %% 阶段 2: 零拷贝请求摄入与协议解析
-    Note over Client, Handler: 阶段 2: 零拷贝请求摄入与协议分发 (Ingress Processing)
-    Client->>Engine: 发送应用层数据 (HTTP 1/2/3, DNS, SOCKS5, Trojan, VLESS...)
-    Engine->>Conn: prepareRequestWritable() 直写可写窗口分配
-    Engine->>Conn: appendRequest() 直接摄入内核数据 (无临时栈缓冲与 memcpy)
-    Conn->>Handler: process() 触发状态机流转
-    Handler->>Handler: 解析消息头、鉴权校验、提取目标地址 (ProxyAddress)
-
-    %% 阶段 3: 出站解析、四元组确立与协议握手
-    alt 需要代理转发或发起出站连接 (Proxy / Outbound Client)
-        Note over Handler, Upstream: 阶段 3: 出站解析、四元组确立与协议握手 (Outbound Pipeline)
-        Handler->>Dialer: 发起目标解析与出站拨号请求 (Target: example.com:443)
-        Dialer->>Dialer: dialTcp() / dialUdp() (SO_BINDTODEVICE 可选网卡绑定)
-        Dialer->>Upstream: 发起非阻塞 connect() 建立 TCP/UDP 四元组
-        Upstream-->>Dialer: TCP SYN-ACK (EINPROGRESS，可写事件就绪)
-        Dialer->>Dialer: checkConnectError() 确认四元组连接成功
-        opt 上游为代理或加密出站 (Trojan / Vless / Socks5 / TLS)
-            Handler->>Upstream: 发送出站协议握手头 (HandlerOutbound*)
-            Upstream-->>Handler: 握手协商响应 (进入 STREAMING 状态)
-        end
-        Note over Conn, Upstream: 阶段 4: 双向流式转发与零拷贝通道 (Streaming / Splice Forward)
-        alt 零拷贝内核管道转发 (Linux splice)
-            Conn->>Upstream: enableSpliceForward(targetFd) 激活内核管道零拷贝直通
-        else 应用层流式中继 (Userspace Relay)
-            Conn->>Upstream: pushResponse() 缓冲流水线转发
-        end
-    else 本地业务服务处理 (HTTP Web API / DNS 本地应答)
-        Note over Conn, Handler: 本地应答生成 (Local Server Response)
-        Handler->>Conn: pushResponse() 存入零分配定容环形队列 (ResponseQueue)
+    %% 阶段 2: 零拷贝摄入、协议解析与域名嗅探
+    Note over Client, Sniffer: 阶段 2: 零拷贝摄入与域名嗅探 (Ingress & Sniffing)
+    Client->>Engine: 发送应用层数据 (SOCKS5 / HTTP / Trojan / VLESS / 透明流量)
+    Engine->>Conn: prepareRequestWritable() 分配直接可写窗口
+    Engine->>Conn: appendRequest() 直接摄入内核数据 (零 memcpy)
+    Conn->>Inbound: createHandler() 触发协议状态机解析
+    opt 开启透明代理或目标为 IP
+        Inbound->>Sniffer: 零拷贝嗅探首包 (TLS SNI / HTTP Host / QUIC Initial)
+        Sniffer-->>Inbound: 还原真实目标域名 (或从 FakeIP / DNS 逆向缓存提取)
     end
 
-    %% 阶段 5: 响应写出、背压控制与对象池回收
-    Note over Client, Pool: 阶段 5: 响应写出、背压控制与对象池回收 (Egress & Recycle)
-    opt 写队列背压监控 (Backpressure Control)
+    %% 阶段 3: 单一真理源路由决策
+    Note over Inbound, Router: 阶段 3: 单一真理源路由决策 (Routing & eBPF Offload)
+    Inbound->>Router: match(target, protocol, port) 提交目标信息
+    Router->>Router: 匹配 GeoIP / GeoSite / CIDR / Domain / Protocol 规则
+    opt 命中 direct 且启用了 eBPF
+        Router->>Router: 同步直连网段至内核 BPF LPM Trie 映射表
+    end
+    Router-->>Forwarder: 决断出站节点标签 (direct / block / proxy-node)
+
+    %% 阶段 4: 出站调度、建连与握手
+    alt 目标命中阻断 (Block Outbound)
+        Note over Forwarder, Outbound: 流量拦截 (Block Blackhole)
+        Forwarder->>Outbound: 路由至 OutboundBlock
+        Outbound-->>Conn: 标记错误并断开连接
+    else 需要转发或出站代理 (Direct / Proxy Outbound)
+        Note over Forwarder, Upstream: 阶段 4: 出站调度、四元组建连与握手 (Outbound Dial)
+        Forwarder->>Outbound: 调度出站端点 (OutboundDirect / Trojan / Vless / Socks5 ...)
+        opt 命中出站调度组 (Selector / UrlTest / Fallback)
+            Outbound->>Outbound: 依据用户选择 / RTT 最优延迟 / 主备顺序选举节点
+        end
+        Outbound->>Outbound: 依据 DialerOptions 注入 SO_MARK 标记 (防路由环路)
+        Outbound->>Upstream: 非阻塞 dialTcp() / dialUdp() 发起 connect()
+        Upstream-->>Outbound: TCP SYN-ACK 连接确立
+        opt 出站为加密/代理节点 (Trojan / Vless / Shadowsocks / Hysteria2)
+            Outbound->>Upstream: 发送出站协议握手头 (HandlerOutbound*)
+            Upstream-->>Outbound: 握手成功，进入 STREAMING 状态
+        end
+
+        %% 阶段 5: 统一双向数据搬运
+        Note over Conn, Upstream: 阶段 5: 统一双向数据搬运数据面 (Forwarding Modes)
+        alt 明文直连场景 (Splice Mode)
+            Forwarder->>Forwarder: enableSpliceForward(targetFd)
+            Conn<<->>Upstream: 双向内核管道零拷贝直通 (Linux splice)
+        else 加密 / 变形协议流式转发 (Buffer Pump Mode)
+            Forwarder->>Forwarder: enableBufferPump(inConn, outConn)
+            Conn<<->>Upstream: 用户态内存双向泵送 + 高低水位背压流控
+        end
+    end
+
+    %% 阶段 6: 响应写出、背压与对象池回收
+    Note over Client, Pool: 阶段 6: 响应写出、背压与安全生命周期回收 (Egress & Recycle)
+    opt 写队列背压流控 (Backpressure)
         Conn->>Engine: 监测高水位线，超限触发 readCredit() 暂停读事件
     end
     Conn->>Engine: 提取待发送数据 (takeResponse)
     Engine->>Client: 非阻塞 send / io_uring write 发送响应
-    Client->>Conn: 传输完毕，对端 FIN / RST 或主动关闭
-    Engine->>Conn: 触发 reset() 重置连接与解析器内部状态
+    Client->>Conn: 传输完毕，对端 FIN / RST 或主动断开
+    Engine->>Conn: reset() 重置连接与解析器内部状态
     opt Proactor 安全生命周期守卫
         Engine->>Engine: 校验 inFlight == 0 (确保无内核在途 I/O 操作)
     end
@@ -176,13 +343,13 @@ sequenceDiagram
 - **`ObjectPool<Object>`**：预先分配由连续槽位数组 `std::unique_ptr<Slot[]>` 与定容索引栈构成的池化结构。对象一旦分配，其在内存中的地址终生不变，确保注册在 epoll 凭证或 io_uring 完成事件上下文中的裸指针永不失效，彻底消除频繁创建与销毁连接导致的内存碎片与分配开销。
 - **`RequestBuffer`**：纯自管连续堆内存块（`operator new[](std::nothrow)` 零异常语义），提供真实可写直接窗口（`writableBytes()`、`writableBegin()`、`commitWritten()`、`ensureWritable()`）与零拷贝读视图（`readableView()`）。仅当已消费的死数据前缀超过 4 KiB 且达到占用总量一半以上时，才会在 `retrieve()` 触发就地数据搬移压缩，兼具极致性能与安全内存边界。
 - **`ResponseQueue`**：定容连续循环响应队列（`src/responseQueue.hpp`），提供 $O(1)$ 零堆分配入队/出队与严格有界内存开销。
-- **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/handler/http/v2/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
+- **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/http/v2/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
 
 ### 4. HTTP/2 帧编解码与流多路复用
 
 - **标准线网帧格式**：`FrameDecoder` 与 `appendFrame` 原生兼容标准 9 字节 HTTP/2 帧头，涵盖 `DATA`、`HEADERS`、`PRIORITY`、`RST_STREAM`、`SETTINGS`、`PUSH_PROMISE`、`PING`、`GOAWAY`、`WINDOW_UPDATE`。
 - **客户端连接前言**：在解码任何帧之前校验 RFC 9113 §3.4 的 24 字节前言（允许分片到达）；前言错误回 `GOAWAY(PROTOCOL_ERROR)`，而不是被误读成 5 MiB 的帧。
-- **HPACK（`handler/http/v2/hpack.hpp`）**：RFC 7541 解码——静态表、带淘汰的动态表、表大小更新与 Huffman 字符串——以及供 `sendResponse` 使用的无状态编码器。压缩失步以 `COMPRESSION_ERROR` 关闭连接；首部列表超限只重置该流。
+- **HPACK（`http/v2/hpack.hpp`）**：RFC 7541 解码——静态表、带淘汰的动态表、表大小更新与 Huffman 字符串——以及供 `sendResponse` 使用的无状态编码器。压缩失步以 `COMPRESSION_ERROR` 关闭连接；首部列表超限只重置该流。
 - **分片首部块**：未带 `END_HEADERS` 的 `HEADERS` 由同流 `CONTINUATION` 帧重组（分片边界可以落在 HPACK 字段中间）。按 RFC 9113 §6.2，期间插入任何其他帧（包括其他流的帧）都以连接错误终止——这同时是 CVE-2024-27983 的防线；零长 `CONTINUATION` 洪水受 32 个空帧上限约束（总片数上限 4096），解码后超过宣告上限的首部列表回 `RST_STREAM`——该块仍会先被完整 HPACK 解码，连接的动态表绝不因此失步。
 - **首部列表上限**：`sendSettings` 宣告的 `SETTINGS_MAX_HEADER_LIST_SIZE` 与解码器实际执行的上限取同一值，合规对端不会在中途触发上限。对端宣告的上限用于出站约束：`sendResponse` 拒绝对端已声明不接受的首部列表，出站 `HEADERS` 按对端 `SETTINGS_MAX_FRAME_SIZE` 拆成 `CONTINUATION`。
 - **`HandlerHttp2<StreamHandler>`**：在单一字节流上承载多条独立请求/响应流。
@@ -210,7 +377,7 @@ sequenceDiagram
 
 ### 7. 配置归属：引擎侧不保留硬编码默认值
 
-所有决定服务端引擎**分配多少**、内核队列**排多深**的可调参数，只有一个归属地：`configHolder.hpp` 提供编译期内建基线，`config/config.lua` 经 `reloadConfig()` 解析并钳位。`Reactor` 与 `Proactor` 自身不携带默认实参——两参数调用读取当前 `NetConfig` 快照：
+所有决定服务端引擎**分配多少**、内核队列**排多深**的可调参数，只有一个归属地：`configHolder.hpp` 提供编译期内建基线，`config/config.lua` 经 `reloadConfig()` 解析并钳位。`Reactor` 与 `Proactor` 自身不携带默认实参——两参数调用读取当前 `MynetConfig` 快照：
 
 ```cpp
 // 没有任何代码会自动加载 config.lua：新进程一开始用的就是 configHolder.hpp 的基线。
@@ -235,7 +402,7 @@ tlsServer.runSsl();
 
 不调用 `reloadConfig()` 也能跑，用的是编译期内建基线——它与随仓库提供的 `config.lua` 数值完全一致（有测试逐字段守着）。读者**不应**假定的是：只改 `config.lua` 就能改变一个正在运行的服务器。
 
-每个字段还声明了**何时生效**，而且这个声明是数据而非文档：`configHolder.hpp` 里的 `kConfigReloadMap` 把每个点分路径映射到一个 `ReloadMode`，并由一条测试用静态反射枚举 `NetConfig` 全部字段，证明没有遗漏。
+每个字段还声明了**何时生效**，而且这个声明是数据而非文档：`configHolder.hpp` 里的 `kConfigReloadMap` 把每个点分路径映射到一个 `ReloadMode`，并由一条测试用静态反射枚举 `MynetConfig` 全部字段，证明没有遗漏。
 
 - **`Hot`（热）**——`reloadConfig()` 后立即生效。读取点在每连接或每次 I/O 的路径上（`Connection`、`Datagram`、`HandlerHttp2`），新连接与在途 I/O 立刻看到新值。
 - **`Startup`（启动）**——只在 `listen()` / `serve()` / `runSsl()` 里读一次。`reloadConfig()` 会更新快照，但已在运行的引擎仍用启动时的值；要生效需重启该服务。
@@ -250,12 +417,12 @@ tlsServer.runSsl();
 | `datagram`   | `maxDatagramBytes`、`maxPendingOutgoing`                                                                                                       | 热       |
 | `http2`      | `maxConcurrentStreams`、`initialWindowSize`、`maxFrameSize`                                                                                  | 热       |
 | `security`   | `certFile`、`keyFile`、`caFile`、`ciphers`、`alpnProtocols`                                                                              | 启动     |
-| `forwarder`  | `enableSplice`、`spliceChunkSize`、`bufferChunkSize`、`sessionIdleTimeoutSecs`、`udpSessionTimeoutSecs`                                        | 热       |
-| `dns`        | `servers`、`ttlSecs`、`enableCache`                                                                                                            | 热       |
-| `dns`        | `port`                                                                                                                                         | 启动     |
+| `forwarder`  | `enableSplice`、`spliceChunkSize`、`bufferChunkSize`、`sessionIdleTimeoutSecs`、`udpSessionTimeoutSecs`                                  | 热       |
+| `dns`        | `servers`、`ttlSecs`、`enableCache`                                                                                                          | 热       |
+| `dns`        | `port`                                                                                                                                           | 启动     |
 | `router`     | `defaultOutbound`、`rules`                                                                                                                     | 热       |
-| `inbounds`   | 入站节点列表 (`tag`、`protocol`、`host`、`port`、`enableSniffing`)                                                                              | 热       |
-| `outbounds`  | 出站节点列表 (`tag`、`type`、`host`、`port`、`selector`)                                                                                        | 热       |
+| `inbounds`   | 入站节点列表 (`tag`、`protocol`、`host`、`port`、`enableSniffing`)                                                                       | 热       |
+| `outbounds`  | 出站节点列表 (`tag`、`type`、`host`、`port`、`selector`)                                                                                 | 热       |
 
 `server.maxConnections` 是容量的唯一真源：Reactor 用它做连接池槽位数，Proactor 用它做会话池槽位数。`server.host`/`port` 由无参的 `runTcp()` / `runSsl()` 消费，`security.certFile`/`keyFile` 由不带路径参数的 `runSsl()` 消费——那个重载在路径未配置时会直接拒绝启动，而不是悄悄降级成明文。
 
@@ -428,7 +595,7 @@ int main() {
 ```cpp
 #include "connection.hpp"
 #include "error.hpp"
-#include "handler/http/v2/handler.hpp"
+#include "http/v2/handler.hpp"
 #include "reactor.hpp"
 
 using namespace mynet;
@@ -474,53 +641,52 @@ mynet/
 │   ├── acceptor.hpp            # 服务端入站监听基础设施 (AcceptorBase / AcceptorSsl / AcceptorQuic)
 │   ├── dialer.hpp              # 客户端出站建连基础设施 (DialerBase / DialerSsl / DialerQuic)
 │   ├── core.hpp                # 统一网络代理内核门面 (Core / 全链路嗅探分流、出站调度与零拷贝桥接)
-│   ├── inboundManager.hpp      # 入站监听节点抽象与管理器 (InboundManager / Mixed / Socks5 / Http / Trojan / TProxy)
-│   ├── outboundManager.hpp     # 出站节点抽象与管理器 (OutboundManager / Direct / Block / Socks5 / Trojan / Selector)
-│   ├── router.hpp              # 策略路由与规则匹配引擎 (Router / RouteRule / CIDR / 域名多维匹配 / 嗅探协议协同)
-│   ├── forwarder.hpp           # 双向流式与数据报中继转发引擎 (Forwarder / ForwarderStreamSession / Splice 零拷贝与缓冲泵送)
 │   ├── connection.hpp          # TCP/TLS 传输层核心 + 连接处理器基类 (HandlerConnection)
 │   ├── datagram.hpp            # UDP 传输层 Datagram<H> + 报文处理器基类 (HandlerDatagram)
-│   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎核心
+│   ├── reactor.hpp             # 边缘触发模式 Reactor 反应器引擎核心与 EventLoop 事件循环
 │   ├── proactor.hpp            # 基于 io_uring 完成态的 Proactor 前摄器引擎核心
-│   ├── loop.hpp                # epoll EventLoop 事件循环与 eventfd 跨线程唤醒
 │   ├── timer.hpp               # 惰性删除的高效二叉最小堆定时器队列
 │   ├── requestBuffer.hpp       # 滑动窗口自收缩低开销请求双端缓冲区
 │   ├── responseQueue.hpp       # 零分配定容循环响应队列
 │   ├── objectPool.hpp          # 地址稳定的固定容量对象池
 │   ├── constraints.hpp         # 通用约束（Resettable / HandlerConstraint / MandatoryMethod*）
 │   ├── error.hpp               # 强类型错误码枚举 Err、IoEnd 与 errno/OpenSSL 错误文本
-│   ├── configHolder.hpp        # 统一网络配置结构体与代次快照（NetConfig / ConfigHolder / ConfigSnapshot）
+│   ├── configHolder.hpp        # 统一网络配置结构体与代次快照（MynetConfig / ConfigHolder / ConfigSnapshot）
 │   ├── config/                 # 第三方适配与运行时配置子系统
 │   │   ├── tls.hpp             # OpenSSL / KTLS 零拷贝内核卸载与多 SNI 握手支持
 │   │   ├── lua.hpp             # 沙箱化 Lua 配置加载与热重载（reloadConfig）
 │   │   └── log.hpp             # 日志输出配置（mylog 输出至 stderr）
-│   └── handler/                # 业务与协议处理器百宝箱 (All Handlers)
-│       ├── inbound.hpp         # 入站协议基类 (HandlerInboundConnection / HandlerInboundDatagram)
-│       ├── outbound.hpp        # 出站协议基类 (HandlerOutboundConnection / HandlerOutboundDatagram)
-│       ├── address.hpp         # 代理与网络目标端点地址抽象 (ProxyAddress)
-│       ├── crypto.hpp          # 加密与哈希原语 (SHA-224, MD5, AEAD, UUID)
-│       ├── direct.hpp / block.hpp # 直连路由与黑洞阻断处理器 (HandlerInboundDirect / HandlerOutboundDirect...)
-│       ├── transparent.hpp     # Linux Netfilter TProxy / Redirect 原始目的地址透明代理 (HandlerInboundRedirect / HandlerInboundTProxy)
-│       ├── mixed.hpp           # SOCKS4 / SOCKS5 / HTTP 自动嗅探自适应混合入站 (HandlerInboundMixed)
-│       ├── dns/                # RFC 1035 / RFC 3596 DNS 协议编解码与处理器
-│       │   ├── dns.hpp         # 二进制报文序列化、反序列化、指针压缩 (0xC0xx)
-│       │   └── handler.hpp     # HandlerInboundConnectionDns (TCP) / HandlerInboundDatagramDns (UDP) / Outbound
-│       ├── http/               # HTTP 协议族实现
-│       │   ├── v1/handler.hpp  # 基于 llhttp 的 HTTP/1.x 协议处理器 (HandlerHttp)
-│       │   ├── v2/             # HTTP/2 分帧、HPACK 静态/动态表、流表与信用控制
-│       │   ├── v3/             # HTTP/3 QUIC 1-RTT 短首部、QPACK、变长整数与流表
-│       │   └── http.hpp        # HTTP Proxy 隧道代理处理器 (HandlerInboundHttpProxy)
-│       ├── socks/              # SOCKS 协议族 (HandlerInboundSocks / HandlerInboundSocks4 / HandlerInboundSocks5 / HandlerOutboundSocks5)
-│       ├── sniffing/           # 深度数据包与域名嗅探引擎 (TLS SNI, HTTP Host, QUIC, DNS, STUN...)
-│       └── proxy/              # 私有与隧道代理协议族
-│           ├── trojan.hpp      # Trojan 协议出入站鉴权与隧道转发
-│           ├── vless.hpp       # VLESS 协议 UUID 鉴权与零拷贝透传
-│           ├── vmess.hpp       # VMess 协议 HMAC-MD5 头部鉴权
-│           ├── hysteria2.hpp   # Hysteria 2 协议认证握手与转发
-│           ├── tuic.hpp        # TUIC v5 协议处理
-│           ├── shadowsocks.hpp # Shadowsocks AEAD 处理器
-│           ├── shadowtls.hpp   # ShadowTLS SNI 嗅探与 HMAC 挑战分流
-│           └── snell.hpp       # Snell v1~v4 协议处理
+│   ├── inbound.hpp             # 入站协议状态机基类 (HandlerInboundConnection / HandlerInboundDatagram)
+│   ├── outbound.hpp            # 出站协议状态机基类 (HandlerOutboundConnection / HandlerOutboundDatagram)
+│   ├── inboundManager.hpp      # 入站监听端点管理器与生命周期纳管 (InboundBase / InboundManager)
+│   ├── outboundManager.hpp     # 出站建连端点管理器与多出站路由调度 (OutboundBase / OutboundManager)
+│   ├── address.hpp             # 代理与网络目标端点地址统一抽象 (ProxyAddress)
+│   ├── crypto.hpp              # 加密与哈希原语 (SHA-224, MD5, AEAD, UUID)
+│   ├── router.hpp              # 策略路由与规则匹配引擎 (Router / RouteRule / CIDR / 域名多维匹配 / 嗅探协议协同)
+│   ├── forwarder.hpp           # 双向流式与数据报中继转发引擎 (Forwarder / ForwarderStreamSession / Splice 零拷贝与缓冲泵送)
+│   ├── sniffer.hpp             # 深度应用层零拷贝统一嗅探调度门面 (DomainSniffer / ProtocolType / SniffResult)
+│   ├── ebpf.hpp                # Linux TC eBPF 内核直连旁路与 LPM Trie 同步
+│   ├── fakeip.hpp              # FakeIP 虚拟地址池与双向 LRU 域名反解
+│   ├── geo.hpp                 # GeoIP 国家网段 / GeoSite 域名资产规则库检索
+│   ├── socks/                  # SOCKS4 / SOCKS5 状态机实现与 InboundSocks5 / OutboundSocks5 端点
+│   ├── http/                   # HTTP/1.x, HTTP/2, HTTP/3 状态机, InboundHttp 端点与 sniff.hpp
+│   ├── trojan/                 # Trojan 协议状态机与 InboundTrojan / OutboundTrojan 端点
+│   ├── vless/                  # VLESS 协议状态机与 InboundVless / OutboundVless 端点
+│   ├── hysteria2/              # Hysteria 2 协议状态机与 InboundHysteria2 / OutboundHysteria2 端点
+│   ├── shadowsocks/            # Shadowsocks AEAD 协议状态机与 InboundShadowsocks / OutboundShadowsocks 端点
+│   ├── direct/                 # InboundDirect / OutboundDirect 零损耗直连穿透端点
+│   ├── block/                  # OutboundBlock 黑洞拦截抛弃端点
+│   ├── mixed/                  # InboundMixed 自适应协议嗅探混合入站端点
+│   ├── transparent/            # InboundTransparent / InboundTun Linux 透明代理与虚拟网卡端点
+│   ├── dns/                    # DNS 二进制线网协议编解码、反向缓存、请求处理器与 sniff.hpp
+│   ├── tls/                    # TLS SNI 零拷贝深度嗅探 (sniff.hpp)
+│   ├── dtls/                   # DTLS 握手协议嗅探 (sniff.hpp)
+│   ├── quic/                   # QUIC Initial 报文解密与 SNI 深度嗅探 (sniff.hpp)
+│   ├── bittorrent/             # BitTorrent 协议握手嗅探 (sniff.hpp)
+│   ├── ssh/                    # SSH 版本指纹嗅探 (sniff.hpp)
+│   ├── stun/                   # STUN NAT 穿越探测嗅探 (sniff.hpp)
+│   ├── rdp/                    # RDP 远程桌面连接请求嗅探 (sniff.hpp)
+│   └── ntp/                    # NTP 时间同步请求报文嗅探 (sniff.hpp)
 │
 ├── config/                     # 运行时配置
 │   └── config.lua              # 含完整中文注释的沙箱化 Lua 配置样例（全部分节）

@@ -4,10 +4,10 @@
 #include "error.hpp"
 #include "config/log.hpp"
 #include "proactor.hpp"
-#include "handler/http/v1/handler.hpp"
-#include "handler/http/v2/handler.hpp"
-#include "handler/http/v3/handler.hpp"
-#include "handler/socks/socks5.hpp"
+#include "http/v1/handler.hpp"
+#include "http/v2/handler.hpp"
+#include "http/v3/handler.hpp"
+#include "socks/socks5.hpp"
 #include "reactor.hpp"
 #include "config/tls.hpp"
 #include <algorithm>
@@ -87,6 +87,10 @@ namespace
 
         int one = 1;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+        timeval tv{.tv_sec = 5, .tv_usec = 0};
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
         sockaddr_in sa{};
         sa.sin_family = AF_INET;
@@ -416,7 +420,7 @@ namespace
         }
 
         auto [certPath, keyPath] = findCertFiles();
-        auto server = std::make_unique<EngineType<AcceptorSsl<HandlerConnection>>>();
+        auto server = std::make_unique<EngineType<AcceptorSsl<example::SpliceEchoHandler>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
@@ -620,7 +624,7 @@ namespace
         class QuietEchoStream : public HandlerConnection
         {
         public:
-            void process() noexcept {}
+            void handle() noexcept {}
         };
         class BenchHttp2Mux : public HandlerHttp2<QuietEchoStream>
         {
@@ -629,7 +633,7 @@ namespace
         };
         BenchHttp2Mux mux;
         [[maybe_unused]] auto _ = mux.appendRequest(BenchHttp2Mux::kClientPreface);
-        mux.process();
+        mux.handle();
         while (mux.hasResponse())
         {
             [[maybe_unused]] auto r = mux.takeResponse();
@@ -653,7 +657,7 @@ namespace
                                      .payload = "http2_payload"});
             id += 2;
             [[maybe_unused]] auto rc = mux.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
-            mux.process();
+            mux.handle();
             while (mux.hasResponse())
             {
                 [[maybe_unused]] auto r = mux.takeResponse();
@@ -680,9 +684,9 @@ namespace
     class BenchSocks5Handler : public handler::HandlerInboundSocks5
     {
     public:
-        void process()
+        void handle()
         {
-            handler::HandlerInboundSocks5::process();
+            handler::HandlerInboundSocks5::handle();
             if (stage() == handler::Socks5Stage::STREAMING && requestBytes() > 0)
             {
                 [[maybe_unused]] auto _ = pushResponse(std::string_view(requestBegin(), requestBytes()));

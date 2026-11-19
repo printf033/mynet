@@ -35,7 +35,7 @@ namespace
     /// 只具备流式能力、不满足 MandatoryMethodDatagram 的处理器。
     struct StreamOnlyHandler : HandlerConnection
     {
-        void process() {}
+        void handle() {}
     };
 
     /// 同时具备两种传输能力（与 HandlerHttp3 同构）。
@@ -598,4 +598,237 @@ TEST(Datagram, BatchIoRecvmmsgAndSendmmsg)
         ASSERT_GT(rn, 0);
         EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), "batch-reply-" + std::to_string(i));
     }
+}
+
+TEST(Datagram, UdpGsoAndGroHelper)
+{
+    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_GE(fd, 0);
+
+    // GSO Segment 配置
+    bool gsoSupported = UdpGsoHelper::setGsoSegment(fd, 1400);
+    if (gsoSupported)
+    {
+        EXPECT_EQ(UdpGsoHelper::getGsoSegment(fd), 1400);
+    }
+
+    // GRO 配置
+    [[maybe_unused]] bool groSupported = UdpGsoHelper::setGro(fd, true);
+
+    // 非法参数防御
+    EXPECT_FALSE(UdpGsoHelper::setGsoSegment(-1, 1400));
+    EXPECT_FALSE(UdpGsoHelper::setGsoSegment(fd, -1));
+    EXPECT_EQ(UdpGsoHelper::getGsoSegment(-1), -1);
+    EXPECT_FALSE(UdpGsoHelper::setGro(-1, true));
+
+    ::close(fd);
+}
+
+TEST(Datagram, UdpWriteBatchAggregator)
+{
+    UdpPair pair;
+    UdpWriteBatchAggregator aggregator(8);
+    EXPECT_EQ(aggregator.capacity(), 8u);
+    EXPECT_TRUE(aggregator.empty());
+    EXPECT_EQ(aggregator.size(), 0u);
+    EXPECT_EQ(aggregator.pendingBytes(), 0u);
+
+    // 追加 8 条数据报
+    for (int i = 0; i < 8; ++i)
+    {
+        std::string pkt = "agg-pkt-" + std::to_string(i);
+        EXPECT_TRUE(aggregator.append(pair.rxAddr, pkt));
+    }
+    EXPECT_EQ(aggregator.size(), 8u);
+    EXPECT_FALSE(aggregator.empty());
+    EXPECT_GT(aggregator.pendingBytes(), 0u);
+
+    // 达到上限时再追加应返回 false
+    EXPECT_FALSE(aggregator.append(pair.rxAddr, "overflow"));
+
+    // flush 冲刷发送
+    size_t sent = aggregator.flush(pair.tx);
+    EXPECT_EQ(sent, 8u);
+    EXPECT_TRUE(aggregator.empty());
+    EXPECT_EQ(aggregator.pendingBytes(), 0u);
+
+    // 验证接收端收齐
+    for (int i = 0; i < 8; ++i)
+    {
+        char buf[64] = {};
+        ssize_t rn = ::recv(pair.rx, buf, sizeof(buf), 0);
+        ASSERT_GT(rn, 0);
+        EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), "agg-pkt-" + std::to_string(i));
+    }
+}
+
+// =============================================================================
+// 25. UDP 端点状态锁固与平滑迁移测试 (借鉴 dae udp_endpoint pin #1137)
+// =============================================================================
+
+TEST(Datagram, UdpEndpointRebuildPin)
+{
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_addr.s_addr = htonl(0x0a000001);
+    peer.sin_port = htons(8080);
+    uint64_t flowKey = 0x1234567890ABCDEF;
+
+    int dummyFd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_GE(dummyFd, 0);
+
+    {
+        UdpEndpointRebuildPin pin(peer, flowKey, dummyFd);
+        EXPECT_TRUE(pin.isPinned());
+        EXPECT_EQ(pin.flowKey(), flowKey);
+        EXPECT_EQ(pin.socketFd(), dummyFd);
+
+        // 模拟端点平滑转交给新会话
+        sockaddr_in newPeer{};
+        uint64_t newFlowKey = 0;
+        int newFd = -1;
+        pin.transferTo(newPeer, newFlowKey, newFd);
+
+        EXPECT_FALSE(pin.isPinned());
+        EXPECT_EQ(newFlowKey, flowKey);
+        EXPECT_EQ(newFd, dummyFd);
+        EXPECT_EQ(newPeer.sin_port, htons(8080));
+
+        // 最终由接收方关闭
+        ::close(newFd);
+    }
+}
+
+// =============================================================================
+// 26. 透明 UDP 套接字复用池与 200ms 空闲节流测试 (借鉴 dae AnyfromSocketPool)
+// =============================================================================
+
+TEST(Datagram, AnyfromSocketPool)
+{
+    AnyfromSocketPool pool(std::chrono::milliseconds(50));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0; // 自动分配端口
+
+    // 获取并绑定
+    int fd1 = pool.acquire(addr, false);
+    ASSERT_GE(fd1, 0);
+
+    // 查询实际绑定的端口
+    socklen_t len = sizeof(addr);
+    ASSERT_EQ(::getsockname(fd1, reinterpret_cast<sockaddr *>(&addr), &len), 0);
+    EXPECT_GT(ntohs(addr.sin_port), 0);
+
+    // 以相同地址再次请求，应当从复用池命中同一个 fd
+    int fd2 = pool.acquire(addr, false);
+    EXPECT_EQ(fd1, fd2);
+    EXPECT_EQ(pool.size(), 1u);
+
+    // 空闲超时后执行清理
+    auto futureTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    size_t swept = pool.sweepIdle(futureTime);
+    EXPECT_EQ(swept, 1u);
+    EXPECT_EQ(pool.size(), 0u);
+}
+
+// =============================================================================
+// 27. 原始套接字 UDP 直连校验和计算测试 (借鉴 dae RawUdpDirectSender)
+// =============================================================================
+
+TEST(Datagram, RawUdpDirectSenderChecksum)
+{
+    uint32_t saddr = htonl(0x0a000001); // 10.0.0.1
+    uint32_t daddr = htonl(0x08080808); // 8.8.8.8
+    uint16_t sport = 12345;
+    uint16_t dport = 53;
+
+    std::vector<uint8_t> payload = {'h', 'e', 'l', 'l', 'o'};
+    uint16_t csum = RawUdpDirectSender::computeUdpChecksum(saddr, daddr, sport, dport, payload);
+
+    EXPECT_NE(csum, 0); // 检验和不能为 0
+
+    // 单独验证通用校验和计算工具
+    const char testStr[] = "test-packet";
+    uint16_t genCsum = RawUdpDirectSender::computeChecksum(testStr, sizeof(testStr) - 1);
+    EXPECT_NE(genCsum, 0);
+}
+
+// =============================================================================
+// 28. 五元组串行保序 UDP 任务池与防溢出测试 (借鉴 dae UdpTaskPool)
+// =============================================================================
+
+TEST(Datagram, UdpTaskPoolSerializationAndThrottle)
+{
+    UdpTaskPool taskPool;
+    uint64_t flowKey = 0xCAFEBABE;
+
+    // 顺序入队 10 个数据包
+    for (int i = 0; i < 10; ++i)
+    {
+        std::string s = "flow-pkt-" + std::to_string(i);
+        EXPECT_TRUE(taskPool.enqueue(flowKey, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(s.data()), s.size())));
+    }
+    EXPECT_EQ(taskPool.queueDepth(flowKey), 10u);
+    EXPECT_EQ(taskPool.flowCount(), 1u);
+
+    // 验证出队严格保序
+    for (int i = 0; i < 10; ++i)
+    {
+        auto pkt = taskPool.dequeue(flowKey);
+        ASSERT_TRUE(pkt.has_value());
+        std::string s(reinterpret_cast<const char *>(pkt->data()), pkt->size());
+        EXPECT_EQ(s, "flow-pkt-" + std::to_string(i));
+    }
+    EXPECT_EQ(taskPool.queueDepth(flowKey), 0u);
+    EXPECT_EQ(taskPool.flowCount(), 0u);
+
+    // 溢出防护测试：填满 128 个报文后触发尾丢弃
+    for (size_t i = 0; i < UdpTaskPool::kMaxQueuePerFlow; ++i)
+    {
+        uint8_t b = static_cast<uint8_t>(i);
+        EXPECT_TRUE(taskPool.enqueue(flowKey, std::span<const uint8_t>(&b, 1)));
+    }
+    EXPECT_EQ(taskPool.queueDepth(flowKey), UdpTaskPool::kMaxQueuePerFlow);
+
+    // 第 129 个报文入队应当被丢弃
+    uint8_t overflowByte = 0xFF;
+    EXPECT_FALSE(taskPool.enqueue(flowKey, std::span<const uint8_t>(&overflowByte, 1)));
+    EXPECT_EQ(taskPool.totalDrops(), 1u);
+}
+
+// =============================================================================
+// 29. FullCone NAT 4 槽位环形热点对端缓存测试 (借鉴 dae FullConeRespCache)
+// =============================================================================
+
+TEST(Datagram, FullConeRespCache)
+{
+    FullConeRespCache cache;
+
+    // 初始查询均未命中 (-1)
+    EXPECT_EQ(cache.lookup(0x01020304, 80), -1);
+
+    // 填充 4 个热点槽位
+    cache.update(0x01020304, 80, 10);
+    cache.update(0x01020305, 81, 11);
+    cache.update(0x01020306, 82, 12);
+    cache.update(0x01020307, 83, 13);
+
+    EXPECT_EQ(cache.lookup(0x01020304, 80), 10);
+    EXPECT_EQ(cache.lookup(0x01020305, 81), 11);
+    EXPECT_EQ(cache.lookup(0x01020306, 82), 12);
+    EXPECT_EQ(cache.lookup(0x01020307, 83), 13);
+
+    // 更新已有对端 fd
+    cache.update(0x01020304, 80, 99);
+    EXPECT_EQ(cache.lookup(0x01020304, 80), 99);
+
+    // 写入第 5 个新对端，触发环形覆盖
+    cache.update(0x01020308, 84, 14);
+    EXPECT_EQ(cache.lookup(0x01020308, 84), 14);
+
+    // 失效注销
+    cache.invalidate(14);
+    EXPECT_EQ(cache.lookup(0x01020308, 84), -1);
 }

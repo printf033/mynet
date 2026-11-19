@@ -1,10 +1,9 @@
 #include "connection.hpp"
-#include "loop.hpp"
 #include "config/lua.hpp"
 #include "reactor.hpp"
 #include "config/tls.hpp"
 #include "core.hpp"
-#include "handler/direct.hpp"
+#include "direct/direct.hpp"
 #include <arpa/inet.h>
 #include <chrono>
 #include <filesystem>
@@ -20,6 +19,21 @@
 
 namespace
 {
+
+    inline int g_rcuLiveInstances = 0;
+    struct RcuTestResource
+    {
+        RcuTestResource() { ++g_rcuLiveInstances; }
+        ~RcuTestResource() { --g_rcuLiveInstances; }
+        RcuTestResource(const RcuTestResource &) { ++g_rcuLiveInstances; }
+        RcuTestResource &operator=(const RcuTestResource &) = default;
+    };
+
+    struct RcuTestConfig
+    {
+        uint16_t port = 8080;
+        RcuTestResource tracker{};
+    };
 
     void writeTestConfigFile(const std::filesystem::path &path, const std::string &content)
     {
@@ -57,6 +71,7 @@ namespace
 
 TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
 {
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
     const std::filesystem::path configPath = "test_config_good.lua";
     writeTestConfigFile(configPath, "server = {\n"
                                     "  host = \"127.0.0.1\",\n"
@@ -116,6 +131,7 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
                                     "}\n"
                                     "forwarder = {\n"
                                     "  enableSplice = true,\n"
+                                    "  propagateClose = true,\n"
                                     "  spliceChunkSize = 65536,\n"
                                     "  bufferChunkSize = 16384,\n"
                                     "  sessionIdleTimeoutSecs = 120,\n"
@@ -181,13 +197,39 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
                                     "    default = \"proxy-out\"\n"
                                     "  }\n"
                                     "}\n"
+                                    "ebpf = {\n"
+                                    "  enabled = true,\n"
+                                    "  wanInterface = \"eth1\",\n"
+                                    "  lanInterface = \"lan0\",\n"
+                                    "  tproxyPort = 12345,\n"
+                                    "  fwmark = 2,\n"
+                                    "  enableDirectBypass = false,\n"
+                                    "  enableLpmGeoIp = false,\n"
+                                    "  dropQuic = true\n"
+                                    "}\n"
+                                    "fakeip = {\n"
+                                    "  enabled = true,\n"
+                                    "  inetRange = \"198.18.0.0/16\",\n"
+                                    "  maxCapacity = 32768\n"
+                                    "}\n"
+                                    "geo = {\n"
+                                    "  geoIpPath = \"/etc/geoip.dat\",\n"
+                                    "  geoSitePath = \"/etc/geosite.dat\",\n"
+                                    "  autoReload = true\n"
+                                    "}\n"
+                                    "controller = {\n"
+                                    "  enabled = true,\n"
+                                    "  host = \"0.0.0.0\",\n"
+                                    "  port = 9999,\n"
+                                    "  secret = \"testsecret\"\n"
+                                    "}\n"
                                     "logger = {\n"
                                     "  suppressLevel = \"warn\"\n"
                                     "}\n");
 
     EXPECT_TRUE(mynet::reloadConfig(configPath));
 
-    const mynet::NetConfig cfg = mynet::getNetConfig();
+    const mynet::MynetConfig cfg = mynet::getMynetConfig();
     EXPECT_EQ(cfg.server.host, "127.0.0.1");
     EXPECT_EQ(cfg.server.port, 9090u);
     EXPECT_EQ(cfg.server.backlog, 512);
@@ -235,6 +277,7 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
     EXPECT_FALSE(cfg.proxy.autoReplyConnectSuccess);
 
     EXPECT_TRUE(cfg.forwarder.enableSplice);
+    EXPECT_TRUE(cfg.forwarder.propagateClose);
     EXPECT_EQ(cfg.forwarder.spliceChunkSize, 65536u);
     EXPECT_EQ(cfg.forwarder.bufferChunkSize, 16384u);
     EXPECT_EQ(cfg.forwarder.sessionIdleTimeoutSecs, 120);
@@ -270,8 +313,31 @@ TEST(ConfigLua, GoodConfigReloadsBothNetAndMylog)
     EXPECT_EQ(cfg.outbounds[3].type, "selector");
     ASSERT_EQ(cfg.outbounds[3].outbounds.size(), 2u);
 
+    EXPECT_TRUE(cfg.ebpf.enabled);
+    EXPECT_EQ(cfg.ebpf.wanInterface, "eth1");
+    EXPECT_EQ(cfg.ebpf.lanInterface, "lan0");
+    EXPECT_EQ(cfg.ebpf.tproxyPort, 12345u);
+    EXPECT_EQ(cfg.ebpf.fwmark, 2u);
+    EXPECT_FALSE(cfg.ebpf.enableDirectBypass);
+    EXPECT_FALSE(cfg.ebpf.enableLpmGeoIp);
+    EXPECT_TRUE(cfg.ebpf.dropQuic);
+
+    EXPECT_TRUE(cfg.fakeip.enabled);
+    EXPECT_EQ(cfg.fakeip.inetRange, "198.18.0.0/16");
+    EXPECT_EQ(cfg.fakeip.maxCapacity, 32768u);
+
+    EXPECT_EQ(cfg.geo.geoIpPath, "/etc/geoip.dat");
+    EXPECT_EQ(cfg.geo.geoSitePath, "/etc/geosite.dat");
+    EXPECT_TRUE(cfg.geo.autoReload);
+
+    EXPECT_TRUE(cfg.controller.enabled);
+    EXPECT_EQ(cfg.controller.host, "0.0.0.0");
+    EXPECT_EQ(cfg.controller.port, 9999u);
+    EXPECT_EQ(cfg.controller.secret, "testsecret");
+
     EXPECT_EQ(static_cast<int>(mylog::getCurrentSuppressLevel()), static_cast<int>(mylog::LEVEL::WARN));
 
+    mynet::publishMynetConfig(saved);
     std::filesystem::remove(configPath);
 }
 
@@ -294,7 +360,7 @@ TEST(ConfigLua, ClampsOutliersSafely)
 
     EXPECT_TRUE(mynet::reloadConfig(clampPath));
 
-    const mynet::NetConfig cfg = mynet::getNetConfig();
+    const mynet::MynetConfig cfg = mynet::getMynetConfig();
     EXPECT_EQ(cfg.server.port, 65535u);
     EXPECT_EQ(cfg.connection.responseCapacity, 1u);
     EXPECT_EQ(cfg.connection.readChunkSize, 256u);
@@ -307,7 +373,7 @@ TEST(ConfigLua, ClampsOutliersSafely)
 
 TEST(ConfigLua, InvalidSyntaxOrTypeDoesNotCorruptRunningConfig)
 {
-    const mynet::NetConfig before = mynet::getNetConfig();
+    const mynet::MynetConfig before = mynet::getMynetConfig();
 
     const std::filesystem::path syntaxErrorPath = "test_config_syntax_err.lua";
     writeTestConfigFile(syntaxErrorPath, "server = { port = \n");
@@ -317,7 +383,7 @@ TEST(ConfigLua, InvalidSyntaxOrTypeDoesNotCorruptRunningConfig)
     writeTestConfigFile(typeErrorPath, "server = \"not a table\"\n");
     EXPECT_FALSE(mynet::reloadConfig(typeErrorPath));
 
-    const mynet::NetConfig after = mynet::getNetConfig();
+    const mynet::MynetConfig after = mynet::getMynetConfig();
     EXPECT_EQ(before.server.port, after.server.port);
     EXPECT_EQ(before.server.host, after.server.host);
 
@@ -341,21 +407,76 @@ TEST(ConfigLua, SandboxBlocksArbitraryCommandExecution)
 
 TEST(ConfigLua, SnapshotTracksGenerationsWithoutLock)
 {
-    mynet::ConfigHolder<mynet::NetConfig> holder;
-    mynet::ConfigSnapshot<mynet::NetConfig> snapshot(holder);
+    mynet::ConfigHolder<mynet::MynetConfig> holder;
+    mynet::ConfigSnapshot<mynet::MynetConfig> snapshot(holder);
 
     EXPECT_EQ(snapshot.refConfig().server.port, 8888u);
 
-    mynet::NetConfig updated = holder.duplicate();
+    mynet::MynetConfig updated = holder.duplicate();
     updated.server.port = 12345;
     holder.publish(updated);
 
     EXPECT_EQ(snapshot.refConfig().server.port, 12345u);
 }
 
+TEST(ConfigLua, RcuGracefulDrainKeepsOldConfigAliveUntilSessionReleases)
+{
+    g_rcuLiveInstances = 0;
+    EXPECT_EQ(g_rcuLiveInstances, 0);
+
+    mynet::ConfigHolder<RcuTestConfig> holder(RcuTestConfig{.port = 8080});
+    EXPECT_EQ(g_rcuLiveInstances, 1);
+
+    // 会话 A 建连，持有代际 1 的 RCU 智能指针
+    std::shared_ptr<const RcuTestConfig> sessionA = holder.currentConfig();
+    EXPECT_EQ(sessionA->port, 8080);
+    EXPECT_EQ(sessionA.use_count(), 2); // holder + sessionA
+
+    // 控制面热重载发布代际 2
+    holder.publish(RcuTestConfig{.port = 9090});
+    EXPECT_EQ(holder.currentConfig()->port, 9090);
+
+    // 关键断言：旧代际配置绝不就地析构！会话 A 依然稳定持有，完全杜绝 ECONNRESET
+    EXPECT_EQ(sessionA->port, 8080);
+    EXPECT_EQ(sessionA.use_count(), 1); // holder 已置换，仅剩 sessionA 活跃
+    EXPECT_EQ(g_rcuLiveInstances, 2); // 代际 1 (sessionA) 与 代际 2 (holder) 共存
+
+    // 会话 A 结束并释放句柄 -> 触发旧代际资源优雅排空 (Drain) 与自动安全析构
+    sessionA.reset();
+    EXPECT_EQ(g_rcuLiveInstances, 1); // 仅剩当前活跃的代际 2
+}
+
+TEST(ConfigLua, ConnectionPinsConfigurationGenerationAcrossLifecycle)
+{
+    mynet::Connection<mynet::HandlerConnection> conn;
+    EXPECT_EQ(conn.fd(), -1);
+
+    // 模拟建连，setFd 自动绑定当前代际并持久持有 RCU 智能指针
+    conn.setFd(99);
+    const uint32_t pinnedGen = conn.configGeneration();
+    EXPECT_GT(pinnedGen, 0u);
+    const uint16_t initialPort = conn.config().server.port;
+
+    EXPECT_NE(conn.configShared(), nullptr);
+
+    // 发布新配置 -> 自动同步推进代际版本号
+    auto newCfg = mynet::getMynetConfig();
+    newCfg.server.port = 34567;
+    mynet::publishMynetConfig(newCfg);
+    const uint32_t newGen = mynet::MynetConfigHolder::getInstance().getGeneration();
+    EXPECT_GT(newGen, pinnedGen);
+
+    // 关键断言：已建连的 conn 保持旧代际一致性，不受热重载影响
+    EXPECT_EQ(conn.config().server.port, initialPort);
+
+    // 重置/关闭连接 -> 优雅排空旧代际 RCU 引用
+    conn.reset();
+    EXPECT_EQ(conn.configShared(), nullptr);
+}
+
 TEST(ConfigLua, RejectsInvalidFieldTypes)
 {
-    const mynet::NetConfig before = mynet::getNetConfig();
+    const mynet::MynetConfig before = mynet::getMynetConfig();
 
     const std::filesystem::path badFieldPath = "test_config_bad_field.lua";
     writeTestConfigFile(badFieldPath, "server = {\n"
@@ -363,7 +484,7 @@ TEST(ConfigLua, RejectsInvalidFieldTypes)
                                       "}\n");
     EXPECT_FALSE(mynet::reloadConfig(badFieldPath));
 
-    const mynet::NetConfig after = mynet::getNetConfig();
+    const mynet::MynetConfig after = mynet::getMynetConfig();
     EXPECT_EQ(before.server.port, after.server.port);
 
     std::filesystem::remove(badFieldPath);
@@ -406,7 +527,7 @@ TEST(ConfigLua, ConnectionConfigLoadsAndAppliesDynamically)
 TEST(ConfigLua, ReactorAndProactorSectionsDriveEngineDefaults)
 {
     // 引擎入口不再持有默认实参：reactor / proactor / server 三个配置段是唯一来源。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
     const std::filesystem::path enginePath = "test_config_engine.lua";
     writeTestConfigFile(enginePath, "server = {\n"
@@ -446,12 +567,12 @@ TEST(ConfigLua, ReactorAndProactorSectionsDriveEngineDefaults)
     EXPECT_EQ(mynet::getServerConfig().maxConnections, 4096u);
 
     std::filesystem::remove(enginePath);
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(ConfigLua, EngineSectionOutliersAreClamped)
 {
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
     const std::filesystem::path clampPath = "test_config_engine_clamp.lua";
     writeTestConfigFile(clampPath, "server = {\n"
@@ -485,7 +606,7 @@ TEST(ConfigLua, EngineSectionOutliersAreClamped)
     EXPECT_EQ(proactorCfg.udpBufSize, 512u);
 
     std::filesystem::remove(clampPath);
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(ConfigLua, EngineConfigValidatorsRejectNonRunnableValues)
@@ -541,7 +662,7 @@ TEST(ConfigLua, ProactorCqIsRaisedToCoverSq)
 {
     // 两个字段各自合法、凑在一起却会让 io_uring_queue_init_params() 返回 EINVAL，
     // 因此解析期必须把这个跨字段约束收敛掉。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
     const std::filesystem::path skewedPath = "test_config_proactor_cq.lua";
     writeTestConfigFile(skewedPath, "proactor = {\n"
@@ -557,7 +678,7 @@ TEST(ConfigLua, ProactorCqIsRaisedToCoverSq)
     EXPECT_TRUE(mynet::validProactorConfig(proactorCfg));
 
     std::filesystem::remove(skewedPath);
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
@@ -581,7 +702,7 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
         GTEST_SKIP() << "config/config.lua not reachable from the test working directory";
     }
 
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
     // 先发布一份**每个字段都偏离基线**的哨兵配置，再加载 config.lua。
     //
@@ -589,7 +710,7 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     // 原值。若直接在当前配置上 reload，config.lua 少写任何一个键都检测不到——
     // 缺失字段会退回当前值，而当前值恰好等于基线，测试就假通过了。
     // 毒化之后，每个字段必须被 config.lua 显式改写才能回到基线。
-    mynet::NetConfig poison{};
+    mynet::MynetConfig poison{};
     poison.server.host = "poison.invalid";
     poison.server.port = 1;
     poison.server.backlog = 2;
@@ -600,6 +721,7 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     poison.server.enableSplice = !poison.server.enableSplice;
     poison.server.reuseAddr = !poison.server.reuseAddr;
     poison.server.reusePort = !poison.server.reusePort;
+    poison.server.engine = "proactor";
     poison.reactor.maxEvents = 3;
     poison.reactor.idleSweepIntervalMs = 3;
     poison.connection.responseCapacity = 3;
@@ -645,6 +767,7 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     poison.http3.maxHeaderEntries = 3;
     poison.http3.port = 3;
     poison.forwarder.enableSplice = !poison.forwarder.enableSplice;
+    poison.forwarder.propagateClose = !poison.forwarder.propagateClose;
     poison.forwarder.spliceChunkSize = 3;
     poison.forwarder.bufferChunkSize = 3;
     poison.forwarder.sessionIdleTimeoutSecs = 3;
@@ -654,15 +777,33 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     poison.dns.ttlSecs = 3;
     poison.dns.enableCache = !poison.dns.enableCache;
     poison.router.defaultOutbound = "poison";
-    mynet::publishNetConfig(poison);
+    poison.ebpf.enabled = !poison.ebpf.enabled;
+    poison.ebpf.wanInterface = "poison_wan";
+    poison.ebpf.lanInterface = "poison_lan";
+    poison.ebpf.tproxyPort = 3;
+    poison.ebpf.fwmark = 3;
+    poison.ebpf.enableDirectBypass = !poison.ebpf.enableDirectBypass;
+    poison.ebpf.enableLpmGeoIp = !poison.ebpf.enableLpmGeoIp;
+    poison.ebpf.dropQuic = !poison.ebpf.dropQuic;
+    poison.fakeip.enabled = !poison.fakeip.enabled;
+    poison.fakeip.inetRange = "poison_range";
+    poison.fakeip.maxCapacity = 3;
+    poison.geo.geoIpPath = "poison_geoip";
+    poison.geo.geoSitePath = "poison_geosite";
+    poison.geo.autoReload = !poison.geo.autoReload;
+    poison.controller.enabled = !poison.controller.enabled;
+    poison.controller.host = "poison_host";
+    poison.controller.port = 3;
+    poison.controller.secret = "poison_secret";
+    mynet::publishMynetConfig(poison);
 
     const bool reloaded = mynet::reloadConfig(shipped, false);
-    const mynet::NetConfig loaded = mynet::getNetConfig();
+    const mynet::MynetConfig loaded = mynet::getMynetConfig();
     // 无论解析成功与否都恢复现场，避免把半成品配置泄漏给后续用例。
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
     ASSERT_TRUE(reloaded) << "shipped config.lua must parse cleanly";
 
-    const mynet::NetConfig baseline{};
+    const mynet::MynetConfig baseline{};
 
     EXPECT_EQ(loaded.server.host, baseline.server.host);
     EXPECT_EQ(loaded.server.port, baseline.server.port);
@@ -674,6 +815,7 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     EXPECT_EQ(loaded.server.enableSplice, baseline.server.enableSplice);
     EXPECT_EQ(loaded.server.reuseAddr, baseline.server.reuseAddr);
     EXPECT_EQ(loaded.server.reusePort, baseline.server.reusePort);
+    EXPECT_EQ(loaded.server.engine, baseline.server.engine);
 
     EXPECT_EQ(loaded.reactor.maxEvents, baseline.reactor.maxEvents);
     EXPECT_EQ(loaded.reactor.idleSweepIntervalMs, baseline.reactor.idleSweepIntervalMs);
@@ -729,6 +871,7 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     EXPECT_EQ(loaded.http3.port, baseline.http3.port);
 
     EXPECT_EQ(loaded.forwarder.enableSplice, baseline.forwarder.enableSplice);
+    EXPECT_EQ(loaded.forwarder.propagateClose, baseline.forwarder.propagateClose);
     EXPECT_EQ(loaded.forwarder.spliceChunkSize, baseline.forwarder.spliceChunkSize);
     EXPECT_EQ(loaded.forwarder.bufferChunkSize, baseline.forwarder.bufferChunkSize);
     EXPECT_EQ(loaded.forwarder.sessionIdleTimeoutSecs, baseline.forwarder.sessionIdleTimeoutSecs);
@@ -743,6 +886,28 @@ TEST(ConfigLua, ShippedConfigMatchesCompiledInBaseline)
     EXPECT_EQ(loaded.router.rules.size(), baseline.router.rules.size());
     EXPECT_EQ(loaded.inbounds.size(), baseline.inbounds.size());
     EXPECT_EQ(loaded.outbounds.size(), baseline.outbounds.size());
+
+    EXPECT_EQ(loaded.ebpf.enabled, baseline.ebpf.enabled);
+    EXPECT_EQ(loaded.ebpf.wanInterface, baseline.ebpf.wanInterface);
+    EXPECT_EQ(loaded.ebpf.lanInterface, baseline.ebpf.lanInterface);
+    EXPECT_EQ(loaded.ebpf.tproxyPort, baseline.ebpf.tproxyPort);
+    EXPECT_EQ(loaded.ebpf.fwmark, baseline.ebpf.fwmark);
+    EXPECT_EQ(loaded.ebpf.enableDirectBypass, baseline.ebpf.enableDirectBypass);
+    EXPECT_EQ(loaded.ebpf.enableLpmGeoIp, baseline.ebpf.enableLpmGeoIp);
+    EXPECT_EQ(loaded.ebpf.dropQuic, baseline.ebpf.dropQuic);
+
+    EXPECT_EQ(loaded.fakeip.enabled, baseline.fakeip.enabled);
+    EXPECT_EQ(loaded.fakeip.inetRange, baseline.fakeip.inetRange);
+    EXPECT_EQ(loaded.fakeip.maxCapacity, baseline.fakeip.maxCapacity);
+
+    EXPECT_EQ(loaded.geo.geoIpPath, baseline.geo.geoIpPath);
+    EXPECT_EQ(loaded.geo.geoSitePath, baseline.geo.geoSitePath);
+    EXPECT_EQ(loaded.geo.autoReload, baseline.geo.autoReload);
+
+    EXPECT_EQ(loaded.controller.enabled, baseline.controller.enabled);
+    EXPECT_EQ(loaded.controller.host, baseline.controller.host);
+    EXPECT_EQ(loaded.controller.port, baseline.controller.port);
+    EXPECT_EQ(loaded.controller.secret, baseline.controller.secret);
 }
 
 TEST(ConfigLua, EventCapacityFollowsMaxEventsExactly)
@@ -931,12 +1096,12 @@ TEST(ConfigLua, ReactorAppliesMaxEventsToTheEventLoop)
 {
     // setEventCapacity 本身有单测了，但那只能证明 setter 有效。
     // 这里证明**引擎真的把 reactor.maxEvents 传下去了**——否则配置项就是死字段。
-    mynet::NetConfig saved = mynet::getNetConfig();
+    mynet::MynetConfig saved = mynet::getMynetConfig();
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.reactor.maxEvents = 384;
     cfg.server.maxConnections = 16;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> server;
     // 端口 0 交给内核挑，避免与本机其他测试/服务抢端口
@@ -947,7 +1112,7 @@ TEST(ConfigLua, ReactorAppliesMaxEventsToTheEventLoop)
     server.stop();
     runner.join();
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 
     EXPECT_EQ(capacity, 384u);
     EXPECT_EQ(poolCapacity, 16u);
@@ -956,7 +1121,7 @@ TEST(ConfigLua, ReactorAppliesMaxEventsToTheEventLoop)
 TEST(ConfigLua, EveryConfigFieldIsRegisteredWithAReloadMode)
 {
     // 「热配置 / 启动配置」的划分不能只活在文档里。这里用静态反射枚举
-    // NetConfig 的每一个字段，与 kConfigReloadMap 逐项比对：
+    // MynetConfig 的每一个字段，与 kConfigReloadMap 逐项比对：
     //   - 结构体新增了字段却没登记  -> 测试失败（不允许再来一个"配了不读"）
     //   - 登记表里留了已删除的字段  -> 测试失败（不允许幽灵条目）
     std::vector<std::string> actual;
@@ -973,6 +1138,10 @@ TEST(ConfigLua, EveryConfigFieldIsRegisteredWithAReloadMode)
     collectFieldPaths<mynet::ForwarderConfig>("forwarder", actual);
     collectFieldPaths<mynet::RouterConfig>("router", actual);
     collectFieldPaths<mynet::DnsConfig>("dns", actual);
+    collectFieldPaths<mynet::EbpfConfig>("ebpf", actual);
+    collectFieldPaths<mynet::FakeIPConfig>("fakeip", actual);
+    collectFieldPaths<mynet::GeoConfig>("geo", actual);
+    collectFieldPaths<mynet::ControllerConfig>("controller", actual);
 
     std::vector<std::string> registered;
     registered.reserve(std::size(mynet::kConfigReloadMap));
@@ -1015,11 +1184,11 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     // 这是"启动期"分类的定义本身：reload 之后，已在运行的引擎保持启动时的值，
     // 只有新启动的引擎才看到新值。若哪天有人把 reactor.maxEvents 改成热读，
     // 这条测试会立刻发现分类与实际行为不符。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.reactor.maxEvents = 384;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
 
     mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> running;
     std::thread runner([&] { (void)running.runTcp("127.0.0.1", 0); });
@@ -1028,7 +1197,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
 
     // 运行中 reload 到 768：分类是 Startup，所以运行中的实例不应改变。
     cfg.reactor.maxEvents = 768;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     EXPECT_EQ(running.loop().eventCapacity(), 384u) << "Startup field must not change a running engine";
 
@@ -1043,33 +1212,33 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     fresh.stop();
     runner2.join();
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(ConfigLua, HotFieldAppliesToConnectionsCreatedAfterReload)
 {
     // 对照：connection 段是"热"，新连接必须采用 reload 后的值。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.connection.maxRequestBytes = 1 << 20;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
     mynet::HandlerConnection before;
     EXPECT_EQ(before.readCredit(), 1u << 20);
 
     cfg.connection.maxRequestBytes = 2 << 20;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
     mynet::HandlerConnection after;
     EXPECT_EQ(after.readCredit(), 2u << 20) << "Hot field must apply without restarting the engine";
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
 {
     // 内核新建 TCP 连接的 TCP_QUICKACK 默认就是 1，因此"读出来是 1"什么也证明不了。
     // 先手动清零，再看 setFd 是否把它抬回 1——这才证明配置真的走到了 setsockopt。
-    const mynet::NetConfig saved = mynet::getNetConfig();
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
 
     int listenFd = ::socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_GE(listenFd, 0);
@@ -1100,9 +1269,9 @@ TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
     ::setsockopt(serverFd, IPPROTO_TCP, TCP_QUICKACK, &zero, sizeof zero);
     ASSERT_EQ(readFlag(), 0) << "failed to clear TCP_QUICKACK for the test precondition";
 
-    mynet::NetConfig cfg = saved;
+    mynet::MynetConfig cfg = saved;
     cfg.server.tcpQuickAck = true;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
     {
         mynet::Connection<mynet::HandlerConnection> conn;
         conn.setFd(serverFd);
@@ -1113,7 +1282,7 @@ TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
     // 关闭时不得改动 socket（保持我们清零后的状态）。
     ::setsockopt(serverFd, IPPROTO_TCP, TCP_QUICKACK, &zero, sizeof zero);
     cfg.server.tcpQuickAck = false;
-    mynet::publishNetConfig(cfg);
+    mynet::publishMynetConfig(cfg);
     {
         mynet::Connection<mynet::HandlerConnection> conn;
         conn.setFd(serverFd);
@@ -1124,7 +1293,7 @@ TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
     ::close(serverFd);
     ::close(clientFd);
     ::close(listenFd);
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
 }
 
 TEST(ConfigLua, SecurityCaFileEnablesClientCertificateVerification)
@@ -1212,7 +1381,7 @@ TEST(ConfigLua, CoreLoadLuaConfigEndToEnd)
                         "}\n");
 
     EXPECT_TRUE(mynet::reloadConfig(configPath));
-    const auto netCfg = mynet::getNetConfig();
+    const auto netCfg = mynet::getMynetConfig();
 
     mynet::Core core(netCfg);
     EXPECT_TRUE(core.inbounds().has("mixed-in"));

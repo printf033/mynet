@@ -1,27 +1,27 @@
-#include "handler/address.hpp"
-#include "handler/block.hpp"
-#include "handler/crypto.hpp"
-#include "handler/direct.hpp"
-#include "handler/dns/cache.hpp"
-#include "handler/dns/dns.hpp"
-#include "handler/dns/handler.hpp"
-#include "handler/http/http.hpp"
-#include "handler/inbound.hpp"
-#include "handler/outbound.hpp"
-#include "handler/proxy/hysteria2.hpp"
-#include "handler/mixed.hpp"
-#include "handler/proxy/shadowsocks.hpp"
-#include "handler/proxy/shadowtls.hpp"
-#include "handler/proxy/snell.hpp"
-#include "handler/proxy/trojan.hpp"
-#include "handler/proxy/tuic.hpp"
-#include "handler/proxy/vless.hpp"
-#include "handler/proxy/vmess.hpp"
-#include "handler/sniffing/sniffer.hpp"
-#include "handler/socks/socks.hpp"
-#include "handler/socks/socks4.hpp"
-#include "handler/socks/socks5.hpp"
-#include "handler/transparent.hpp"
+#include "address.hpp"
+#include "block/block.hpp"
+#include "crypto.hpp"
+#include "direct/direct.hpp"
+#include "dns/cache.hpp"
+#include "dns/dns.hpp"
+#include "dns/handler.hpp"
+#include "http/http.hpp"
+#include "inbound.hpp"
+#include "outbound.hpp"
+#include "hysteria2/hysteria2.hpp"
+#include "mixed/mixed.hpp"
+#include "shadowsocks/shadowsocks.hpp"
+#include "shadowtls/shadowtls.hpp"
+#include "snell/snell.hpp"
+#include "trojan/trojan.hpp"
+#include "tuic/tuic.hpp"
+#include "vless/vless.hpp"
+#include "vmess/vmess.hpp"
+#include "sniffer.hpp"
+#include "socks/socks.hpp"
+#include "socks/socks4.hpp"
+#include "socks/socks5.hpp"
+#include "transparent/transparent.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -110,7 +110,7 @@ TEST(HandlerSocks4Test, IPv4ConnectSuccess)
     // SOCKS4 CONNECT 请求: VN(0x04) | CMD(0x01) | Port(80: 0x0050) | IP(1.2.3.4: 0x01020304) | USERID("alice\0")
     std::vector<uint8_t> req = {0x04, 0x01, 0x00, 80, 1, 2, 3, 4, 'a', 'l', 'i', 'c', 'e', 0x00};
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(requestCalled);
     EXPECT_EQ(handler.stage(), Socks4Stage::STREAMING);
@@ -147,7 +147,7 @@ TEST(HandlerSocks4Test, Socks4aDomainConnect)
         'e',  'x',  'a',  'm',  'p', 'l', 'e', '.', 'c', 'o', 'm', 0x00 // Domain
     };
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(handler.isEstablished());
     EXPECT_EQ(handler.userId(), "bob");
@@ -162,7 +162,7 @@ TEST(HandlerSocks4Test, AuthFailureRejected)
 
     std::vector<uint8_t> req = {0x04, 0x01, 0x00, 80, 10, 0, 0, 1, 'h', 'a', 'c', 'k', 'e', 'r', 0x00};
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), Socks4Stage::ERROR);
     ASSERT_TRUE(handler.hasResponse());
@@ -182,7 +182,7 @@ TEST(HandlerSocksTest, AutoDetectSocks4AndSocks5)
         HandlerInboundSocks handler;
         std::vector<uint8_t> req4 = {0x04, 0x01, 0x00, 80, 1, 1, 1, 1, 0x00};
         feed(handler, req4);
-        handler.process();
+        handler.handle();
         EXPECT_EQ(handler.version(), SocksProtocolVersion::SOCKS4);
         EXPECT_TRUE(handler.isEstablished());
         ASSERT_TRUE(handler.targetAddress().has_value());
@@ -194,14 +194,14 @@ TEST(HandlerSocksTest, AutoDetectSocks4AndSocks5)
         HandlerInboundSocks handler;
         // 1. SOCKS5 初始握手
         feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
-        handler.process();
+        handler.handle();
         EXPECT_EQ(handler.version(), SocksProtocolVersion::SOCKS5);
         [[maybe_unused]] auto _ = handler.takeResponse();
 
         // 2. SOCKS5 CONNECT
         std::vector<uint8_t> req5 = {0x05, 0x01, 0x00, 0x01, 8, 8, 8, 8, 0x00, 53};
         feed(handler, req5);
-        handler.process();
+        handler.handle();
         EXPECT_TRUE(handler.isEstablished());
         ASSERT_TRUE(handler.targetAddress().has_value());
         EXPECT_EQ(handler.targetAddress()->toString(), "8.8.8.8:53");
@@ -229,7 +229,7 @@ TEST(HandlerHttpProxyTest, ConnectTunneling)
                       "Host: example.com:443\r\n"
                       "User-Agent: curl/8.0\r\n\r\n";
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(requestCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -253,7 +253,7 @@ TEST(HandlerHttpProxyTest, PlainHttpForwardProxy)
     std::string req = "GET http://example.org:8080/index.html HTTP/1.1\r\n"
                       "Host: example.org:8080\r\n\r\n";
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(handler.isEstablished());
     EXPECT_FALSE(handler.isConnectMethod());
@@ -270,7 +270,7 @@ TEST(HandlerHttpProxyTest, BasicAuthCheck)
     // 1. 无认证 -> 返回 407
     std::string reqNoAuth = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
     feed(handler, reqNoAuth);
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.stage(), HttpProxyStage::ERROR);
     ASSERT_TRUE(handler.hasResponse());
     std::string resp407 = handler.takeResponse();
@@ -282,7 +282,7 @@ TEST(HandlerHttpProxyTest, BasicAuthCheck)
                           "Host: example.com:443\r\n"
                           "Proxy-Authorization: Basic YWRtaW46c2VjcmV0\r\n\r\n";
     feed(handler, reqAuth);
-    handler.process();
+    handler.handle();
     EXPECT_TRUE(handler.isEstablished());
     ASSERT_TRUE(handler.hasResponse());
     std::string resp200 = handler.takeResponse();
@@ -299,7 +299,7 @@ TEST(HandlerMixedTest, MultiplexSocksAndHttp)
     {
         HandlerInboundMixed handler;
         feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
-        handler.process();
+        handler.handle();
         EXPECT_EQ(handler.protocol(), MixedProtocolType::SOCKS5);
     }
 
@@ -307,7 +307,7 @@ TEST(HandlerMixedTest, MultiplexSocksAndHttp)
     {
         HandlerInboundMixed handler;
         feed(handler, std::vector<uint8_t>{0x04, 0x01, 0x00, 80, 1, 2, 3, 4, 0x00});
-        handler.process();
+        handler.handle();
         EXPECT_EQ(handler.protocol(), MixedProtocolType::SOCKS4);
     }
 
@@ -316,7 +316,7 @@ TEST(HandlerMixedTest, MultiplexSocksAndHttp)
         HandlerInboundMixed handler;
         std::string httpReq = "CONNECT 127.0.0.1:8443 HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n";
         feed(handler, httpReq);
-        handler.process();
+        handler.handle();
         EXPECT_EQ(handler.protocol(), MixedProtocolType::HTTP);
         EXPECT_TRUE(handler.isEstablished());
         ASSERT_TRUE(handler.targetAddress().has_value());
@@ -365,7 +365,7 @@ TEST(HandlerTrojanTest, Sha224KeyHandshake)
     req.insert(req.end(), payload.begin(), payload.end());
 
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -392,7 +392,7 @@ TEST(HandlerTrojanTest, WrongPasswordRejected)
     req.push_back('\n');
 
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), InboundStage::ERROR);
     EXPECT_FALSE(handler.isEstablished());
@@ -437,7 +437,7 @@ TEST(HandlerVlessTest, UuidConnectHandshake)
     req.insert(req.end(), payload.begin(), payload.end());
 
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -476,7 +476,9 @@ TEST(HandlerVmessTest, AuthAndHeaderDecode)
         });
 
     // 16 字节 AuthID
-    std::vector<uint8_t> req(16, 0xAA);
+    std::vector<uint8_t> req;
+    req.reserve(128);
+    req.insert(req.end(), 16, 0xAA);
 
     // Header 模拟
     req.push_back(vmess::kVersion);
@@ -494,7 +496,7 @@ TEST(HandlerVmessTest, AuthAndHeaderDecode)
     ProxyAddress::fromIPv4(htonl(0x0A000001), 80).encodeSocks5(req);
 
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -519,7 +521,7 @@ TEST(HandlerShadowsocksTest, NoneCipherDirectCodec)
     std::vector<uint8_t> req;
     ProxyAddress::fromIPv4(htonl(0x7F000001), 9000).encodeSocks5(req);
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -582,7 +584,7 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
     packet.insert(packet.end(), payloadTag.begin(), payloadTag.end());
 
     feed(handler, packet);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -686,7 +688,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
         std::vector<uint8_t> packet = buildClientHello(random, dummySid, "cloudflare.com");
 
         feed(handler, packet);
-        handler.process();
+        handler.handle();
 
         EXPECT_TRUE(callbackCalled);
         EXPECT_TRUE(handler.isEstablished());
@@ -717,7 +719,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
         std::vector<uint8_t> packet = buildClientHello(random, validSid, "shadowtls.internal");
 
         feed(handler, packet);
-        handler.process();
+        handler.handle();
 
         EXPECT_TRUE(callbackCalled);
         EXPECT_TRUE(handler.isEstablished());
@@ -737,7 +739,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
             });
 
         feed(handler, std::string_view("GET / HTTP/1.1\r\n\r\n"));
-        handler.process();
+        handler.handle();
         EXPECT_TRUE(handler.isEstablished());
         EXPECT_FALSE(handler.isClientAuthenticated());
     }
@@ -764,7 +766,7 @@ TEST(HandlerSnellTest, ConnectHandshake)
     ProxyAddress::fromIPv4(htonl(0x01020304), 80).encodeSocks5(req);
 
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -796,7 +798,7 @@ TEST(HandlerHysteria2Test, AuthAndConnectSuccess)
     ProxyAddress::fromDomain("example.com", 80).encodeSocks5(req);
 
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -833,7 +835,7 @@ TEST(HandlerTuicTest, ConnectSuccess)
     ProxyAddress::fromIPv4(htonl(0x0A000001), 443).encodeSocks5(req);
 
     feed(handler, req);
-    handler.process();
+    handler.handle();
 
     EXPECT_TRUE(reqCalled);
     EXPECT_TRUE(handler.isEstablished());
@@ -861,7 +863,7 @@ TEST(HandlerDirectBlockTest, DirectPassThrough)
             called = true;
             EXPECT_EQ(addr.toString(), "8.8.8.8:53");
         });
-    direct.process();
+    direct.handle();
     EXPECT_TRUE(called);
 }
 
@@ -870,7 +872,7 @@ TEST(HandlerBlockTest, BlockRejects)
     HandlerInboundBlock block;
     EXPECT_FALSE(block.isEstablished());
     feed(block, std::string_view("GET / HTTP/1.1\r\n\r\n"));
-    block.process();
+    block.handle();
     EXPECT_TRUE(block.closeAfterResponse());
 }
 
@@ -975,13 +977,13 @@ TEST(HandlerTransparentTest, RedirectWithTlsSniSniffing)
     });
 
     // 初始 resolve 原始目的
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.stage(), TransparentStage::SNIFFING);
     EXPECT_FALSE(callbackInvoked);
 
     auto tlsPkt = makeTlsClientHello("openai.com");
     feed(handler, std::string_view(reinterpret_cast<const char *>(tlsPkt.data()), tlsPkt.size()));
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), TransparentStage::STREAMING);
     EXPECT_TRUE(callbackInvoked);
@@ -1001,12 +1003,12 @@ TEST(HandlerTransparentTest, TProxyWithHttpHostSniffing)
         callbackInvoked = true;
     });
 
-    handler.process();
+    handler.handle();
     EXPECT_EQ(handler.stage(), TransparentStage::SNIFFING);
 
     std::string httpReq = "GET / HTTP/1.1\r\nHost: rust-lang.org:8080\r\n\r\n";
     feed(handler, httpReq);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), TransparentStage::STREAMING);
     EXPECT_TRUE(callbackInvoked);
@@ -1031,11 +1033,11 @@ TEST(HandlerTransparentTest, FallbackToDnsReverseCache)
         callbackInvoked = true;
     });
 
-    handler.process();
+    handler.handle();
     // 注入非 TLS/HTTP 的私有协议数据
     std::string nonSniffablePayload(64, '\xAA');
     feed(handler, nonSniffablePayload);
-    handler.process();
+    handler.handle();
 
     EXPECT_EQ(handler.stage(), TransparentStage::STREAMING);
     EXPECT_TRUE(callbackInvoked);

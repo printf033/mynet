@@ -5,17 +5,17 @@
 #include "datagram.hpp"
 #include "dialer.hpp"
 #include "proactor.hpp"
-#include "handler/block.hpp"
-#include "handler/direct.hpp"
-#include "handler/dns/handler.hpp"
-#include "handler/http/v1/handler.hpp"
-#include "handler/http/v3/handler.hpp"
-#include "handler/inbound.hpp"
-#include "handler/outbound.hpp"
-#include "handler/proxy/hysteria2.hpp"
-#include "handler/proxy/trojan.hpp"
-#include "handler/proxy/vless.hpp"
-#include "handler/socks/socks5.hpp"
+#include "block/block.hpp"
+#include "direct/direct.hpp"
+#include "dns/handler.hpp"
+#include "http/v1/handler.hpp"
+#include "http/v3/handler.hpp"
+#include "inbound.hpp"
+#include "outbound.hpp"
+#include "hysteria2/hysteria2.hpp"
+#include "trojan/trojan.hpp"
+#include "vless/vless.hpp"
+#include "socks/socks5.hpp"
 #include "reactor.hpp"
 #include <gtest/gtest.h>
 #include <type_traits>
@@ -47,10 +47,10 @@ namespace
     {
     };
 
-    /// 正例：派生自 HandlerConnection，只重写 process() 表达业务定制。
+    /// 正例：派生自 HandlerConnection，只重写 handle() 表达业务定制。
     struct FakeHandler : public HandlerConnection
     {
-        void process() {}
+        void handle() {}
     };
 
     /// 反例：手写齐全部流式成员与生命周期钩子——结构上无懈可击，
@@ -73,7 +73,7 @@ namespace
         const char *requestBegin() noexcept { return ""; }
         void requestConsume(size_t) noexcept {}
         void requestClear() noexcept {}
-        void process() {}
+        void handle() {}
         void reset() noexcept {}
         void onConnect(int) noexcept {}
         void onUpgrade() noexcept {}
@@ -108,7 +108,7 @@ namespace
         bool hasResponse() noexcept { return false; }
         std::string takeResponse() { return ""; }
         bool requestOverLimit() noexcept { return false; }
-        void process() {}
+        void handle() {}
         void reset() noexcept {}
     };
 
@@ -119,9 +119,9 @@ namespace
         void appendRequest(const char *, ssize_t) {}
     };
 
-    struct DeletedProcessHandler : public HandlerConnection
+    struct DeletedHandleHandler : public HandlerConnection
     {
-        void process() = delete;
+        void handle() = delete;
     };
 
     struct DeletedTakeResponseHandler : public HandlerConnection
@@ -313,7 +313,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     static_assert(MandatoryMethodConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(!MandatoryMethodConnection<ThrowingAppendHandler>); // 旧语义：允许抛出的摄入路径现被约束拒绝
 
-    static_assert(!MandatoryMethodConnection<DeletedProcessHandler>);
+    static_assert(!MandatoryMethodConnection<DeletedHandleHandler>);
     static_assert(!MandatoryMethodConnection<DeletedTakeResponseHandler>);
     static_assert(!MandatoryMethodConnection<DeletedPushResponseHandler>);
     static_assert(!MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);
@@ -327,7 +327,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     EXPECT_FALSE(MandatoryMethodConnection<FullContractWithoutDerivation>);
     EXPECT_FALSE(MandatoryMethodConnection<LegacySixMemberHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<ThrowingAppendHandler>);
-    EXPECT_FALSE(MandatoryMethodConnection<DeletedProcessHandler>);
+    EXPECT_FALSE(MandatoryMethodConnection<DeletedHandleHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedTakeResponseHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedPushResponseHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);
@@ -633,11 +633,11 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
 
     // 把监听地址预先改成不可能绑定的字面量：零参重载会读取它并立刻失败，
     // 于是本测试只做"函数体能否编译"，绝不会真的进入事件循环把测试挂住。
-    const mynet::NetConfig saved = mynet::getNetConfig();
-    mynet::NetConfig poison = saved;
+    const mynet::MynetConfig saved = mynet::getMynetConfig();
+    mynet::MynetConfig poison = saved;
     poison.server.host = "256.256.256.256";
     poison.server.port = 1;
-    mynet::publishNetConfig(poison);
+    mynet::publishMynetConfig(poison);
 
     mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> reactorStream;
     mynet::Reactor<mynet::AcceptorBase<mynet::HandlerDatagram>> reactorDatagram;
@@ -673,6 +673,6 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     [[maybe_unused]] auto r11 = proactorTls.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
 #endif
 
-    mynet::publishNetConfig(saved);
+    mynet::publishMynetConfig(saved);
     SUCCEED();
 }

@@ -11,6 +11,8 @@
  */
 
 #include "logger.hpp"
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <string_view>
