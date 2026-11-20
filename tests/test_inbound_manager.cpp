@@ -20,12 +20,12 @@ TEST(InboundManagerTest, RegistryAndTypes)
     InboundManager mgr;
     EXPECT_EQ(mgr.size(), 0u);
 
-    auto mixed = std::make_shared<InboundMixed>("mixed-in", "127.0.0.1", 1080);
-    EXPECT_EQ(mixed->tag(), "mixed-in");
-    EXPECT_EQ(mixed->type(), "mixed");
-    EXPECT_EQ(mixed->host(), "127.0.0.1");
-    EXPECT_EQ(mixed->port(), 1080);
-    EXPECT_TRUE(mixed->isSniffingEnabled());
+    auto vless = std::make_shared<InboundVless>("vless-in", "127.0.0.1", 1080, "de04add9-5c1a-4b08-8e65-244e45cf5483");
+    EXPECT_EQ(vless->tag(), "vless-in");
+    EXPECT_EQ(vless->type(), "vless");
+    EXPECT_EQ(vless->host(), "127.0.0.1");
+    EXPECT_EQ(vless->port(), 1080);
+    EXPECT_TRUE(vless->isSniffingEnabled());
 
     auto socks = std::make_shared<InboundSocks5>("socks-in", "127.0.0.1", 1081, "admin", "pass123");
     EXPECT_EQ(socks->tag(), "socks-in");
@@ -40,14 +40,14 @@ TEST(InboundManagerTest, RegistryAndTypes)
     auto direct = std::make_shared<InboundDirect>("direct-in", "127.0.0.1", 9000);
     EXPECT_EQ(direct->type(), "direct");
 
-    mgr.registerInbound(mixed);
+    mgr.registerInbound(vless);
     mgr.registerInbound(socks);
     mgr.registerInbound(http);
     mgr.registerInbound(trojan);
     mgr.registerInbound(direct);
 
     EXPECT_EQ(mgr.size(), 5u);
-    EXPECT_TRUE(mgr.has("mixed-in"));
+    EXPECT_TRUE(mgr.has("vless-in"));
     EXPECT_TRUE(mgr.has("socks-in"));
     EXPECT_TRUE(mgr.has("http-in"));
     EXPECT_TRUE(mgr.has("trojan-in"));
@@ -72,9 +72,9 @@ TEST(InboundManagerTest, HandlerFactoryProduction)
     ASSERT_NE(hSocks, nullptr);
     EXPECT_EQ(hSocks->stage(), InboundStage::HANDSHAKE);
 
-    InboundMixed mixed("mixed", "127.0.0.1", 1080);
-    auto hMixed = mixed.createHandler();
-    ASSERT_NE(hMixed, nullptr);
+    InboundVless vless("vless", "127.0.0.1", 1080, "de04add9-5c1a-4b08-8e65-244e45cf5483");
+    auto hVless = vless.createHandler();
+    ASSERT_NE(hVless, nullptr);
 
     InboundHttp http("http", "127.0.0.1", 8080);
     auto hHttp = http.createHandler();
@@ -153,7 +153,7 @@ TEST(InboundManagerTest, BatchStartAllAndStopAll)
     InboundManager mgr;
 
     auto in1 = std::make_shared<InboundSocks5>("in-1", "127.0.0.1", 0);
-    auto in2 = std::make_shared<InboundMixed>("in-2", "127.0.0.1", 0);
+    auto in2 = std::make_shared<InboundHttp>("in-2", "127.0.0.1", 0);
 
     mgr.registerInbound(in1);
     mgr.registerInbound(in2);

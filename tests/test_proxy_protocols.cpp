@@ -11,7 +11,6 @@
 #include "hysteria2/hysteria2.hpp"
 #include "inbound.hpp"
 #include "kdf.hpp"
-#include "mixed/mixed.hpp"
 #include "outbound.hpp"
 #include "shadowsocks/shadowsocks.hpp"
 #include "shadowtls/shadowtls.hpp"
@@ -44,10 +43,6 @@ static_assert(MandatoryMethodConnection<HandlerInboundSocks>,
 static_assert(HandlerConstraint<HandlerInboundHttpProxy>, "HandlerInboundHttpProxy must satisfy HandlerConstraint");
 static_assert(MandatoryMethodConnection<HandlerInboundHttpProxy>,
               "HandlerInboundHttpProxy must satisfy MandatoryMethodConnection");
-
-static_assert(HandlerConstraint<HandlerInboundMixed>, "HandlerInboundMixed must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundMixed>,
-              "HandlerInboundMixed must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundTrojan>, "HandlerInboundTrojan must satisfy HandlerConstraint");
 static_assert(MandatoryMethodConnection<HandlerInboundTrojan>,
@@ -307,42 +302,7 @@ TEST(HandlerHttpProxyTest, BasicAuthCheck)
 }
 
 // =============================================================================
-// 4. Mixed 混合共端口代理 (HandlerInboundMixed) 测试
-// =============================================================================
-
-TEST(HandlerMixedTest, MultiplexSocksAndHttp)
-{
-    // 1. SOCKS5 客户端接入
-    {
-        HandlerInboundMixed handler;
-        feed(handler, std::vector<uint8_t>{0x05, 0x01, 0x00});
-        handler.handle();
-        EXPECT_EQ(handler.protocol(), MixedProtocolType::SOCKS5);
-    }
-
-    // 2. SOCKS4 客户端接入
-    {
-        HandlerInboundMixed handler;
-        feed(handler, std::vector<uint8_t>{0x04, 0x01, 0x00, 80, 1, 2, 3, 4, 0x00});
-        handler.handle();
-        EXPECT_EQ(handler.protocol(), MixedProtocolType::SOCKS4);
-    }
-
-    // 3. HTTP 客户端接入
-    {
-        HandlerInboundMixed handler;
-        std::string httpReq = "CONNECT 127.0.0.1:8443 HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n\r\n";
-        feed(handler, httpReq);
-        handler.handle();
-        EXPECT_EQ(handler.protocol(), MixedProtocolType::HTTP);
-        EXPECT_TRUE(handler.isEstablished());
-        ASSERT_TRUE(handler.targetAddress().has_value());
-        EXPECT_EQ(handler.targetAddress()->toString(), "127.0.0.1:8443");
-    }
-}
-
-// =============================================================================
-// 5. Trojan 代理协议 (HandlerInboundTrojan) 测试
+// 4. Trojan 代理协议 (HandlerInboundTrojan) 测试
 // =============================================================================
 
 TEST(HandlerTrojanTest, Sha224KeyHandshake)
