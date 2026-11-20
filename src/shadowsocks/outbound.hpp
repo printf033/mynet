@@ -22,8 +22,8 @@ namespace mynet
         std::string password_{};
 
     public:
-        OutboundShadowsocks(std::string tag, std::string serverHost, uint16_t serverPort,
-                            std::string method, std::string password, DialerOptions options = {})
+        OutboundShadowsocks(std::string tag, std::string serverHost, uint16_t serverPort, std::string method,
+                            std::string password, DialerOptions options = {})
             : OutboundBase(std::move(tag), "shadowsocks", std::move(options)),
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort),
@@ -39,7 +39,8 @@ namespace mynet
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
         {
-            return dialStreamHelper<handler::HandlerOutboundShadowsocks>(serverHost_, serverPort_, target, method_, password_);
+            return dialStreamHelper<handler::HandlerOutboundShadowsocks>(serverHost_, serverPort_, target, method_,
+                                                                         password_);
         }
 
         Result<int> dialDatagram(const handler::ProxyAddress &target) override

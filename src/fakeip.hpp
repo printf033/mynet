@@ -11,9 +11,9 @@
  * 4. 线程安全、LRU 自动淘汰机制与毫秒级双向极速索引 (Domain <-> FakeIP)。
  */
 
-#include "error.hpp"
-#include "configHolder.hpp"
 #include "address.hpp"
+#include "configHolder.hpp"
+#include "error.hpp"
 #include <arpa/inet.h>
 #include <cstdint>
 #include <list>
@@ -35,9 +35,9 @@ namespace mynet
     public:
         // 198.18.0.0/15 保留地址段定义
         static constexpr uint32_t kPoolStart = 0xC6120001; // 198.18.0.1
-        static constexpr uint32_t kPoolEnd   = 0xC613FFFE; // 198.19.255.254
-        static constexpr uint32_t kPoolMask  = 0xFFFE0000; // 255.254.0.0
-        static constexpr uint32_t kPoolNet   = 0xC6120000; // 198.18.0.0
+        static constexpr uint32_t kPoolEnd = 0xC613FFFE;   // 198.19.255.254
+        static constexpr uint32_t kPoolMask = 0xFFFE0000;  // 255.254.0.0
+        static constexpr uint32_t kPoolNet = 0xC6120000;   // 198.18.0.0
 
     private:
         mutable std::mutex mutex_{};
@@ -50,7 +50,10 @@ namespace mynet
         size_t maxCapacity_{65534};
 
     public:
-        explicit FakeIPPool(size_t maxCap = 65534) noexcept : maxCapacity_(maxCap) {}
+        explicit FakeIPPool(size_t maxCap = 65534) noexcept
+            : maxCapacity_(maxCap)
+        {
+        }
         ~FakeIPPool() noexcept = default;
 
         FakeIPPool(const FakeIPPool &) = delete;
@@ -207,7 +210,8 @@ namespace mynet
 
         void evictOldest()
         {
-            if (lruList_.empty()) return;
+            if (lruList_.empty())
+                return;
             const uint32_t oldestIp = lruList_.back();
             lruList_.pop_back();
             ipToLru_.erase(oldestIp);

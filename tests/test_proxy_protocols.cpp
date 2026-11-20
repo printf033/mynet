@@ -1,27 +1,30 @@
 #include "address.hpp"
 #include "block/block.hpp"
-#include "crypto.hpp"
+#include "cipher.hpp"
+#include "digest.hpp"
 #include "direct/direct.hpp"
 #include "dns/cache.hpp"
 #include "dns/dns.hpp"
 #include "dns/handler.hpp"
+#include "encoding.hpp"
 #include "http/http.hpp"
-#include "inbound.hpp"
-#include "outbound.hpp"
 #include "hysteria2/hysteria2.hpp"
+#include "inbound.hpp"
+#include "kdf.hpp"
 #include "mixed/mixed.hpp"
+#include "outbound.hpp"
 #include "shadowsocks/shadowsocks.hpp"
 #include "shadowtls/shadowtls.hpp"
 #include "snell/snell.hpp"
-#include "trojan/trojan.hpp"
-#include "tuic/tuic.hpp"
-#include "vless/vless.hpp"
-#include "vmess/vmess.hpp"
 #include "sniffer.hpp"
 #include "socks/socks.hpp"
 #include "socks/socks4.hpp"
 #include "socks/socks5.hpp"
 #include "transparent/transparent.hpp"
+#include "trojan/trojan.hpp"
+#include "tuic/tuic.hpp"
+#include "vless/vless.hpp"
+#include "vmess/vmess.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -31,50 +34,64 @@ using namespace mynet::handler;
 
 // 静态概念约束检验：全部代理协议处理器均必须严格满足 HandlerConstraint 与 MandatoryMethodConnection
 static_assert(HandlerConstraint<HandlerInboundSocks4>, "HandlerInboundSocks4 must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundSocks4>, "HandlerInboundSocks4 must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundSocks4>,
+              "HandlerInboundSocks4 must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundSocks>, "HandlerInboundSocks must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundSocks>, "HandlerInboundSocks must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundSocks>,
+              "HandlerInboundSocks must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundHttpProxy>, "HandlerInboundHttpProxy must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundHttpProxy>, "HandlerInboundHttpProxy must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundHttpProxy>,
+              "HandlerInboundHttpProxy must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundMixed>, "HandlerInboundMixed must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundMixed>, "HandlerInboundMixed must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundMixed>,
+              "HandlerInboundMixed must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundTrojan>, "HandlerInboundTrojan must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundTrojan>, "HandlerInboundTrojan must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundTrojan>,
+              "HandlerInboundTrojan must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundVless>, "HandlerInboundVless must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundVless>, "HandlerInboundVless must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundVless>,
+              "HandlerInboundVless must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundVmess>, "HandlerInboundVmess must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundVmess>, "HandlerInboundVmess must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundVmess>,
+              "HandlerInboundVmess must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundShadowsocks>, "HandlerInboundShadowsocks must satisfy HandlerConstraint");
 static_assert(MandatoryMethodConnection<HandlerInboundShadowsocks>,
               "HandlerInboundShadowsocks must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundShadowTls>, "HandlerInboundShadowTls must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundShadowTls>, "HandlerInboundShadowTls must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundShadowTls>,
+              "HandlerInboundShadowTls must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundSnell>, "HandlerInboundSnell must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundSnell>, "HandlerInboundSnell must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundSnell>,
+              "HandlerInboundSnell must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundHysteria2>, "HandlerInboundHysteria2 must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundHysteria2>, "HandlerInboundHysteria2 must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundHysteria2>,
+              "HandlerInboundHysteria2 must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundTuic>, "HandlerInboundTuic must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundTuic>, "HandlerInboundTuic must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundTuic>,
+              "HandlerInboundTuic must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundRedirect>, "HandlerInboundRedirect must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundRedirect>, "HandlerInboundRedirect must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundRedirect>,
+              "HandlerInboundRedirect must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundDirect>, "HandlerInboundDirect must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundDirect>, "HandlerInboundDirect must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundDirect>,
+              "HandlerInboundDirect must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundBlock>, "HandlerInboundBlock must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundBlock>, "HandlerInboundBlock must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundBlock>,
+              "HandlerInboundBlock must satisfy MandatoryMethodConnection");
 
 namespace
 {
@@ -331,7 +348,7 @@ TEST(HandlerMixedTest, MultiplexSocksAndHttp)
 TEST(HandlerTrojanTest, Sha224KeyHandshake)
 {
     std::string pass = "trojan-password";
-    std::string hexKey = crypto::sha224Hex(pass);
+    std::string hexKey = digest::sha224Hex(pass);
     ASSERT_EQ(hexKey.size(), 56u);
 
     HandlerInboundTrojan handler(pass);
@@ -380,7 +397,7 @@ TEST(HandlerTrojanTest, Sha224KeyHandshake)
 TEST(HandlerTrojanTest, WrongPasswordRejected)
 {
     HandlerInboundTrojan handler("correct-password");
-    std::string wrongKey = crypto::sha224Hex("wrong-password");
+    std::string wrongKey = digest::sha224Hex("wrong-password");
 
     std::vector<uint8_t> req;
     req.insert(req.end(), wrongKey.begin(), wrongKey.end());
@@ -405,7 +422,7 @@ TEST(HandlerTrojanTest, WrongPasswordRejected)
 TEST(HandlerVlessTest, UuidConnectHandshake)
 {
     std::string uuidStr = "a1b2c3d4-e5f6-7890-abcd-ef0123456789";
-    auto parsedUuid = crypto::parseUuid(uuidStr);
+    auto parsedUuid = encoding::parseUuid(uuidStr);
     ASSERT_TRUE(parsedUuid.has_value());
 
     HandlerInboundVless handler(uuidStr);
@@ -553,7 +570,7 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
     // 3. 派生子密钥 subkey = HKDF-SHA1
     static constexpr uint8_t kInfo[] = {'s', 's', '-', 's', 'u', 'b', 'k', 'e', 'y'};
     std::vector<uint8_t> subkey(16);
-    ASSERT_TRUE(crypto::hkdfSha1(masterKey, salt, kInfo, subkey));
+    ASSERT_TRUE(kdf::hkdfSha1(masterKey, salt, kInfo, subkey));
 
     // 4. 目标地址载荷
     std::vector<uint8_t> plainPayload;
@@ -565,7 +582,7 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
                                        static_cast<uint8_t>(plainPayload.size() & 0xFF)};
     std::vector<uint8_t> cipherLen;
     std::array<uint8_t, 16> lenTag{};
-    ASSERT_TRUE(crypto::aeadEncrypt(EVP_aes_128_gcm(), subkey, nonce, lenBytes, cipherLen, lenTag));
+    ASSERT_TRUE(cipher::aeadEncrypt(EVP_aes_128_gcm(), subkey, nonce, lenBytes, cipherLen, lenTag));
 
     // 自增 nonce
     nonce[0]++;
@@ -573,7 +590,7 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
     // 6. 加密载荷块
     std::vector<uint8_t> cipherPayload;
     std::array<uint8_t, 16> payloadTag{};
-    ASSERT_TRUE(crypto::aeadEncrypt(EVP_aes_128_gcm(), subkey, nonce, plainPayload, cipherPayload, payloadTag));
+    ASSERT_TRUE(cipher::aeadEncrypt(EVP_aes_128_gcm(), subkey, nonce, plainPayload, cipherPayload, payloadTag));
 
     // 7. 组装发往服务端的全量字节流：[Salt(16)][CipherLen(2)][LenTag(16)][CipherPayload(N)][PayloadTag(16)]
     std::vector<uint8_t> packet;
@@ -712,7 +729,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
 
         std::vector<uint8_t> random(32, 0x33);
         std::vector<uint8_t> hmacKey(pass.begin(), pass.end());
-        auto hmacRes = crypto::hmacSha256(hmacKey, random);
+        auto hmacRes = digest::hmacSha256(hmacKey, random);
         ASSERT_TRUE(hmacRes.has_value());
 
         std::vector<uint8_t> validSid(hmacRes->begin(), hmacRes->end());
@@ -815,7 +832,7 @@ TEST(HandlerHysteria2Test, AuthAndConnectSuccess)
 TEST(HandlerTuicTest, ConnectSuccess)
 {
     std::string uuidStr = "12345678-1234-1234-1234-123456789abc";
-    auto uuid = crypto::parseUuid(uuidStr);
+    auto uuid = encoding::parseUuid(uuidStr);
     ASSERT_TRUE(uuid.has_value());
 
     HandlerInboundTuic handler(uuidStr);
@@ -884,20 +901,14 @@ class MockRedirectHandler : public HandlerInboundRedirect
 {
 public:
     ProxyAddress mockDst = ProxyAddress::fromHostPort("104.16.132.229", 443);
-    std::optional<ProxyAddress> fetchOriginalDst() override
-    {
-        return mockDst;
-    }
+    std::optional<ProxyAddress> fetchOriginalDst() override { return mockDst; }
 };
 
 class MockTProxyHandler : public HandlerInboundTProxy
 {
 public:
     ProxyAddress mockDst = ProxyAddress::fromHostPort("1.1.1.1", 80);
-    std::optional<ProxyAddress> fetchOriginalDst() override
-    {
-        return mockDst;
-    }
+    std::optional<ProxyAddress> fetchOriginalDst() override { return mockDst; }
 };
 
 static std::vector<uint8_t> makeTlsClientHello(std::string_view serverName)
@@ -970,11 +981,13 @@ TEST(HandlerTransparentTest, RedirectWithTlsSniSniffing)
     ProxyAddress reportedTarget{};
     bool callbackInvoked = false;
 
-    handler.setOnRequest([&](uint8_t cmd, const ProxyAddress &target) {
-        EXPECT_EQ(cmd, 0x01);
-        reportedTarget = target;
-        callbackInvoked = true;
-    });
+    handler.setOnRequest(
+        [&](uint8_t cmd, const ProxyAddress &target)
+        {
+            EXPECT_EQ(cmd, 0x01);
+            reportedTarget = target;
+            callbackInvoked = true;
+        });
 
     // 初始 resolve 原始目的
     handler.handle();
@@ -998,10 +1011,12 @@ TEST(HandlerTransparentTest, TProxyWithHttpHostSniffing)
     ProxyAddress reportedTarget{};
     bool callbackInvoked = false;
 
-    handler.setOnRequest([&](uint8_t, const ProxyAddress &target) {
-        reportedTarget = target;
-        callbackInvoked = true;
-    });
+    handler.setOnRequest(
+        [&](uint8_t, const ProxyAddress &target)
+        {
+            reportedTarget = target;
+            callbackInvoked = true;
+        });
 
     handler.handle();
     EXPECT_EQ(handler.stage(), TransparentStage::SNIFFING);
@@ -1028,10 +1043,12 @@ TEST(HandlerTransparentTest, FallbackToDnsReverseCache)
     ProxyAddress reportedTarget{};
     bool callbackInvoked = false;
 
-    handler.setOnRequest([&](uint8_t, const ProxyAddress &target) {
-        reportedTarget = target;
-        callbackInvoked = true;
-    });
+    handler.setOnRequest(
+        [&](uint8_t, const ProxyAddress &target)
+        {
+            reportedTarget = target;
+            callbackInvoked = true;
+        });
 
     handler.handle();
     // 注入非 TLS/HTTP 的私有协议数据
@@ -1061,7 +1078,8 @@ TEST(HandlerTransparentTest, DatagramTProxyPacketHandling)
     ::inet_pton(AF_INET, "8.8.8.8", &origDst.sin_addr);
 
     HandlerInboundDatagramTProxy tproxy(
-        [&](const sockaddr_in &client, const ProxyAddress &target, const char *data, size_t n) {
+        [&](const sockaddr_in &client, const ProxyAddress &target, const char *data, size_t n)
+        {
             packetReceived = true;
             EXPECT_EQ(client.sin_port, htons(12345));
             EXPECT_EQ(target.type, AddressType::DOMAIN);
@@ -1072,15 +1090,10 @@ TEST(HandlerTransparentTest, DatagramTProxyPacketHandling)
         });
 
     // 构造发往 8.8.8.8:53 的 DNS 查询包
-    std::vector<uint8_t> dnsQuery = {
-        0x33, 0x44, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        6, 'm', 'y', 't', 'e', 's', 't',
-        3, 'o', 'r', 'g', 0x00,
-        0x00, 0x01, 0x00, 0x01
-    };
+    std::vector<uint8_t> dnsQuery = {0x33, 0x44, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+                                     0x00, 0x00, 6,    'm',  'y',  't',  'e',  's',  't',  3,
+                                     'o',  'r',  'g',  0x00, 0x00, 0x01, 0x00, 0x01};
 
-    tproxy.onDatagramWithDst(clientPeer, origDst,
-                             reinterpret_cast<const char *>(dnsQuery.data()), dnsQuery.size());
+    tproxy.onDatagramWithDst(clientPeer, origDst, reinterpret_cast<const char *>(dnsQuery.data()), dnsQuery.size());
     EXPECT_TRUE(packetReceived);
 }

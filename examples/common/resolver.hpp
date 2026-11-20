@@ -5,9 +5,9 @@
  * @brief 异步与非阻塞 DNS 域名解析器（RFC 1035），支持缓存、TTL 与多对端解析。
  */
 
-#include "error.hpp"
 #include "address.hpp"
 #include "dns/dns.hpp"
+#include "error.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
@@ -119,8 +119,8 @@ namespace mynet
             }
             if (!it->second.ipv6.empty())
             {
-                return handler::ProxyAddress::fromIPv6(
-                    reinterpret_cast<const uint8_t *>(&it->second.ipv6.front()), port);
+                return handler::ProxyAddress::fromIPv6(reinterpret_cast<const uint8_t *>(&it->second.ipv6.front()),
+                                                       port);
             }
             return std::nullopt;
         }

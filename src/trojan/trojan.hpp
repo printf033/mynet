@@ -6,7 +6,8 @@
  */
 
 #include "../address.hpp"
-#include "../crypto.hpp"
+#include "../digest.hpp"
+#include "../encoding.hpp"
 #include "../inbound.hpp"
 #include "../outbound.hpp"
 #include <cstdint>
@@ -56,23 +57,20 @@ namespace mynet::handler
         void setPassword(std::string_view password)
         {
             validHexKeys_.clear();
-            validHexKeys_.push_back(crypto::sha224Hex(password));
+            validHexKeys_.push_back(digest::sha224Hex(password));
         }
 
         /**
          * @brief 添加一个合法用户密码
          */
-        void addUser(std::string_view password) { validHexKeys_.push_back(crypto::sha224Hex(password)); }
+        void addUser(std::string_view password) { validHexKeys_.push_back(digest::sha224Hex(password)); }
 
         /**
          * @brief 自定义鉴权回调（供复杂数据库/鉴权系统使用）
          */
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
 
-        void reset() noexcept override
-        {
-            HandlerInboundConnection::reset();
-        }
+        void reset() noexcept override { HandlerInboundConnection::reset(); }
 
         void handle() override
         {
@@ -117,7 +115,7 @@ namespace mynet::handler
             {
                 for (const auto &v : validHexKeys_)
                 {
-                    if (crypto::constantTimeEqual(keySpan, v))
+                    if (encoding::constantTimeEqual(keySpan, v))
                     {
                         authOk = true;
                         break;
@@ -192,14 +190,11 @@ namespace mynet::handler
         HandlerOutboundTrojan() noexcept = default;
         HandlerOutboundTrojan(std::string_view password, const ProxyAddress &target)
             : HandlerOutboundConnection(target),
-              hexKey_(crypto::sha224Hex(password))
+              hexKey_(digest::sha224Hex(password))
         {
         }
 
-        void setPassword(std::string_view password)
-        {
-            hexKey_ = crypto::sha224Hex(password);
-        }
+        void setPassword(std::string_view password) { hexKey_ = digest::sha224Hex(password); }
 
         void reset() noexcept override
         {

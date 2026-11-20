@@ -16,8 +16,7 @@ namespace mynet::handler::sniffing
             return false;
         }
         const uint8_t contentType = data[0];
-        if (contentType != 20 && contentType != 21 && contentType != 22 &&
-            contentType != 23 && contentType != 25)
+        if (contentType != 20 && contentType != 21 && contentType != 22 && contentType != 23 && contentType != 25)
         {
             return false;
         }
@@ -27,7 +26,8 @@ namespace mynet::handler::sniffing
         {
             return false;
         }
-        return (verMinor == 0xff || verMinor == 0xfd || verMinor == 0xfc); // DTLS 1.0 (0xFEFF), DTLS 1.2 (0xFEFD), or DTLS 1.3 (0xFEFC, RFC 9147)
+        return (verMinor == 0xff || verMinor == 0xfd ||
+                verMinor == 0xfc); // DTLS 1.0 (0xFEFF), DTLS 1.2 (0xFEFD), or DTLS 1.3 (0xFEFC, RFC 9147)
     }
 
 } // namespace mynet::handler::sniffing

@@ -47,6 +47,7 @@ mynet_unit_test(test_ruleset_srs)
 mynet_unit_test(test_transport)
 mynet_unit_test(test_vless_reality)
 mynet_unit_test(test_singbox_features)
+mynet_unit_test(test_singbox_interop)
 
 if(MYNET_ENABLE_LUA)
     add_executable(test_config_lua test_config_lua.cpp)

@@ -1,5 +1,5 @@
-#include "connection.hpp"
 #include "config/tls.hpp"
+#include "connection.hpp"
 #include <filesystem>
 #include <gtest/gtest.h>
 

@@ -5,9 +5,9 @@
  * @brief 入站协议状态机处理器基类（面向流式连接 HandlerInboundConnection 与面向数据报 HandlerInboundDatagram）。
  */
 
+#include "address.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
-#include "address.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -18,9 +18,9 @@ namespace mynet::handler
 
     enum class InboundStage : uint8_t
     {
-        HANDSHAKE,  ///< 正在接收并解析入站握手报文/鉴权/提取目标地址
-        STREAMING,  ///< 握手完成，进入数据流式透传/内核零拷贝转发阶段
-        ERROR       ///< 鉴权失败或协议格式畸变
+        HANDSHAKE, ///< 正在接收并解析入站握手报文/鉴权/提取目标地址
+        STREAMING, ///< 握手完成，进入数据流式透传/内核零拷贝转发阶段
+        ERROR      ///< 鉴权失败或协议格式畸变
     };
 
     /**
@@ -65,7 +65,10 @@ namespace mynet::handler
         [[nodiscard]] inline InboundStage stage() const noexcept { return stage_; }
         [[nodiscard]] inline bool isEstablished() const noexcept { return stage_ == InboundStage::STREAMING; }
         [[nodiscard]] inline uint8_t command() const noexcept { return command_; }
-        [[nodiscard]] inline const std::optional<ProxyAddress> &targetAddress() const noexcept { return targetAddress_; }
+        [[nodiscard]] inline const std::optional<ProxyAddress> &targetAddress() const noexcept
+        {
+            return targetAddress_;
+        }
         [[nodiscard]] inline const ProxyAddress &target() const noexcept
         {
             static const ProxyAddress kEmpty{};

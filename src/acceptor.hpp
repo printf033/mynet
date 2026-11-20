@@ -1,8 +1,8 @@
 #pragma once
 
+#include "config/log.hpp"
 #include "constraints.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
 #include <arpa/inet.h>
 #include <concepts>
 #include <csignal>
@@ -39,7 +39,8 @@ namespace mynet
         AcceptorBase &operator=(const AcceptorBase &) = delete;
 
         AcceptorBase(AcceptorBase &&other) noexcept
-            : fd(other.fd), addr(other.addr)
+            : fd(other.fd),
+              addr(other.addr)
         {
             other.fd = -1;
             other.addr = {};
@@ -95,8 +96,7 @@ namespace mynet
 
             sockaddr_in clientAddr{};
             socklen_t len = sizeof(clientAddr);
-            int clientFd = ::accept4(fd, reinterpret_cast<sockaddr *>(&clientAddr), &len,
-                                     SOCK_NONBLOCK | SOCK_CLOEXEC);
+            int clientFd = ::accept4(fd, reinterpret_cast<sockaddr *>(&clientAddr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (clientFd < 0) [[unlikely]]
             {
                 return std::unexpected(ERR::ACCEPT_FAILED);
@@ -144,8 +144,7 @@ namespace mynet
             constexpr int opt = 1;
             if (reuseAddr)
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-                    [[unlikely]]
+                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
                 {
                     LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
                     reset();
@@ -154,16 +153,14 @@ namespace mynet
             }
             if (reusePort)
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
-                    [[unlikely]]
+                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
                 {
                     LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
                     reset();
                     return std::unexpected(ERR::SETSOCKOPT_FAILED);
                 }
             }
-            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) <
-                0) [[unlikely]]
+            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0) [[unlikely]]
             {
                 LOG_ERROR("listenTcp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
                 reset();
@@ -211,29 +208,25 @@ namespace mynet
             }
 
             constexpr int opt = 1;
-            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-                [[unlikely]]
+            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
-            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0)
-                [[unlikely]]
+            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
-            if (::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0)
-                [[unlikely]]
+            if (::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0) [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: setsockopt(SO_BROADCAST) failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::SETSOCKOPT_FAILED);
             }
-            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) <
-                0) [[unlikely]]
+            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0) [[unlikely]]
             {
                 LOG_ERROR("listenUdp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
                 reset();

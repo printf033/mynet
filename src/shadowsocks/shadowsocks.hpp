@@ -5,15 +5,16 @@
  * @brief Shadowsocks AEAD 代理协议服务端状态机处理器（RFC/SIP002 规范）。
  */
 
-#include "../connection.hpp"
 #include "../address.hpp"
-#include "../crypto.hpp"
+#include "../cipher.hpp"
+#include "../connection.hpp"
 #include "../inbound.hpp"
+#include "../kdf.hpp"
 #include "../outbound.hpp"
-#include <openssl/rand.h>
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <openssl/rand.h>
 #include <optional>
 #include <span>
 #include <string>
@@ -267,7 +268,7 @@ namespace mynet::handler
             // 派生子密钥 subkey = HKDF-SHA1(masterKey, salt, "ss-subkey")
             static constexpr uint8_t kInfo[] = {'s', 's', '-', 's', 'u', 'b', 'k', 'e', 'y'};
             rxSubkey_.resize(keyLen_);
-            if (!crypto::hkdfSha1(masterKey_, salt, kInfo, rxSubkey_))
+            if (!kdf::hkdfSha1(masterKey_, salt, kInfo, rxSubkey_))
             {
                 onParseError("Shadowsocks: HKDF subkey derivation failed");
                 ssStage_ = ShadowsocksStage::ERROR;
@@ -298,7 +299,7 @@ namespace mynet::handler
             std::memcpy(tag.data(), data + 2, 16);
 
             std::vector<uint8_t> plainLen{};
-            if (!crypto::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherLen, tag, plainLen))
+            if (!cipher::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherLen, tag, plainLen))
             {
                 onParseError("Shadowsocks: Decrypt chunk length failed");
                 ssStage_ = ShadowsocksStage::ERROR;
@@ -349,7 +350,7 @@ namespace mynet::handler
             std::memcpy(tag.data(), data + currentChunkLen_, 16);
 
             std::vector<uint8_t> plainPayload{};
-            if (!crypto::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherPayload, tag, plainPayload))
+            if (!cipher::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherPayload, tag, plainPayload))
             {
                 onParseError("Shadowsocks: Decrypt chunk payload failed");
                 ssStage_ = ShadowsocksStage::ERROR;
@@ -380,6 +381,13 @@ namespace mynet::handler
                 stage_ = InboundStage::STREAMING;
                 onMessageComplete();
 
+                if (plainPayload.size() > addrConsumed)
+                {
+                    const char *extra = reinterpret_cast<const char *>(plainPayload.data() + addrConsumed);
+                    size_t extraLen = plainPayload.size() - addrConsumed;
+                    [[maybe_unused]] auto _ = appendRequest(extra, static_cast<ssize_t>(extraLen));
+                }
+
                 if (requestCallback_)
                 {
                     requestCallback_(0x01, *targetAddress_);
@@ -387,6 +395,11 @@ namespace mynet::handler
             }
             else
             {
+                if (!plainPayload.empty())
+                {
+                    const char *p = reinterpret_cast<const char *>(plainPayload.data());
+                    [[maybe_unused]] auto _ = appendRequest(p, static_cast<ssize_t>(plainPayload.size()));
+                }
                 ssStage_ = ShadowsocksStage::CHUNK_LEN;
             }
 
@@ -475,7 +488,7 @@ namespace mynet::handler
 
             static constexpr uint8_t kInfo[] = {'s', 's', '-', 's', 'u', 'b', 'k', 'e', 'y'};
             std::vector<uint8_t> subkey(keyLen_);
-            if (!crypto::hkdfSha1(masterKey_, salt, kInfo, subkey))
+            if (!kdf::hkdfSha1(masterKey_, salt, kInfo, subkey))
             {
                 onParseError("HandlerOutboundShadowsocks: HKDF subkey derivation failed");
                 return;
@@ -484,25 +497,29 @@ namespace mynet::handler
             std::array<uint8_t, 12> nonce{};
             std::memset(nonce.data(), 0, nonce.size());
 
-            const EVP_CIPHER *cipher = (cipherType_ == ShadowsocksCipher::AES_256_GCM) ? EVP_aes_256_gcm() :
-                                       (cipherType_ == ShadowsocksCipher::CHACHA20_POLY1305) ? EVP_chacha20_poly1305() :
-                                       EVP_aes_128_gcm();
+            const EVP_CIPHER *cipher = (cipherType_ == ShadowsocksCipher::AES_256_GCM)         ? EVP_aes_256_gcm()
+                                       : (cipherType_ == ShadowsocksCipher::CHACHA20_POLY1305) ? EVP_chacha20_poly1305()
+                                                                                               : EVP_aes_128_gcm();
 
             uint16_t plen = htons(static_cast<uint16_t>(encodedTarget.size()));
             std::span<const uint8_t> plainLenSpan(reinterpret_cast<const uint8_t *>(&plen), 2);
             std::vector<uint8_t> cipherLen;
             std::array<uint8_t, 16> lenTag{};
-            if (!crypto::aeadEncrypt(cipher, subkey, nonce, plainLenSpan, cipherLen, lenTag))
+            if (!cipher::aeadEncrypt(cipher, subkey, nonce, plainLenSpan, cipherLen, lenTag))
             {
                 onParseError("HandlerOutboundShadowsocks: Encrypt length failed");
                 return;
             }
-            for (size_t i = 0; i < nonce.size(); ++i) { if (++nonce[i] != 0) break; }
+            for (size_t i = 0; i < nonce.size(); ++i)
+            {
+                if (++nonce[i] != 0)
+                    break;
+            }
 
             std::span<const uint8_t> payloadSpan(encodedTarget.data(), encodedTarget.size());
             std::vector<uint8_t> cipherPayload;
             std::array<uint8_t, 16> payloadTag{};
-            if (!crypto::aeadEncrypt(cipher, subkey, nonce, payloadSpan, cipherPayload, payloadTag))
+            if (!cipher::aeadEncrypt(cipher, subkey, nonce, payloadSpan, cipherPayload, payloadTag))
             {
                 onParseError("HandlerOutboundShadowsocks: Encrypt payload failed");
                 return;

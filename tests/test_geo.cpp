@@ -39,7 +39,7 @@ TEST(GeoTest, GeoIpPrivateAndCountryMatching)
     ::inet_pton(AF_INET, "223.5.5.5", &cnIp2);       // 223.0.0.0/8
     EXPECT_TRUE(matcher.matches(cnIp1, "cn"));
     EXPECT_TRUE(matcher.matches(cnIp2, "cn"));
-    EXPECT_FALSE(matcher.matches(pubIp, "cn"));      // 8.8.8.8 是 US
+    EXPECT_FALSE(matcher.matches(pubIp, "cn")); // 8.8.8.8 是 US
 
     // 3. 动态扩展 CIDR 测试
     matcher.addCidr("us", "8.8.8.0/24");

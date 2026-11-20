@@ -22,8 +22,8 @@ namespace mynet
         std::string password_{};
 
     public:
-        OutboundSocks5(std::string tag, std::string serverHost, uint16_t serverPort,
-                       std::string username = "", std::string password = "", DialerOptions options = {})
+        OutboundSocks5(std::string tag, std::string serverHost, uint16_t serverPort, std::string username = "",
+                       std::string password = "", DialerOptions options = {})
             : OutboundBase(std::move(tag), "socks5", std::move(options)),
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort),

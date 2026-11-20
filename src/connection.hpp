@@ -3,10 +3,10 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "config/log.hpp"
 #include "configHolder.hpp"
 #include "constraints.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
 #include "requestBuffer.hpp"
 #include "responseQueue.hpp"
 #include <cerrno>
@@ -212,9 +212,12 @@ namespace mynet
 
         virtual ~HandlerConnection() noexcept = default;
 
-        HandlerConnection(const HandlerConnection &) = delete; // a connection handler holds parser state bound to one connection
-        HandlerConnection &operator=(const HandlerConnection &) = delete; // a connection handler holds parser state bound to one connection
-        HandlerConnection(HandlerConnection &&) = delete; // a connection handler holds parser state bound to one connection
+        HandlerConnection(const HandlerConnection &) =
+            delete; // a connection handler holds parser state bound to one connection
+        HandlerConnection &operator=(const HandlerConnection &) =
+            delete; // a connection handler holds parser state bound to one connection
+        HandlerConnection(HandlerConnection &&) =
+            delete; // a connection handler holds parser state bound to one connection
         HandlerConnection &
         operator=(HandlerConnection &&) = delete; // a connection handler holds parser state bound to one connection
 
@@ -655,10 +658,14 @@ namespace mynet
         Connection() noexcept = default;
         ~Connection() noexcept { reset(); }
 
-        Connection(const Connection &) = delete; // a connection owns a socket, its TLS state and its handler; there is nothing to share
-        Connection &operator=(const Connection &) = delete; // a connection owns a socket, its TLS state and its handler; there is nothing to share
-        Connection(Connection &&) noexcept = delete; // a connection owns a socket, its TLS state and its handler; it stays put in its session
-        Connection &operator=(Connection &&) noexcept = delete; // a connection owns a socket, its TLS state and its handler; it stays put in its session
+        Connection(const Connection &) =
+            delete; // a connection owns a socket, its TLS state and its handler; there is nothing to share
+        Connection &operator=(const Connection &) =
+            delete; // a connection owns a socket, its TLS state and its handler; there is nothing to share
+        Connection(Connection &&) noexcept =
+            delete; // a connection owns a socket, its TLS state and its handler; it stays put in its session
+        Connection &operator=(Connection &&) noexcept =
+            delete; // a connection owns a socket, its TLS state and its handler; it stays put in its session
 
         inline void reset() noexcept
         {
@@ -741,10 +748,7 @@ namespace mynet
             return config_ ? *config_ : *getMynetConfigShared();
         }
 
-        [[nodiscard]] inline const std::shared_ptr<const MynetConfig> &configShared() const noexcept
-        {
-            return config_;
-        }
+        [[nodiscard]] inline const std::shared_ptr<const MynetConfig> &configShared() const noexcept { return config_; }
 
         [[nodiscard]] inline uint32_t configGeneration() const noexcept
         {

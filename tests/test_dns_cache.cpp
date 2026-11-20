@@ -95,21 +95,23 @@ TEST(DnsReverseCacheTest, ConcurrentAccess)
 
     for (int t = 0; t < 8; ++t)
     {
-        workers.emplace_back([t, &cache]() {
-            for (int i = 0; i < 200; ++i)
+        workers.emplace_back(
+            [t, &cache]()
             {
-                in_addr ip{};
-                ip.s_addr = htonl((10 << 24) | (t << 16) | (i & 0xFFFF));
-                std::string dom = "worker-" + std::to_string(t) + ".test";
-                cache.insert(ip, dom, 60);
-
-                auto res = cache.lookup(ip);
-                if (res.has_value())
+                for (int i = 0; i < 200; ++i)
                 {
-                    EXPECT_EQ(*res, dom);
+                    in_addr ip{};
+                    ip.s_addr = htonl((10 << 24) | (t << 16) | (i & 0xFFFF));
+                    std::string dom = "worker-" + std::to_string(t) + ".test";
+                    cache.insert(ip, dom, 60);
+
+                    auto res = cache.lookup(ip);
+                    if (res.has_value())
+                    {
+                        EXPECT_EQ(*res, dom);
+                    }
                 }
-            }
-        });
+            });
     }
 
     for (auto &w : workers)
@@ -210,19 +212,19 @@ TEST(DnsReverseCacheTest, DnsPackedResponseCache)
 
     // 构造一个简单的原生 DNS 响应线缆字节流 (ID = 0x1122)
     std::vector<uint8_t> mockWire = {
-        0x11, 0x22,             // ID
-        0x81, 0x80,             // Flags: Standard query response, No error
-        0x00, 0x01,             // QDCOUNT = 1
-        0x00, 0x01,             // ANCOUNT = 1
-        0x00, 0x00,             // NSCOUNT = 0
-        0x00, 0x00,             // ARCOUNT = 0
-        0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00, // example.com
-        0x00, 0x01, 0x00, 0x01, // QTYPE=A, QCLASS=IN
-        0xc0, 0x0c,             // Pointer to example.com
-        0x00, 0x01, 0x00, 0x01, // TYPE=A, CLASS=IN
-        0x00, 0x00, 0x00, 0x3c, // TTL = 60s
-        0x00, 0x04,             // RDLENGTH = 4
-        0x5d, 0xd0, 0x01, 0x01  // 93.208.1.1
+        0x11, 0x22, // ID
+        0x81, 0x80, // Flags: Standard query response, No error
+        0x00, 0x01, // QDCOUNT = 1
+        0x00, 0x01, // ANCOUNT = 1
+        0x00, 0x00, // NSCOUNT = 0
+        0x00, 0x00, // ARCOUNT = 0
+        0x07, 'e',  'x',  'a',  'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00, // example.com
+        0x00, 0x01, 0x00, 0x01,                                                // QTYPE=A, QCLASS=IN
+        0xc0, 0x0c,                                                            // Pointer to example.com
+        0x00, 0x01, 0x00, 0x01,                                                // TYPE=A, CLASS=IN
+        0x00, 0x00, 0x00, 0x3c,                                                // TTL = 60s
+        0x00, 0x04,                                                            // RDLENGTH = 4
+        0x5d, 0xd0, 0x01, 0x01                                                 // 93.208.1.1
     };
 
     packedCache.put("example.com", 1, std::span<const uint8_t>(mockWire), 60);
@@ -321,24 +323,21 @@ TEST(DnsReverseCacheTest, Rfc5452SecurityValidation)
 {
     // 构造请求报文 queryWire (QNAME = example.com, QTYPE = A, QCLASS = IN)
     std::vector<uint8_t> queryWire = {
-        0x12, 0x34,             // ID
-        0x01, 0x00,             // Flags: Standard query
-        0x00, 0x01,             // QDCOUNT = 1
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x00, 0x01, 0x00, 0x01  // QTYPE=1, QCLASS=1
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags: Standard query
+        0x00, 0x01, // QDCOUNT = 1
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',  'm', 'p',
+        'l',  'e',  0x03, 'c',  'o',  'm',  0x00, 0x00, 0x01, 0x00, 0x01 // QTYPE=1, QCLASS=1
     };
 
     // 构造完全匹配的响应报文 respWire
     std::vector<uint8_t> respWire = {
-        0x12, 0x34,             // ID
-        0x81, 0x80,             // Flags: Response
-        0x00, 0x01,             // QDCOUNT = 1
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x00, 0x01, 0x00, 0x01, // QTYPE=1, QCLASS=1
-        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04
-    };
+        0x12, 0x34, // ID
+        0x81, 0x80, // Flags: Response
+        0x00, 0x01, // QDCOUNT = 1
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',  'm',  'p',  'l',  'e',  0x03, 'c',
+        'o',  'm',  0x00, 0x00, 0x01, 0x00, 0x01, // QTYPE=1, QCLASS=1
+        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04};
 
     EXPECT_TRUE(DnsSecurityValidator::questionEchoMatches(queryWire, respWire));
 
@@ -362,17 +361,13 @@ TEST(DnsReverseCacheTest, Rfc5452SecurityValidation)
 TEST(DnsReverseCacheTest, TruncateDnsResponse)
 {
     // 构造超长响应报文 (大于 32 字节)
-    std::vector<uint8_t> longResp = {
-        0x12, 0x34,
-        0x81, 0x80, // TC = 0
-        0x00, 0x01, // QDCOUNT = 1
-        0x00, 0x02, // ANCOUNT = 2
-        0x00, 0x00, 0x00, 0x00,
-        0x04, 't', 'e', 's', 't', 0x00,
-        0x00, 0x01, 0x00, 0x01,
-        // 伪造 30 字节额外应答数据
-        0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9
-    };
+    std::vector<uint8_t> longResp = {0x12, 0x34, 0x81, 0x80, // TC = 0
+                                     0x00, 0x01,             // QDCOUNT = 1
+                                     0x00, 0x02,             // ANCOUNT = 2
+                                     0x00, 0x00, 0x00, 0x00, 0x04, 't', 'e', 's', 't', 0x00, 0x00, 0x01, 0x00, 0x01,
+                                     // 伪造 30 字节额外应答数据
+                                     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7,
+                                     8, 9};
 
     // 限制缓冲区上限为 25 字节，强制触发截断
     auto truncated = truncateDnsResponse(longResp, 25);
@@ -382,12 +377,16 @@ TEST(DnsReverseCacheTest, TruncateDnsResponse)
     EXPECT_TRUE((truncated[2] & 0x02) != 0);
 
     // 验证 ANCOUNT, NSCOUNT, ARCOUNT 被清空为 0
-    EXPECT_EQ(truncated[6], 0); EXPECT_EQ(truncated[7], 0);
-    EXPECT_EQ(truncated[8], 0); EXPECT_EQ(truncated[9], 0);
-    EXPECT_EQ(truncated[10], 0); EXPECT_EQ(truncated[11], 0);
+    EXPECT_EQ(truncated[6], 0);
+    EXPECT_EQ(truncated[7], 0);
+    EXPECT_EQ(truncated[8], 0);
+    EXPECT_EQ(truncated[9], 0);
+    EXPECT_EQ(truncated[10], 0);
+    EXPECT_EQ(truncated[11], 0);
 
     // 验证 Question 段完整保留
-    EXPECT_EQ(truncated[4], 0); EXPECT_EQ(truncated[5], 1); // QDCOUNT = 1
+    EXPECT_EQ(truncated[4], 0);
+    EXPECT_EQ(truncated[5], 1); // QDCOUNT = 1
 }
 
 // =============================================================================

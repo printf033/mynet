@@ -5,8 +5,9 @@
  * @brief RFC 6455 WebSocket 协议编解码与会话实现
  */
 
+#include "../digest.hpp"
+#include "../encoding.hpp"
 #include "transport.hpp"
-#include "../crypto.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -49,12 +50,13 @@ namespace mynet::transport::ws
     {
         std::string combined(secKey);
         combined.append(kWsGuid);
-        auto hash = mynet::handler::crypto::sha1(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(combined.data()), combined.size()));
+        auto hash = mynet::digest::sha1(
+            std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(combined.data()), combined.size()));
         if (!hash.has_value())
         {
             return {};
         }
-        return mynet::handler::crypto::base64Encode(std::span<const uint8_t>(hash->data(), hash->size()));
+        return mynet::encoding::base64Encode(std::span<const uint8_t>(hash->data(), hash->size()));
     }
 
     /**
@@ -71,16 +73,14 @@ namespace mynet::transport::ws
                 b = static_cast<uint8_t>(rand() & 0xFF);
             }
         }
-        return mynet::handler::crypto::base64Encode(std::span<const uint8_t>(randomBytes.data(), randomBytes.size()));
+        return mynet::encoding::base64Encode(std::span<const uint8_t>(randomBytes.data(), randomBytes.size()));
     }
 
     /**
      * @brief 构建客户端 HTTP/1.1 Upgrade 握手报文
      */
-    [[nodiscard]] inline std::string buildClientHandshake(std::string_view path,
-                                                          std::string_view host,
-                                                          std::string_view key,
-                                                          std::string_view earlyData = {})
+    [[nodiscard]] inline std::string buildClientHandshake(std::string_view path, std::string_view host,
+                                                          std::string_view key, std::string_view earlyData = {})
     {
         std::string req;
         req.reserve(256 + earlyData.size());
@@ -246,7 +246,8 @@ namespace mynet::transport::ws
             return false;
         }
         auto lineEnd = response.find("\r\n", acceptPos);
-        auto val = response.substr(acceptPos + 21, (lineEnd == std::string_view::npos) ? std::string_view::npos : lineEnd - (acceptPos + 21));
+        auto val = response.substr(acceptPos + 21, (lineEnd == std::string_view::npos) ? std::string_view::npos
+                                                                                       : lineEnd - (acceptPos + 21));
         while (!val.empty() && (val.front() == ' ' || val.front() == '\t'))
         {
             val.remove_prefix(1);
@@ -261,10 +262,7 @@ namespace mynet::transport::ws
     /**
      * @brief RFC 6455 帧序列化
      */
-    inline void encodeFrame(std::span<const uint8_t> payload,
-                            Opcode opcode,
-                            bool masked,
-                            std::vector<uint8_t> &out,
+    inline void encodeFrame(std::span<const uint8_t> payload, Opcode opcode, bool masked, std::vector<uint8_t> &out,
                             std::array<uint8_t, 4> maskKey = {0, 0, 0, 0})
     {
         const size_t payloadLen = payload.size();
@@ -504,7 +502,8 @@ namespace mynet::transport::ws
                 }
                 inBuffer_.erase(inBuffer_.begin(), inBuffer_.begin() + consumed);
 
-                if (frame.opcode == Opcode::BINARY || frame.opcode == Opcode::CONTINUATION || frame.opcode == Opcode::TEXT)
+                if (frame.opcode == Opcode::BINARY || frame.opcode == Opcode::CONTINUATION ||
+                    frame.opcode == Opcode::TEXT)
                 {
                     appData.insert(appData.end(), frame.payload.begin(), frame.payload.end());
                 }

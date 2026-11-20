@@ -1,18 +1,19 @@
 #pragma once
 
+#include "checksum.hpp"
+#include "config/log.hpp"
+#include "config/tls.hpp"
 #include "configHolder.hpp"
 #include "constraints.hpp"
-#include "checksum.hpp"
 #include "error.hpp"
+#include "http/common.hpp"
 #include "http/v3/frame.hpp"
 #include "http/v3/qpack.hpp"
-#include "http/v3/varint.hpp"
-#include "config/log.hpp"
+#include "quic/varint.hpp"
 #include "requestBuffer.hpp"
 #include "responseQueue.hpp"
-#include "config/tls.hpp"
-#include <array>
 #include <arpa/inet.h>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -296,7 +297,8 @@ namespace mynet
          */
         static uint16_t computeUdp4Checksum(uint32_t saddr, uint32_t daddr, std::span<const uint8_t> udpPacket) noexcept
         {
-            if (udpPacket.size() < 8) return 0;
+            if (udpPacket.size() < 8)
+                return 0;
             const uint16_t sport = (static_cast<uint16_t>(udpPacket[0]) << 8) | udpPacket[1];
             const uint16_t dport = (static_cast<uint16_t>(udpPacket[2]) << 8) | udpPacket[3];
             return mynet::rfcUdp4Checksum(saddr, daddr, sport, dport, udpPacket.subspan(8));
@@ -305,14 +307,13 @@ namespace mynet
         /**
          * @brief 通过 SOCK_RAW 构造并直接发送带有自定义源 IP 和源端口的 UDP 数据报
          */
-        static bool sendUdp4RawDirect(std::span<const uint8_t> payload,
-                                      uint32_t saddr, uint16_t sport,
-                                      uint32_t daddr, uint16_t dport,
-                                      uint32_t fwmark = 0) noexcept
+        static bool sendUdp4RawDirect(std::span<const uint8_t> payload, uint32_t saddr, uint16_t sport, uint32_t daddr,
+                                      uint16_t dport, uint32_t fwmark = 0) noexcept
         {
 #if defined(__linux__)
             int fd = ::socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_UDP);
-            if (fd < 0) return false;
+            if (fd < 0)
+                return false;
 
             constexpr int one = 1;
             ::setsockopt(fd, IPPROTO_IP, IP_TRANSPARENT, &one, sizeof(one));
@@ -347,8 +348,8 @@ namespace mynet
             dstAddr.sin_addr.s_addr = daddr;
             dstAddr.sin_port = dportBe;
 
-            ssize_t n = ::sendto(fd, udp.data(), udp.size(), 0,
-                                 reinterpret_cast<const sockaddr *>(&dstAddr), sizeof(dstAddr));
+            ssize_t n =
+                ::sendto(fd, udp.data(), udp.size(), 0, reinterpret_cast<const sockaddr *>(&dstAddr), sizeof(dstAddr));
             ::close(fd);
             return n == static_cast<ssize_t>(udp.size());
 #else
@@ -389,7 +390,7 @@ namespace mynet
 
         HandlerDatagram(const HandlerDatagram &) = delete; // a datagram handler owns the outgoing queue for one socket
         HandlerDatagram &
-        operator=(const HandlerDatagram &) = delete; // a datagram handler owns the outgoing queue for one socket
+        operator=(const HandlerDatagram &) = delete;  // a datagram handler owns the outgoing queue for one socket
         HandlerDatagram(HandlerDatagram &&) = delete; // a datagram handler owns the outgoing queue for one socket
         HandlerDatagram &
         operator=(HandlerDatagram &&) = delete; // a datagram handler owns the outgoing queue for one socket
@@ -626,10 +627,14 @@ namespace mynet
         Datagram() noexcept = default;
         ~Datagram() noexcept { reset(); }
 
-        Datagram(const Datagram &) = delete; // a datagram binding owns a handler reference and the receive window of one socket
-        Datagram &operator=(const Datagram &) = delete; // a datagram binding owns a handler reference and the receive window of one socket
-        Datagram(Datagram &&) = delete; // a datagram binding owns a handler reference and the receive window of one socket
-        Datagram &operator=(Datagram &&) = delete; // a datagram binding owns a handler reference and the receive window of one socket
+        Datagram(const Datagram &) =
+            delete; // a datagram binding owns a handler reference and the receive window of one socket
+        Datagram &operator=(const Datagram &) =
+            delete; // a datagram binding owns a handler reference and the receive window of one socket
+        Datagram(Datagram &&) =
+            delete; // a datagram binding owns a handler reference and the receive window of one socket
+        Datagram &operator=(Datagram &&) =
+            delete; // a datagram binding owns a handler reference and the receive window of one socket
 
         /**
          * @brief 计算接收窗口容量（纯函数，便于单独验证边界）
@@ -1316,10 +1321,12 @@ namespace mynet
                         http::v3::encodeHeaders(hdrPayload, respHeaders);
 
                         std::string respFrames;
-                        http::v3::appendFrame(respFrames, std::to_underlying(http::v3::FRAME_TYPE::HEADERS), hdrPayload);
+                        http::v3::appendFrame(respFrames, std::to_underlying(http::v3::FRAME_TYPE::HEADERS),
+                                              hdrPayload);
                         if (!responseBody.empty())
                         {
-                            http::v3::appendFrame(respFrames, std::to_underlying(http::v3::FRAME_TYPE::DATA), responseBody);
+                            http::v3::appendFrame(respFrames, std::to_underlying(http::v3::FRAME_TYPE::DATA),
+                                                  responseBody);
                         }
 
                         size_t written = 0;
@@ -1330,8 +1337,7 @@ namespace mynet
                     }
 
                     const int wstate = SSL_get_stream_write_state(st.stream);
-                    if (st.responseSent &&
-                        (wstate == SSL_STREAM_STATE_FINISHED || rstate == SSL_STREAM_STATE_FINISHED))
+                    if (st.responseSent && (wstate == SSL_STREAM_STATE_FINISHED || rstate == SSL_STREAM_STATE_FINISHED))
                     {
                         if constexpr (requires { handler_->onStreamClose(streamId); })
                         {
@@ -1482,7 +1488,10 @@ namespace mynet
 
     public:
         UdpEndpointRebuildPin(const sockaddr_in &peer, uint64_t flowKey, int fd = -1) noexcept
-            : peerAddr_(peer), flowKey_(flowKey), socketFd_(fd), pinned_(true)
+            : peerAddr_(peer),
+              flowKey_(flowKey),
+              socketFd_(fd),
+              pinned_(true)
         {
         }
 
@@ -1582,10 +1591,7 @@ namespace mynet
         {
         }
 
-        ~AnyfromSocketPool()
-        {
-            clear();
-        }
+        ~AnyfromSocketPool() { clear(); }
 
         AnyfromSocketPool(const AnyfromSocketPool &) = delete;
         AnyfromSocketPool &operator=(const AnyfromSocketPool &) = delete;
@@ -1606,7 +1612,8 @@ namespace mynet
             }
 
             int fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) return -1;
+            if (fd < 0)
+                return -1;
 
             int opt = 1;
             ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -1627,18 +1634,15 @@ namespace mynet
             ::getsockname(fd, reinterpret_cast<sockaddr *>(&actualAddr), &slen);
 
             uint64_t key = makeKey(actualAddr);
-            PooledSocket ps{
-                .fd = fd,
-                .boundAddr = actualAddr,
-                .lastUsed = now
-            };
+            PooledSocket ps{.fd = fd, .boundAddr = actualAddr, .lastUsed = now};
             pool_[key] = ps;
             return fd;
         }
 
         void put(int fd, const sockaddr_in &addr) noexcept
         {
-            if (fd < 0) return;
+            if (fd < 0)
+                return;
             uint64_t key = makeKey(addr);
             auto now = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1649,11 +1653,7 @@ namespace mynet
             }
             else
             {
-                pool_[key] = PooledSocket{
-                    .fd = fd,
-                    .boundAddr = addr,
-                    .lastUsed = now
-                };
+                pool_[key] = PooledSocket{.fd = fd, .boundAddr = addr, .lastUsed = now};
             }
         }
 
@@ -1661,7 +1661,7 @@ namespace mynet
         {
             std::lock_guard<std::mutex> lock(mutex_);
             size_t closed = 0;
-            for (auto it = pool_.begin(); it != pool_.end(); )
+            for (auto it = pool_.begin(); it != pool_.end();)
             {
                 if (now - it->second.lastUsed >= idleTtl_)
                 {
@@ -1713,18 +1713,17 @@ namespace mynet
             return mynet::rfc1071Checksum(std::span<const uint8_t>(static_cast<const uint8_t *>(data), bytes));
         }
 
-        [[nodiscard]] static uint16_t computeUdpChecksum(uint32_t saddr, uint32_t daddr,
-                                                         uint16_t sport, uint16_t dport,
+        [[nodiscard]] static uint16_t computeUdpChecksum(uint32_t saddr, uint32_t daddr, uint16_t sport, uint16_t dport,
                                                          std::span<const uint8_t> payload) noexcept
         {
             return mynet::rfcUdp4Checksum(saddr, daddr, sport, dport, payload);
         }
 
-        static ssize_t sendRawUdp(int rawFd, uint32_t saddr, uint32_t daddr,
-                                  uint16_t sport, uint16_t dport,
+        static ssize_t sendRawUdp(int rawFd, uint32_t saddr, uint32_t daddr, uint16_t sport, uint16_t dport,
                                   std::span<const uint8_t> payload) noexcept
         {
-            if (rawFd < 0) return -1;
+            if (rawFd < 0)
+                return -1;
             size_t totalLen = sizeof(udphdr) + payload.size();
             std::vector<uint8_t> packet(totalLen);
             auto *uh = reinterpret_cast<udphdr *>(packet.data());
@@ -1745,8 +1744,8 @@ namespace mynet
             dst.sin_addr.s_addr = daddr;
             dst.sin_port = htons(dport);
 
-            return ::sendto(rawFd, packet.data(), packet.size(), 0,
-                            reinterpret_cast<const sockaddr *>(&dst), sizeof(dst));
+            return ::sendto(rawFd, packet.data(), packet.size(), 0, reinterpret_cast<const sockaddr *>(&dst),
+                            sizeof(dst));
         }
     };
 
@@ -1820,10 +1819,7 @@ namespace mynet
             return flows_.size();
         }
 
-        [[nodiscard]] uint64_t totalDrops() const noexcept
-        {
-            return totalDrops_.load(std::memory_order_relaxed);
-        }
+        [[nodiscard]] uint64_t totalDrops() const noexcept { return totalDrops_.load(std::memory_order_relaxed); }
     };
 
     /**

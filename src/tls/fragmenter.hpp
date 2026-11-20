@@ -13,35 +13,35 @@
  *    确保前序分片已被远端或中间件物理 ACK 确认后再发射后续分片，彻底破坏 DPI 滑动流重组。
  */
 
-#include <span>
-#include <vector>
-#include <string>
-#include <string_view>
-#include <optional>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <chrono>
-#include <thread>
-#include <sys/socket.h>
-#include <netinet/tcp.h>
 #include <netinet/in.h>
-#include <unistd.h>
+#include <netinet/tcp.h>
+#include <optional>
 #include <poll.h>
+#include <span>
+#include <string>
+#include <string_view>
+#include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
+#include <vector>
 
 namespace mynet::tls
 {
 
     enum class FragmentMode : uint8_t
     {
-        PACKET_ONLY = 1,  ///< 仅 TCP 分节发送并同步 ACK
-        RECORD_ONLY = 2,  ///< 仅切分为多个合规 TLS Record
-        HYBRID = 3        ///< 既拆分 TLS Record，又在 TCP 层分包同步 ACK
+        PACKET_ONLY = 1, ///< 仅 TCP 分节发送并同步 ACK
+        RECORD_ONLY = 2, ///< 仅切分为多个合规 TLS Record
+        HYBRID = 3       ///< 既拆分 TLS Record，又在 TCP 层分包同步 ACK
     };
 
     struct SniIndexInfo
     {
-        size_t sniOffset{0};      ///< SNI 字符串在整个报文中的起始偏移
-        size_t sniLength{0};      ///< SNI 字符串字节长度
+        size_t sniOffset{0}; ///< SNI 字符串在整个报文中的起始偏移
+        size_t sniLength{0}; ///< SNI 字符串字节长度
         std::string_view serverName{};
     };
 
@@ -58,22 +58,26 @@ namespace mynet::tls
          */
         [[nodiscard]] static std::optional<SniIndexInfo> findSni(std::span<const uint8_t> data) noexcept
         {
-            if (data.empty()) return std::nullopt;
+            if (data.empty())
+                return std::nullopt;
 
-            const uint8_t* p = nullptr;
-            const uint8_t* end = nullptr;
+            const uint8_t *p = nullptr;
+            const uint8_t *end = nullptr;
 
             if (data[0] == CONTENT_TYPE_HANDSHAKE)
             {
-                if (data.size() < RECORD_HEADER_LEN + 4) return std::nullopt;
+                if (data.size() < RECORD_HEADER_LEN + 4)
+                    return std::nullopt;
                 const size_t recordLen = (static_cast<size_t>(data[3]) << 8) | data[4];
-                if (data.size() < RECORD_HEADER_LEN + recordLen) return std::nullopt;
+                if (data.size() < RECORD_HEADER_LEN + recordLen)
+                    return std::nullopt;
                 p = data.data() + RECORD_HEADER_LEN;
                 end = p + recordLen;
             }
             else if (data[0] == HANDSHAKE_CLIENT_HELLO)
             {
-                if (data.size() < 4) return std::nullopt;
+                if (data.size() < 4)
+                    return std::nullopt;
                 p = data.data();
                 end = data.data() + data.size();
             }
@@ -83,42 +87,54 @@ namespace mynet::tls
             }
 
             // 握手类型必须为 ClientHello (1)
-            if (p >= end || *p != HANDSHAKE_CLIENT_HELLO) return std::nullopt;
+            if (p >= end || *p != HANDSHAKE_CLIENT_HELLO)
+                return std::nullopt;
             p += 1;
 
-            if (p + 3 > end) return std::nullopt;
+            if (p + 3 > end)
+                return std::nullopt;
             const size_t handshakeLen = (static_cast<size_t>(p[0]) << 16) | (static_cast<size_t>(p[1]) << 8) | p[2];
             p += 3;
-            if (p + handshakeLen > end) return std::nullopt;
+            if (p + handshakeLen > end)
+                return std::nullopt;
 
             // Client Version (2 bytes) + Random (32 bytes)
-            if (p + 2 + 32 > end) return std::nullopt;
+            if (p + 2 + 32 > end)
+                return std::nullopt;
             p += 2 + 32;
 
             // Session ID
-            if (p + 1 > end) return std::nullopt;
+            if (p + 1 > end)
+                return std::nullopt;
             const uint8_t sessionIdLen = *p;
             p += 1 + sessionIdLen;
-            if (p > end) return std::nullopt;
+            if (p > end)
+                return std::nullopt;
 
             // Cipher Suites
-            if (p + 2 > end) return std::nullopt;
+            if (p + 2 > end)
+                return std::nullopt;
             const size_t csLen = (static_cast<size_t>(p[0]) << 8) | p[1];
             p += 2 + csLen;
-            if (p > end) return std::nullopt;
+            if (p > end)
+                return std::nullopt;
 
             // Compression Methods
-            if (p + 1 > end) return std::nullopt;
+            if (p + 1 > end)
+                return std::nullopt;
             const uint8_t compLen = *p;
             p += 1 + compLen;
-            if (p > end) return std::nullopt;
+            if (p > end)
+                return std::nullopt;
 
             // Extensions Length
-            if (p + 2 > end) return std::nullopt;
+            if (p + 2 > end)
+                return std::nullopt;
             const size_t extTotalLen = (static_cast<size_t>(p[0]) << 8) | p[1];
             p += 2;
-            const uint8_t* extEnd = p + extTotalLen;
-            if (extEnd > end) return std::nullopt;
+            const uint8_t *extEnd = p + extTotalLen;
+            if (extEnd > end)
+                return std::nullopt;
 
             // 遍历扩展寻找 server_name (0x0000)
             while (p + 4 <= extEnd)
@@ -126,26 +142,25 @@ namespace mynet::tls
                 const uint16_t extType = (static_cast<uint16_t>(p[0]) << 8) | p[1];
                 const size_t extLen = (static_cast<size_t>(p[2]) << 8) | p[3];
                 p += 4;
-                if (p + extLen > extEnd) return std::nullopt;
+                if (p + extLen > extEnd)
+                    return std::nullopt;
 
                 if (extType == 0x0000) // server_name extension
                 {
-                    if (extLen < 5) return std::nullopt;
+                    if (extLen < 5)
+                        return std::nullopt;
                     // server_name_list_length (2) + name_type (1) + name_length (2)
                     const uint8_t nameType = p[2];
                     if (nameType == 0x00) // host_name
                     {
                         const size_t nameLen = (static_cast<size_t>(p[3]) << 8) | p[4];
-                        if (5 + nameLen > extLen) return std::nullopt;
+                        if (5 + nameLen > extLen)
+                            return std::nullopt;
 
-                        const uint8_t* namePtr = p + 5;
+                        const uint8_t *namePtr = p + 5;
                         const size_t offset = static_cast<size_t>(namePtr - data.data());
-                        std::string_view name(reinterpret_cast<const char*>(namePtr), nameLen);
-                        return SniIndexInfo{
-                            .sniOffset = offset,
-                            .sniLength = nameLen,
-                            .serverName = name
-                        };
+                        std::string_view name(reinterpret_cast<const char *>(namePtr), nameLen);
+                        return SniIndexInfo{.sniOffset = offset, .sniLength = nameLen, .serverName = name};
                     }
                 }
                 p += extLen;
@@ -157,9 +172,8 @@ namespace mynet::tls
         /**
          * @brief 计算切分点序列（在 SNI 点号或子域名内部进行切割）
          */
-        [[nodiscard]] static std::vector<size_t> computeSplitOffsets(
-            std::span<const uint8_t> /* data */,
-            const SniIndexInfo& sniInfo) noexcept
+        [[nodiscard]] static std::vector<size_t> computeSplitOffsets(std::span<const uint8_t> /* data */,
+                                                                     const SniIndexInfo &sniInfo) noexcept
         {
             std::vector<size_t> splitOffsets;
             if (sniInfo.sniLength <= 1)
@@ -190,9 +204,8 @@ namespace mynet::tls
          *
          * 每个分片均带有合法的 5 字节记录层头部：ContentType=0x16, Version=0x0301, Length=分片载荷长
          */
-        [[nodiscard]] static std::vector<std::vector<uint8_t>> buildSplitRecords(
-            std::span<const uint8_t> data,
-            const std::vector<size_t>& splitOffsets) noexcept
+        [[nodiscard]] static std::vector<std::vector<uint8_t>>
+        buildSplitRecords(std::span<const uint8_t> data, const std::vector<size_t> &splitOffsets) noexcept
         {
             std::vector<std::vector<uint8_t>> records;
             if (data.size() <= RECORD_HEADER_LEN || splitOffsets.empty())
@@ -206,7 +219,7 @@ namespace mynet::tls
             const uint8_t vMinor = data[2];
 
             // 原始有效载荷 (去掉前 5 字节头部)
-            const uint8_t* payload = data.data() + RECORD_HEADER_LEN;
+            const uint8_t *payload = data.data() + RECORD_HEADER_LEN;
             const size_t totalPayloadLen = data.size() - RECORD_HEADER_LEN;
 
             // 转换切分偏移为相对于握手载荷的偏移
@@ -231,7 +244,8 @@ namespace mynet::tls
             size_t prev = 0;
             for (size_t next : offsets)
             {
-                if (next <= prev || next > totalPayloadLen) continue;
+                if (next <= prev || next > totalPayloadLen)
+                    continue;
                 const size_t chunkLen = next - prev;
 
                 std::vector<uint8_t> rec(RECORD_HEADER_LEN + chunkLen);
@@ -270,12 +284,11 @@ namespace mynet::tls
          * @param fallbackDelay 等待 ACK 超时或透明代理回退延时
          * @return 实际发送成功的字节数，出错返回 -1
          */
-        static ssize_t writeAndWaitAck(
-            int fd,
-            std::span<const uint8_t> payload,
-            std::chrono::milliseconds fallbackDelay = std::chrono::milliseconds(50)) noexcept
+        static ssize_t writeAndWaitAck(int fd, std::span<const uint8_t> payload,
+                                       std::chrono::milliseconds fallbackDelay = std::chrono::milliseconds(50)) noexcept
         {
-            if (fd < 0 || payload.empty()) return 0;
+            if (fd < 0 || payload.empty())
+                return 0;
 
             // 发送数据 (处理非阻塞部分写入)
             size_t totalSent = 0;
@@ -288,17 +301,20 @@ namespace mynet::tls
                 }
                 else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
                 {
-                    struct pollfd pfd{ .fd = fd, .events = POLLOUT, .revents = 0 };
+                    struct pollfd pfd{.fd = fd, .events = POLLOUT, .revents = 0};
                     int pr = ::poll(&pfd, 1, 50);
-                    if (pr <= 0) break;
+                    if (pr <= 0)
+                        break;
                 }
                 else
                 {
-                    if (totalSent == 0) return n;
+                    if (totalSent == 0)
+                        return n;
                     break;
                 }
             }
-            if (totalSent == 0) return 0;
+            if (totalSent == 0)
+                return 0;
 
 #if defined(__linux__)
             const auto start = std::chrono::steady_clock::now();
@@ -345,13 +361,13 @@ namespace mynet::tls
         /**
          * @brief 一站式发送带有智能分片的 ClientHello 报文
          */
-        static bool sendFragmentedClientHello(
-            int fd,
-            std::span<const uint8_t> clientHelloData,
-            FragmentMode mode = FragmentMode::HYBRID,
-            std::chrono::milliseconds fallbackDelay = std::chrono::milliseconds(30)) noexcept
+        static bool
+        sendFragmentedClientHello(int fd, std::span<const uint8_t> clientHelloData,
+                                  FragmentMode mode = FragmentMode::HYBRID,
+                                  std::chrono::milliseconds fallbackDelay = std::chrono::milliseconds(30)) noexcept
         {
-            if (fd < 0 || clientHelloData.empty()) return false;
+            if (fd < 0 || clientHelloData.empty())
+                return false;
 
             auto sniInfo = findSni(clientHelloData);
             if (!sniInfo)
@@ -375,7 +391,7 @@ namespace mynet::tls
             if (mode == FragmentMode::RECORD_ONLY)
             {
                 auto records = buildSplitRecords(clientHelloData, splitOffsets);
-                for (const auto& rec : records)
+                for (const auto &rec : records)
                 {
                     ssize_t n = ::send(fd, rec.data(), rec.size(), MSG_NOSIGNAL);
                     if (n != static_cast<ssize_t>(rec.size()))
@@ -390,7 +406,8 @@ namespace mynet::tls
                 size_t prev = 0;
                 for (size_t next : splitOffsets)
                 {
-                    if (next <= prev || next > clientHelloData.size()) continue;
+                    if (next <= prev || next > clientHelloData.size())
+                        continue;
                     auto chunk = clientHelloData.subspan(prev, next - prev);
                     if (writeAndWaitAck(fd, chunk, fallbackDelay) <= 0)
                     {
@@ -403,7 +420,8 @@ namespace mynet::tls
                 {
                     auto chunk = clientHelloData.subspan(prev, clientHelloData.size() - prev);
                     ssize_t n = ::send(fd, chunk.data(), chunk.size(), MSG_NOSIGNAL);
-                    if (n <= 0) success = false;
+                    if (n <= 0)
+                        success = false;
                 }
             }
             else // HYBRID
@@ -411,7 +429,7 @@ namespace mynet::tls
                 auto records = buildSplitRecords(clientHelloData, splitOffsets);
                 for (size_t i = 0; i < records.size(); ++i)
                 {
-                    const auto& rec = records[i];
+                    const auto &rec = records[i];
                     if (i + 1 < records.size())
                     {
                         if (writeAndWaitAck(fd, rec, fallbackDelay) <= 0)
@@ -423,7 +441,8 @@ namespace mynet::tls
                     else
                     {
                         ssize_t n = ::send(fd, rec.data(), rec.size(), MSG_NOSIGNAL);
-                        if (n <= 0) success = false;
+                        if (n <= 0)
+                            success = false;
                     }
                 }
             }

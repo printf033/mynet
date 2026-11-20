@@ -1,6 +1,6 @@
+#include "transport/grpc.hpp"
 #include "transport/transport.hpp"
 #include "transport/websocket.hpp"
-#include "transport/grpc.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -125,7 +125,8 @@ TEST(TransportTest, GrpcFramingAndHeaders)
     // Test message encoding & decoding
     std::string sample = "gRPC Protobuf payload test with Gun-lite streaming!";
     std::vector<uint8_t> frame;
-    grpc::encodeMessage(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(sample.data()), sample.size()), frame);
+    grpc::encodeMessage(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(sample.data()), sample.size()),
+                        frame);
 
     // 5B prefix + 1B (0x0A) + 1B (varint length of sample ~51) + 51B
     EXPECT_EQ(frame[0], 0x00); // uncompressed
@@ -141,7 +142,8 @@ TEST(TransportTest, GrpcFramingAndHeaders)
     grpc::GrpcSession client(false, "TunService", "example.com");
     grpc::GrpcSession server(true, "TunService", "example.com");
 
-    auto msg = client.wrapPayload(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(sample.data()), sample.size()));
+    auto msg =
+        client.wrapPayload(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(sample.data()), sample.size()));
     std::vector<uint8_t> appReceived;
     server.feedData(msg, appReceived);
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(appReceived.data()), appReceived.size()), sample);

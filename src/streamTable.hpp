@@ -1,13 +1,12 @@
 /**
- * @file handler/http/v2/streamTable.hpp
+ * @file streamTable.hpp
  * @brief 定容开放寻址流表：多路复用器流 ID → StreamSlot 的零分配热路径存储。
  *
  * 设计取舍（安全、高效、高性能）：
  * - 数组 + 线性探测，槽位地址稳定；erase() 采用墓碑标记，
  *   探测链不会被提前截断，墓碑可被 open() 就地复用。
- * - 键为非零 uint32_t，散列取 键>>1 与 键低位的组合：
- *   HTTP/2 流 ID 全部为奇数（低位全 1），仅用键低位会让新流
- *   恒等键 % 槽数 + 步进 1 的探测链，键 >> 1 提供真实散列性。
+ * - 键为非零 uint32_t / uint64_t，散列取 键>>1 与 键低位的组合：
+ *   HTTP/2、HTTP/3 流 ID 通常具有低位特征，键 >> 1 提供真实散列性。
  * - 活跃条目达到 75% 时 open() 拒绝新流：定容语义下这是调用方
  *   （池耗尽 → REFUSED_STREAM）已有的降级路径，无新增故障模式。
  * - erase() 留下的墓碑仍占探测链位但不占活跃预算：open() 在活跃
@@ -46,12 +45,14 @@ namespace mynet
         public:
             StreamTable() noexcept = default;
             ~StreamTable() noexcept { release(); }
-            StreamTable(const StreamTable &) = delete; // a stream table exclusively owns its slots and stream identities
+            StreamTable(const StreamTable &) =
+                delete; // a stream table exclusively owns its slots and stream identities
             StreamTable &
             operator=(const StreamTable &) = delete; // a stream table exclusively owns its slots and stream identities
-            StreamTable(StreamTable &&) = delete; // stream slot pointers remain valid externally; moving causes dangling pointers
-            StreamTable &
-            operator=(StreamTable &&) = delete; // stream slot pointers remain valid externally; moving causes dangling pointers
+            StreamTable(StreamTable &&) =
+                delete; // stream slot pointers remain valid externally; moving causes dangling pointers
+            StreamTable &operator=(StreamTable &&) =
+                delete; // stream slot pointers remain valid externally; moving causes dangling pointers
 
             /**
              * @brief 一次性分配 2 的幂个槽位（幂等：重复 init 前自动释放旧槽）。

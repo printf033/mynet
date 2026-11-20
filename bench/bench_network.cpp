@@ -1,15 +1,15 @@
 #include "../examples/common/handlers.hpp"
 #include "../examples/common/http2.hpp"
+#include "config/log.hpp"
+#include "config/tls.hpp"
 #include "connection.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
-#include "proactor.hpp"
 #include "http/v1/handler.hpp"
 #include "http/v2/handler.hpp"
 #include "http/v3/handler.hpp"
-#include "socks/socks5.hpp"
+#include "proactor.hpp"
 #include "reactor.hpp"
-#include "config/tls.hpp"
+#include "socks/socks5.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
@@ -824,16 +824,19 @@ namespace
         auto [certPath, keyPath] = findCertFiles();
         http::v3::HandlerHttp3 handler;
         Reactor<AcceptorQuic<http::v3::HandlerHttp3<>>> reactor;
-        std::thread srvThread([&]() {
-            [[maybe_unused]] auto _ =
-                reactor.runQuic("127.0.0.1", port, certPath.c_str(), keyPath.c_str(), handler);
-        });
+        std::thread srvThread(
+            [&]()
+            {
+                [[maybe_unused]] auto _ =
+                    reactor.runQuic("127.0.0.1", port, certPath.c_str(), keyPath.c_str(), handler);
+            });
 
         // 等待服务监听就绪
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         char cmd[256];
-        std::snprintf(cmd, sizeof(cmd), "curl -k -s --connect-timeout 1 -m 2 --http3-only https://127.0.0.1:%d/ > /dev/null 2>&1", port);
+        std::snprintf(cmd, sizeof(cmd),
+                      "curl -k -s --connect-timeout 1 -m 2 --http3-only https://127.0.0.1:%d/ > /dev/null 2>&1", port);
 
         constexpr size_t kQuicRequests = 5;
         std::vector<double> latencies;

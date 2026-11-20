@@ -28,7 +28,7 @@ namespace mynet
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort)
         {
-            if (auto u = handler::crypto::parseUuid(uuidStr); u.has_value())
+            if (auto u = encoding::parseUuid(uuidStr); u.has_value())
             {
                 uuid_ = *u;
             }

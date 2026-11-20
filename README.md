@@ -343,7 +343,7 @@ sequenceDiagram
 - **`ObjectPool<Object>`**: Pre-allocates a contiguous array of slots via `std::unique_ptr<Slot[]>` with an index-based free stack. Objects are pinned in memory so epoll data pointers and io_uring completion context pointers remain 100% stable, completely bypassing heap allocation during connection accept/release cycles.
 - **`RequestBuffer`**: A zero-exception, self-managed contiguous byte buffer (`operator new[](std::nothrow)`) with sliding-window auto-compaction and direct zero-copy write window (`writableBytes()`, `writableBegin()`, `commitWritten()`, `ensureWritable()`, `readableView()`). Storage is compacted in-place only when dead prefix space exceeds 4 KiB and occupies at least half of the allocation, amortizing compaction overhead while keeping memory footprints bounded.
 - **`ResponseQueue`**: Fixed-capacity contiguous circular ring buffer (`src/responseQueue.hpp`) providing $O(1)$ zero-allocation enqueue/dequeue operations with bounded memory footprints.
-- **`StreamTable<T>`**: Open-addressing flat hash table (`src/http/v2/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
+- **`StreamTable<T>`**: Open-addressing flat hash table (`src/streamTable.hpp`) with linear probing, tombstone deletion, and tombstone recycling, achieving zero runtime allocations for active stream management.
 
 ### 4. HTTP/2 Framing & Stream Multiplexer
 
@@ -660,7 +660,11 @@ mynet/
 │   ├── inboundManager.hpp      # Inbound listening endpoint manager & registry (InboundBase / InboundManager)
 │   ├── outboundManager.hpp     # Outbound dialing endpoint manager & routing policies (OutboundBase / OutboundManager)
 │   ├── address.hpp             # Proxy & network target endpoint abstraction (ProxyAddress)
-│   ├── crypto.hpp              # Crypto primitives & hashing (SHA-224, MD5, AEAD, UUID)
+│   ├── encoding.hpp            # Text & binary encoding primitives (Hex, Base64, UUID, constant-time compare)
+│   ├── digest.hpp              # Hashing and MAC algorithms (SHA-1/224/256, MD5, HMAC)
+│   ├── kdf.hpp                 # Key derivation functions (HKDF-SHA1, HKDF-SHA256, RFC 8446/9000 ExpandLabel)
+│   ├── cipher.hpp              # Symmetric & AEAD ciphers (Shadowsocks AEAD, AES-GCM, AES-ECB)
+│   ├── x25519.hpp              # X25519 key generation & ECDH shared secret negotiation
 │   ├── router.hpp              # Policy routing & rule matching engine (Router / RouteRule / CIDR / Domain multi-dim / Sniffing)
 │   ├── forwarder.hpp           # Bidirectional stream & datagram forwarding engine (Forwarder / Splice zero-copy & pump)
 │   ├── sniffer.hpp             # Unified zero-copy packet sniffing dispatcher & ProtocolType definitions

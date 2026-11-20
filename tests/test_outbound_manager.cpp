@@ -1,5 +1,5 @@
-#include "outboundManager.hpp"
 #include "address.hpp"
+#include "outboundManager.hpp"
 #include "shadowsocks/outbound.hpp"
 #include <gtest/gtest.h>
 #include <netinet/in.h>

@@ -5,9 +5,9 @@
  * @brief 出站协议状态机处理器基类（面向流式连接 HandlerOutboundConnection 与面向数据报 HandlerOutboundDatagram）。
  */
 
+#include "address.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
-#include "address.hpp"
 #include <cstdint>
 #include <functional>
 #include <string_view>

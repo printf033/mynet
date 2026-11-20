@@ -5,7 +5,8 @@
  * @brief RFC 9114 HTTP/3 标准协议帧结构、序列化与解码器。
  */
 
-#include "varint.hpp"
+#include "../../quic/varint.hpp"
+#include "../common.hpp"
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -17,6 +18,12 @@ namespace mynet
 {
     namespace http::v3
     {
+        using quic::appendVarint;
+        using quic::decodeVarint;
+        using quic::readVarint;
+        using quic::VARINT_ERROR;
+        using quic::varintLength;
+        using quic::varintLengthFromPrefix;
         /**
          * @brief RFC 9114 Section 7.2 HTTP/3 协议帧类型枚举
          */
@@ -149,10 +156,7 @@ namespace mynet
             uint64_t type = 0;
             std::string payload{};
 
-            [[nodiscard]] inline FrameView view() const noexcept
-            {
-                return FrameView{.type = type, .payload = payload};
-            }
+            [[nodiscard]] inline FrameView view() const noexcept { return FrameView{.type = type, .payload = payload}; }
         };
 
         inline FrameView::operator Frame() const
@@ -203,7 +207,8 @@ namespace mynet
              * @param in 输入数据缓冲区
              * @return 成功且有完整帧返回 FrameView；数据不足返回 nullopt；解析超限或破损返回错误码
              */
-            [[nodiscard]] inline std::expected<std::optional<FrameView>, FRAME_DECODE_ERROR> nextView(RequestBuffer &in) const
+            [[nodiscard]] inline std::expected<std::optional<FrameView>, FRAME_DECODE_ERROR>
+            nextView(RequestBuffer &in) const
             {
                 const size_t available = in.readableBytes();
                 if (available == 0) [[unlikely]]

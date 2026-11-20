@@ -5,9 +5,9 @@
  * @brief ShadowTLS (v1/v2/v3) 协议服务端状态机处理器。
  */
 
-#include "../connection.hpp"
 #include "../address.hpp"
-#include "../crypto.hpp"
+#include "../connection.hpp"
+#include "../digest.hpp"
 #include "../inbound.hpp"
 #include <cstdint>
 #include <functional>
@@ -191,7 +191,7 @@ namespace mynet::handler
                     {
                         std::vector<uint8_t> hmacKey(password_.begin(), password_.end());
                         std::span<const uint8_t> challenge(random, 32);
-                        auto expected = crypto::hmacSha256(hmacKey, challenge);
+                        auto expected = digest::hmacSha256(hmacKey, challenge);
                         if (expected.has_value())
                         {
                             const size_t checkLen = std::min<size_t>(sessionIdLen, 8);
@@ -205,7 +205,7 @@ namespace mynet::handler
                     {
                         std::vector<uint8_t> hmacKey(password_.begin(), password_.end());
                         std::span<const uint8_t> challenge(sessionId, 4);
-                        auto expected = crypto::hmacSha256(hmacKey, challenge);
+                        auto expected = digest::hmacSha256(hmacKey, challenge);
                         if (expected.has_value())
                         {
                             ok = (CRYPTO_memcmp(sessionId + 4, expected->data(), 28) == 0);

@@ -16,10 +16,8 @@ namespace mynet::handler::sniffing
             return false;
         }
         // STUN Magic Cookie = 0x2112A442
-        const uint32_t magic = (static_cast<uint32_t>(data[4]) << 24) |
-                               (static_cast<uint32_t>(data[5]) << 16) |
-                               (static_cast<uint32_t>(data[6]) << 8) |
-                               static_cast<uint32_t>(data[7]);
+        const uint32_t magic = (static_cast<uint32_t>(data[4]) << 24) | (static_cast<uint32_t>(data[5]) << 16) |
+                               (static_cast<uint32_t>(data[6]) << 8) | static_cast<uint32_t>(data[7]);
         if (magic != 0x2112A442)
         {
             return false;

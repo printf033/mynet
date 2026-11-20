@@ -13,10 +13,10 @@
 // 单进程运行，并将日志输出重定向至远离被测路径的终端。
 //
 // 运行命令：./bench 2>/dev/null （日志行输出至 stderr）
+#include "config/log.hpp"
 #include "connection.hpp"
 #include "http/v2/frame.hpp"
 #include "http/v2/handler.hpp"
-#include "config/log.hpp"
 #include "objectPool.hpp"
 #include "requestBuffer.hpp"
 #include <algorithm>

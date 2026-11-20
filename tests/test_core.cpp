@@ -1,5 +1,5 @@
-#include "core.hpp"
 #include "address.hpp"
+#include "core.hpp"
 #include "direct/direct.hpp"
 #include <gtest/gtest.h>
 #include <netinet/in.h>
@@ -304,4 +304,3 @@ TEST(CoreTest, DirectBridgeAndSessionManagement)
 
     core.stop();
 }
-

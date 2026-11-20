@@ -2,16 +2,15 @@
 #include "vless/vision.hpp"
 #include <gtest/gtest.h>
 #include <openssl/rand.h>
-#include <vector>
 #include <string>
+#include <vector>
 
 using namespace mynet::handler::vless;
 
 namespace
 {
     // 构造一个合法的 TLS 1.3 ClientHello 测试报文
-    std::vector<uint8_t> makeTlsClientHello(std::string_view sni,
-                                            std::span<const uint8_t, 32> clientPubKey)
+    std::vector<uint8_t> makeTlsClientHello(std::string_view sni, std::span<const uint8_t, 32> clientPubKey)
     {
         std::vector<uint8_t> body;
 
@@ -113,18 +112,18 @@ namespace
 
 TEST(RealityTest, X25519AndBase64RawUrl)
 {
-    auto kpAlice = mynet::handler::crypto::generateX25519KeyPair();
+    auto kpAlice = mynet::x25519::generateKeyPair();
     ASSERT_TRUE(kpAlice.has_value());
 
-    auto kpBob = mynet::handler::crypto::generateX25519KeyPair();
+    auto kpBob = mynet::x25519::generateKeyPair();
     ASSERT_TRUE(kpBob.has_value());
 
     // Alice ECDH with Bob's public key
-    auto secretA = mynet::handler::crypto::computeX25519SharedSecret(kpAlice->privKey, kpBob->pubKey);
+    auto secretA = mynet::x25519::computeSharedSecret(kpAlice->privKey, kpBob->pubKey);
     ASSERT_TRUE(secretA.has_value());
 
     // Bob ECDH with Alice's public key
-    auto secretB = mynet::handler::crypto::computeX25519SharedSecret(kpBob->privKey, kpAlice->pubKey);
+    auto secretB = mynet::x25519::computeSharedSecret(kpBob->privKey, kpAlice->pubKey);
     ASSERT_TRUE(secretB.has_value());
 
     // Secrets must match identically
@@ -145,11 +144,11 @@ TEST(RealityTest, X25519AndBase64RawUrl)
 TEST(RealityTest, HandshakeAuthenticationSuccess)
 {
     // Generate Server KeyPair
-    auto serverKp = mynet::handler::crypto::generateX25519KeyPair();
+    auto serverKp = mynet::x25519::generateKeyPair();
     ASSERT_TRUE(serverKp.has_value());
 
     // Generate Client Ephemeral KeyPair
-    auto clientEcdhe = mynet::handler::crypto::generateX25519KeyPair();
+    auto clientEcdhe = mynet::x25519::generateKeyPair();
     ASSERT_TRUE(clientEcdhe.has_value());
 
     reality::ServerConfig serverCfg;
@@ -182,17 +181,17 @@ TEST(RealityTest, HandshakeAuthenticationSuccess)
     EXPECT_EQ(authRes.shortId, *shortId);
 
     // Expected shared secret
-    auto expectedSecret = mynet::handler::crypto::computeX25519SharedSecret(serverKp->privKey, clientEcdhe->pubKey);
+    auto expectedSecret = mynet::x25519::computeSharedSecret(serverKp->privKey, clientEcdhe->pubKey);
     ASSERT_TRUE(expectedSecret.has_value());
     EXPECT_EQ(authRes.authKey, *expectedSecret);
 }
 
 TEST(RealityTest, HandshakeFallbackOnProbe)
 {
-    auto serverKp = mynet::handler::crypto::generateX25519KeyPair();
+    auto serverKp = mynet::x25519::generateKeyPair();
     ASSERT_TRUE(serverKp.has_value());
 
-    auto clientEcdhe = mynet::handler::crypto::generateX25519KeyPair();
+    auto clientEcdhe = mynet::x25519::generateKeyPair();
     ASSERT_TRUE(clientEcdhe.has_value());
 
     reality::ServerConfig serverCfg;
@@ -234,7 +233,8 @@ TEST(VisionTest, PaddingAndUnpaddingRoundtrip)
 
     // 1. First packet (contains UUID and padding header)
     std::string payload1 = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
-    auto padded1 = sender.pad(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload1.data()), payload1.size()));
+    auto padded1 =
+        sender.pad(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload1.data()), payload1.size()));
     EXPECT_GE(padded1.size(), 16 + 5 + payload1.size());
 
     std::vector<uint8_t> unpacked1;
@@ -244,7 +244,8 @@ TEST(VisionTest, PaddingAndUnpaddingRoundtrip)
 
     // 2. Second packet (no UUID, only padding header)
     std::string payload2 = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello World!";
-    auto padded2 = sender.pad(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload2.data()), payload2.size()));
+    auto padded2 =
+        sender.pad(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload2.data()), payload2.size()));
     // Second packet should NOT have UUID prefix
     EXPECT_LT(padded2.size(), 16 + 5 + payload2.size() + 256);
 

@@ -6,7 +6,7 @@
  */
 
 #include "../address.hpp"
-#include "../crypto.hpp"
+#include "../encoding.hpp"
 #include "../inbound.hpp"
 #include "../outbound.hpp"
 #include "reality.hpp"
@@ -63,7 +63,7 @@ namespace mynet::handler
         void setUuid(std::string_view uuidStr)
         {
             validUuids_.clear();
-            if (auto u = crypto::parseUuid(uuidStr); u.has_value())
+            if (auto u = encoding::parseUuid(uuidStr); u.has_value())
             {
                 validUuids_.push_back(*u);
             }
@@ -71,7 +71,7 @@ namespace mynet::handler
 
         void addUser(std::string_view uuidStr)
         {
-            if (auto u = crypto::parseUuid(uuidStr); u.has_value())
+            if (auto u = encoding::parseUuid(uuidStr); u.has_value())
             {
                 validUuids_.push_back(*u);
             }
@@ -162,7 +162,7 @@ namespace mynet::handler
             {
                 for (const auto &v : validUuids_)
                 {
-                    if (crypto::constantTimeEqual(uuid, v))
+                    if (encoding::constantTimeEqual(uuid, v))
                     {
                         authOk = true;
                         break;
@@ -247,7 +247,7 @@ namespace mynet::handler
 
         bool setUuidString(std::string_view uuidStr) noexcept
         {
-            auto parsed = crypto::parseUuid(uuidStr);
+            auto parsed = encoding::parseUuid(uuidStr);
             if (!parsed.has_value())
             {
                 return false;
@@ -307,7 +307,7 @@ namespace mynet::handler
             std::vector<uint8_t> header;
             header.reserve(1 + 16 + 1 + 1 + 2 + 64);
 
-            header.push_back(0x00); // Version 0
+            header.push_back(0x00);                                  // Version 0
             header.insert(header.end(), uuid_.begin(), uuid_.end()); // 16 字节 UUID
 
             if (flow_ == vless::vision::kFlowVision)
@@ -328,20 +328,22 @@ namespace mynet::handler
             header.push_back(static_cast<uint8_t>(target_.port >> 8));
             header.push_back(static_cast<uint8_t>(target_.port & 0xFF));
 
-            // ATYP + Address
-            header.push_back(static_cast<uint8_t>(target_.type));
+            // ATYP + Address (VLESS: 0x01 IPv4, 0x02 Domain, 0x03 IPv6)
             if (target_.type == AddressType::IPV4)
             {
+                header.push_back(0x01);
                 const auto *p = reinterpret_cast<const uint8_t *>(&target_.ipv4_.s_addr);
                 header.insert(header.end(), p, p + 4);
             }
             else if (target_.type == AddressType::DOMAIN)
             {
+                header.push_back(0x02);
                 header.push_back(static_cast<uint8_t>(target_.host.size()));
                 header.insert(header.end(), target_.host.begin(), target_.host.end());
             }
             else if (target_.type == AddressType::IPV6)
             {
+                header.push_back(0x03);
                 const auto *p = reinterpret_cast<const uint8_t *>(&target_.ipv6_);
                 header.insert(header.end(), p, p + 16);
             }

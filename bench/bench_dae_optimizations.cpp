@@ -8,14 +8,16 @@
  * 3. DNS 逆向倒排缓存：插入与高并发查找吞吐 (DnsReverseCache)
  */
 
-#include "sniffer.hpp"
-#include "dns/cache.hpp"
-#include "http/http.hpp"
-#include "datagram.hpp"
-#include "ebpf.hpp"
-#include "outboundManager.hpp"
-#include "forwarder.hpp"
+#include "cipher.hpp"
 #include "connection.hpp"
+#include "datagram.hpp"
+#include "dns/cache.hpp"
+#include "ebpf.hpp"
+#include "forwarder.hpp"
+#include "http/http.hpp"
+#include "kdf.hpp"
+#include "outboundManager.hpp"
+#include "sniffer.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
@@ -72,10 +74,15 @@ namespace
         hs.push_back(0x00); // Length placeholder
         hs.push_back(0x03);
         hs.push_back(0x03); // TLS 1.2
-        for (int i = 0; i < 32; ++i) hs.push_back(0x42); // Random
-        hs.push_back(0x00); // Session ID len
-        hs.push_back(0x00); hs.push_back(0x02); hs.push_back(0x13); hs.push_back(0x01); // Cipher
-        hs.push_back(0x01); hs.push_back(0x00); // Compression
+        for (int i = 0; i < 32; ++i)
+            hs.push_back(0x42); // Random
+        hs.push_back(0x00);     // Session ID len
+        hs.push_back(0x00);
+        hs.push_back(0x02);
+        hs.push_back(0x13);
+        hs.push_back(0x01); // Cipher
+        hs.push_back(0x01);
+        hs.push_back(0x00); // Compression
         const uint16_t extTotalLen = static_cast<uint16_t>(extSni.size());
         hs.push_back(static_cast<uint8_t>(extTotalLen >> 8));
         hs.push_back(static_cast<uint8_t>(extTotalLen & 0xFF));
@@ -88,7 +95,8 @@ namespace
 
         std::vector<uint8_t> rec;
         rec.push_back(0x16); // Handshake
-        rec.push_back(0x03); rec.push_back(0x01);
+        rec.push_back(0x03);
+        rec.push_back(0x01);
         const uint16_t recLen = static_cast<uint16_t>(hs.size());
         rec.push_back(static_cast<uint8_t>(recLen >> 8));
         rec.push_back(static_cast<uint8_t>(recLen & 0xFF));
@@ -106,24 +114,28 @@ namespace
         sniffing::detail::appendUvarint(payload, 0);
         sniffing::detail::appendUvarint(payload, ch.size());
         payload.insert(payload.end(), ch.begin(), ch.end());
-        while (payload.size() < 64) payload.push_back(0x00);
+        while (payload.size() < 64)
+            payload.push_back(0x00);
 
         std::array<uint8_t, 8> dcid = {1, 2, 3, 4, 5, 6, 7, 8};
-        auto initSecret = crypto::hkdfSha256Extract(sniffing::detail::kQuicSaltV1, dcid);
+        auto initSecret = kdf::hkdfSha256Extract(sniffing::detail::kQuicSaltV1, dcid);
         std::array<uint8_t, 32> clientSecret{};
-        crypto::hkdfExpandLabel(*initSecret, "client in", {}, 32, clientSecret);
+        kdf::hkdfExpandLabel(*initSecret, "client in", {}, 32, clientSecret);
         std::array<uint8_t, 16> hpKey{}, key{};
         std::array<uint8_t, 12> iv{};
-        crypto::hkdfExpandLabel(clientSecret, "quic hp", {}, 16, hpKey);
-        crypto::hkdfExpandLabel(clientSecret, "quic key", {}, 16, key);
-        crypto::hkdfExpandLabel(clientSecret, "quic iv", {}, 12, iv);
+        kdf::hkdfExpandLabel(clientSecret, "quic hp", {}, 16, hpKey);
+        kdf::hkdfExpandLabel(clientSecret, "quic key", {}, 16, key);
+        kdf::hkdfExpandLabel(clientSecret, "quic iv", {}, 12, iv);
 
         std::vector<uint8_t> pkt;
         pkt.push_back(0xC0); // Long header, initial, pnLen=1
-        pkt.push_back(0); pkt.push_back(0); pkt.push_back(0); pkt.push_back(1); // v1
+        pkt.push_back(0);
+        pkt.push_back(0);
+        pkt.push_back(0);
+        pkt.push_back(1); // v1
         pkt.push_back(static_cast<uint8_t>(dcid.size()));
         pkt.insert(pkt.end(), dcid.begin(), dcid.end());
-        pkt.push_back(0); // SCID len
+        pkt.push_back(0);                        // SCID len
         sniffing::detail::appendUvarint(pkt, 0); // Token len
 
         size_t protLen = 1 + payload.size() + 16;
@@ -138,18 +150,18 @@ namespace
         std::span<const uint8_t> aad(pkt.data(), extHdrLen);
         std::vector<uint8_t> cipher;
         std::array<uint8_t, 16> tag{};
-        crypto::aes128GcmEncryptWithAad(key, nonce, aad, payload, cipher, tag);
+        cipher::aes128GcmEncryptWithAad(key, nonce, aad, payload, cipher, tag);
         pkt.insert(pkt.end(), cipher.begin(), cipher.end());
         pkt.insert(pkt.end(), tag.begin(), tag.end());
 
         std::array<uint8_t, 16> sample{}, mask{};
         std::memcpy(sample.data(), pkt.data() + hdrLen + 4, 16);
-        crypto::aes128EcbEncryptBlock(hpKey, sample, mask);
+        cipher::aes128EcbEncryptBlock(hpKey, sample, mask);
         pkt[0] ^= (mask[0] & 0x0F);
         pkt[hdrLen] ^= mask[1];
         return pkt;
     }
-}
+} // namespace
 
 // ==========================================
 // 1. 嗅探性能基准测试
@@ -168,13 +180,14 @@ void benchSniffing()
     for (size_t i = 0; i < kIterations; ++i)
     {
         auto res = sniffing::DomainSniffer::sniffTlsSni(tlsSpan);
-        if (res.has_value()) sum += res->size();
+        if (res.has_value())
+            sum += res->size();
     }
     auto t1 = Clock::now();
     double tlsNs = std::chrono::duration<double, std::nano>(t1 - t0).count() / kIterations;
     double tlsOps = 1e9 / tlsNs;
-    printf("[TLS SNI]      单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (0 次内存分配, sum=%lu)\n",
-           tlsNs, tlsOps / 10000.0, sum);
+    printf("[TLS SNI]      单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (0 次内存分配, sum=%lu)\n", tlsNs, tlsOps / 10000.0,
+           sum);
 
     // B. HTTP Host
     std::string httpReq = "GET /index.html HTTP/1.1\r\nHost: cdn.jsdelivr.net:8443\r\nAccept: */*\r\n\r\n";
@@ -185,20 +198,19 @@ void benchSniffing()
     for (size_t i = 0; i < kIterations; ++i)
     {
         auto res = sniffing::DomainSniffer::sniffHttpHost(httpSpan);
-        if (res.has_value()) sum += res->first.size() + res->second;
+        if (res.has_value())
+            sum += res->first.size() + res->second;
     }
     t1 = Clock::now();
     double httpNs = std::chrono::duration<double, std::nano>(t1 - t0).count() / kIterations;
     double httpOps = 1e9 / httpNs;
-    printf("[HTTP Host]    单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (0 次内存分配, sum=%lu)\n",
-           httpNs, httpOps / 10000.0, sum);
+    printf("[HTTP Host]    单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (0 次内存分配, sum=%lu)\n", httpNs,
+           httpOps / 10000.0, sum);
 
     // C. DNS QNAME
-    std::vector<uint8_t> dnsReq = {
-        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x03, 'w', 'w', 'w', 0x06, 'g', 'o', 'o', 'g', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x00, 0x01, 0x00, 0x01
-    };
+    std::vector<uint8_t> dnsReq = {0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                   0x00, 0x03, 'w',  'w',  'w',  0x06, 'g',  'o',  'o',  'g',  'l',
+                                   'e',  0x03, 'c',  'o',  'm',  0x00, 0x00, 0x01, 0x00, 0x01};
     std::span<const uint8_t> dnsSpan(dnsReq.data(), dnsReq.size());
 
     t0 = Clock::now();
@@ -206,13 +218,13 @@ void benchSniffing()
     for (size_t i = 0; i < kIterations; ++i)
     {
         auto res = sniffing::DomainSniffer::sniffDnsQuestion(dnsSpan);
-        if (res.has_value()) sum += res->size();
+        if (res.has_value())
+            sum += res->size();
     }
     t1 = Clock::now();
     double dnsNs = std::chrono::duration<double, std::nano>(t1 - t0).count() / kIterations;
     double dnsOps = 1e9 / dnsNs;
-    printf("[DNS QNAME]    单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (sum=%lu)\n",
-           dnsNs, dnsOps / 10000.0, sum);
+    printf("[DNS QNAME]    单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (sum=%lu)\n", dnsNs, dnsOps / 10000.0, sum);
 
     // D. QUIC Initial 解密 + SNI 提取 (含 HKDF + AES-ECB 掩码 + AES-GCM 解密)
     auto quicPkt = makeQuicInitial("quic.nginx.org");
@@ -224,13 +236,14 @@ void benchSniffing()
     for (size_t i = 0; i < kQuicIters; ++i)
     {
         auto res = sniffing::DomainSniffer::sniffQuicSni(quicSpan);
-        if (res.has_value()) sum += res->size();
+        if (res.has_value())
+            sum += res->size();
     }
     t1 = Clock::now();
     double quicUs = std::chrono::duration<double, std::micro>(t1 - t0).count() / kQuicIters;
     double quicOps = 1e6 / quicUs;
-    printf("[QUIC Initial] 单次耗时: %6.2f µs | 吞吐: %8.2f 万次/秒 (RFC 9000 全解密, sum=%lu)\n",
-           quicUs, quicOps / 10000.0, sum);
+    printf("[QUIC Initial] 单次耗时: %6.2f µs | 吞吐: %8.2f 万次/秒 (RFC 9000 全解密, sum=%lu)\n", quicUs,
+           quicOps / 10000.0, sum);
 }
 
 // ==========================================
@@ -260,13 +273,14 @@ void benchDnsReverseCache()
     for (size_t i = 0; i < kLookupIters; ++i)
     {
         auto res = cache.lookup(target);
-        if (res.has_value()) ++hits;
+        if (res.has_value())
+            ++hits;
     }
     auto t1 = Clock::now();
     double lookupNs = std::chrono::duration<double, std::nano>(t1 - t0).count() / kLookupIters;
     double lookupOps = 1e9 / lookupNs;
-    printf("[DNS Reverse Lookup] 单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (并发安全读, 命中=%lu)\n",
-           lookupNs, lookupOps / 10000.0, hits);
+    printf("[DNS Reverse Lookup] 单次耗时: %6.1f ns | 吞吐: %8.2f 万次/秒 (并发安全读, 命中=%lu)\n", lookupNs,
+           lookupOps / 10000.0, hits);
 }
 
 // ==========================================
@@ -306,26 +320,28 @@ void benchUdpIoComparison()
         uint64_t recvSyscalls = 0;
 
         auto t0 = Clock::now();
-        std::thread receiverThread([&]() {
-            std::vector<uint8_t> buf(2048);
-            sockaddr_in peer{};
-            socklen_t plen = sizeof(peer);
-            for (size_t received = 0; received < kTotalPackets; )
+        std::thread receiverThread(
+            [&]()
             {
-                ssize_t ret = ::recvfrom(receiverFd, buf.data(), buf.size(), 0,
-                                         reinterpret_cast<sockaddr *>(&peer), &plen);
-                ++recvSyscalls;
-                if (ret > 0)
+                std::vector<uint8_t> buf(2048);
+                sockaddr_in peer{};
+                socklen_t plen = sizeof(peer);
+                for (size_t received = 0; received < kTotalPackets;)
                 {
-                    ++received;
+                    ssize_t ret =
+                        ::recvfrom(receiverFd, buf.data(), buf.size(), 0, reinterpret_cast<sockaddr *>(&peer), &plen);
+                    ++recvSyscalls;
+                    if (ret > 0)
+                    {
+                        ++received;
+                    }
                 }
-            }
-        });
+            });
 
         for (size_t sent = 0; sent < kTotalPackets; ++sent)
         {
-            ::sendto(senderFd, payload.data(), payload.size(), 0,
-                     reinterpret_cast<sockaddr *>(&rcvAddr), sizeof(rcvAddr));
+            ::sendto(senderFd, payload.data(), payload.size(), 0, reinterpret_cast<sockaddr *>(&rcvAddr),
+                     sizeof(rcvAddr));
             ++sendSyscalls;
         }
 
@@ -338,8 +354,8 @@ void benchUdpIoComparison()
 
         printf("\n[单包模式 - sendto / recvfrom]\n");
         printf("  总收发报文: %zu 包 | 单包载荷: %zu B | 耗时: %6.2f ms\n", kTotalPackets, kPayloadSize, elapsedMs);
-        printf("  系统调用总数: 发送 %lu 次 + 接收 %lu 次 = %lu 次 syscall\n",
-               sendSyscalls, recvSyscalls, sendSyscalls + recvSyscalls);
+        printf("  系统调用总数: 发送 %lu 次 + 接收 %lu 次 = %lu 次 syscall\n", sendSyscalls, recvSyscalls,
+               sendSyscalls + recvSyscalls);
         printf("  传输包率:   %8.0f pps\n", pps);
         printf("  有效吞吐量: %8.2f MB/s\n", mbps);
     }
@@ -353,33 +369,35 @@ void benchUdpIoComparison()
         uint64_t recvSyscalls = 0;
 
         auto t0 = Clock::now();
-        std::thread receiverThread([&]() {
-            mmsghdr msgs[kBatch]{};
-            iovec iovs[kBatch]{};
-            sockaddr_in peers[kBatch]{};
-            std::array<std::array<char, 2048>, kBatch> bufs{};
-
-            for (size_t i = 0; i < kBatch; ++i)
+        std::thread receiverThread(
+            [&]()
             {
-                iovs[i].iov_base = bufs[i].data();
-                iovs[i].iov_len = bufs[i].size();
-                msgs[i].msg_hdr.msg_name = &peers[i];
-                msgs[i].msg_hdr.msg_namelen = sizeof(sockaddr_in);
-                msgs[i].msg_hdr.msg_iov = &iovs[i];
-                msgs[i].msg_hdr.msg_iovlen = 1;
-            }
+                mmsghdr msgs[kBatch]{};
+                iovec iovs[kBatch]{};
+                sockaddr_in peers[kBatch]{};
+                std::array<std::array<char, 2048>, kBatch> bufs{};
 
-            for (size_t received = 0; received < kTotalPackets; )
-            {
-                const size_t batchCount = std::min(kBatch, kTotalPackets - received);
-                int ret = ::recvmmsg(receiverFd, msgs, batchCount, 0, nullptr);
-                ++recvSyscalls;
-                if (ret > 0)
+                for (size_t i = 0; i < kBatch; ++i)
                 {
-                    received += static_cast<size_t>(ret);
+                    iovs[i].iov_base = bufs[i].data();
+                    iovs[i].iov_len = bufs[i].size();
+                    msgs[i].msg_hdr.msg_name = &peers[i];
+                    msgs[i].msg_hdr.msg_namelen = sizeof(sockaddr_in);
+                    msgs[i].msg_hdr.msg_iov = &iovs[i];
+                    msgs[i].msg_hdr.msg_iovlen = 1;
                 }
-            }
-        });
+
+                for (size_t received = 0; received < kTotalPackets;)
+                {
+                    const size_t batchCount = std::min(kBatch, kTotalPackets - received);
+                    int ret = ::recvmmsg(receiverFd, msgs, batchCount, 0, nullptr);
+                    ++recvSyscalls;
+                    if (ret > 0)
+                    {
+                        received += static_cast<size_t>(ret);
+                    }
+                }
+            });
 
         // 批量发送
         mmsghdr sendMsgs[kBatch]{};
@@ -394,7 +412,7 @@ void benchUdpIoComparison()
             sendMsgs[i].msg_hdr.msg_iovlen = 1;
         }
 
-        for (size_t sent = 0; sent < kTotalPackets; )
+        for (size_t sent = 0; sent < kTotalPackets;)
         {
             const size_t batchCount = std::min(kBatch, kTotalPackets - sent);
             int ret = ::sendmmsg(senderFd, sendMsgs, batchCount, 0);
@@ -414,8 +432,8 @@ void benchUdpIoComparison()
 
         printf("\n[批量流水线 - sendmmsg / recvmmsg (批宽度 32)]\n");
         printf("  总收发报文: %zu 包 | 单包载荷: %zu B | 耗时: %6.2f ms\n", kTotalPackets, kPayloadSize, elapsedMs);
-        printf("  系统调用总数: 发送 %lu 次 + 接收 %lu 次 = %lu 次 syscall\n",
-               sendSyscalls, recvSyscalls, sendSyscalls + recvSyscalls);
+        printf("  系统调用总数: 发送 %lu 次 + 接收 %lu 次 = %lu 次 syscall\n", sendSyscalls, recvSyscalls,
+               sendSyscalls + recvSyscalls);
         printf("  传输包率:   %8.0f pps\n", pps);
         printf("  有效吞吐量: %8.2f MB/s\n", mbps);
     }
@@ -431,7 +449,8 @@ void benchTcpStreamForwardingComparison()
 {
     printf("\n=== [4] TCP 协议数据转发模式对比: 传统用户态拷贝 vs Linux splice(2) 零拷贝 vs eBPF Sockmap ===\n");
 
-    auto createListener = [](int &port) -> int {
+    auto createListener = [](int &port) -> int
+    {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -447,7 +466,8 @@ void benchTcpStreamForwardingComparison()
         return fd;
     };
 
-    auto connectTo = [](int port) -> int {
+    auto connectTo = [](int port) -> int
+    {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         int nodelay = 1;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
@@ -474,38 +494,49 @@ void benchTcpStreamForwardingComparison()
     // 测试 1: 传统用户态代理 (read + write, 2次系统调用 + 2次特权级内存拷贝)
     // -------------------------------------------------------------
     {
-        std::thread srvThread([&]() {
-            int cfd = ::accept(srvListen, nullptr, nullptr);
-            std::vector<char> buf(kSize);
-            while (::read(cfd, buf.data(), buf.size()) > 0);
-            ::close(cfd);
-        });
+        std::thread srvThread(
+            [&]()
+            {
+                int cfd = ::accept(srvListen, nullptr, nullptr);
+                std::vector<char> buf(kSize);
+                while (::read(cfd, buf.data(), buf.size()) > 0)
+                    ;
+                ::close(cfd);
+            });
 
-        std::thread proxyThread([&]() {
-            int inFd = ::accept(proxyListen, nullptr, nullptr);
-            int outFd = connectTo(srvPort);
-            std::vector<char> buf(kSize);
-            ssize_t n;
-            while ((n = ::read(inFd, buf.data(), buf.size())) > 0) {
-                ssize_t written = 0;
-                while (written < n) {
-                    ssize_t w = ::write(outFd, buf.data() + written, n - written);
-                    if (w <= 0) break;
-                    written += w;
+        std::thread proxyThread(
+            [&]()
+            {
+                int inFd = ::accept(proxyListen, nullptr, nullptr);
+                int outFd = connectTo(srvPort);
+                std::vector<char> buf(kSize);
+                ssize_t n;
+                while ((n = ::read(inFd, buf.data(), buf.size())) > 0)
+                {
+                    ssize_t written = 0;
+                    while (written < n)
+                    {
+                        ssize_t w = ::write(outFd, buf.data() + written, n - written);
+                        if (w <= 0)
+                            break;
+                        written += w;
+                    }
                 }
-            }
-            ::close(inFd);
-            ::close(outFd);
-        });
+                ::close(inFd);
+                ::close(outFd);
+            });
 
         int clientFd = connectTo(proxyPort);
         auto t0 = Clock::now();
         std::vector<char> sendBuf(kSize, 0x5a);
-        for (size_t i = 0; i < kChunks; ++i) {
+        for (size_t i = 0; i < kChunks; ++i)
+        {
             ssize_t written = 0;
-            while (written < static_cast<ssize_t>(kSize)) {
+            while (written < static_cast<ssize_t>(kSize))
+            {
                 ssize_t w = ::write(clientFd, sendBuf.data() + written, kSize - written);
-                if (w <= 0) break;
+                if (w <= 0)
+                    break;
                 written += w;
             }
         }
@@ -528,45 +559,57 @@ void benchTcpStreamForwardingComparison()
     // 测试 2: Linux splice(2) 管道零拷贝直通 (mynet 现有主力生产实现)
     // -------------------------------------------------------------
     {
-        std::thread srvThread([&]() {
-            int cfd = ::accept(srvListen, nullptr, nullptr);
-            std::vector<char> buf(kSize);
-            while (::read(cfd, buf.data(), buf.size()) > 0);
-            ::close(cfd);
-        });
+        std::thread srvThread(
+            [&]()
+            {
+                int cfd = ::accept(srvListen, nullptr, nullptr);
+                std::vector<char> buf(kSize);
+                while (::read(cfd, buf.data(), buf.size()) > 0)
+                    ;
+                ::close(cfd);
+            });
 
-        std::thread proxyThread([&]() {
-            int inFd = ::accept(proxyListen, nullptr, nullptr);
-            int outFd = connectTo(srvPort);
-            int pfd[2];
-            ::pipe(pfd);
-            ::fcntl(pfd[0], F_SETPIPE_SZ, 1024 * 1024);
-            ::fcntl(pfd[1], F_SETPIPE_SZ, 1024 * 1024);
+        std::thread proxyThread(
+            [&]()
+            {
+                int inFd = ::accept(proxyListen, nullptr, nullptr);
+                int outFd = connectTo(srvPort);
+                int pfd[2];
+                ::pipe(pfd);
+                ::fcntl(pfd[0], F_SETPIPE_SZ, 1024 * 1024);
+                ::fcntl(pfd[1], F_SETPIPE_SZ, 1024 * 1024);
 
-            while (true) {
-                ssize_t n = ::splice(inFd, nullptr, pfd[1], nullptr, 65536, SPLICE_F_MOVE);
-                if (n <= 0) break;
-                ssize_t written = 0;
-                while (written < n) {
-                    ssize_t m = ::splice(pfd[0], nullptr, outFd, nullptr, n - written, SPLICE_F_MOVE);
-                    if (m <= 0) break;
-                    written += m;
+                while (true)
+                {
+                    ssize_t n = ::splice(inFd, nullptr, pfd[1], nullptr, 65536, SPLICE_F_MOVE);
+                    if (n <= 0)
+                        break;
+                    ssize_t written = 0;
+                    while (written < n)
+                    {
+                        ssize_t m = ::splice(pfd[0], nullptr, outFd, nullptr, n - written, SPLICE_F_MOVE);
+                        if (m <= 0)
+                            break;
+                        written += m;
+                    }
                 }
-            }
-            ::close(inFd);
-            ::close(outFd);
-            ::close(pfd[0]);
-            ::close(pfd[1]);
-        });
+                ::close(inFd);
+                ::close(outFd);
+                ::close(pfd[0]);
+                ::close(pfd[1]);
+            });
 
         int clientFd = connectTo(proxyPort);
         auto t0 = Clock::now();
         std::vector<char> sendBuf(kSize, 0x5a);
-        for (size_t i = 0; i < kChunks; ++i) {
+        for (size_t i = 0; i < kChunks; ++i)
+        {
             ssize_t written = 0;
-            while (written < static_cast<ssize_t>(kSize)) {
+            while (written < static_cast<ssize_t>(kSize))
+            {
                 ssize_t w = ::write(clientFd, sendBuf.data() + written, kSize - written);
-                if (w <= 0) break;
+                if (w <= 0)
+                    break;
                 written += w;
             }
         }
@@ -601,13 +644,17 @@ void benchTcpStreamForwardingComparison()
         attr.max_entries = 1;
         long mapFd = ::syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
 
-        if (mapFd >= 0) {
+        if (mapFd >= 0)
+        {
             ::close(static_cast<int>(mapFd));
             printf("  内核 BPF 权限状态: 具备 CAP_BPF / CAP_SYS_ADMIN 特权，已成功创建 SOCKMAP\n");
             printf("  架构优势: 0 内存拷贝、0 上下文切换、0 用户态系统调用\n");
-        } else {
+        }
+        else
+        {
             printf("  内核 BPF 权限状态: 受限 (errno=%d: %s)\n", errno, strerror(errno));
-            printf("  原因诊断: 容器沙箱开启了 no_new_privs / unprivileged_bpf_disabled=2，非特权用户禁止加载/挂载 eBPF\n");
+            printf("  原因诊断: 容器沙箱开启了 no_new_privs / unprivileged_bpf_disabled=2，非特权用户禁止加载/挂载 "
+                   "eBPF\n");
         }
 #else
         printf("  内核 BPF 权限状态: 平台未支持 __NR_bpf 系统调用\n");
@@ -637,7 +684,8 @@ void benchHttp1ThroughputComparison()
 {
     printf("\n=== [5] 真实 HTTP/1.1 协议端到端代理基准: 完全不使用技巧 vs splice 零拷贝 vs eBPF Sockmap ===\n");
 
-    auto createListener = [](int &port) -> int {
+    auto createListener = [](int &port) -> int
+    {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         int opt = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -653,7 +701,8 @@ void benchHttp1ThroughputComparison()
         return fd;
     };
 
-    auto connectTo = [](int port) -> int {
+    auto connectTo = [](int port) -> int
+    {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
         int nodelay = 1;
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
@@ -681,14 +730,17 @@ void benchHttp1ThroughputComparison()
     // 基线测试: Direct Loopback Socket-to-Socket (Sockmap 理论物理上限)
     // -------------------------------------------------------------
     {
-        std::thread srvThread([&]() {
-            int cfd = ::accept(srvListen, nullptr, nullptr);
-            int bufSize = 4 * 1024 * 1024;
-            ::setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-            std::vector<char> buf(kSize);
-            while (::read(cfd, buf.data(), buf.size()) > 0);
-            ::close(cfd);
-        });
+        std::thread srvThread(
+            [&]()
+            {
+                int cfd = ::accept(srvListen, nullptr, nullptr);
+                int bufSize = 4 * 1024 * 1024;
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+                std::vector<char> buf(kSize);
+                while (::read(cfd, buf.data(), buf.size()) > 0)
+                    ;
+                ::close(cfd);
+            });
 
         int clientFd = connectTo(srvPort);
         int bufSize = 4 * 1024 * 1024;
@@ -696,11 +748,14 @@ void benchHttp1ThroughputComparison()
 
         auto t0 = Clock::now();
         std::vector<char> sendBuf(kSize, 0x48); // 'H'
-        for (size_t i = 0; i < kChunks; ++i) {
+        for (size_t i = 0; i < kChunks; ++i)
+        {
             ssize_t written = 0;
-            while (written < static_cast<ssize_t>(kSize)) {
+            while (written < static_cast<ssize_t>(kSize))
+            {
                 ssize_t w = ::write(clientFd, sendBuf.data() + written, kSize - written);
-                if (w <= 0) break;
+                if (w <= 0)
+                    break;
                 written += w;
             }
         }
@@ -715,62 +770,75 @@ void benchHttp1ThroughputComparison()
     // 模式 1: 完全不使用技巧 (朴素模式: HTTP/1 协议状态机解析 + 纯用户态 read/write 堆内存拷贝)
     // -------------------------------------------------------------
     {
-        std::thread srvThread([&]() {
-            int cfd = ::accept(srvListen, nullptr, nullptr);
-            int bufSize = 4 * 1024 * 1024;
-            ::setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-            std::vector<char> buf(kSize);
-            while (::read(cfd, buf.data(), buf.size()) > 0);
-            ::close(cfd);
-        });
+        std::thread srvThread(
+            [&]()
+            {
+                int cfd = ::accept(srvListen, nullptr, nullptr);
+                int bufSize = 4 * 1024 * 1024;
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+                std::vector<char> buf(kSize);
+                while (::read(cfd, buf.data(), buf.size()) > 0)
+                    ;
+                ::close(cfd);
+            });
 
-        std::thread proxyThread([&]() {
-            int inFd = ::accept(proxyListen, nullptr, nullptr);
-            int bufSize = 4 * 1024 * 1024;
-            ::setsockopt(inFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-            ::setsockopt(inFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+        std::thread proxyThread(
+            [&]()
+            {
+                int inFd = ::accept(proxyListen, nullptr, nullptr);
+                int bufSize = 4 * 1024 * 1024;
+                ::setsockopt(inFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+                ::setsockopt(inFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
 
-            // 1. 真实 HTTP/1.1 协议首部解析 (使用 HandlerInboundHttpProxy 状态机)
-            HandlerInboundHttpProxy httpHandler;
-            char handshakeBuf[1024];
-            ssize_t n = ::read(inFd, handshakeBuf, sizeof(handshakeBuf));
-            if (n > 0) {
-                [[maybe_unused]] auto _ = httpHandler.appendRequest(handshakeBuf, n);
-                httpHandler.handle();
-            }
-
-            int outFd = connectTo(srvPort);
-            ::setsockopt(outFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-            ::setsockopt(outFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
-
-            // 2. 回送 HTTP/1.1 200 Connection Established 握手响应
-            if (httpHandler.hasResponse()) {
-                std::string resp = httpHandler.takeResponse();
-                [[maybe_unused]] auto _ = ::write(inFd, resp.data(), resp.size());
-            }
-
-            // 3. 朴素数据转发：无任何零拷贝技巧，纯用户空间缓冲区 read -> write
-            std::vector<char> userBuffer(kSize);
-            ssize_t rBytes = 0;
-            while ((rBytes = ::read(inFd, userBuffer.data(), userBuffer.size())) > 0) {
-                ssize_t written = 0;
-                while (written < rBytes) {
-                    ssize_t w = ::write(outFd, userBuffer.data() + written, rBytes - written);
-                    if (w <= 0) break;
-                    written += w;
+                // 1. 真实 HTTP/1.1 协议首部解析 (使用 HandlerInboundHttpProxy 状态机)
+                HandlerInboundHttpProxy httpHandler;
+                char handshakeBuf[1024];
+                ssize_t n = ::read(inFd, handshakeBuf, sizeof(handshakeBuf));
+                if (n > 0)
+                {
+                    [[maybe_unused]] auto _ = httpHandler.appendRequest(handshakeBuf, n);
+                    httpHandler.handle();
                 }
-            }
-            ::close(inFd);
-            ::close(outFd);
-        });
+
+                int outFd = connectTo(srvPort);
+                ::setsockopt(outFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+                ::setsockopt(outFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+
+                // 2. 回送 HTTP/1.1 200 Connection Established 握手响应
+                if (httpHandler.hasResponse())
+                {
+                    std::string resp = httpHandler.takeResponse();
+                    [[maybe_unused]] auto _ = ::write(inFd, resp.data(), resp.size());
+                }
+
+                // 3. 朴素数据转发：无任何零拷贝技巧，纯用户空间缓冲区 read -> write
+                std::vector<char> userBuffer(kSize);
+                ssize_t rBytes = 0;
+                while ((rBytes = ::read(inFd, userBuffer.data(), userBuffer.size())) > 0)
+                {
+                    ssize_t written = 0;
+                    while (written < rBytes)
+                    {
+                        ssize_t w = ::write(outFd, userBuffer.data() + written, rBytes - written);
+                        if (w <= 0)
+                            break;
+                        written += w;
+                    }
+                }
+                ::close(inFd);
+                ::close(outFd);
+            });
 
         int clientFd = connectTo(proxyPort);
         int bufSize = 4 * 1024 * 1024;
         ::setsockopt(clientFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
 
         // 发送 HTTP/1.1 CONNECT 握手请求
-        std::string req = "CONNECT 127.0.0.1:" + std::to_string(srvPort) + " HTTP/1.1\r\n"
-                          "Host: 127.0.0.1:" + std::to_string(srvPort) + "\r\n"
+        std::string req = "CONNECT 127.0.0.1:" + std::to_string(srvPort) +
+                          " HTTP/1.1\r\n"
+                          "Host: 127.0.0.1:" +
+                          std::to_string(srvPort) +
+                          "\r\n"
                           "User-Agent: curl/8.0\r\n\r\n";
         [[maybe_unused]] auto _w = ::write(clientFd, req.data(), req.size());
 
@@ -780,11 +848,14 @@ void benchHttp1ThroughputComparison()
 
         auto t0 = Clock::now();
         std::vector<char> sendBuf(kSize, 0x48);
-        for (size_t i = 0; i < kChunks; ++i) {
+        for (size_t i = 0; i < kChunks; ++i)
+        {
             ssize_t written = 0;
-            while (written < static_cast<ssize_t>(kSize)) {
+            while (written < static_cast<ssize_t>(kSize))
+            {
                 ssize_t w = ::write(clientFd, sendBuf.data() + written, kSize - written);
-                if (w <= 0) break;
+                if (w <= 0)
+                    break;
                 written += w;
             }
         }
@@ -807,69 +878,83 @@ void benchHttp1ThroughputComparison()
     // 模式 2: Linux splice(2) 管道零拷贝 (mynet 现役生产方案)
     // -------------------------------------------------------------
     {
-        std::thread srvThread([&]() {
-            int cfd = ::accept(srvListen, nullptr, nullptr);
-            int bufSize = 4 * 1024 * 1024;
-            ::setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-            std::vector<char> buf(kSize);
-            while (::read(cfd, buf.data(), buf.size()) > 0);
-            ::close(cfd);
-        });
+        std::thread srvThread(
+            [&]()
+            {
+                int cfd = ::accept(srvListen, nullptr, nullptr);
+                int bufSize = 4 * 1024 * 1024;
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+                std::vector<char> buf(kSize);
+                while (::read(cfd, buf.data(), buf.size()) > 0)
+                    ;
+                ::close(cfd);
+            });
 
-        std::thread proxyThread([&]() {
-            int inFd = ::accept(proxyListen, nullptr, nullptr);
-            int bufSize = 4 * 1024 * 1024;
-            ::setsockopt(inFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-            ::setsockopt(inFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+        std::thread proxyThread(
+            [&]()
+            {
+                int inFd = ::accept(proxyListen, nullptr, nullptr);
+                int bufSize = 4 * 1024 * 1024;
+                ::setsockopt(inFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+                ::setsockopt(inFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
 
-            // 1. 真实 HTTP/1.1 协议首部解析 (使用 HandlerInboundHttpProxy 状态机)
-            HandlerInboundHttpProxy httpHandler;
-            char handshakeBuf[1024];
-            ssize_t n = ::read(inFd, handshakeBuf, sizeof(handshakeBuf));
-            if (n > 0) {
-                [[maybe_unused]] auto _ = httpHandler.appendRequest(handshakeBuf, n);
-                httpHandler.handle();
-            }
-
-            int outFd = connectTo(srvPort);
-            ::setsockopt(outFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
-            ::setsockopt(outFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
-
-            // 2. 回送 HTTP/1.1 200 Connection Established 握手响应
-            if (httpHandler.hasResponse()) {
-                std::string resp = httpHandler.takeResponse();
-                [[maybe_unused]] auto _ = ::write(inFd, resp.data(), resp.size());
-            }
-
-            // 3. 开启 Linux splice(2) 管道零拷贝通道
-            int pfd[2];
-            ::pipe(pfd);
-            ::fcntl(pfd[0], F_SETPIPE_SZ, 1024 * 1024);
-            ::fcntl(pfd[1], F_SETPIPE_SZ, 1024 * 1024);
-
-            while (true) {
-                ssize_t sIn = ::splice(inFd, nullptr, pfd[1], nullptr, 65536, SPLICE_F_MOVE);
-                if (sIn <= 0) break;
-                ssize_t written = 0;
-                while (written < sIn) {
-                    ssize_t sOut = ::splice(pfd[0], nullptr, outFd, nullptr, sIn - written, SPLICE_F_MOVE);
-                    if (sOut <= 0) break;
-                    written += sOut;
+                // 1. 真实 HTTP/1.1 协议首部解析 (使用 HandlerInboundHttpProxy 状态机)
+                HandlerInboundHttpProxy httpHandler;
+                char handshakeBuf[1024];
+                ssize_t n = ::read(inFd, handshakeBuf, sizeof(handshakeBuf));
+                if (n > 0)
+                {
+                    [[maybe_unused]] auto _ = httpHandler.appendRequest(handshakeBuf, n);
+                    httpHandler.handle();
                 }
-            }
-            ::close(inFd);
-            ::close(outFd);
-            ::close(pfd[0]);
-            ::close(pfd[1]);
-        });
+
+                int outFd = connectTo(srvPort);
+                ::setsockopt(outFd, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+                ::setsockopt(outFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+
+                // 2. 回送 HTTP/1.1 200 Connection Established 握手响应
+                if (httpHandler.hasResponse())
+                {
+                    std::string resp = httpHandler.takeResponse();
+                    [[maybe_unused]] auto _ = ::write(inFd, resp.data(), resp.size());
+                }
+
+                // 3. 开启 Linux splice(2) 管道零拷贝通道
+                int pfd[2];
+                ::pipe(pfd);
+                ::fcntl(pfd[0], F_SETPIPE_SZ, 1024 * 1024);
+                ::fcntl(pfd[1], F_SETPIPE_SZ, 1024 * 1024);
+
+                while (true)
+                {
+                    ssize_t sIn = ::splice(inFd, nullptr, pfd[1], nullptr, 65536, SPLICE_F_MOVE);
+                    if (sIn <= 0)
+                        break;
+                    ssize_t written = 0;
+                    while (written < sIn)
+                    {
+                        ssize_t sOut = ::splice(pfd[0], nullptr, outFd, nullptr, sIn - written, SPLICE_F_MOVE);
+                        if (sOut <= 0)
+                            break;
+                        written += sOut;
+                    }
+                }
+                ::close(inFd);
+                ::close(outFd);
+                ::close(pfd[0]);
+                ::close(pfd[1]);
+            });
 
         int clientFd = connectTo(proxyPort);
         int bufSize = 4 * 1024 * 1024;
         ::setsockopt(clientFd, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
 
         // 发送 HTTP/1.1 CONNECT 握手请求
-        std::string req = "CONNECT 127.0.0.1:" + std::to_string(srvPort) + " HTTP/1.1\r\n"
-                          "Host: 127.0.0.1:" + std::to_string(srvPort) + "\r\n"
+        std::string req = "CONNECT 127.0.0.1:" + std::to_string(srvPort) +
+                          " HTTP/1.1\r\n"
+                          "Host: 127.0.0.1:" +
+                          std::to_string(srvPort) +
+                          "\r\n"
                           "User-Agent: curl/8.0\r\n\r\n";
         [[maybe_unused]] auto _w = ::write(clientFd, req.data(), req.size());
 
@@ -878,11 +963,14 @@ void benchHttp1ThroughputComparison()
 
         auto t0 = Clock::now();
         std::vector<char> sendBuf(kSize, 0x48);
-        for (size_t i = 0; i < kChunks; ++i) {
+        for (size_t i = 0; i < kChunks; ++i)
+        {
             ssize_t written = 0;
-            while (written < static_cast<ssize_t>(kSize)) {
+            while (written < static_cast<ssize_t>(kSize))
+            {
                 ssize_t w = ::write(clientFd, sendBuf.data() + written, kSize - written);
-                if (w <= 0) break;
+                if (w <= 0)
+                    break;
                 written += w;
             }
         }
@@ -917,12 +1005,15 @@ void benchHttp1ThroughputComparison()
         attr.max_entries = 2;
         long mapFd = ::syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
 
-        if (mapFd >= 0) {
+        if (mapFd >= 0)
+        {
             ::close(static_cast<int>(mapFd));
             printf("  内核 BPF 权限状态: 具备特权，可加载 sockmap\n");
-        } else {
-            printf("  内核 BPF 权限状态: 受限 (errno=%d: %s, 沙箱限制 unprivileged_bpf_disabled=2)\n",
-                   errno, strerror(errno));
+        }
+        else
+        {
+            printf("  内核 BPF 权限状态: 受限 (errno=%d: %s, 沙箱限制 unprivileged_bpf_disabled=2)\n", errno,
+                   strerror(errno));
         }
 #endif
         // 计算 Sockmap 理论吞吐与工业界数据 (Sockmap 在内核短接两个 socket，其性能逼近 Direct loopback 性能的 90%~95%)
@@ -931,22 +1022,33 @@ void benchHttp1ThroughputComparison()
         double sockmapSpeedupOverSplice = ((sockmapEstThroughput - spliceThroughput) / spliceThroughput) * 100.0;
 
         printf("  宿主机直连通道基准 (Direct Loopback): %8.2f MB/s (物理上限参考)\n", directThroughput);
-        printf("  eBPF Sockmap 预估吞吐 (92%% Direct):  %8.2f MB/s (相比无技巧提升 +%.1f%%, 相比 splice 提升 +%.1f%%)\n",
-               sockmapEstThroughput, sockmapSpeedupOverNaive, sockmapSpeedupOverSplice);
+        printf(
+            "  eBPF Sockmap 预估吞吐 (92%% Direct):  %8.2f MB/s (相比无技巧提升 +%.1f%%, 相比 splice 提升 +%.1f%%)\n",
+            sockmapEstThroughput, sockmapSpeedupOverNaive, sockmapSpeedupOverSplice);
 
         printf("\n=== HTTP/1 协议三种转发模式全景量化对比矩阵 ===\n");
-        printf("+-----------------------+-------------------------+-------------------------+-------------------------+\n");
-        printf("| 指标维度              | 1. 完全不使用技巧       | 2. Linux splice 零拷贝  | 3. eBPF Sockmap 流卸载  |\n");
-        printf("+-----------------------+-------------------------+-------------------------+-------------------------+\n");
-        printf("| 吞吐量 (Throughput)   | %8.2f MB/s (1.0x)     | %8.2f MB/s (+%4.1f%%)   | ~%7.2f MB/s (+%4.1f%%)  |\n",
-               naiveThroughput, spliceThroughput, ((spliceThroughput - naiveThroughput) / naiveThroughput) * 100.0,
-               sockmapEstThroughput, sockmapSpeedupOverNaive);
-        printf("| 用户态内存拷贝        | 2 次 (每个 16KB 块)     | 0 次 (内核 Pipe 页面)   | 0 次 (Socket 队列直连)  |\n");
-        printf("| 数据面系统调用        | 30,000 次 (read+write)  | ~3,750 次 (splice)      | 0 次 (握手后零 syscall) |\n");
-        printf("| 上下文切换 / epoll    | 极高 (每包唤醒调度)     | 中等 (epoll 唤醒调度)   | 0 次 (内核软中断 SoftIRQ) |\n");
-        printf("| CPU 占用率 (归一化)   | 100%% (基准)             | 约 55%% ~ 62%%           | 约 25%% ~ 35%% (释放 65%%) |\n");
-        printf("| P99 尾部延迟          | 基线延迟                | 降低 ~30%%               | 降低 ~55%% ~ 65%%        |\n");
-        printf("+-----------------------+-------------------------+-------------------------+-------------------------+\n");
+        printf("+-----------------------+-------------------------+-------------------------+-------------------------+"
+               "\n");
+        printf("| 指标维度              | 1. 完全不使用技巧       | 2. Linux splice 零拷贝  | 3. eBPF Sockmap 流卸载  "
+               "|\n");
+        printf("+-----------------------+-------------------------+-------------------------+-------------------------+"
+               "\n");
+        printf(
+            "| 吞吐量 (Throughput)   | %8.2f MB/s (1.0x)     | %8.2f MB/s (+%4.1f%%)   | ~%7.2f MB/s (+%4.1f%%)  |\n",
+            naiveThroughput, spliceThroughput, ((spliceThroughput - naiveThroughput) / naiveThroughput) * 100.0,
+            sockmapEstThroughput, sockmapSpeedupOverNaive);
+        printf("| 用户态内存拷贝        | 2 次 (每个 16KB 块)     | 0 次 (内核 Pipe 页面)   | 0 次 (Socket 队列直连)  "
+               "|\n");
+        printf("| 数据面系统调用        | 30,000 次 (read+write)  | ~3,750 次 (splice)      | 0 次 (握手后零 syscall) "
+               "|\n");
+        printf("| 上下文切换 / epoll    | 极高 (每包唤醒调度)     | 中等 (epoll 唤醒调度)   | 0 次 (内核软中断 "
+               "SoftIRQ) |\n");
+        printf("| CPU 占用率 (归一化)   | 100%% (基准)             | 约 55%% ~ 62%%           | 约 25%% ~ 35%% (释放 "
+               "65%%) |\n");
+        printf("| P99 尾部延迟          | 基线延迟                | 降低 ~30%%               | 降低 ~55%% ~ 65%%       "
+               " |\n");
+        printf("+-----------------------+-------------------------+-------------------------+-------------------------+"
+               "\n");
     }
 
     ::close(srvListen);
@@ -974,8 +1076,8 @@ void benchToleranceAndLatenciesN()
     auto t1 = Clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     printf("  [LatenciesN<10> O(1) 环形滑动窗口采样]\n");
-    printf("    样本总数: %zu 次 | 耗时: %6.2f ms | 吞吐: %8.2f M ops/s (平均 %4.2f ns/op)\n",
-           kLatOps, ms, (kLatOps / (ms / 1000.0)) / 1000000.0, (ms * 1000000.0) / kLatOps);
+    printf("    样本总数: %zu 次 | 耗时: %6.2f ms | 吞吐: %8.2f M ops/s (平均 %4.2f ns/op)\n", kLatOps, ms,
+           (kLatOps / (ms / 1000.0)) / 1000000.0, (ms * 1000000.0) / kLatOps);
 
     // Part B: 路由抖动抑制对比 (Route Flapping Suppression)
     OutboundManager mgr;
@@ -1021,7 +1123,8 @@ void benchToleranceAndLatenciesN()
     printf("\n  [出站路由震荡 (Route Flapping) 抑制仿真对比 (%zu 次波动测试)]\n", kSimRounds);
     printf("    1. 无容差阻尼 (tolerance = 0ms):  发生震荡切换: %4zu 次 (会话频繁跳跃断流)\n", flapsNoTol);
     printf("    2. 启用容差阻尼 (tolerance = 15ms): 发生震荡切换: %4zu 次 (微抖动 100%% 抑制平稳)\n", flapsWithTol);
-    double flapReduction = (flapsNoTol > 0) ? ((static_cast<double>(flapsNoTol - flapsWithTol) / flapsNoTol) * 100.0) : 100.0;
+    double flapReduction =
+        (flapsNoTol > 0) ? ((static_cast<double>(flapsNoTol - flapsWithTol) / flapsNoTol) * 100.0) : 100.0;
     printf("    -> 震荡抑制率: +%5.1f%% (大幅减少 TCP 重传与 QUIC 迁移风暴)\n", flapReduction);
 }
 
@@ -1072,14 +1175,16 @@ void benchScatterGatherGatherWrite()
     auto t3 = Clock::now();
     double msGather = std::chrono::duration<double, std::milli>(t3 - t2).count();
 
-    ::close(pairA[0]); ::close(pairA[1]);
-    ::close(pairB[0]); ::close(pairB[1]);
+    ::close(pairA[0]);
+    ::close(pairA[1]);
+    ::close(pairB[0]);
+    ::close(pairB[1]);
 
     printf("  [协议前缀与伴随载荷写入系统调用开销对比 (%zu 次迭代)]\n", kIterations);
     printf("    1. 朴素方案 (两次 write 独立发送):     耗时: %6.2f ms | 系统调用: %zu 次 (存在 Nagle 延迟隐患)\n",
            msNaive, kIterations * 2);
-    printf("    2. FIONREAD + writev (聚集原子发送):  耗时: %6.2f ms | 系统调用: %zu 次 (-50%% 系统调用)\n",
-           msGather, kIterations);
+    printf("    2. FIONREAD + writev (聚集原子发送):  耗时: %6.2f ms | 系统调用: %zu 次 (-50%% 系统调用)\n", msGather,
+           kIterations);
     double speedup = ((msNaive - msGather) / msNaive) * 100.0;
     printf("    -> 写入耗时缩减: +%5.1f%% (单次系统调用上链，消灭分包延迟)\n", speedup);
 }
@@ -1101,7 +1206,8 @@ void benchShortLivedUdpChurnDefense()
 
     // 场景 1: 未开启短生命周期旁路 (全量追踪写入 conn_state_map)
     size_t simulatedMapOccupancyWithoutBypass = kDnsQueryBurst;
-    double mapUsagePctWithoutBypass = (static_cast<double>(simulatedMapOccupancyWithoutBypass) / kMaxMapEntries) * 100.0;
+    double mapUsagePctWithoutBypass =
+        (static_cast<double>(simulatedMapOccupancyWithoutBypass) / kMaxMapEntries) * 100.0;
     size_t longLivedConnectionsEvictedWithoutBypass = kMaxMapEntries; // 100% 存量长连接被挤压驱逐淘汰
 
     // 场景 2: 开启短生命周期 UDP 旁路 (isShortLivedUdp)

@@ -5,6 +5,7 @@
  * @brief 通用代理目标网络地址抽象，兼容 SOCKS5 / Trojan / VLESS 规范。
  */
 
+#include "encoding.hpp"
 #include <arpa/inet.h>
 #include <cstdint>
 #include <cstring>
@@ -16,7 +17,6 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <vector>
-#include "crypto.hpp"
 
 #ifndef SO_ORIGINAL_DST
 #define SO_ORIGINAL_DST 80
@@ -35,21 +35,29 @@ namespace mynet::handler
     {
         const uint32_t h = ntohl(ip.s_addr);
         // 10.0.0.0/8
-        if ((h & 0xFF000000) == 0x0A000000) return true;
+        if ((h & 0xFF000000) == 0x0A000000)
+            return true;
         // 172.16.0.0/12
-        if ((h & 0xFFF00000) == 0xAC100000) return true;
+        if ((h & 0xFFF00000) == 0xAC100000)
+            return true;
         // 192.168.0.0/16
-        if ((h & 0xFFFF0000) == 0xC0A80000) return true;
+        if ((h & 0xFFFF0000) == 0xC0A80000)
+            return true;
         // 127.0.0.0/8 (Loopback)
-        if ((h & 0xFF000000) == 0x7F000000) return true;
+        if ((h & 0xFF000000) == 0x7F000000)
+            return true;
         // 100.64.0.0/10 (CGNAT)
-        if ((h & 0xFFC00000) == 0x64400000) return true;
+        if ((h & 0xFFC00000) == 0x64400000)
+            return true;
         // 169.254.0.0/16 (Link Local)
-        if ((h & 0xFFFF0000) == 0xA9FE0000) return true;
+        if ((h & 0xFFFF0000) == 0xA9FE0000)
+            return true;
         // 198.18.0.0/15 (FakeIP / Benchmark)
-        if ((h & 0xFFFE0000) == 0xC6120000) return true;
+        if ((h & 0xFFFE0000) == 0xC6120000)
+            return true;
         // 0.0.0.0/8
-        if ((h & 0xFF000000) == 0x00000000) return true;
+        if ((h & 0xFF000000) == 0x00000000)
+            return true;
         return false;
     }
 
@@ -85,22 +93,17 @@ namespace mynet::handler
         [[nodiscard]] constexpr uint32_t maskBeVal() const noexcept { return maskBe; }
         [[nodiscard]] constexpr uint8_t prefix() const noexcept { return prefixLen; }
 
-        [[nodiscard]] constexpr bool matches(uint32_t ipBe) const noexcept
-        {
-            return (ipBe & maskBe) == networkBe;
-        }
+        [[nodiscard]] constexpr bool matches(uint32_t ipBe) const noexcept { return (ipBe & maskBe) == networkBe; }
 
-        [[nodiscard]] constexpr bool matches(in_addr ip) const noexcept
-        {
-            return matches(ip.s_addr);
-        }
+        [[nodiscard]] constexpr bool matches(in_addr ip) const noexcept { return matches(ip.s_addr); }
 
         /**
          * @brief 从标准 CIDR 格式字符串解析（如 "192.168.1.0/24" 或单 IP "10.0.0.1"）
          */
         static std::optional<IpCidr> parse(std::string_view cidrStr) noexcept
         {
-            if (cidrStr.empty()) return std::nullopt;
+            if (cidrStr.empty())
+                return std::nullopt;
 
             size_t slashPos = cidrStr.find('/');
             std::string ipPart(cidrStr.substr(0, slashPos));
@@ -114,13 +117,16 @@ namespace mynet::handler
             if (slashPos != std::string_view::npos)
             {
                 std::string_view prefixPart = cidrStr.substr(slashPos + 1);
-                if (prefixPart.empty()) return std::nullopt;
+                if (prefixPart.empty())
+                    return std::nullopt;
                 uint32_t val = 0;
                 for (char c : prefixPart)
                 {
-                    if (c < '0' || c > '9') return std::nullopt;
+                    if (c < '0' || c > '9')
+                        return std::nullopt;
                     val = val * 10 + static_cast<uint32_t>(c - '0');
-                    if (val > 32) return std::nullopt;
+                    if (val > 32)
+                        return std::nullopt;
                 }
                 prefix = static_cast<uint8_t>(val);
             }
@@ -128,10 +134,7 @@ namespace mynet::handler
             return IpCidr(addr.s_addr, prefix);
         }
 
-        [[nodiscard]] static bool isPrivate(in_addr ip) noexcept
-        {
-            return isPrivateAddress(ip);
-        }
+        [[nodiscard]] static bool isPrivate(in_addr ip) noexcept { return isPrivateAddress(ip); }
     };
 
     /**
@@ -144,7 +147,8 @@ namespace mynet::handler
 
         static std::optional<Ip6Cidr> parse(std::string_view cidrStr) noexcept
         {
-            if (cidrStr.empty()) return std::nullopt;
+            if (cidrStr.empty())
+                return std::nullopt;
 
             size_t slashPos = cidrStr.find('/');
             std::string ipPart(cidrStr.substr(0, slashPos));
@@ -158,13 +162,16 @@ namespace mynet::handler
             if (slashPos != std::string_view::npos)
             {
                 std::string_view prefixPart = cidrStr.substr(slashPos + 1);
-                if (prefixPart.empty()) return std::nullopt;
+                if (prefixPart.empty())
+                    return std::nullopt;
                 uint32_t val = 0;
                 for (char c : prefixPart)
                 {
-                    if (c < '0' || c > '9') return std::nullopt;
+                    if (c < '0' || c > '9')
+                        return std::nullopt;
                     val = val * 10 + static_cast<uint32_t>(c - '0');
-                    if (val > 128) return std::nullopt;
+                    if (val > 128)
+                        return std::nullopt;
                 }
                 prefix = static_cast<uint8_t>(val);
             }
@@ -182,7 +189,8 @@ namespace mynet::handler
 
         static std::optional<MacAddress> parse(std::string_view str) noexcept
         {
-            if (str.size() != 17) return std::nullopt;
+            if (str.size() != 17)
+                return std::nullopt;
             MacAddress mac{};
             for (size_t i = 0; i < 6; ++i)
             {
@@ -191,9 +199,10 @@ namespace mynet::handler
                 {
                     return std::nullopt;
                 }
-                int hi = crypto::hexCharToNibble(str[offset]);
-                int lo = crypto::hexCharToNibble(str[offset + 1]);
-                if (hi < 0 || lo < 0) return std::nullopt;
+                int hi = encoding::hexCharToNibble(str[offset]);
+                int lo = encoding::hexCharToNibble(str[offset + 1]);
+                if (hi < 0 || lo < 0)
+                    return std::nullopt;
                 mac.bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
             }
             return mac;
@@ -202,8 +211,8 @@ namespace mynet::handler
         [[nodiscard]] std::string toString() const
         {
             char buf[18];
-            std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-                          bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
+            std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x", bytes[0], bytes[1], bytes[2], bytes[3],
+                          bytes[4], bytes[5]);
             return std::string(buf);
         }
 
@@ -211,7 +220,8 @@ namespace mynet::handler
         {
             for (size_t i = 0; i < 6; ++i)
             {
-                if (bytes[i] != other.bytes[i]) return false;
+                if (bytes[i] != other.bytes[i])
+                    return false;
             }
             return true;
         }
@@ -220,7 +230,8 @@ namespace mynet::handler
         {
             for (size_t i = 0; i < 6; ++i)
             {
-                if (bytes[i] != 0) return false;
+                if (bytes[i] != 0)
+                    return false;
             }
             return true;
         }

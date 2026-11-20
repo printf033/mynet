@@ -8,13 +8,13 @@
  */
 
 #include "acceptor.hpp"
+#include "config/log.hpp"
+#include "config/tls.hpp"
 #include "configHolder.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
 #include "objectPool.hpp"
-#include "config/tls.hpp"
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -69,8 +69,10 @@ namespace mynet
         Proactor(const Proactor &) = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
         Proactor &
         operator=(const Proactor &) = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
-        Proactor(Proactor &&) noexcept = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
-        Proactor &operator=(Proactor &&) noexcept = delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
+        Proactor(Proactor &&) noexcept =
+            delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
+        Proactor &operator=(Proactor &&) noexcept =
+            delete; // a proactor owns the io_uring ring and the buffers handed to the kernel
 
         using AcceptCallback = std::function<void(int clientFd, const sockaddr_in &clientAddr)>;
 
@@ -924,8 +926,8 @@ namespace mynet
                 {
                     if (auto rc = postOneAccept(listenFd, it->second->onAccept); !rc)
                     {
-                        LOG_WARN("Proactor::onAcceptDone: re-arming accept for fd {} failed: {}",
-                                 listenFd, toString(rc.error()));
+                        LOG_WARN("Proactor::onAcceptDone: re-arming accept for fd {} failed: {}", listenFd,
+                                 toString(rc.error()));
                     }
                 }
             }

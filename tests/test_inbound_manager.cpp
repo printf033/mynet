@@ -193,21 +193,25 @@ TEST(InboundManagerTest, ReactorDrivesInboundAcceptor)
     Server reactor;
 
     std::atomic<bool> accepted{false};
-    auto regRes = reactor.addListener(inbound->listenFd(), [&accepted](int clientFd, const sockaddr_in &) {
-        accepted.store(true, std::memory_order_release);
-        ::close(clientFd);
-    });
+    auto regRes = reactor.addListener(inbound->listenFd(),
+                                      [&accepted](int clientFd, const sockaddr_in &)
+                                      {
+                                          accepted.store(true, std::memory_order_release);
+                                          ::close(clientFd);
+                                      });
     ASSERT_TRUE(regRes.has_value());
     EXPECT_GE(reactor.listenerCount(), 1u);
 
     // 3. 在后台线程运行 Reactor 事件循环
-    std::thread serverThread([&reactor]() {
-        ServerConfig scfg;
-        scfg.host = "127.0.0.1";
-        scfg.port = 0;
-        ReactorConfig rcfg;
-        [[maybe_unused]] auto _ = reactor.runTcp("127.0.0.1", 0, scfg, rcfg);
-    });
+    std::thread serverThread(
+        [&reactor]()
+        {
+            ServerConfig scfg;
+            scfg.host = "127.0.0.1";
+            scfg.port = 0;
+            ReactorConfig rcfg;
+            [[maybe_unused]] auto _ = reactor.runTcp("127.0.0.1", 0, scfg, rcfg);
+        });
 
     // 4. 等待 reactor 启动后由客户端发起建连
     usleep(10000);
@@ -255,10 +259,12 @@ TEST(InboundManagerTest, ProactorDrivesInboundAcceptor)
     Server proactor;
 
     std::atomic<bool> accepted{false};
-    auto regRes = proactor.addListener(inbound->listenFd(), [&accepted](int clientFd, const sockaddr_in &) {
-        accepted.store(true, std::memory_order_release);
-        ::close(clientFd);
-    });
+    auto regRes = proactor.addListener(inbound->listenFd(),
+                                       [&accepted](int clientFd, const sockaddr_in &)
+                                       {
+                                           accepted.store(true, std::memory_order_release);
+                                           ::close(clientFd);
+                                       });
     ASSERT_TRUE(regRes.has_value());
     EXPECT_GE(proactor.listenerCount(), 1u);
 
@@ -274,13 +280,15 @@ TEST(InboundManagerTest, ProactorDrivesInboundAcceptor)
     io_uring_queue_exit(&testRing);
 
     // 3. 在后台线程运行 Proactor 完成事件循环
-    std::thread serverThread([&proactor]() {
-        ServerConfig scfg;
-        scfg.host = "127.0.0.1";
-        scfg.port = 0;
-        ProactorConfig pcfg;
-        [[maybe_unused]] auto _ = proactor.runTcp("127.0.0.1", 0, scfg, pcfg);
-    });
+    std::thread serverThread(
+        [&proactor]()
+        {
+            ServerConfig scfg;
+            scfg.host = "127.0.0.1";
+            scfg.port = 0;
+            ProactorConfig pcfg;
+            [[maybe_unused]] auto _ = proactor.runTcp("127.0.0.1", 0, scfg, pcfg);
+        });
 
     // 4. 等待 proactor 启动后由客户端发起建连
     usleep(10000);

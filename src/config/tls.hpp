@@ -1,8 +1,8 @@
 #pragma once
 
+#include "config/log.hpp"
 #include "configHolder.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
 #include <cstring>
 #include <mutex>
 #include <openssl/ssl.h>

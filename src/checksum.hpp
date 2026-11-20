@@ -1,10 +1,10 @@
 #pragma once
 
-#include <cstdint>
-#include <cstddef>
-#include <span>
 #include <arpa/inet.h>
+#include <cstddef>
+#include <cstdint>
 #include <netinet/in.h>
+#include <span>
 
 namespace mynet
 {
@@ -49,8 +49,7 @@ namespace mynet
      * @param payload UDP 负载数据切片
      * @return uint16_t 16位校验和 (主机字节序；RFC 768 规定若计算结果为 0 则回绕填 0xFFFF)
      */
-    [[nodiscard]] inline uint16_t rfcUdp4Checksum(uint32_t saddr, uint32_t daddr,
-                                                  uint16_t sport, uint16_t dport,
+    [[nodiscard]] inline uint16_t rfcUdp4Checksum(uint32_t saddr, uint32_t daddr, uint16_t sport, uint16_t dport,
                                                   std::span<const uint8_t> payload) noexcept
     {
         const uint16_t udpLen = static_cast<uint16_t>(8 + payload.size());

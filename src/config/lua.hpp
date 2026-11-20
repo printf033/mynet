@@ -9,8 +9,8 @@
  * reloadConfig() 在信号或 mylog 热重载时重新装载。
  */
 
-#include "configHolder.hpp"
 #include "config/log.hpp"
+#include "configHolder.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -145,7 +145,8 @@ namespace mynet
             return true;
         }
 
-        inline bool readStringList(lua_State *L, int tableIdx, const char *key, std::vector<std::string> &out, bool &valid)
+        inline bool readStringList(lua_State *L, int tableIdx, const char *key, std::vector<std::string> &out,
+                                   bool &valid)
         {
             lua_getfield(L, tableIdx, key);
             const int type = lua_type(L, -1);
@@ -714,8 +715,7 @@ namespace mynet
                 const lua_Integer v = clampValue<lua_Integer>(num, 1, 65535);
                 cfg.port = static_cast<uint16_t>(v);
             }
-            if (readNumberField(L, idx, "ttlSecs", num, valid) ||
-                readNumberField(L, idx, "ttl", num, valid))
+            if (readNumberField(L, idx, "ttlSecs", num, valid) || readNumberField(L, idx, "ttl", num, valid))
             {
                 const lua_Integer v = clampValue<lua_Integer>(num, 1, 86400 * 30);
                 cfg.ttlSecs = static_cast<uint32_t>(v);
@@ -756,8 +756,7 @@ namespace mynet
                         std::string s;
                         bool b = false;
 
-                        if (readStringField(L, rIdx, "outbound", s, valid) ||
-                            readStringField(L, rIdx, "tag", s, valid))
+                        if (readStringField(L, rIdx, "outbound", s, valid) || readStringField(L, rIdx, "tag", s, valid))
                         {
                             rule.outbound = std::move(s);
                         }

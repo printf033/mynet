@@ -20,8 +20,8 @@ TEST(AdvancedProxyTest, UrlTestSelectsLowestLatencyNode)
     mgr.registerOutbound(std::make_shared<OutboundDirect>("jp-node"));
     mgr.registerOutbound(std::make_shared<OutboundDirect>("us-node"));
 
-    auto urltest = std::make_shared<OutboundUrlTest>(
-        "auto-fastest", std::vector<std::string>{"hk-node", "jp-node", "us-node"}, &mgr);
+    auto urltest = std::make_shared<OutboundUrlTest>("auto-fastest",
+                                                     std::vector<std::string>{"hk-node", "jp-node", "us-node"}, &mgr);
     mgr.registerOutbound(urltest);
 
     // 默认初始选择第一个节点
@@ -51,8 +51,8 @@ TEST(AdvancedProxyTest, OutboundFallbackSequence)
     mgr.registerOutbound(std::make_shared<OutboundBlock>("faulty-primary"));
     mgr.registerOutbound(std::make_shared<OutboundDirect>("backup-node"));
 
-    auto fallback = std::make_shared<OutboundFallback>(
-        "auto-fallback", std::vector<std::string>{"faulty-primary", "backup-node"}, &mgr);
+    auto fallback = std::make_shared<OutboundFallback>("auto-fallback",
+                                                       std::vector<std::string>{"faulty-primary", "backup-node"}, &mgr);
     mgr.registerOutbound(fallback);
 
     ASSERT_EQ(fallback->candidates().size(), 2u);
@@ -67,7 +67,8 @@ TEST(AdvancedProxyTest, OutboundFallbackSequence)
 TEST(AdvancedProxyTest, AdvancedInboundAndOutboundProtocols)
 {
     // 1. Inbounds
-    auto vlessIn = std::make_shared<InboundVless>("vless-in", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
+    auto vlessIn =
+        std::make_shared<InboundVless>("vless-in", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
     EXPECT_EQ(vlessIn->type(), "vless");
     EXPECT_EQ(vlessIn->uuid(), "a1b2c3d4-e5f6-7890-1234-567890abcdef");
     auto vlessHandler = vlessIn->createHandler();
@@ -94,7 +95,8 @@ TEST(AdvancedProxyTest, AdvancedInboundAndOutboundProtocols)
     ASSERT_NE(tunHandler, nullptr);
 
     // 2. Outbounds
-    auto vlessOut = std::make_shared<OutboundVless>("vless-out", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
+    auto vlessOut =
+        std::make_shared<OutboundVless>("vless-out", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
     EXPECT_EQ(vlessOut->type(), "vless");
     EXPECT_EQ(vlessOut->serverHost(), "127.0.0.1");
     EXPECT_EQ(vlessOut->serverPort(), 4430);

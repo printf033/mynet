@@ -5,8 +5,9 @@
  * @brief HTTP/1.x 协议处理器实现，基于 llhttp 状态机进行文本报文流解析。
  */
 
-#include "connection.hpp"
+#include "../common.hpp"
 #include "config/log.hpp"
+#include "connection.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -44,8 +45,8 @@ namespace mynet
 
             HandlerHttp(const HandlerHttp &) = delete; // a handler holds parser state bound to one connection
             HandlerHttp &
-            operator=(const HandlerHttp &) = delete; // a handler holds parser state bound to one connection
-            HandlerHttp(HandlerHttp &&) = delete; // a handler holds parser state bound to one connection
+            operator=(const HandlerHttp &) = delete;         // a handler holds parser state bound to one connection
+            HandlerHttp(HandlerHttp &&) = delete;            // a handler holds parser state bound to one connection
             HandlerHttp &operator=(HandlerHttp &&) = delete; // a handler holds parser state bound to one connection
 
             inline void init() noexcept
@@ -124,7 +125,7 @@ namespace mynet
                 resp.append("HTTP/1.1 ");
                 resp.append(std::to_string(statusCode));
                 resp.push_back(' ');
-                resp.append(statusText.empty() ? "OK" : statusText);
+                resp.append(statusText.empty() ? http::statusReason(statusCode) : statusText);
                 resp.append("\r\nContent-Length: ");
                 resp.append(std::to_string(body.size()));
                 resp.append("\r\nConnection: ");
@@ -174,33 +175,10 @@ namespace mynet
                 {
                     return {};
                 }
-                const size_t targetLen = std::strlen(name);
+                const std::string_view target(name);
                 for (const auto &kv : headers_)
                 {
-                    if (kv.first.size() != targetLen)
-                    {
-                        continue;
-                    }
-                    bool equal = true;
-                    for (size_t i = 0; i < kv.first.size(); ++i)
-                    {
-                        char a = kv.first[i];
-                        char b = name[i];
-                        if (a >= 'A' && a <= 'Z')
-                        {
-                            a = static_cast<char>(a - 'A' + 'a');
-                        }
-                        if (b >= 'A' && b <= 'Z')
-                        {
-                            b = static_cast<char>(b - 'A' + 'a');
-                        }
-                        if (a != b)
-                        {
-                            equal = false;
-                            break;
-                        }
-                    }
-                    if (equal)
+                    if (http::iequals(kv.first, target))
                     {
                         return kv.second;
                     }

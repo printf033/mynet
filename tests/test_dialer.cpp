@@ -1,14 +1,14 @@
-#include "dialer.hpp"
+#include "../examples/common/resolver.hpp"
 #include "address.hpp"
 #include "block/block.hpp"
+#include "dialer.hpp"
 #include "direct/direct.hpp"
 #include "dns/dns.hpp"
 #include "dns/handler.hpp"
 #include "hysteria2/hysteria2.hpp"
+#include "socks/socks5.hpp"
 #include "trojan/trojan.hpp"
 #include "vless/vless.hpp"
-#include "socks/socks5.hpp"
-#include "../examples/common/resolver.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -59,22 +59,16 @@ TEST(DnsResolverTest, DecodeResponseAndCache)
     // 构造一个合法的 DNS 响应包: 事务 ID=0x1234, Flags=0x8180 (标准响应, No error)
     // QDCOUNT=1, ANCOUNT=1, A 记录: 93.184.216.34, TTL=300
     std::vector<uint8_t> resp = {
-        0x12, 0x34,             // ID
-        0x81, 0x80,             // Flags: Response, Recursion Desired & Available
-        0x00, 0x01,             // QDCOUNT = 1
-        0x00, 0x01,             // ANCOUNT = 1
-        0x00, 0x00,             // NSCOUNT = 0
-        0x00, 0x00,             // ARCOUNT = 0
+        0x12, 0x34, // ID
+        0x81, 0x80, // Flags: Response, Recursion Desired & Available
+        0x00, 0x01, // QDCOUNT = 1
+        0x00, 0x01, // ANCOUNT = 1
+        0x00, 0x00, // NSCOUNT = 0
+        0x00, 0x00, // ARCOUNT = 0
         // Question: 7example3com0 | Type A | Class IN
-        0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-        0x00, 0x01, 0x00, 0x01,
+        0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00, 0x00, 0x01, 0x00, 0x01,
         // Answer: 指针压缩 0xC00C, TYPE=1, CLASS=1, TTL=300 (0x0000012C), RDLENGTH=4, IP=93.184.216.34
-        0xC0, 0x0C,
-        0x00, 0x01, 0x00, 0x01,
-        0x00, 0x00, 0x01, 0x2C,
-        0x00, 0x04,
-        93, 184, 216, 34
-    };
+        0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C, 0x00, 0x04, 93, 184, 216, 34};
 
     std::vector<in_addr> v4;
     std::vector<in6_addr> v6;
@@ -170,7 +164,7 @@ TEST(HandlerOutboundTest, OutboundTrojan)
 
     std::string sent = trojan.takeResponse();
     // Trojan 头部：56B 密钥 + CRLF + CMD + Address + CRLF
-    std::string expectedKey = crypto::sha224Hex("password123");
+    std::string expectedKey = digest::sha224Hex("password123");
     EXPECT_TRUE(sent.starts_with(expectedKey + "\r\n\x01"));
     EXPECT_TRUE(sent.ends_with("\r\n"));
 }
@@ -267,19 +261,22 @@ TEST(HandlerOutboundTest, OutboundHysteria2)
 }
 
 // =============================================================================
-// 4. DNS 协议处理器族测试 (HandlerInboundConnectionDns / HandlerInboundDatagramDns / HandlerOutboundConnectionDns / HandlerOutboundDatagramDns)
+// 4. DNS 协议处理器族测试 (HandlerInboundConnectionDns / HandlerInboundDatagramDns / HandlerOutboundConnectionDns /
+// HandlerOutboundDatagramDns)
 // =============================================================================
 
 TEST(HandlerDnsTest, TcpDnsServerAndClient)
 {
     HandlerInboundConnectionDns server;
-    server.setResponder([](const dns::DnsMessage &query) -> std::optional<dns::DnsMessage> {
-        auto resp = query.makeResponse();
-        in_addr ip{};
-        ::inet_pton(AF_INET, "10.0.0.1", &ip);
-        resp.answers.push_back(dns::DnsRecord::createA("api.test.com", ip, 120));
-        return resp;
-    });
+    server.setResponder(
+        [](const dns::DnsMessage &query) -> std::optional<dns::DnsMessage>
+        {
+            auto resp = query.makeResponse();
+            in_addr ip{};
+            ::inet_pton(AF_INET, "10.0.0.1", &ip);
+            resp.answers.push_back(dns::DnsRecord::createA("api.test.com", ip, 120));
+            return resp;
+        });
 
     // 客户端构造查询
     auto queryBytes = dns::encodeQuery("api.test.com", dns::kTypeA, 0x1234);
@@ -313,13 +310,15 @@ TEST(HandlerDnsTest, TcpDnsServerAndClient)
 TEST(HandlerDnsTest, UdpDatagramDnsServer)
 {
     HandlerInboundDatagramDns udpServer;
-    udpServer.setResponder([](const dns::DnsMessage &query) -> std::optional<dns::DnsMessage> {
-        auto resp = query.makeResponse();
-        in_addr ip{};
-        ::inet_pton(AF_INET, "192.168.1.1", &ip);
-        resp.answers.push_back(dns::DnsRecord::createA("udp.test.com", ip, 60));
-        return resp;
-    });
+    udpServer.setResponder(
+        [](const dns::DnsMessage &query) -> std::optional<dns::DnsMessage>
+        {
+            auto resp = query.makeResponse();
+            in_addr ip{};
+            ::inet_pton(AF_INET, "192.168.1.1", &ip);
+            resp.answers.push_back(dns::DnsRecord::createA("udp.test.com", ip, 60));
+            return resp;
+        });
 
     sockaddr_in peer{};
     peer.sin_family = AF_INET;

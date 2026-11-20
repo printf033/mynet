@@ -1,7 +1,10 @@
 #include "http/v3/handler.hpp"
+#include "quic/quic.hpp"
+#include "quic/varint.hpp"
 #include <gtest/gtest.h>
 
 using namespace mynet;
+using namespace mynet::quic;
 using namespace mynet::http::v3;
 
 // ============================================================================

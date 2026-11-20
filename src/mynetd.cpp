@@ -10,16 +10,16 @@
  * 5. 支持 -t 拓扑语法校验、-d 后台守护运行、SIGHUP 沙箱化 Lua 配置热重载与 SIGINT/SIGTERM 平滑停机。
  */
 
-#include "core.hpp"
 #include "controller.hpp"
+#include "core.hpp"
 #include "reactor.hpp"
 #if defined(MYNET_ENABLE_URING)
 #include "proactor.hpp"
 #endif
-#include "mixed/mixed.hpp"
 #include "config/log.hpp"
 #include "config/lua.hpp"
 #include "configHolder.hpp"
+#include "mixed/mixed.hpp"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -139,9 +139,7 @@ namespace
         using Server = EngineType<mynet::AcceptorBase<KernelProxyHandler>>;
         Server server;
 
-        g_stopHandler = [&server]() {
-            server.stop();
-        };
+        g_stopHandler = [&server]() { server.stop(); };
 
         LOG_INFO("I/O Engine active: {}", engineName);
 
@@ -152,19 +150,37 @@ namespace
             {
                 if constexpr (requires { server.addListener(0, {}); })
                 {
-                    auto addRes = server.addListener(inbound->listenFd(), [&core, inbound](int clientFd, const sockaddr_in &clientAddr) {
-                        (void)clientAddr;
-                        auto handler = inbound->createHandler();
-                        if (handler != nullptr)
-                        {
-                            handler->handle();
-                            core.dispatch(*handler, clientFd, inbound->tag(), inbound->isSniffingEnabled());
-                        }
-                    });
+                    auto addRes =
+                        server.addListener(inbound->listenFd(),
+                                           [&core, inbound](int clientFd, const sockaddr_in &clientAddr)
+                                           {
+                                               (void)clientAddr;
+                                               auto handler = inbound->createHandler();
+                                               if (handler != nullptr)
+                                               {
+                                                   if (mynet::inbound::driveHandshake(clientFd, *handler, 2000))
+                                                   {
+                                                       auto res = core.dispatch(*handler, clientFd, inbound->tag(),
+                                                                                inbound->isSniffingEnabled());
+                                                       if (!res.ok() || res.session == nullptr)
+                                                       {
+                                                           ::close(clientFd);
+                                                       }
+                                                   }
+                                                   else
+                                                   {
+                                                       ::close(clientFd);
+                                                   }
+                                               }
+                                               else
+                                               {
+                                                   ::close(clientFd);
+                                               }
+                                           });
                     if (!addRes)
                     {
-                        LOG_WARN("runServer: failed to attach inbound '{}' to engine: {}",
-                                 inbound->tag(), mynet::toString(addRes.error()));
+                        LOG_WARN("runServer: failed to attach inbound '{}' to engine: {}", inbound->tag(),
+                                 mynet::toString(addRes.error()));
                     }
                 }
             }
@@ -172,14 +188,16 @@ namespace
 
         // 启动后台流式转发泵送与空闲会话超时排空任务
         std::atomic<bool> pumpRunning{true};
-        std::thread pumpThread([&core, &pumpRunning]() {
-            while (pumpRunning.load(std::memory_order_relaxed))
+        std::thread pumpThread(
+            [&core, &pumpRunning]()
             {
-                core.tick();
-                core.sweepIdleSessions(60);
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-        });
+                while (pumpRunning.load(std::memory_order_relaxed))
+                {
+                    core.tick();
+                    core.sweepIdleSessions(60);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            });
 
         auto res = server.runTcp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port));
 
@@ -207,13 +225,9 @@ int main(int argc, char *argv[])
     bool runDaemon = false;
 
     static struct option longOptions[] = {
-        {"config", required_argument, nullptr, 'c'},
-        {"test", no_argument, nullptr, 't'},
-        {"version", no_argument, nullptr, 'v'},
-        {"help", no_argument, nullptr, 'h'},
-        {"daemon", no_argument, nullptr, 'd'},
-        {nullptr, 0, nullptr, 0}
-    };
+        {"config", required_argument, nullptr, 'c'}, {"test", no_argument, nullptr, 't'},
+        {"version", no_argument, nullptr, 'v'},      {"help", no_argument, nullptr, 'h'},
+        {"daemon", no_argument, nullptr, 'd'},       {nullptr, 0, nullptr, 0}};
 
     int opt = 0;
     while ((opt = getopt_long(argc, argv, "c:tvhd", longOptions, nullptr)) != -1)
@@ -255,7 +269,8 @@ int main(int argc, char *argv[])
         }
         else
         {
-            std::cerr << "[ERROR] Cannot open configuration file: " << configPath << " (" << std::strerror(errno) << ")\n";
+            std::cerr << "[ERROR] Cannot open configuration file: " << configPath << " (" << std::strerror(errno)
+                      << ")\n";
             return 1;
         }
     }
@@ -300,7 +315,8 @@ int main(int argc, char *argv[])
         }
         if (cfg.controller.enabled)
         {
-            std::cout << "     - Control API:        ENABLED (" << cfg.controller.host << ":" << cfg.controller.port << ")\n";
+            std::cout << "     - Control API:        ENABLED (" << cfg.controller.host << ":" << cfg.controller.port
+                      << ")\n";
         }
         testCore.stop();
         return 0;
@@ -338,7 +354,8 @@ int main(int argc, char *argv[])
     // 构建内核主体并应用配置
     mynet::Core core(cfg);
 
-    g_reloadHandler = [&core, &configPath]() {
+    g_reloadHandler = [&core, &configPath]()
+    {
         LOG_INFO("SIGHUP received: live reloading Lua configuration from '{}'...", configPath);
 #ifdef MYNET_HAVE_LUA
         if (mynet::reloadConfig(configPath, false))
@@ -355,8 +372,7 @@ int main(int argc, char *argv[])
 
     if (core.ebpf() != nullptr)
     {
-        LOG_INFO("dae eBPF Engine: initialized on interface '{}' (Kernel BPF: {}, Mode: {})",
-                 cfg.ebpf.wanInterface,
+        LOG_INFO("dae eBPF Engine: initialized on interface '{}' (Kernel BPF: {}, Mode: {})", cfg.ebpf.wanInterface,
                  core.ebpf()->isKernelBpfActive() ? "ACTIVE" : "EMULATION",
                  core.ebpf()->isKernelBpfActive() ? "Kernel TC Hook" : "User-space LPM Trie");
     }
@@ -372,11 +388,11 @@ int main(int argc, char *argv[])
     LOG_INFO("Core engine started successfully. Active listeners:");
     for (const auto &inbound : core.inbounds().inbounds())
     {
-        LOG_INFO("  * Inbound [{}] protocol='{}' listening on {}:{} (fd: {})",
-                 inbound->tag(), inbound->type(), inbound->host(), inbound->port(), inbound->listenFd());
+        LOG_INFO("  * Inbound [{}] protocol='{}' listening on {}:{} (fd: {})", inbound->tag(), inbound->type(),
+                 inbound->host(), inbound->port(), inbound->listenFd());
     }
-    LOG_INFO("Default outbound: '{}', active route rules: {}",
-             core.router().defaultOutbound(), core.router().rules().size());
+    LOG_INFO("Default outbound: '{}', active route rules: {}", core.router().defaultOutbound(),
+             core.router().rules().size());
 
     // 启动可选的 Clash-compatible 控制 API
     std::unique_ptr<mynet::Controller> apiController{nullptr};
@@ -385,11 +401,13 @@ int main(int argc, char *argv[])
         apiController = std::make_unique<mynet::Controller>(&core, cfg.controller);
         if (auto res = apiController->startBackground(); res)
         {
-            LOG_INFO("Clash-compatible RESTful Control API listening on {}:{}", cfg.controller.host, cfg.controller.port);
+            LOG_INFO("Clash-compatible RESTful Control API listening on {}:{}", cfg.controller.host,
+                     cfg.controller.port);
         }
         else
         {
-            LOG_ERROR("Failed to start Control API on {}:{}: {}", cfg.controller.host, cfg.controller.port, mynet::toString(res.error()));
+            LOG_ERROR("Failed to start Control API on {}:{}: {}", cfg.controller.host, cfg.controller.port,
+                      mynet::toString(res.error()));
         }
     }
 

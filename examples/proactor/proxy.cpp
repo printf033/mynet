@@ -1,7 +1,7 @@
-#include "mixed/mixed.hpp"
 #include "common/endpoint.hpp"
-#include "error.hpp"
 #include "config/log.hpp"
+#include "error.hpp"
+#include "mixed/mixed.hpp"
 #include "proactor.hpp"
 #include <string>
 #include <string_view>

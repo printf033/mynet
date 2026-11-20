@@ -343,7 +343,7 @@ sequenceDiagram
 - **`ObjectPool<Object>`**：预先分配由连续槽位数组 `std::unique_ptr<Slot[]>` 与定容索引栈构成的池化结构。对象一旦分配，其在内存中的地址终生不变，确保注册在 epoll 凭证或 io_uring 完成事件上下文中的裸指针永不失效，彻底消除频繁创建与销毁连接导致的内存碎片与分配开销。
 - **`RequestBuffer`**：纯自管连续堆内存块（`operator new[](std::nothrow)` 零异常语义），提供真实可写直接窗口（`writableBytes()`、`writableBegin()`、`commitWritten()`、`ensureWritable()`）与零拷贝读视图（`readableView()`）。仅当已消费的死数据前缀超过 4 KiB 且达到占用总量一半以上时，才会在 `retrieve()` 触发就地数据搬移压缩，兼具极致性能与安全内存边界。
 - **`ResponseQueue`**：定容连续循环响应队列（`src/responseQueue.hpp`），提供 $O(1)$ 零堆分配入队/出队与严格有界内存开销。
-- **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/http/v2/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
+- **`StreamTable<T>`**：定容开放寻址平坦哈希表（`src/streamTable.hpp`），采用线性探测、墓碑删除与墓碑原位复用算法，实现多路复用流 ID 到槽位的零运行时堆分配。
 
 ### 4. HTTP/2 帧编解码与流多路复用
 
@@ -661,7 +661,11 @@ mynet/
 │   ├── inboundManager.hpp      # 入站监听端点管理器与生命周期纳管 (InboundBase / InboundManager)
 │   ├── outboundManager.hpp     # 出站建连端点管理器与多出站路由调度 (OutboundBase / OutboundManager)
 │   ├── address.hpp             # 代理与网络目标端点地址统一抽象 (ProxyAddress)
-│   ├── crypto.hpp              # 加密与哈希原语 (SHA-224, MD5, AEAD, UUID)
+│   ├── encoding.hpp            # 文本与二进制编解码原语 (Hex, Base64, UUID, 恒定时间比较)
+│   ├── digest.hpp              # 摘要与消息认证码算法 (SHA-1/224/256, MD5, HMAC)
+│   ├── kdf.hpp                 # 密钥派生函数 (HKDF-SHA1, HKDF-SHA256, RFC 8446/9000 ExpandLabel)
+│   ├── cipher.hpp              # 对称与 AEAD 加密算法 (Shadowsocks AEAD, AES-GCM, AES-ECB)
+│   ├── x25519.hpp              # X25519 密钥生成与 ECDH 共享秘密协商
 │   ├── router.hpp              # 策略路由与规则匹配引擎 (Router / RouteRule / CIDR / 域名多维匹配 / 嗅探协议协同)
 │   ├── forwarder.hpp           # 双向流式与数据报中继转发引擎 (Forwarder / ForwarderStreamSession / Splice 零拷贝与缓冲泵送)
 │   ├── sniffer.hpp             # 深度应用层零拷贝统一嗅探调度门面 (DomainSniffer / ProtocolType / SniffResult)

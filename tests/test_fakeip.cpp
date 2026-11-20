@@ -1,7 +1,7 @@
-#include "fakeip.hpp"
-#include "core.hpp"
 #include "address.hpp"
+#include "core.hpp"
 #include "direct/direct.hpp"
+#include "fakeip.hpp"
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>

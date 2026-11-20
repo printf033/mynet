@@ -5,10 +5,12 @@
  * @brief HTTP 代理协议服务端状态机处理器（支持 HTTP CONNECT 隧道与透明转发，带 Basic 认证）。
  */
 
-#include "../connection.hpp"
 #include "../address.hpp"
-#include "../crypto.hpp"
+#include "../connection.hpp"
+#include "../encoding.hpp"
 #include "../inbound.hpp"
+#include "../outbound.hpp"
+#include "common.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -163,7 +165,7 @@ namespace mynet::handler
             }
 
             // 解析目标地址
-            if (method == "CONNECT")
+            if (method == http::method::kConnect)
             {
                 isConnectMethod_ = true;
                 command_ = http_proxy::kCmdConnect;
@@ -246,38 +248,25 @@ namespace mynet::handler
                 std::string_view line = headers.substr(pos, lineEnd - pos);
                 pos = lineEnd + 2;
 
-                // 统一大小写比对
-                if (line.size() > kAuthHeader.size())
+                if (http::istartsWith(line, kAuthHeader))
                 {
-                    bool match = true;
-                    for (size_t i = 0; i < kAuthHeader.size(); ++i)
+                    std::string_view val = line.substr(kAuthHeader.size());
+                    while (!val.empty() && val.front() == ' ')
                     {
-                        if (std::tolower(static_cast<unsigned char>(line[i])) != kAuthHeader[i])
-                        {
-                            match = false;
-                            break;
-                        }
+                        val.remove_prefix(1);
                     }
-                    if (match)
+                    if (http::istartsWith(val, "Basic ") || http::istartsWith(val, "basic "))
                     {
-                        std::string_view val = line.substr(kAuthHeader.size());
-                        while (!val.empty() && val.front() == ' ')
+                        std::string_view b64 = val.substr(6);
+                        std::string decoded;
+                        if (encoding::base64Decode(b64, decoded))
                         {
-                            val.remove_prefix(1);
-                        }
-                        if (val.starts_with("Basic ") || val.starts_with("basic "))
-                        {
-                            std::string_view b64 = val.substr(6);
-                            std::string decoded;
-                            if (crypto::base64Decode(b64, decoded))
+                            size_t colon = decoded.find(':');
+                            if (colon != std::string::npos)
                             {
-                                size_t colon = decoded.find(':');
-                                if (colon != std::string::npos)
-                                {
-                                    std::string_view u = std::string_view(decoded).substr(0, colon);
-                                    std::string_view p = std::string_view(decoded).substr(colon + 1);
-                                    return authCallback_(u, p);
-                                }
+                                std::string_view u = std::string_view(decoded).substr(0, colon);
+                                std::string_view p = std::string_view(decoded).substr(colon + 1);
+                                return authCallback_(u, p);
                             }
                         }
                     }
@@ -363,29 +352,113 @@ namespace mynet::handler
                 std::string_view line = headers.substr(pos, lineEnd - pos);
                 pos = lineEnd + 2;
 
-                if (line.size() > kHost.size())
+                if (http::istartsWith(line, kHost))
                 {
-                    bool match = true;
-                    for (size_t i = 0; i < kHost.size(); ++i)
+                    std::string_view val = line.substr(kHost.size());
+                    while (!val.empty() && val.front() == ' ')
                     {
-                        if (std::tolower(static_cast<unsigned char>(line[i])) != kHost[i])
-                        {
-                            match = false;
-                            break;
-                        }
+                        val.remove_prefix(1);
                     }
-                    if (match)
-                    {
-                        std::string_view val = line.substr(kHost.size());
-                        while (!val.empty() && val.front() == ' ')
-                        {
-                            val.remove_prefix(1);
-                        }
-                        return parseHostPort(val, 80);
-                    }
+                    return parseHostPort(val, 80);
                 }
             }
             return std::nullopt;
+        }
+    };
+
+    /**
+     * @brief HTTP 代理出站客户端协议处理器 (HTTP Proxy Outbound)
+     *
+     * 自动向上游 HTTP 代理服务器发送 CONNECT 隧道建连指令，并等待 HTTP/1.x 200 响应。
+     */
+    class HandlerOutboundHttp : public HandlerOutboundConnection
+    {
+    public:
+        static constexpr bool kEnableSplice = true;
+
+    private:
+        enum class Step : uint8_t
+        {
+            SEND_CONNECT,
+            RECV_CONNECT,
+            DONE
+        };
+        Step step_{Step::SEND_CONNECT};
+        std::string username_{};
+        std::string password_{};
+
+    public:
+        HandlerOutboundHttp() noexcept = default;
+        HandlerOutboundHttp(std::string_view username, std::string_view password, const ProxyAddress &target)
+            : HandlerOutboundConnection(target),
+              username_(username),
+              password_(password)
+        {
+        }
+        explicit HandlerOutboundHttp(const ProxyAddress &target)
+            : HandlerOutboundConnection(target)
+        {
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            step_ = Step::SEND_CONNECT;
+        }
+
+        void handle() override
+        {
+            switch (step_)
+            {
+            case Step::SEND_CONNECT:
+            {
+                std::string req;
+                std::string endpoint = target_.toString();
+                req.reserve(128 + endpoint.size() * 2);
+                req.append("CONNECT ").append(endpoint).append(" HTTP/1.1\r\n");
+                req.append("Host: ").append(endpoint).append("\r\n");
+                req.append("User-Agent: mynet/1.0\r\n");
+                req.append("Proxy-Connection: Keep-Alive\r\n");
+                if (!username_.empty())
+                {
+                    std::string cred = username_ + ":" + password_;
+                    std::span<const uint8_t> credSpan(reinterpret_cast<const uint8_t *>(cred.data()), cred.size());
+                    req.append("Proxy-Authorization: Basic ").append(encoding::base64Encode(credSpan)).append("\r\n");
+                }
+                req.append("\r\n");
+                [[maybe_unused]] auto _ = pushResponse(std::move(req));
+                step_ = Step::RECV_CONNECT;
+                stage_ = OutboundStage::CONNECTING;
+                break;
+            }
+            case Step::RECV_CONNECT:
+            {
+                const size_t avail = requestBytes();
+                if (avail < 12)
+                {
+                    return;
+                }
+                std::string_view resp(requestBegin(), avail);
+                size_t headerEnd = resp.find("\r\n\r\n");
+                if (headerEnd == std::string_view::npos)
+                {
+                    return;
+                }
+                size_t firstLineEnd = resp.find("\r\n");
+                std::string_view statusLine = resp.substr(0, firstLineEnd);
+                if (statusLine.find(" 200") == std::string_view::npos)
+                {
+                    onParseError("HandlerOutboundHttp: CONNECT rejected by upstream HTTP proxy");
+                    return;
+                }
+                requestConsume(headerEnd + 4);
+                step_ = Step::DONE;
+                stage_ = OutboundStage::STREAMING;
+                break;
+            }
+            case Step::DONE:
+                break;
+            }
         }
     };
 

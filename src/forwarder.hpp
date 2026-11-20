@@ -15,16 +15,16 @@
  * 6. UDP/Datagram 代理会话管理与空闲会话超时排空。
  */
 
-#include "connection.hpp"
+#include "address.hpp"
+#include "config/log.hpp"
 #include "configHolder.hpp"
+#include "connection.hpp"
 #include "datagram.hpp"
 #include "dialer.hpp"
 #include "ebpf.hpp"
 #include "error.hpp"
-#include "address.hpp"
 #include "inbound.hpp"
 #include "outbound.hpp"
-#include "config/log.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -37,8 +37,8 @@
 #include <optional>
 #include <span>
 #include <string_view>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -92,7 +92,8 @@ namespace mynet
 
         [[nodiscard]] inline uint64_t totalBytes() const noexcept { return bytesUp + bytesDown; }
         [[nodiscard]] inline uint64_t totalPackets() const noexcept { return packetsUp + packetsDown; }
-        [[nodiscard]] inline double idleSeconds(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) const noexcept
+        [[nodiscard]] inline double
+        idleSeconds(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) const noexcept
         {
             return std::chrono::duration<double>(now - lastActive).count();
         }
@@ -135,7 +136,8 @@ namespace mynet
          */
         static ssize_t writevBuffers(int fd, std::span<const iovec> iovs) noexcept
         {
-            if (fd < 0 || iovs.empty()) return 0;
+            if (fd < 0 || iovs.empty())
+                return 0;
             return ::writev(fd, iovs.data(), static_cast<int>(iovs.size()));
         }
 
@@ -144,7 +146,8 @@ namespace mynet
          */
         static ssize_t writePrefixed(int fd, std::span<const uint8_t> header, std::span<const uint8_t> payload) noexcept
         {
-            if (fd < 0) return -1;
+            if (fd < 0)
+                return -1;
             iovec iov[2];
             iov[0].iov_base = const_cast<uint8_t *>(header.data());
             iov[0].iov_len = header.size();
@@ -162,7 +165,8 @@ namespace mynet
         static ssize_t writePrefixedWithGather(int dstFd, std::span<const uint8_t> header, int srcFd,
                                                std::span<uint8_t> scratchBuf) noexcept
         {
-            if (dstFd < 0) return -1;
+            if (dstFd < 0)
+                return -1;
             int pending = 0;
             size_t payloadLen = 0;
             if (srcFd >= 0 && ::ioctl(srcFd, FIONREAD, &pending) == 0 && pending > 0 && !scratchBuf.empty())
@@ -193,8 +197,8 @@ namespace mynet
             }
 
             // 1. 从源端摄入管道
-            const ssize_t sIn = ::splice(srcFd, nullptr, pipeWriteFd, nullptr, maxBytes,
-                                         SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            const ssize_t sIn =
+                ::splice(srcFd, nullptr, pipeWriteFd, nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
             if (sIn < 0)
             {
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -213,8 +217,8 @@ namespace mynet
             size_t written = 0;
             while (pending > 0)
             {
-                const ssize_t sOut = ::splice(pipeReadFd, nullptr, dstFd, nullptr, pending,
-                                              SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                const ssize_t sOut =
+                    ::splice(pipeReadFd, nullptr, dstFd, nullptr, pending, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (sOut > 0)
                 {
                     written += static_cast<size_t>(sOut);
@@ -345,8 +349,8 @@ namespace mynet
          * @param userSslActive 是否存在用户态 SSL（若为 true 则禁止 splice 强制走用户态缓冲）
          * @return size_t 桥接初始化阶段预排空摄入的残余字节数
          */
-        size_t attach(handler::HandlerInboundConnection &in, handler::HandlerOutboundConnection &out,
-                      int inFd = -1, int outFd = -1, bool userSslActive = false)
+        size_t attach(handler::HandlerInboundConnection &in, handler::HandlerOutboundConnection &out, int inFd = -1,
+                      int outFd = -1, bool userSslActive = false)
         {
             inbound_ = &in;
             outbound_ = &out;
@@ -367,11 +371,63 @@ namespace mynet
             // 1. 握手残余数据预冲刷：排空握手期间在用户态缓冲区堆积的早期业务载荷
             size_t preFlushed = flushPrebuffered();
 
-            // 2. 统一阶梯自适应：Sockmap -> Splice -> Buffer Pump
-            activateAdaptiveMode(userSslActive);
+            // 2. 冲刷已生成的出站与入站协议头/握手报文 (如 SOCKS5 Greeting, Trojan Header, VLESS Header, HTTP CONNECT
+            // 等)
+            flushOutboundResponses();
+            flushInboundResponses();
+
+            // 3. 仅当出站协议已确立时，激活最优零拷贝转发通道
+            if (outbound_ == nullptr || outbound_->isEstablished())
+            {
+                activateAdaptiveMode(userSslActive);
+            }
+            else
+            {
+                activateBufferPump();
+            }
 
             setState(ForwardSessionState::STREAMING);
             return preFlushed;
+        }
+
+        inline void flushOutboundResponses() noexcept
+        {
+            if (outbound_ != nullptr && outboundFd_ >= 0)
+            {
+                while (outbound_->hasResponse())
+                {
+                    std::string resp = outbound_->takeResponse();
+                    if (!resp.empty())
+                    {
+                        ssize_t n = ::send(outboundFd_, resp.data(), resp.size(), MSG_NOSIGNAL);
+                        if (n > 0)
+                        {
+                            stats_.bytesUp += static_cast<size_t>(n);
+                            stats_.touch();
+                        }
+                    }
+                }
+            }
+        }
+
+        inline void flushInboundResponses() noexcept
+        {
+            if (inbound_ != nullptr && inboundFd_ >= 0)
+            {
+                while (inbound_->hasResponse())
+                {
+                    std::string resp = inbound_->takeResponse();
+                    if (!resp.empty())
+                    {
+                        ssize_t n = ::send(inboundFd_, resp.data(), resp.size(), MSG_NOSIGNAL);
+                        if (n > 0)
+                        {
+                            stats_.bytesDown += static_cast<size_t>(n);
+                            stats_.touch();
+                        }
+                    }
+                }
+            }
         }
 
         /**
@@ -482,7 +538,8 @@ namespace mynet
         [[nodiscard]] size_t getSocketPendingOutBytes(int fd) const noexcept
         {
 #if defined(__linux__) && defined(SIOCOUTQ)
-            if (fd < 0) return 0;
+            if (fd < 0)
+                return 0;
             int unsent = 0;
             if (::ioctl(fd, SIOCOUTQ, &unsent) == 0 && unsent > 0)
             {
@@ -541,17 +598,13 @@ namespace mynet
             const bool inCanSplice = (inbound_ == nullptr) || inbound_->kEnableSplice;
             const bool outCanSplice = (outbound_ == nullptr) || outbound_->kEnableSplice;
 
-            const bool canSplice = config_.enableSplice &&
-                                   (configuredMode_ != ForwardMode::BUFFER_PUMP) &&
-                                   !userSslActive &&
-                                   inCanSplice &&
-                                   outCanSplice &&
-                                   (inboundFd_ >= 0) &&
+            const bool canSplice = config_.enableSplice && (configuredMode_ != ForwardMode::BUFFER_PUMP) &&
+                                   !userSslActive && inCanSplice && outCanSplice && (inboundFd_ >= 0) &&
                                    (outboundFd_ >= 0);
 
-            const bool canOffload = (configuredMode_ == ForwardMode::AUTO || configuredMode_ == ForwardMode::KERNEL_SOCKMAP) &&
-                                    (sockmapFd_ >= 0) &&
-                                    canSplice;
+            const bool canOffload =
+                (configuredMode_ == ForwardMode::AUTO || configuredMode_ == ForwardMode::KERNEL_SOCKMAP) &&
+                (sockmapFd_ >= 0) && canSplice;
 
             if (canOffload && activateSockmap())
             {
@@ -613,6 +666,37 @@ namespace mynet
             }
 
             PumpResult result{};
+
+            // 0. 若出站协议握手尚未建立完成 (如 SOCKS5 等待协商与回执、VLESS 等待响应等)：
+            if (outbound_ != nullptr && !outbound_->isEstablished() && !outboundClosed_ && outboundFd_ >= 0)
+            {
+                flushOutboundResponses();
+
+                char hbuf[4096];
+                ssize_t hn = ::read(outboundFd_, hbuf, sizeof(hbuf));
+                if (hn > 0)
+                {
+                    [[maybe_unused]] auto _ = outbound_->appendRequest(hbuf, hn);
+                    outbound_->handle();
+                    flushOutboundResponses();
+
+                    if (outbound_->isEstablished())
+                    {
+                        activateAdaptiveMode(false);
+                    }
+                }
+                else if (hn == 0)
+                {
+                    markOutboundClosed();
+                }
+                else if (errno != EAGAIN && errno != EWOULDBLOCK)
+                {
+                    markOutboundClosed();
+                }
+            }
+
+            flushOutboundResponses();
+            flushInboundResponses();
 
             // 1. 上行泵送：Inbound RequestBuffer -> Outbound ResponseQueue
             if (inbound_ != nullptr && outbound_ != nullptr && !outboundClosed_)
@@ -741,10 +825,26 @@ namespace mynet
                 }
             }
 
-            if (pipeUp_[0] >= 0) { ::close(pipeUp_[0]); pipeUp_[0] = -1; }
-            if (pipeUp_[1] >= 0) { ::close(pipeUp_[1]); pipeUp_[1] = -1; }
-            if (pipeDown_[0] >= 0) { ::close(pipeDown_[0]); pipeDown_[0] = -1; }
-            if (pipeDown_[1] >= 0) { ::close(pipeDown_[1]); pipeDown_[1] = -1; }
+            if (pipeUp_[0] >= 0)
+            {
+                ::close(pipeUp_[0]);
+                pipeUp_[0] = -1;
+            }
+            if (pipeUp_[1] >= 0)
+            {
+                ::close(pipeUp_[1]);
+                pipeUp_[1] = -1;
+            }
+            if (pipeDown_[0] >= 0)
+            {
+                ::close(pipeDown_[0]);
+                pipeDown_[0] = -1;
+            }
+            if (pipeDown_[1] >= 0)
+            {
+                ::close(pipeDown_[1]);
+                pipeDown_[1] = -1;
+            }
 
             if (activeMode_ == ForwardMode::KERNEL_SOCKMAP)
             {
@@ -777,7 +877,8 @@ namespace mynet
             if ((activeMode_ == ForwardMode::ZERO_COPY_SPLICE || activeMode_ == ForwardMode::KERNEL_SOCKMAP) &&
                 pipeUp_[0] >= 0 && pipeUp_[1] >= 0)
             {
-                auto res = detail::splicePipes(inboundFd_, outboundFd_, pipeUp_[1], pipeUp_[0], config_.spliceChunkSize);
+                auto res =
+                    detail::splicePipes(inboundFd_, outboundFd_, pipeUp_[1], pipeUp_[0], config_.spliceChunkSize);
                 if (res.bytesSpliced > 0)
                 {
                     stats_.bytesUp += static_cast<size_t>(res.bytesSpliced);
@@ -835,7 +936,8 @@ namespace mynet
             if ((activeMode_ == ForwardMode::ZERO_COPY_SPLICE || activeMode_ == ForwardMode::KERNEL_SOCKMAP) &&
                 pipeDown_[0] >= 0 && pipeDown_[1] >= 0)
             {
-                auto res = detail::splicePipes(outboundFd_, inboundFd_, pipeDown_[1], pipeDown_[0], config_.spliceChunkSize);
+                auto res =
+                    detail::splicePipes(outboundFd_, inboundFd_, pipeDown_[1], pipeDown_[0], config_.spliceChunkSize);
                 if (res.bytesSpliced > 0)
                 {
                     stats_.bytesDown += static_cast<size_t>(res.bytesSpliced);
@@ -929,7 +1031,7 @@ namespace mynet
 
     public:
         ForwarderDatagramSession(uint64_t id, const sockaddr_in &client, const sockaddr_in &remote,
-                                int outboundFd = -1) noexcept
+                                 int outboundFd = -1) noexcept
             : id_(id),
               clientAddr_(client),
               remoteAddr_(remote),
@@ -1030,8 +1132,8 @@ namespace mynet
          * @return std::shared_ptr<ForwarderStreamSession> 转发会话句柄
          */
         std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnection &inbound,
-                                                      handler::HandlerOutboundConnection &outbound,
-                                                      std::optional<ForwarderConfig> cfg = std::nullopt)
+                                                       handler::HandlerOutboundConnection &outbound,
+                                                       std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
             const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
@@ -1066,8 +1168,8 @@ namespace mynet
             requires std::derived_from<InHandler, handler::HandlerInboundConnection> &&
                      std::derived_from<OutHandler, handler::HandlerOutboundConnection>
         std::shared_ptr<ForwarderStreamSession> bridge(Connection<InHandler> &inboundConn,
-                                                      Connection<OutHandler> &outboundConn,
-                                                      std::optional<ForwarderConfig> cfg = std::nullopt)
+                                                       Connection<OutHandler> &outboundConn,
+                                                       std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
             const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
@@ -1075,8 +1177,8 @@ namespace mynet
             session->setSockmapFd(sockmapFd_);
 
             const bool userSsl = (inboundConn.ssl() != nullptr || outboundConn.ssl() != nullptr);
-            [[maybe_unused]] auto preFlushed =
-                session->attach(inboundConn.handler(), outboundConn.handler(), inboundConn.fd(), outboundConn.fd(), userSsl);
+            [[maybe_unused]] auto preFlushed = session->attach(inboundConn.handler(), outboundConn.handler(),
+                                                               inboundConn.fd(), outboundConn.fd(), userSsl);
             if (session->stats().bytesUp > 0)
             {
                 totalBytesUp_.fetch_add(session->stats().bytesUp, std::memory_order_relaxed);
@@ -1111,7 +1213,7 @@ namespace mynet
          * @brief 直接桥接两个裸套接字文件描述符（纯管道零拷贝或透传转发）
          */
         std::shared_ptr<ForwarderStreamSession> bridgeSockets(int inFd, int outFd,
-                                                             std::optional<ForwarderConfig> cfg = std::nullopt)
+                                                              std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             contract_assert(inFd >= 0 && outFd >= 0);
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
@@ -1279,9 +1381,8 @@ namespace mynet
         /**
          * @brief 获取或创建关联的 UDP 数据报转发会话
          */
-        std::shared_ptr<ForwarderDatagramSession> getOrCreateDatagramSession(const sockaddr_in &client,
-                                                                            const sockaddr_in &remote,
-                                                                            int outboundFd = -1)
+        std::shared_ptr<ForwarderDatagramSession>
+        getOrCreateDatagramSession(const sockaddr_in &client, const sockaddr_in &remote, int outboundFd = -1)
         {
             const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
             auto session = std::make_shared<ForwarderDatagramSession>(sid, client, remote, outboundFd);
@@ -1329,8 +1430,7 @@ namespace mynet
          * @brief 将上游响应的数据报封装并回传给客户端
          */
         [[nodiscard]] Result<size_t> forwardDatagramToClient(handler::HandlerInboundDatagram &inbound,
-                                                             const sockaddr_in &client,
-                                                             std::string_view payload,
+                                                             const sockaddr_in &client, std::string_view payload,
                                                              ForwarderDatagramSession *session = nullptr) noexcept
         {
             if (payload.empty())
@@ -1481,4 +1581,3 @@ namespace mynet
     };
 
 } // namespace mynet
-

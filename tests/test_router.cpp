@@ -1,8 +1,8 @@
-#include "router.hpp"
 #include "address.hpp"
+#include "router.hpp"
 #include "sniffer.hpp"
-#include <gtest/gtest.h>
 #include <arpa/inet.h>
+#include <gtest/gtest.h>
 #include <string_view>
 
 using namespace mynet;
@@ -179,15 +179,10 @@ TEST(RouterTest, CombinedAndInboundFilters)
     Router router("default_out");
 
     // 仅针对 "tproxy-in" 入站且端口为 53 的 DNS 查询走 dns_out
-    router.addRule(RouteRule::to("dns_out")
-                       .fromInbound("tproxy-in")
-                       .forNetwork(NetworkType::UDP)
-                       .port(53));
+    router.addRule(RouteRule::to("dns_out").fromInbound("tproxy-in").forNetwork(NetworkType::UDP).port(53));
 
     // 内网 IP CIDR 直连
-    router.addRule(RouteRule::to("direct")
-                       .cidr("10.0.0.0/8")
-                       .cidr("192.168.0.0/16"));
+    router.addRule(RouteRule::to("direct").cidr("10.0.0.0/8").cidr("192.168.0.0/16"));
 
     // 规则 1 命中
     RouteContext ctxDns;
@@ -268,10 +263,7 @@ TEST(RouterTest, MustRuleLocking)
     Router router("direct");
 
     // 规则 1: 针对 DNS 服务器 223.5.5.5:53 强制锁定为 direct (must = true)
-    router.addRule(RouteRule::to("direct")
-                       .cidr("223.5.5.5/32")
-                       .port(53)
-                       .setMust(true));
+    router.addRule(RouteRule::to("direct").cidr("223.5.5.5/32").port(53).setMust(true));
 
     // 规则 2: 后续通用代理规则
     router.addRule(RouteRule::to("proxy").port(53));

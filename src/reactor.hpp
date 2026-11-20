@@ -6,14 +6,14 @@
  */
 
 #include "acceptor.hpp"
+#include "config/log.hpp"
+#include "config/tls.hpp"
 #include "configHolder.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
 #include "objectPool.hpp"
 #include "timer.hpp"
-#include "config/tls.hpp"
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -143,8 +143,10 @@ namespace mynet
             }
         }
 
-        EventLoop(const EventLoop &) = delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
-        EventLoop &operator=(const EventLoop &) = delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
+        EventLoop(const EventLoop &) =
+            delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
+        EventLoop &operator=(const EventLoop &) =
+            delete; // the loop owns an epoll set and a wakeup fd; a copy would double-close both
 
         [[nodiscard]] inline int epollFd() const noexcept { return epollFd_; }
         [[nodiscard]] inline bool running() const noexcept { return running_.load(std::memory_order_acquire); }
@@ -506,7 +508,7 @@ namespace mynet
 
         ~Reactor() noexcept { reset(); }
 
-        Reactor(const Reactor &) = delete; // a reactor owns the epoll registration of every live connection
+        Reactor(const Reactor &) = delete;            // a reactor owns the epoll registration of every live connection
         Reactor &operator=(const Reactor &) = delete; // a reactor owns the epoll registration of every live connection
 
         /**
@@ -903,8 +905,8 @@ namespace mynet
         /**
          * @brief 以显式配置与证书路径运行 QUIC 服务器，直至被请求停止。
          */
-        [[nodiscard]] Result<> runQuic(const char *ip, int port, const char *crt, const char *key,
-                                       Handler &handler, const ReactorConfig &reactor)
+        [[nodiscard]] Result<> runQuic(const char *ip, int port, const char *crt, const char *key, Handler &handler,
+                                       const ReactorConfig &reactor)
             requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
         {
             contract_assert(validReactorConfig(reactor));
@@ -1015,7 +1017,8 @@ namespace mynet
             {
                 if (auto res = loop_.addFd(acceptor_.fd, EPOLLIN | EPOLLET, &acceptor_); !res) [[unlikely]]
                 {
-                    LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", acceptor_.fd, errnoText(errno));
+                    LOG_ERROR("Reactor::serve: adding listener fd {} to loop failed: {}", acceptor_.fd,
+                              errnoText(errno));
                     return std::unexpected(ERR::EPOLL_CTL_FAILED);
                 }
             }
@@ -1025,7 +1028,8 @@ namespace mynet
                 {
                     if (auto res = loop_.addFd(listener->fd, EPOLLIN | EPOLLET, listener.get()); !res) [[unlikely]]
                     {
-                        LOG_ERROR("Reactor::serve: adding extra listener fd {} to loop failed: {}", listener->fd, errnoText(errno));
+                        LOG_ERROR("Reactor::serve: adding extra listener fd {} to loop failed: {}", listener->fd,
+                                  errnoText(errno));
                         return std::unexpected(ERR::EPOLL_CTL_FAILED);
                     }
                 }
@@ -1061,9 +1065,7 @@ namespace mynet
             uint64_t quicTimerId = 0;
             if (datagram_.isQuic())
             {
-                quicTimerId = loop_.runEvery(std::chrono::milliseconds(20), [this] {
-                    datagram_.tick(acceptor_.fd);
-                });
+                quicTimerId = loop_.runEvery(std::chrono::milliseconds(20), [this] { datagram_.tick(acceptor_.fd); });
             }
             Result<> rc = loop_.run();
             if (quicTimerId != 0)
@@ -1169,8 +1171,8 @@ namespace mynet
             {
                 sockaddr_in addr{};
                 socklen_t len = sizeof(addr);
-                int clientFd = ::accept4(listener.fd, reinterpret_cast<sockaddr *>(&addr), &len,
-                                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+                int clientFd =
+                    ::accept4(listener.fd, reinterpret_cast<sockaddr *>(&addr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
                 if (clientFd < 0)
                 {
                     if (errno == EAGAIN || errno == EWOULDBLOCK)

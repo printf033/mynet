@@ -1,7 +1,7 @@
-#include "ebpf.hpp"
-#include "core.hpp"
 #include "address.hpp"
+#include "core.hpp"
 #include "direct/direct.hpp"
+#include "ebpf.hpp"
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
 
@@ -14,15 +14,13 @@ using namespace mynet::ebpf;
 
 TEST(EbpfTest, LifecycleAndConfig)
 {
-    EbpfConfig cfg{
-        .wanInterface = "eth1",
-        .lanInterface = "lo",
-        .tproxyPort = 7893,
-        .fwmark = 0x4321,
-        .enableDirectBypass = true,
-        .enableLpmGeoIp = true,
-        .dropQuic = true
-    };
+    EbpfConfig cfg{.wanInterface = "eth1",
+                   .lanInterface = "lo",
+                   .tproxyPort = 7893,
+                   .fwmark = 0x4321,
+                   .enableDirectBypass = true,
+                   .enableLpmGeoIp = true,
+                   .dropQuic = true};
 
     EbpfManager mgr(cfg);
     EXPECT_EQ(mgr.config().wanInterface, "eth1");
@@ -443,11 +441,13 @@ TEST(EbpfTest, DoubleEpochZeroDowntimeHotReload)
     EXPECT_EQ(mgr.classify(pkt), Action::DIRECT);
 
     // 原子热重载至 Epoch 1：将 192.0.2.0/24 改为 BLOCK，并新增 198.51.100.0/24 -> DIRECT
-    mgr.reloadRoutingEpoch([&](auto &&addIpv4, auto &&addIpv6) {
-        (void)addIpv6;
-        addIpv4("192.0.2.0/24", Action::BLOCK);
-        addIpv4("198.51.100.0/24", Action::DIRECT);
-    });
+    mgr.reloadRoutingEpoch(
+        [&](auto &&addIpv4, auto &&addIpv6)
+        {
+            (void)addIpv6;
+            addIpv4("192.0.2.0/24", Action::BLOCK);
+            addIpv4("198.51.100.0/24", Action::DIRECT);
+        });
 
     // 活跃槽位应原子切换为 1
     EXPECT_EQ(mgr.activeEpoch(), 1);
@@ -462,9 +462,7 @@ TEST(EbpfTest, DoubleEpochZeroDowntimeHotReload)
     EXPECT_EQ(mgr.classify(pkt2), Action::DIRECT);
 
     // 再次热重载回 Epoch 0
-    mgr.reloadRoutingEpoch([&](auto &&addIpv4, auto &&) {
-        addIpv4("192.0.2.0/24", Action::DIRECT);
-    });
+    mgr.reloadRoutingEpoch([&](auto &&addIpv4, auto &&) { addIpv4("192.0.2.0/24", Action::DIRECT); });
     EXPECT_EQ(mgr.activeEpoch(), 0);
     EXPECT_EQ(mgr.classify(pkt), Action::DIRECT);
 }
@@ -475,7 +473,7 @@ TEST(EbpfTest, DoubleEpochZeroDowntimeHotReload)
 
 TEST(EbpfTest, AsymmetricGatewayMacRewrite)
 {
-    // 1. MAC 地址解析与格式校验 (单根抽象，复用 crypto::hexCharToNibble)
+    // 1. MAC 地址解析与格式校验 (单根抽象，复用 encoding::hexCharToNibble)
     auto mac1 = MacAddress::parse("00:11:22:33:44:55");
     ASSERT_TRUE(mac1.has_value());
     EXPECT_EQ(mac1->bytes[0], 0x00);
@@ -558,21 +556,17 @@ TEST(EbpfTest, UdpConnStateTrackingAndJanitorSweep)
 {
     EbpfManager mgr;
 
-    TuplesKey key1{
-        .saddr = 0x0100007f, // 127.0.0.1
-        .daddr = 0x01010101, // 1.1.1.1
-        .sport = htons(12345),
-        .dport = htons(53),
-        .proto = IPPROTO_UDP
-    };
+    TuplesKey key1{.saddr = 0x0100007f, // 127.0.0.1
+                   .daddr = 0x01010101, // 1.1.1.1
+                   .sport = htons(12345),
+                   .dport = htons(53),
+                   .proto = IPPROTO_UDP};
 
-    TuplesKey key2{
-        .saddr = 0x0100007f,
-        .daddr = 0x08080808, // 8.8.8.8
-        .sport = htons(23456),
-        .dport = htons(53),
-        .proto = IPPROTO_UDP
-    };
+    TuplesKey key2{.saddr = 0x0100007f,
+                   .daddr = 0x08080808, // 8.8.8.8
+                   .sport = htons(23456),
+                   .dport = htons(53),
+                   .proto = IPPROTO_UDP};
 
     uint64_t nowNs = getMonotonicTimeNs();
 
@@ -792,13 +786,11 @@ TEST(EbpfTest, TcpFlowStateTrackingFastPath)
 {
     EbpfManager mgr;
 
-    TuplesKey tcpKey{
-        .saddr = 0x0100007f, // 127.0.0.1
-        .daddr = 0x02020202, // 2.2.2.2
-        .sport = htons(45678),
-        .dport = htons(80),
-        .proto = IPPROTO_TCP
-    };
+    TuplesKey tcpKey{.saddr = 0x0100007f, // 127.0.0.1
+                     .daddr = 0x02020202, // 2.2.2.2
+                     .sport = htons(45678),
+                     .dport = htons(80),
+                     .proto = IPPROTO_TCP};
 
     // 预置 TCP 连接状态为 DIRECT
     EXPECT_TRUE(mgr.trackUdpConnState(tcpKey, Action::DIRECT));
@@ -827,12 +819,7 @@ TEST(EbpfTest, SockmapBacklogFuseOffloadPause)
     EbpfManager mgr;
 
     TuplesKey flowKey{
-        .saddr = 0x0a000001,
-        .daddr = 0x0a000002,
-        .sport = htons(1111),
-        .dport = htons(2222),
-        .proto = IPPROTO_TCP
-    };
+        .saddr = 0x0a000001, .daddr = 0x0a000002, .sport = htons(1111), .dport = htons(2222), .proto = IPPROTO_TCP};
 
     // 初始状态未被暂停
     EXPECT_FALSE(mgr.isOffloadPaused(flowKey));
@@ -939,13 +926,11 @@ TEST(EbpfTest, DirectTrafficObserverStats)
     auto initialStats = mgr.getDirectTrafficStats();
     EXPECT_EQ(initialStats.directBytes, 0u);
 
-    TuplesKey directKey{
-        .saddr = 0x0100007f, // 127.0.0.1
-        .daddr = 0x01010101, // 1.1.1.1
-        .sport = htons(12345),
-        .dport = htons(80),
-        .proto = IPPROTO_TCP
-    };
+    TuplesKey directKey{.saddr = 0x0100007f, // 127.0.0.1
+                        .daddr = 0x01010101, // 1.1.1.1
+                        .sport = htons(12345),
+                        .dport = htons(80),
+                        .proto = IPPROTO_TCP};
 
     uint64_t nowNs = getMonotonicTimeNs();
     EXPECT_TRUE(mgr.trackUdpConnState(directKey, Action::DIRECT, nowNs));
@@ -965,11 +950,7 @@ TEST(EbpfTest, DatapathOverflowMonitorDeltaReporting)
 
     // 1. 初次基准观察：静默对齐 baseline
     DatapathOverflowMonitor::Snapshot s0{
-        .udpConnOverflow = 1000,
-        .tcpConnOverflow = 2000,
-        .blockRateDrops = 500,
-        .eventDrops = 10
-    };
+        .udpConnOverflow = 1000, .tcpConnOverflow = 2000, .blockRateDrops = 500, .eventDrops = 10};
     auto r0 = monitor.evaluate(s0);
     EXPECT_FALSE(r0.moved);
     EXPECT_EQ(r0.level, DatapathOverflowMonitor::PressureLevel::NORMAL);
@@ -980,12 +961,10 @@ TEST(EbpfTest, DatapathOverflowMonitorDeltaReporting)
     EXPECT_EQ(r1.level, DatapathOverflowMonitor::PressureLevel::NORMAL);
 
     // 3. 轻微波动区间 (增量低于阈值 50)：升级为 WARNING
-    DatapathOverflowMonitor::Snapshot s2{
-        .udpConnOverflow = 1010, // delta = 10
-        .tcpConnOverflow = 2005, // delta = 5
-        .blockRateDrops = 500,
-        .eventDrops = 10
-    };
+    DatapathOverflowMonitor::Snapshot s2{.udpConnOverflow = 1010, // delta = 10
+                                         .tcpConnOverflow = 2005, // delta = 5
+                                         .blockRateDrops = 500,
+                                         .eventDrops = 10};
     auto r2 = monitor.evaluate(s2);
     EXPECT_TRUE(r2.moved);
     EXPECT_EQ(r2.deltaUdpOverflow, 10u);
@@ -993,12 +972,10 @@ TEST(EbpfTest, DatapathOverflowMonitorDeltaReporting)
     EXPECT_EQ(r2.level, DatapathOverflowMonitor::PressureLevel::WARNING);
 
     // 4. 重度压力区间 (单周期增量突破 50)：升级为 CRITICAL
-    DatapathOverflowMonitor::Snapshot s3{
-        .udpConnOverflow = 1080, // delta = 70 >= 50
-        .tcpConnOverflow = 2010, // delta = 5
-        .blockRateDrops = 500,
-        .eventDrops = 10
-    };
+    DatapathOverflowMonitor::Snapshot s3{.udpConnOverflow = 1080, // delta = 70 >= 50
+                                         .tcpConnOverflow = 2010, // delta = 5
+                                         .blockRateDrops = 500,
+                                         .eventDrops = 10};
     auto r3 = monitor.evaluate(s3);
     EXPECT_TRUE(r3.moved);
     EXPECT_EQ(r3.deltaUdpOverflow, 70u);
@@ -1076,8 +1053,12 @@ TEST(EbpfTest, RedirectTrackSingleWriterProtection)
     RedirectTrackEntry pubA{};
     pubA.ifindex = 2;
     pubA.fromWan = 0;
-    pubA.smac[0] = 0xAA; pubA.smac[1] = 0xBB; pubA.smac[2] = 0xCC;
-    pubA.smac[3] = 0x11; pubA.smac[4] = 0x22; pubA.smac[5] = 0x33;
+    pubA.smac[0] = 0xAA;
+    pubA.smac[1] = 0xBB;
+    pubA.smac[2] = 0xCC;
+    pubA.smac[3] = 0x11;
+    pubA.smac[4] = 0x22;
+    pubA.smac[5] = 0x33;
     pubA.lastSeenNs = 1'000'000'000ULL;
 
     EXPECT_TRUE(mgr.updateRedirectTrack(key, pubA));
@@ -1085,7 +1066,7 @@ TEST(EbpfTest, RedirectTrackSingleWriterProtection)
 
     // 伪造/冒充者 Pub B 在 5s 保护期内 (仅过去 1s) 试图抢占重定向
     RedirectTrackEntry spoofB = pubA;
-    spoofB.smac[5] = 0x99; // MAC 伪造
+    spoofB.smac[5] = 0x99;                // MAC 伪造
     spoofB.lastSeenNs = 2'000'000'000ULL; // 1s 之后
 
     EXPECT_FALSE(mgr.updateRedirectTrack(key, spoofB));

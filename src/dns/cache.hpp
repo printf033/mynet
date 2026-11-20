@@ -14,8 +14,8 @@
 #include "../address.hpp"
 #include "dns.hpp"
 #include <algorithm>
-#include <array>
 #include <arpa/inet.h>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -272,11 +272,13 @@ namespace mynet::handler::dns
          * 若记录已过期但仍在 staleGracePeriod 内，返回陈旧域名并设置 outNeedsRefresh = true，
          * 避免上游 DNS 抖动导致断网，同时触发异步刷新。
          */
-        [[nodiscard]] std::optional<std::string> lookupOptimistic(
-            in_addr ip, bool *outStale = nullptr, bool *outNeedsRefresh = nullptr) const
+        [[nodiscard]] std::optional<std::string> lookupOptimistic(in_addr ip, bool *outStale = nullptr,
+                                                                  bool *outNeedsRefresh = nullptr) const
         {
-            if (outStale) *outStale = false;
-            if (outNeedsRefresh) *outNeedsRefresh = false;
+            if (outStale)
+                *outStale = false;
+            if (outNeedsRefresh)
+                *outNeedsRefresh = false;
 
             const auto now = std::chrono::steady_clock::now();
             std::shared_lock lock(rwLock_);
@@ -293,11 +295,13 @@ namespace mynet::handler::dns
 
             if (it->second.isStaleValid(now, staleGracePeriod_))
             {
-                if (outStale) *outStale = true;
+                if (outStale)
+                    *outStale = true;
                 if (!it->second.isRefreshing)
                 {
                     it->second.isRefreshing = true;
-                    if (outNeedsRefresh) *outNeedsRefresh = true;
+                    if (outNeedsRefresh)
+                        *outNeedsRefresh = true;
                 }
                 return it->second.domain;
             }
@@ -308,11 +312,13 @@ namespace mynet::handler::dns
         /**
          * @brief RFC 8767 弹性乐观查询：根据 IPv6 反查域名
          */
-        [[nodiscard]] std::optional<std::string> lookupOptimistic(
-            in6_addr ip6, bool *outStale = nullptr, bool *outNeedsRefresh = nullptr) const
+        [[nodiscard]] std::optional<std::string> lookupOptimistic(in6_addr ip6, bool *outStale = nullptr,
+                                                                  bool *outNeedsRefresh = nullptr) const
         {
-            if (outStale) *outStale = false;
-            if (outNeedsRefresh) *outNeedsRefresh = false;
+            if (outStale)
+                *outStale = false;
+            if (outNeedsRefresh)
+                *outNeedsRefresh = false;
 
             const auto now = std::chrono::steady_clock::now();
             std::shared_lock lock(rwLock_);
@@ -329,11 +335,13 @@ namespace mynet::handler::dns
 
             if (it->second.isStaleValid(now, staleGracePeriod_))
             {
-                if (outStale) *outStale = true;
+                if (outStale)
+                    *outStale = true;
                 if (!it->second.isRefreshing)
                 {
                     it->second.isRefreshing = true;
-                    if (outNeedsRefresh) *outNeedsRefresh = true;
+                    if (outNeedsRefresh)
+                        *outNeedsRefresh = true;
                 }
                 return it->second.domain;
             }
@@ -344,8 +352,8 @@ namespace mynet::handler::dns
         /**
          * @brief RFC 8767 弹性乐观查询：根据 ProxyAddress 逆向还原为域名目标地址
          */
-        [[nodiscard]] std::optional<ProxyAddress> lookupOptimistic(
-            const ProxyAddress &addr, bool *outStale = nullptr, bool *outNeedsRefresh = nullptr) const
+        [[nodiscard]] std::optional<ProxyAddress> lookupOptimistic(const ProxyAddress &addr, bool *outStale = nullptr,
+                                                                   bool *outNeedsRefresh = nullptr) const
         {
             if (addr.type == AddressType::IPV4)
             {
@@ -493,7 +501,8 @@ namespace mynet::handler::dns
             return preferredQtype_;
         }
 
-        bool registerWait(std::string_view qname, uint16_t qtype, std::chrono::milliseconds delay = kDefaultResolutionDelay) noexcept
+        bool registerWait(std::string_view qname, uint16_t qtype,
+                          std::chrono::milliseconds delay = kDefaultResolutionDelay) noexcept
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (preferredQtype_ == 0 || qtype == preferredQtype_)
@@ -510,18 +519,17 @@ namespace mynet::handler::dns
             {
                 return true;
             }
-            WaitEntry entry{
-                .qname = name,
-                .qtype = qtype,
-                .preferredArrived = false,
-                .hasRecords = false,
-                .deadline = std::chrono::steady_clock::now() + delay
-            };
+            WaitEntry entry{.qname = name,
+                            .qtype = qtype,
+                            .preferredArrived = false,
+                            .hasRecords = false,
+                            .deadline = std::chrono::steady_clock::now() + delay};
             waits_[name] = entry;
             return true;
         }
 
-        bool startWait(std::string_view qname, uint16_t qtype, std::chrono::milliseconds delay = kDefaultResolutionDelay) noexcept
+        bool startWait(std::string_view qname, uint16_t qtype,
+                       std::chrono::milliseconds delay = kDefaultResolutionDelay) noexcept
         {
             return registerWait(qname, qtype, delay);
         }
@@ -633,7 +641,8 @@ namespace mynet::handler::dns
     public:
         [[nodiscard]] static bool isTruncated(std::span<const uint8_t> wireMsg) noexcept
         {
-            if (wireMsg.size() < 12) return false;
+            if (wireMsg.size() < 12)
+                return false;
             // Byte 2: QR(1), Opcode(4), AA(1), TC(1), RD(1) -> TC is bit 1 (0x02)
             return (wireMsg[2] & 0x02) != 0;
         }
@@ -661,8 +670,14 @@ namespace mynet::handler::dns
         }
 
         [[nodiscard]] uint64_t tcCount() const noexcept { return tcCount_.load(std::memory_order_relaxed); }
-        [[nodiscard]] uint64_t tcpFallbackSuccessCount() const noexcept { return tcpFallbackSuccessCount_.load(std::memory_order_relaxed); }
-        [[nodiscard]] uint64_t tcpFallbackFailureCount() const noexcept { return tcpFallbackFailureCount_.load(std::memory_order_relaxed); }
+        [[nodiscard]] uint64_t tcpFallbackSuccessCount() const noexcept
+        {
+            return tcpFallbackSuccessCount_.load(std::memory_order_relaxed);
+        }
+        [[nodiscard]] uint64_t tcpFallbackFailureCount() const noexcept
+        {
+            return tcpFallbackFailureCount_.load(std::memory_order_relaxed);
+        }
     };
 
     /**
@@ -699,28 +714,30 @@ namespace mynet::handler::dns
         }
 
     public:
-        void put(std::string_view domain, uint16_t qtype, std::span<const uint8_t> wirePayload, uint32_t ttlSeconds) noexcept
+        void put(std::string_view domain, uint16_t qtype, std::span<const uint8_t> wirePayload,
+                 uint32_t ttlSeconds) noexcept
         {
-            if (wirePayload.size() < 12 || ttlSeconds == 0) return;
+            if (wirePayload.size() < 12 || ttlSeconds == 0)
+                return;
             auto now = std::chrono::steady_clock::now();
-            PackedEntry entry{
-                .wirePayload = std::vector<uint8_t>(wirePayload.begin(), wirePayload.end()),
-                .cachedAt = now,
-                .deadline = now + std::chrono::seconds(ttlSeconds),
-                .lastRepackTime = now,
-                .origTtlSeconds = ttlSeconds
-            };
+            PackedEntry entry{.wirePayload = std::vector<uint8_t>(wirePayload.begin(), wirePayload.end()),
+                              .cachedAt = now,
+                              .deadline = now + std::chrono::seconds(ttlSeconds),
+                              .lastRepackTime = now,
+                              .origTtlSeconds = ttlSeconds};
             std::lock_guard<std::mutex> lock(mutex_);
             cache_[makeKey(domain, qtype)] = std::move(entry);
         }
 
-        [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::string_view domain, uint16_t qtype, uint16_t clientTxId) noexcept
+        [[nodiscard]] std::optional<std::vector<uint8_t>> get(std::string_view domain, uint16_t qtype,
+                                                              uint16_t clientTxId) noexcept
         {
             auto now = std::chrono::steady_clock::now();
             std::string key = makeKey(domain, qtype);
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = cache_.find(key);
-            if (it == cache_.end()) return std::nullopt;
+            if (it == cache_.end())
+                return std::nullopt;
 
             if (now >= it->second.deadline)
             {
@@ -872,9 +889,8 @@ namespace mynet::handler::dns
                 uint64_t oldVal = words_[wordIdx].load(std::memory_order_relaxed);
                 while ((oldVal & mask) == 0)
                 {
-                    if (words_[wordIdx].compare_exchange_weak(oldVal, oldVal | mask,
-                                                             std::memory_order_acquire,
-                                                             std::memory_order_relaxed))
+                    if (words_[wordIdx].compare_exchange_weak(oldVal, oldVal | mask, std::memory_order_acquire,
+                                                              std::memory_order_relaxed))
                     {
                         return cur;
                     }
@@ -921,11 +937,13 @@ namespace mynet::handler::dns
         [[nodiscard]] static bool questionEchoMatches(std::span<const uint8_t> queryWire,
                                                       std::span<const uint8_t> respWire) noexcept
         {
-            if (queryWire.size() < 12 || respWire.size() < 12) return false;
+            if (queryWire.size() < 12 || respWire.size() < 12)
+                return false;
             // 检查 QDCOUNT 是否为 1
             uint16_t qdQuery = (static_cast<uint16_t>(queryWire[4]) << 8) | queryWire[5];
             uint16_t qdResp = (static_cast<uint16_t>(respWire[4]) << 8) | respWire[5];
-            if (qdQuery != 1 || qdResp != 1) return false;
+            if (qdQuery != 1 || qdResp != 1)
+                return false;
 
             // 提取 Question Section (从 offset 12 开始直到结尾 QTYPE+QCLASS 4 字节)
             size_t qLenQuery = 12;
@@ -944,7 +962,8 @@ namespace mynet::handler::dns
                 }
                 qLenQuery += (1 + len);
             }
-            if (qLenQuery > queryWire.size()) return false;
+            if (qLenQuery > queryWire.size())
+                return false;
 
             size_t qLenResp = 12;
             while (qLenResp < respWire.size())
@@ -962,11 +981,13 @@ namespace mynet::handler::dns
                 }
                 qLenResp += (1 + len);
             }
-            if (qLenResp > respWire.size()) return false;
+            if (qLenResp > respWire.size())
+                return false;
 
             // 长度必须相等且内容完全一致
             size_t qSectionLen = qLenQuery - 12;
-            if (qSectionLen != (qLenResp - 12)) return false;
+            if (qSectionLen != (qLenResp - 12))
+                return false;
 
             return std::memcmp(queryWire.data() + 12, respWire.data() + 12, qSectionLen) == 0;
         }
@@ -989,7 +1010,7 @@ namespace mynet::handler::dns
      * 3. 截断保留 Question 段，引导客户端无损升级至 TCP 重试。
      */
     [[nodiscard]] inline std::vector<uint8_t> truncateDnsResponse(std::span<const uint8_t> fullWire,
-                                                                   size_t maxBufferSize = 512) noexcept
+                                                                  size_t maxBufferSize = 512) noexcept
     {
         if (fullWire.size() <= maxBufferSize || fullWire.size() < 12)
         {
@@ -1022,9 +1043,12 @@ namespace mynet::handler::dns
         // 置位 TC=1: byte 2 bit 1
         truncated[2] |= 0x02;
         // 清空 ANCOUNT, NSCOUNT, ARCOUNT 为 0
-        truncated[6] = 0; truncated[7] = 0;
-        truncated[8] = 0; truncated[9] = 0;
-        truncated[10] = 0; truncated[11] = 0;
+        truncated[6] = 0;
+        truncated[7] = 0;
+        truncated[8] = 0;
+        truncated[9] = 0;
+        truncated[10] = 0;
+        truncated[11] = 0;
         return truncated;
     }
 

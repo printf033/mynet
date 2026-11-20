@@ -48,7 +48,8 @@ namespace mynet::handler::vless::vision
     public:
         VisionContext() noexcept = default;
         explicit VisionContext(const std::array<uint8_t, 16> &uuid) noexcept
-            : uuid_(uuid), writeUuid_(true)
+            : uuid_(uuid),
+              writeUuid_(true)
         {
         }
 
@@ -119,7 +120,7 @@ namespace mynet::handler::vless::vision
          * @brief 封包：添加 Vision 长度混淆填充与协议头
          */
         [[nodiscard]] std::vector<uint8_t> pad(std::span<const uint8_t> payload,
-                                              uint8_t command = kCommandPaddingContinue)
+                                               uint8_t command = kCommandPaddingContinue)
         {
             filterTls(payload);
 

@@ -5,9 +5,9 @@
  * @brief VMess 代理协议服务端状态机处理器。
  */
 
-#include "../connection.hpp"
 #include "../address.hpp"
-#include "../crypto.hpp"
+#include "../connection.hpp"
+#include "../encoding.hpp"
 #include "../inbound.hpp"
 #include <array>
 #include <cstdint>
@@ -76,7 +76,7 @@ namespace mynet::handler
         void setUuid(std::string_view uuidStr)
         {
             validUuids_.clear();
-            if (auto u = crypto::parseUuid(uuidStr); u.has_value())
+            if (auto u = encoding::parseUuid(uuidStr); u.has_value())
             {
                 validUuids_.push_back(*u);
             }
@@ -84,7 +84,7 @@ namespace mynet::handler
 
         void addUser(std::string_view uuidStr)
         {
-            if (auto u = crypto::parseUuid(uuidStr); u.has_value())
+            if (auto u = encoding::parseUuid(uuidStr); u.has_value())
             {
                 validUuids_.push_back(*u);
             }
@@ -188,22 +188,33 @@ namespace mynet::handler
             const uint8_t cmd = data[cmdOffset];
             const uint16_t port =
                 (static_cast<uint16_t>(data[cmdOffset + 1]) << 8) | static_cast<uint16_t>(data[cmdOffset + 2]);
-            (void)port;
+            const uint8_t atyp = data[cmdOffset + 3];
+            const size_t addrOffset = cmdOffset + 4;
 
-            const size_t addrOffset = cmdOffset + 3;
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
-            auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
+            auto target = ProxyAddress::decodeVlessAddress(atyp, addrSpan, port, addrConsumed);
             if (!target.has_value())
             {
-                // 可能是 VLESS 风格地址或数据不足
-                return false;
+                // 兼容 SOCKS5 ATYP 格式
+                std::span<const uint8_t> s5Span(data + cmdOffset + 3, avail - (cmdOffset + 3));
+                target = ProxyAddress::decodeSocks5(s5Span, addrConsumed);
+                if (!target.has_value())
+                {
+                    return false;
+                }
+                const size_t totalConsumed = (cmdOffset + 3) + addrConsumed;
+                command_ = cmd;
+                targetAddress_ = std::move(target);
+                requestConsume(totalConsumed);
             }
-
-            const size_t totalConsumed = addrOffset + addrConsumed;
-            command_ = cmd;
-            targetAddress_ = std::move(target);
-            requestConsume(totalConsumed);
+            else
+            {
+                const size_t totalConsumed = addrOffset + addrConsumed;
+                command_ = cmd;
+                targetAddress_ = std::move(target);
+                requestConsume(totalConsumed);
+            }
 
             vmessStage_ = VmessStage::STREAMING;
             stage_ = InboundStage::STREAMING;
@@ -214,6 +225,103 @@ namespace mynet::handler
                 requestCallback_(command_, *targetAddress_);
             }
             return true;
+        }
+    };
+
+    /**
+     * @brief VMess 客户端出站协议处理器 (VMess Outbound)
+     */
+    class HandlerOutboundVmess : public HandlerOutboundConnection
+    {
+    private:
+        std::array<uint8_t, 16> uuid_{};
+        std::string security_{"auto"};
+        bool headerSent_{false};
+
+    public:
+        HandlerOutboundVmess() noexcept = default;
+        HandlerOutboundVmess(std::string_view uuidStr, std::string_view security, const ProxyAddress &target)
+            : HandlerOutboundConnection(target),
+              security_(security)
+        {
+            setUuid(uuidStr);
+        }
+        HandlerOutboundVmess(const std::array<uint8_t, 16> &uuid, std::string_view security, const ProxyAddress &target)
+            : HandlerOutboundConnection(target),
+              uuid_(uuid),
+              security_(security)
+        {
+        }
+
+        void setUuid(std::string_view uuidStr)
+        {
+            if (auto u = encoding::parseUuid(uuidStr); u.has_value())
+            {
+                uuid_ = *u;
+            }
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnection::reset();
+            headerSent_ = false;
+        }
+
+        void handle() override
+        {
+            if (!headerSent_)
+            {
+                sendVmessHeader();
+            }
+        }
+
+    private:
+        void sendVmessHeader()
+        {
+            std::vector<uint8_t> header;
+            header.reserve(16 + 1 + 16 + 16 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 64);
+
+            // 1. 16B AuthID
+            header.insert(header.end(), uuid_.begin(), uuid_.end());
+
+            // 2. Command header
+            header.push_back(vmess::kVersion); // 0x01
+            std::vector<uint8_t> iv(16, 0x01);
+            std::vector<uint8_t> key(16, 0x02);
+            header.insert(header.end(), iv.begin(), iv.end());
+            header.insert(header.end(), key.begin(), key.end());
+            header.push_back(0x55);            // RespAuth
+            header.push_back(0x00);            // Option
+            header.push_back(vmess::kSecNone); // Sec (None)
+            header.push_back(0x00);            // Reserved
+            header.push_back(vmess::kCmdTcp);  // CMD: 0x01 TCP
+            header.push_back(static_cast<uint8_t>(target_.port >> 8));
+            header.push_back(static_cast<uint8_t>(target_.port & 0xFF));
+
+            // ATYP + Address
+            if (target_.type == AddressType::IPV4)
+            {
+                header.push_back(0x01); // ATYP IPv4
+                const auto *p = reinterpret_cast<const uint8_t *>(&target_.ipv4_.s_addr);
+                header.insert(header.end(), p, p + 4);
+            }
+            else if (target_.type == AddressType::DOMAIN)
+            {
+                header.push_back(0x02); // ATYP Domain
+                header.push_back(static_cast<uint8_t>(target_.host.size()));
+                header.insert(header.end(), target_.host.begin(), target_.host.end());
+            }
+            else if (target_.type == AddressType::IPV6)
+            {
+                header.push_back(0x03); // ATYP IPv6
+                const auto *p = reinterpret_cast<const uint8_t *>(&target_.ipv6_);
+                header.insert(header.end(), p, p + 16);
+            }
+
+            [[maybe_unused]] auto _ =
+                pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));
+            headerSent_ = true;
+            stage_ = OutboundStage::STREAMING;
         }
     };
 

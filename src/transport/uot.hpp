@@ -15,18 +15,18 @@
  *    - Packet 模式 (多目标数据报)：报文头携带 [地址族 + IP/域名 + 端口 + 长度 + 载荷]。
  */
 
+#include <arpa/inet.h>
 #include <cstdint>
 #include <cstring>
+#include <netinet/in.h>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
-#include <vector>
-#include <span>
-#include <optional>
 #include <sys/socket.h>
 #include <sys/uio.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
+#include <vector>
 
 namespace mynet::transport
 {
@@ -50,10 +50,10 @@ namespace mynet::transport
     struct UotEndpoint
     {
         UotAddressType type{UotAddressType::IPV4};
-        uint32_t ipv4{0};              ///< 主机字节序
+        uint32_t ipv4{0}; ///< 主机字节序
         uint8_t ipv6[16]{};
         std::string domain{};
-        uint16_t port{0};             ///< 主机字节序
+        uint16_t port{0}; ///< 主机字节序
 
         [[nodiscard]] bool isIpv4() const noexcept { return type == UotAddressType::IPV4; }
         [[nodiscard]] bool isIpv6() const noexcept { return type == UotAddressType::IPV6; }
@@ -62,7 +62,7 @@ namespace mynet::transport
 
     struct UotRequest
     {
-        bool isConnect{true};          ///< 是否为绑定单一目标的连接模式
+        bool isConnect{true}; ///< 是否为绑定单一目标的连接模式
         UotEndpoint destination{};
     };
 
@@ -80,7 +80,7 @@ namespace mynet::transport
         /**
          * @brief 编码 UoT 请求头 (握手阶段)
          */
-        [[nodiscard]] static std::vector<uint8_t> encodeRequest(const UotRequest& req) noexcept
+        [[nodiscard]] static std::vector<uint8_t> encodeRequest(const UotRequest &req) noexcept
         {
             std::vector<uint8_t> buf;
             buf.push_back(req.isConnect ? 0x01 : 0x00);
@@ -122,9 +122,11 @@ namespace mynet::transport
         /**
          * @brief 解码 UoT 初始请求头
          */
-        [[nodiscard]] static std::optional<std::pair<UotRequest, size_t>> decodeRequest(std::span<const uint8_t> data) noexcept
+        [[nodiscard]] static std::optional<std::pair<UotRequest, size_t>>
+        decodeRequest(std::span<const uint8_t> data) noexcept
         {
-            if (data.size() < 4) return std::nullopt;
+            if (data.size() < 4)
+                return std::nullopt;
 
             UotRequest req{};
             req.isConnect = (data[0] != 0);
@@ -134,28 +136,31 @@ namespace mynet::transport
 
             if (addrType == static_cast<uint8_t>(UotAddressType::IPV4))
             {
-                if (data.size() < offset + 4 + 2) return std::nullopt;
+                if (data.size() < offset + 4 + 2)
+                    return std::nullopt;
                 req.destination.type = UotAddressType::IPV4;
-                req.destination.ipv4 = (static_cast<uint32_t>(data[offset]) << 24) |
-                                       (static_cast<uint32_t>(data[offset + 1]) << 16) |
-                                       (static_cast<uint32_t>(data[offset + 2]) << 8) |
-                                       static_cast<uint32_t>(data[offset + 3]);
+                req.destination.ipv4 =
+                    (static_cast<uint32_t>(data[offset]) << 24) | (static_cast<uint32_t>(data[offset + 1]) << 16) |
+                    (static_cast<uint32_t>(data[offset + 2]) << 8) | static_cast<uint32_t>(data[offset + 3]);
                 offset += 4;
             }
             else if (addrType == static_cast<uint8_t>(UotAddressType::IPV6))
             {
-                if (data.size() < offset + 16 + 2) return std::nullopt;
+                if (data.size() < offset + 16 + 2)
+                    return std::nullopt;
                 req.destination.type = UotAddressType::IPV6;
                 std::memcpy(req.destination.ipv6, data.data() + offset, 16);
                 offset += 16;
             }
             else if (addrType == static_cast<uint8_t>(UotAddressType::FQDN))
             {
-                if (data.size() < offset + 1) return std::nullopt;
+                if (data.size() < offset + 1)
+                    return std::nullopt;
                 const uint8_t fqdnLen = data[offset++];
-                if (data.size() < offset + fqdnLen + 2) return std::nullopt;
+                if (data.size() < offset + fqdnLen + 2)
+                    return std::nullopt;
                 req.destination.type = UotAddressType::FQDN;
-                req.destination.domain = std::string(reinterpret_cast<const char*>(data.data() + offset), fqdnLen);
+                req.destination.domain = std::string(reinterpret_cast<const char *>(data.data() + offset), fqdnLen);
                 offset += fqdnLen;
             }
             else
@@ -174,7 +179,8 @@ namespace mynet::transport
          */
         [[nodiscard]] static std::vector<uint8_t> encodeConnectedFrame(std::span<const uint8_t> payload) noexcept
         {
-            if (payload.size() > 0xFFFF) return {};
+            if (payload.size() > 0xFFFF)
+                return {};
             const size_t len = payload.size();
             std::vector<uint8_t> frame(2 + len);
             frame[0] = static_cast<uint8_t>((len >> 8) & 0xFF);
@@ -191,7 +197,8 @@ namespace mynet::transport
          */
         static ssize_t writeVectorisedConnectedFrame(int tcpFd, std::span<const uint8_t> payload) noexcept
         {
-            if (tcpFd < 0 || payload.size() > 0xFFFF) return -1;
+            if (tcpFd < 0 || payload.size() > 0xFFFF)
+                return -1;
 
             uint8_t header[2];
             const uint16_t len = static_cast<uint16_t>(payload.size());
@@ -201,7 +208,7 @@ namespace mynet::transport
             struct iovec iov[2];
             iov[0].iov_base = header;
             iov[0].iov_len = sizeof(header);
-            iov[1].iov_base = const_cast<uint8_t*>(payload.data());
+            iov[1].iov_base = const_cast<uint8_t *>(payload.data());
             iov[1].iov_len = payload.size();
 
             return ::writev(tcpFd, iov, 2);
@@ -214,10 +221,12 @@ namespace mynet::transport
         [[nodiscard]] static std::optional<std::pair<std::span<const uint8_t>, size_t>>
         decodeConnectedFrame(std::span<const uint8_t> data) noexcept
         {
-            if (data.size() < 2) return std::nullopt;
+            if (data.size() < 2)
+                return std::nullopt;
 
             const size_t payloadLen = (static_cast<size_t>(data[0]) << 8) | data[1];
-            if (data.size() < 2 + payloadLen) return std::nullopt;
+            if (data.size() < 2 + payloadLen)
+                return std::nullopt;
 
             return std::make_pair(data.subspan(2, payloadLen), 2 + payloadLen);
         }
@@ -225,11 +234,11 @@ namespace mynet::transport
         /**
          * @brief 编码 Packet 模式下的数据帧 (携带对端目的地址)
          */
-        [[nodiscard]] static std::vector<uint8_t> encodePacketFrame(
-            const UotEndpoint& endpoint,
-            std::span<const uint8_t> payload) noexcept
+        [[nodiscard]] static std::vector<uint8_t> encodePacketFrame(const UotEndpoint &endpoint,
+                                                                    std::span<const uint8_t> payload) noexcept
         {
-            if (payload.size() > 0xFFFF) return {};
+            if (payload.size() > 0xFFFF)
+                return {};
             std::vector<uint8_t> frame;
             frame.push_back(static_cast<uint8_t>(endpoint.type));
 
@@ -272,9 +281,10 @@ namespace mynet::transport
          * @brief 解码 Packet 模式数据帧
          */
         [[nodiscard]] static std::optional<std::pair<UotEndpoint, std::vector<uint8_t>>>
-        decodePacketFrame(std::span<const uint8_t> data, size_t& outBytesConsumed) noexcept
+        decodePacketFrame(std::span<const uint8_t> data, size_t &outBytesConsumed) noexcept
         {
-            if (data.size() < 5) return std::nullopt;
+            if (data.size() < 5)
+                return std::nullopt;
 
             UotEndpoint ep{};
             const uint8_t addrType = data[0];
@@ -282,17 +292,18 @@ namespace mynet::transport
 
             if (addrType == static_cast<uint8_t>(UotAddressType::IPV4))
             {
-                if (data.size() < offset + 4 + 2 + 2) return std::nullopt;
+                if (data.size() < offset + 4 + 2 + 2)
+                    return std::nullopt;
                 ep.type = UotAddressType::IPV4;
                 ep.ipv4 = (static_cast<uint32_t>(data[offset]) << 24) |
                           (static_cast<uint32_t>(data[offset + 1]) << 16) |
-                          (static_cast<uint32_t>(data[offset + 2]) << 8) |
-                          static_cast<uint32_t>(data[offset + 3]);
+                          (static_cast<uint32_t>(data[offset + 2]) << 8) | static_cast<uint32_t>(data[offset + 3]);
                 offset += 4;
             }
             else if (addrType == static_cast<uint8_t>(UotAddressType::IPV6))
             {
-                if (data.size() < offset + 16 + 2 + 2) return std::nullopt;
+                if (data.size() < offset + 16 + 2 + 2)
+                    return std::nullopt;
                 ep.type = UotAddressType::IPV6;
                 std::memcpy(ep.ipv6, data.data() + offset, 16);
                 offset += 16;
@@ -300,9 +311,10 @@ namespace mynet::transport
             else if (addrType == static_cast<uint8_t>(UotAddressType::FQDN))
             {
                 const uint8_t fqdnLen = data[offset++];
-                if (data.size() < offset + fqdnLen + 2 + 2) return std::nullopt;
+                if (data.size() < offset + fqdnLen + 2 + 2)
+                    return std::nullopt;
                 ep.type = UotAddressType::FQDN;
-                ep.domain = std::string(reinterpret_cast<const char*>(data.data() + offset), fqdnLen);
+                ep.domain = std::string(reinterpret_cast<const char *>(data.data() + offset), fqdnLen);
                 offset += fqdnLen;
             }
             else
@@ -316,7 +328,8 @@ namespace mynet::transport
             const size_t len = (static_cast<size_t>(data[offset]) << 8) | data[offset + 1];
             offset += 2;
 
-            if (data.size() < offset + len) return std::nullopt;
+            if (data.size() < offset + len)
+                return std::nullopt;
 
             std::vector<uint8_t> payload(data.data() + offset, data.data() + offset + len);
             outBytesConsumed = offset + len;

@@ -16,18 +16,18 @@
  * 6. 统一可观测性：全局聚合会话追踪、上下行吞吐统计与空闲会话超时排空。
  */
 
-#include "error.hpp"
+#include "config/log.hpp"
 #include "ebpf.hpp"
+#include "error.hpp"
 #include "fakeip.hpp"
 #include "forwarder.hpp"
 #include "geo.hpp"
+#include "inbound.hpp"
 #include "inboundManager.hpp"
+#include "outbound.hpp"
 #include "outboundManager.hpp"
 #include "router.hpp"
-#include "inbound.hpp"
-#include "outbound.hpp"
 #include "sniffer.hpp"
-#include "config/log.hpp"
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -124,58 +124,63 @@ namespace mynet
             // 装配入站节点
             for (const auto &inCfg : cfg.inbounds)
             {
-                    if (inCfg.protocol == "mixed")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundMixed>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "socks5")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundSocks5>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "http")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundHttp>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "trojan")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundTrojan>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "tproxy")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundTransparent>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "direct")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundDirect>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "vless")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundVless>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.uuid, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "hysteria2")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundHysteria2>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "shadowsocks")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundShadowsocks>(
-                            inCfg.tag, inCfg.host, inCfg.port, inCfg.username.empty() ? "aes-128-gcm" : inCfg.username,
-                            inCfg.password, inCfg.enableSniffing));
-                    }
-                    else if (inCfg.protocol == "tun")
-                    {
-                        inboundManager_->registerInbound(std::make_shared<InboundTun>(
-                            inCfg.tag, inCfg.ifName, inCfg.enableSniffing));
-                    }
+                if (inCfg.protocol == "mixed")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundMixed>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
                 }
+                else if (inCfg.protocol == "socks5")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundSocks5>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "http")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundHttp>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "trojan")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundTrojan>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "tproxy")
+                {
+                    inboundManager_->registerInbound(
+                        std::make_shared<InboundTransparent>(inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "direct")
+                {
+                    inboundManager_->registerInbound(
+                        std::make_shared<InboundDirect>(inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "vless")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundVless>(inCfg.tag, inCfg.host, inCfg.port,
+                                                                                    inCfg.uuid, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "hysteria2")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundHysteria2>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "shadowsocks")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundShadowsocks>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username.empty() ? "aes-128-gcm" : inCfg.username,
+                        inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "tun")
+                {
+                    inboundManager_->registerInbound(
+                        std::make_shared<InboundTun>(inCfg.tag, inCfg.ifName, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "vmess")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundVmess>(inCfg.tag, inCfg.host, inCfg.port,
+                                                                                    inCfg.uuid, inCfg.enableSniffing));
+                }
+            }
 
             // 装配出站节点
             for (const auto &outCfg : cfg.outbounds)
@@ -188,6 +193,11 @@ namespace mynet
                 {
                     outboundManager_->registerOutbound(std::make_shared<OutboundBlock>(outCfg.tag));
                 }
+                else if (outCfg.type == "http")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<OutboundHttp>(
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.username, outCfg.password));
+                }
                 else if (outCfg.type == "socks5")
                 {
                     outboundManager_->registerOutbound(std::make_shared<OutboundSocks5>(
@@ -195,38 +205,44 @@ namespace mynet
                 }
                 else if (outCfg.type == "trojan")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<OutboundTrojan>(
-                        outCfg.tag, outCfg.host, outCfg.port, outCfg.password));
+                    outboundManager_->registerOutbound(
+                        std::make_shared<OutboundTrojan>(outCfg.tag, outCfg.host, outCfg.port, outCfg.password));
                 }
                 else if (outCfg.type == "vless")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<OutboundVless>(
-                        outCfg.tag, outCfg.host, outCfg.port, outCfg.uuid));
+                    outboundManager_->registerOutbound(
+                        std::make_shared<OutboundVless>(outCfg.tag, outCfg.host, outCfg.port, outCfg.uuid));
+                }
+                else if (outCfg.type == "vmess")
+                {
+                    outboundManager_->registerOutbound(std::make_shared<OutboundVmess>(
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.uuid, outCfg.security));
                 }
                 else if (outCfg.type == "hysteria2")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<OutboundHysteria2>(
-                        outCfg.tag, outCfg.host, outCfg.port, outCfg.password));
+                    outboundManager_->registerOutbound(
+                        std::make_shared<OutboundHysteria2>(outCfg.tag, outCfg.host, outCfg.port, outCfg.password));
                 }
                 else if (outCfg.type == "shadowsocks")
                 {
                     outboundManager_->registerOutbound(std::make_shared<OutboundShadowsocks>(
-                        outCfg.tag, outCfg.host, outCfg.port, outCfg.method.empty() ? "aes-128-gcm" : outCfg.method, outCfg.password));
+                        outCfg.tag, outCfg.host, outCfg.port, outCfg.method.empty() ? "aes-128-gcm" : outCfg.method,
+                        outCfg.password));
                 }
                 else if (outCfg.type == "urltest")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<OutboundUrlTest>(
-                        outCfg.tag, outCfg.outbounds, outboundManager_.get(), outCfg.url, outCfg.intervalSecs, outCfg.toleranceMs));
+                    outboundManager_->registerOutbound(
+                        std::make_shared<OutboundUrlTest>(outCfg.tag, outCfg.outbounds, outboundManager_.get(),
+                                                          outCfg.url, outCfg.intervalSecs, outCfg.toleranceMs));
                 }
                 else if (outCfg.type == "fallback")
                 {
-                    outboundManager_->registerOutbound(std::make_shared<OutboundFallback>(
-                        outCfg.tag, outCfg.outbounds, outboundManager_.get()));
+                    outboundManager_->registerOutbound(
+                        std::make_shared<OutboundFallback>(outCfg.tag, outCfg.outbounds, outboundManager_.get()));
                 }
                 else if (outCfg.type == "selector")
                 {
-                    auto sel = std::make_shared<OutboundSelector>(
-                        outCfg.tag, outCfg.outbounds, outboundManager_.get());
+                    auto sel = std::make_shared<OutboundSelector>(outCfg.tag, outCfg.outbounds, outboundManager_.get());
                     if (!outCfg.defaultTag.empty())
                     {
                         sel->setSelected(outCfg.defaultTag);
@@ -243,10 +259,14 @@ namespace mynet
             for (const auto &r : cfg.router.rules)
             {
                 auto rule = RouteRule::to(r.outbound);
-                for (const auto &d : r.domains) rule.domain(d);
-                for (const auto &s : r.domainSuffixes) rule.domainSuffix(s);
-                for (const auto &k : r.domainKeywords) rule.domainKeyword(k);
-                for (const auto &c : r.ipCidrs) rule.cidr(c);
+                for (const auto &d : r.domains)
+                    rule.domain(d);
+                for (const auto &s : r.domainSuffixes)
+                    rule.domainSuffix(s);
+                for (const auto &k : r.domainKeywords)
+                    rule.domainKeyword(k);
+                for (const auto &c : r.ipCidrs)
+                    rule.cidr(c);
                 for (const auto &p : r.portRanges)
                 {
                     if (auto parsed = PortRange::parse(p); parsed.has_value())
@@ -254,14 +274,22 @@ namespace mynet
                         rule.portRange(parsed->start, parsed->end);
                     }
                 }
-                for (const auto &proto : r.protocols) rule.protocol(proto);
-                for (const auto &gip : r.geoIps) rule.geoIp(gip);
-                for (const auto &gsite : r.geoSites) rule.geoSite(gsite);
-                if (!r.processName.empty()) rule.forProcess(r.processName);
-                if (r.network == "tcp") rule.forNetwork(NetworkType::TCP);
-                else if (r.network == "udp") rule.forNetwork(NetworkType::UDP);
-                for (const auto &inTag : r.inboundTags) rule.fromInbound(inTag);
-                if (r.invert) rule.setInvert(true);
+                for (const auto &proto : r.protocols)
+                    rule.protocol(proto);
+                for (const auto &gip : r.geoIps)
+                    rule.geoIp(gip);
+                for (const auto &gsite : r.geoSites)
+                    rule.geoSite(gsite);
+                if (!r.processName.empty())
+                    rule.forProcess(r.processName);
+                if (r.network == "tcp")
+                    rule.forNetwork(NetworkType::TCP);
+                else if (r.network == "udp")
+                    rule.forNetwork(NetworkType::UDP);
+                for (const auto &inTag : r.inboundTags)
+                    rule.fromInbound(inTag);
+                if (r.invert)
+                    rule.setInvert(true);
                 router_->addRule(std::move(rule));
             }
 
@@ -351,10 +379,7 @@ namespace mynet
             }
         }
 
-        [[nodiscard]] inline bool isRunning() const noexcept
-        {
-            return running_.load(std::memory_order_acquire);
-        }
+        [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
         inline Result<> start(int backlog = 128)
         {
@@ -550,15 +575,14 @@ namespace mynet
          * @param enableSniffing 是否开启首包域名嗅探
          * @return CoreDispatchResult 调度决断与转发会话结果
          */
-        CoreDispatchResult dispatch(handler::HandlerInboundConnection &inbound,
-                                   int inFd = -1,
-                                   std::string_view inboundTag = "",
-                                   bool enableSniffing = true)
+        CoreDispatchResult dispatch(handler::HandlerInboundConnection &inbound, int inFd = -1,
+                                    std::string_view inboundTag = "", bool enableSniffing = true)
         {
             CoreDispatchResult result;
 
             // 1. 提取目标端点地址
-            if (!inbound.targetAddress().has_value() && inbound.target().host.empty() && inbound.target().ipv4_.s_addr == 0)
+            if (!inbound.targetAddress().has_value() && inbound.target().host.empty() &&
+                inbound.target().ipv4_.s_addr == 0)
             {
                 result.status = CoreDispatchStatus::NO_TARGET;
                 return result;
@@ -579,9 +603,8 @@ namespace mynet
             // 2. 深度数据包嗅探：从早期摄入用户态缓冲的数据中嗅探真实 SNI 与协议
             if (enableSniffing && inbound.requestBytes() > 0)
             {
-                std::span<const uint8_t> earlyData(
-                    reinterpret_cast<const uint8_t *>(inbound.requestBegin()),
-                    inbound.requestBytes());
+                std::span<const uint8_t> earlyData(reinterpret_cast<const uint8_t *>(inbound.requestBegin()),
+                                                   inbound.requestBytes());
 
                 if (auto sniffRes = handler::sniffing::DomainSniffer::sniff(earlyData); sniffRes.has_value())
                 {
@@ -645,34 +668,19 @@ namespace mynet
         /**
          * @brief 驱动一次全量会话泵送与空闲清理
          */
-        inline size_t tick()
-        {
-            return forwarder_->pumpAll();
-        }
+        inline size_t tick() { return forwarder_->pumpAll(); }
 
         // =====================================================================
         // 全局聚合监控指标
         // =====================================================================
 
-        [[nodiscard]] inline size_t activeSessions() const noexcept
-        {
-            return forwarder_->activeStreamSessions();
-        }
+        [[nodiscard]] inline size_t activeSessions() const noexcept { return forwarder_->activeStreamSessions(); }
 
-        [[nodiscard]] inline uint64_t totalBytesUp() const noexcept
-        {
-            return forwarder_->totalBytesUp();
-        }
+        [[nodiscard]] inline uint64_t totalBytesUp() const noexcept { return forwarder_->totalBytesUp(); }
 
-        [[nodiscard]] inline uint64_t totalBytesDown() const noexcept
-        {
-            return forwarder_->totalBytesDown();
-        }
+        [[nodiscard]] inline uint64_t totalBytesDown() const noexcept { return forwarder_->totalBytesDown(); }
 
-        [[nodiscard]] inline uint64_t totalBytes() const noexcept
-        {
-            return totalBytesUp() + totalBytesDown();
-        }
+        [[nodiscard]] inline uint64_t totalBytes() const noexcept { return totalBytesUp() + totalBytesDown(); }
     };
 
 } // namespace mynet

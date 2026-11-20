@@ -29,10 +29,7 @@ namespace mynet::handler
         bool triggered_{false};
 
     public:
-        HandlerInboundDirect() noexcept
-        {
-            stage_ = InboundStage::STREAMING;
-        }
+        HandlerInboundDirect() noexcept { stage_ = InboundStage::STREAMING; }
 
         explicit HandlerInboundDirect(const ProxyAddress &target) noexcept
         {
@@ -85,10 +82,7 @@ namespace mynet::handler
     class HandlerOutboundDirect : public HandlerOutboundConnection
     {
     public:
-        HandlerOutboundDirect() noexcept
-        {
-            stage_ = OutboundStage::STREAMING;
-        }
+        HandlerOutboundDirect() noexcept { stage_ = OutboundStage::STREAMING; }
 
         explicit HandlerOutboundDirect(const ProxyAddress &target) noexcept
             : HandlerOutboundConnection(target)

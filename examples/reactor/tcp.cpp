@@ -1,7 +1,7 @@
 #include "common/endpoint.hpp"
 #include "common/handlers.hpp"
-#include "error.hpp"
 #include "config/log.hpp"
+#include "error.hpp"
 #include "reactor.hpp"
 
 // epoll 驱动的流式回显服务端。用法：

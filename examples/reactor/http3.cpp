@@ -1,6 +1,6 @@
 #include "common/endpoint.hpp"
-#include "error.hpp"
 #include "config/log.hpp"
+#include "error.hpp"
 #include "http/v3/handler.hpp"
 #include "reactor.hpp"
 #include <csignal>

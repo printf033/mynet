@@ -41,8 +41,8 @@ namespace mynet
             int transparentOpt = 1;
             if (::setsockopt(acceptor_.fd, SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
             {
-                LOG_WARN("InboundTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}",
-                         acceptor_.fd, errnoText(errno));
+                LOG_WARN("InboundTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", acceptor_.fd,
+                         errnoText(errno));
             }
 
             if (port_ == 0)
@@ -79,8 +79,8 @@ namespace mynet
         {
         }
 
-        InboundTun(std::string tag, std::string ifName, std::string inetIp,
-                   std::string netmask = "255.255.255.0", uint32_t mtu = 1500, bool enableSniffing = true)
+        InboundTun(std::string tag, std::string ifName, std::string inetIp, std::string netmask = "255.255.255.0",
+                   uint32_t mtu = 1500, bool enableSniffing = true)
             : InboundBase(std::move(tag), "tun", "0.0.0.0", 0, enableSniffing),
               ifName_(std::move(ifName)),
               inetIp_(std::move(inetIp)),

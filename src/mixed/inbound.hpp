@@ -20,8 +20,8 @@ namespace mynet
         std::string password_{};
 
     public:
-        InboundMixed(std::string tag, std::string host, uint16_t port,
-                     std::string username = "", std::string password = "", bool enableSniffing = true)
+        InboundMixed(std::string tag, std::string host, uint16_t port, std::string username = "",
+                     std::string password = "", bool enableSniffing = true)
             : InboundBase(std::move(tag), "mixed", std::move(host), port, enableSniffing),
               username_(std::move(username)),
               password_(std::move(password))
@@ -35,9 +35,8 @@ namespace mynet
             {
                 std::string u = username_;
                 std::string p = password_;
-                h->setAuthenticator([u, p](std::string_view user, std::string_view pass) {
-                    return user == u && (p.empty() || pass == p);
-                });
+                h->setAuthenticator([u, p](std::string_view user, std::string_view pass)
+                                    { return user == u && (p.empty() || pass == p); });
             }
             return h;
         }

@@ -25,27 +25,27 @@ namespace mynet::handler::dns
     // =========================================================================
     // 常量定义
     // =========================================================================
-    inline constexpr uint16_t kTypeA = 1;       ///< IPv4 地址
-    inline constexpr uint16_t kTypeNS = 2;      ///< 权威域名服务器
-    inline constexpr uint16_t kTypeCNAME = 5;   ///< 规范名称
-    inline constexpr uint16_t kTypeSOA = 6;     ///< 起始授权机构
-    inline constexpr uint16_t kTypePTR = 12;    ///< 指针记录
-    inline constexpr uint16_t kTypeMX = 15;     ///< 邮件交换
-    inline constexpr uint16_t kTypeTXT = 16;    ///< 文本记录
-    inline constexpr uint16_t kTypeAAAA = 28;   ///< IPv6 地址
-    inline constexpr uint16_t kTypeANY = 255;   ///< 通配查询
+    inline constexpr uint16_t kTypeA = 1;     ///< IPv4 地址
+    inline constexpr uint16_t kTypeNS = 2;    ///< 权威域名服务器
+    inline constexpr uint16_t kTypeCNAME = 5; ///< 规范名称
+    inline constexpr uint16_t kTypeSOA = 6;   ///< 起始授权机构
+    inline constexpr uint16_t kTypePTR = 12;  ///< 指针记录
+    inline constexpr uint16_t kTypeMX = 15;   ///< 邮件交换
+    inline constexpr uint16_t kTypeTXT = 16;  ///< 文本记录
+    inline constexpr uint16_t kTypeAAAA = 28; ///< IPv6 地址
+    inline constexpr uint16_t kTypeANY = 255; ///< 通配查询
 
-    inline constexpr uint16_t kClassIN = 1;     ///< 互联网类别 (Internet)
+    inline constexpr uint16_t kClassIN = 1; ///< 互联网类别 (Internet)
     inline constexpr uint16_t kDefaultPort = 53;
 
     namespace rcode
     {
-        inline constexpr uint8_t NOERROR = 0;   ///< 成功
-        inline constexpr uint8_t FORMERR = 1;   ///< 格式错误
-        inline constexpr uint8_t SERVFAIL = 2;  ///< 服务器失败
-        inline constexpr uint8_t NXDOMAIN = 3;  ///< 域名不存在
-        inline constexpr uint8_t NOTIMP = 4;    ///< 功能不支持
-        inline constexpr uint8_t REFUSED = 5;   ///< 拒绝查询
+        inline constexpr uint8_t NOERROR = 0;  ///< 成功
+        inline constexpr uint8_t FORMERR = 1;  ///< 格式错误
+        inline constexpr uint8_t SERVFAIL = 2; ///< 服务器失败
+        inline constexpr uint8_t NXDOMAIN = 3; ///< 域名不存在
+        inline constexpr uint8_t NOTIMP = 4;   ///< 功能不支持
+        inline constexpr uint8_t REFUSED = 5;  ///< 拒绝查询
     } // namespace rcode
 
     // =========================================================================
@@ -63,8 +63,10 @@ namespace mynet::handler::dns
         [[nodiscard]] bool isResponse() const noexcept { return (flags & 0x8000) != 0; }
         void setResponse(bool v) noexcept
         {
-            if (v) flags |= 0x8000;
-            else flags &= ~0x8000;
+            if (v)
+                flags |= 0x8000;
+            else
+                flags &= ~0x8000;
         }
 
         [[nodiscard]] uint8_t opcode() const noexcept { return static_cast<uint8_t>((flags >> 11) & 0x0F); }
@@ -73,29 +75,37 @@ namespace mynet::handler::dns
         [[nodiscard]] bool authoritative() const noexcept { return (flags & 0x0400) != 0; }
         void setAuthoritative(bool v) noexcept
         {
-            if (v) flags |= 0x0400;
-            else flags &= ~0x0400;
+            if (v)
+                flags |= 0x0400;
+            else
+                flags &= ~0x0400;
         }
 
         [[nodiscard]] bool truncated() const noexcept { return (flags & 0x0200) != 0; }
         void setTruncated(bool v) noexcept
         {
-            if (v) flags |= 0x0200;
-            else flags &= ~0x0200;
+            if (v)
+                flags |= 0x0200;
+            else
+                flags &= ~0x0200;
         }
 
         [[nodiscard]] bool recursionDesired() const noexcept { return (flags & 0x0100) != 0; }
         void setRecursionDesired(bool v) noexcept
         {
-            if (v) flags |= 0x0100;
-            else flags &= ~0x0100;
+            if (v)
+                flags |= 0x0100;
+            else
+                flags &= ~0x0100;
         }
 
         [[nodiscard]] bool recursionAvailable() const noexcept { return (flags & 0x0080) != 0; }
         void setRecursionAvailable(bool v) noexcept
         {
-            if (v) flags |= 0x0080;
-            else flags &= ~0x0080;
+            if (v)
+                flags |= 0x0080;
+            else
+                flags &= ~0x0080;
         }
 
         [[nodiscard]] uint8_t rcode() const noexcept { return static_cast<uint8_t>(flags & 0x0F); }
@@ -320,7 +330,8 @@ namespace mynet::handler::dns
             }
 
             // 3. Answers
-            auto encodeRecords = [&buf](const std::vector<DnsRecord> &records) {
+            auto encodeRecords = [&buf](const std::vector<DnsRecord> &records)
+            {
                 for (const auto &r : records)
                 {
                     encodeDomainLabels(r.name, buf);
@@ -384,7 +395,8 @@ namespace mynet::handler::dns
             }
 
             // 2. Records 解析闭包
-            auto decodeRecords = [&](uint16_t count, std::vector<DnsRecord> &records) -> bool {
+            auto decodeRecords = [&](uint16_t count, std::vector<DnsRecord> &records) -> bool
+            {
                 for (uint16_t i = 0; i < count; ++i)
                 {
                     DnsRecord r;
@@ -450,8 +462,7 @@ namespace mynet::handler::dns
     /**
      * @brief 快速编码单个域名查询包
      */
-    inline std::vector<uint8_t> encodeQuery(std::string_view domain, uint16_t qtype = kTypeA,
-                                            uint16_t txid = 0x1234)
+    inline std::vector<uint8_t> encodeQuery(std::string_view domain, uint16_t qtype = kTypeA, uint16_t txid = 0x1234)
     {
         DnsMessage msg;
         msg.header.id = txid;

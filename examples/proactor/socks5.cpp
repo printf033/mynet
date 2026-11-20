@@ -1,7 +1,7 @@
 #include "socks/socks5.hpp"
 #include "common/endpoint.hpp"
-#include "error.hpp"
 #include "config/log.hpp"
+#include "error.hpp"
 #include "proactor.hpp"
 #include <string>
 #include <string_view>

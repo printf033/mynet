@@ -1,20 +1,23 @@
 #pragma once
 
+#include "config/log.hpp"
 #include "constraints.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
+#include "tls/fragmenter.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
+#include <chrono>
 #include <concepts>
 #include <csignal>
 #include <fcntl.h>
+#include <mutex>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-#include <chrono>
-#include <mutex>
+#include <poll.h>
 #include <span>
 #include <string>
 #include <string_view>
@@ -22,9 +25,6 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-#include <poll.h>
-#include <net/if.h>
-#include "tls/fragmenter.hpp"
 
 #ifndef IPPROTO_MPTCP
 #define IPPROTO_MPTCP 262
@@ -108,10 +108,11 @@ namespace mynet
      */
     struct TlsFragmentHelper
     {
-        static std::vector<std::vector<uint8_t>> fragmentClientHello(
-            std::span<const uint8_t> clientHello, size_t minChunk = 50, size_t maxChunk = 100)
+        static std::vector<std::vector<uint8_t>> fragmentClientHello(std::span<const uint8_t> clientHello,
+                                                                     size_t minChunk = 50, size_t maxChunk = 100)
         {
-            if (clientHello.empty()) return {};
+            if (clientHello.empty())
+                return {};
             if (auto sni = tls::TlsFragmenter::findSni(clientHello); sni.has_value())
             {
                 auto splits = tls::TlsFragmenter::computeSplitOffsets(clientHello, *sni);
@@ -150,11 +151,11 @@ namespace mynet
         int fd = -1;
         using Handler = HandlerType;
         sockaddr_in targetAddr{};
-        uint32_t fwmark{0};      ///< Linux SO_MARK 策略路由标记（防环路）
-        bool transparent{false}; ///< Linux IP_TRANSPARENT 支持（绑定原始源 IP）
-        uint8_t dscp{0};         ///< DSCP 服务质量标记 (借鉴 dae dscp)
-        bool enableMptcp{false}; ///< 是否启用 Multipath TCP (MPTCP)
-        std::string bindInterface{}; ///< SO_BINDTODEVICE 绑定网卡
+        uint32_t fwmark{0};               ///< Linux SO_MARK 策略路由标记（防环路）
+        bool transparent{false};          ///< Linux IP_TRANSPARENT 支持（绑定原始源 IP）
+        uint8_t dscp{0};                  ///< DSCP 服务质量标记 (借鉴 dae dscp)
+        bool enableMptcp{false};          ///< 是否启用 Multipath TCP (MPTCP)
+        std::string bindInterface{};      ///< SO_BINDTODEVICE 绑定网卡
         std::vector<uint8_t> tcpPrefix{}; ///< TCP 前置注入前缀 (借鉴 sing-box tcp_prefix)
 
         DialerBase() = default;
@@ -164,8 +165,13 @@ namespace mynet
         DialerBase &operator=(const DialerBase &) = delete;
 
         DialerBase(DialerBase &&other) noexcept
-            : fd(other.fd), targetAddr(other.targetAddr), fwmark(other.fwmark), transparent(other.transparent),
-              dscp(other.dscp), enableMptcp(other.enableMptcp), bindInterface(std::move(other.bindInterface)),
+            : fd(other.fd),
+              targetAddr(other.targetAddr),
+              fwmark(other.fwmark),
+              transparent(other.transparent),
+              dscp(other.dscp),
+              enableMptcp(other.enableMptcp),
+              bindInterface(std::move(other.bindInterface)),
               tcpPrefix(std::move(other.tcpPrefix))
         {
             other.fd = -1;
@@ -214,7 +220,8 @@ namespace mynet
          */
         inline bool flushTcpPrefix() noexcept
         {
-            if (fd < 0 || tcpPrefix.empty()) return true;
+            if (fd < 0 || tcpPrefix.empty())
+                return true;
             ssize_t n = ::send(fd, tcpPrefix.data(), tcpPrefix.size(), MSG_NOSIGNAL);
             return n == static_cast<ssize_t>(tcpPrefix.size());
         }
@@ -382,12 +389,11 @@ namespace mynet
             [[maybe_unused]] auto _keepalive = ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
 
             const char *iface = (bindInterface != nullptr && bindInterface[0] != '\0')
-                                ? bindInterface
-                                : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
+                                    ? bindInterface
+                                    : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
             if (iface != nullptr && iface[0] != '\0')
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0)
-                    [[unlikely]]
+                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
                 {
                     LOG_WARN("dialTcp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
                 }
@@ -511,12 +517,11 @@ namespace mynet
             }
 
             const char *iface = (bindInterface != nullptr && bindInterface[0] != '\0')
-                                ? bindInterface
-                                : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
+                                    ? bindInterface
+                                    : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
             if (iface != nullptr && iface[0] != '\0')
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0)
-                    [[unlikely]]
+                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
                 {
                     LOG_WARN("dialUdp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
                 }
@@ -626,9 +631,9 @@ namespace mynet
      */
     enum class InterfaceStrategy : uint8_t
     {
-        DEFAULT = 0,    ///< 默认：仅走默认主路由网卡
-        HYBRID = 1,     ///< 混合赛马：所有网卡同时发起握手，最快连通者获胜，其余立即安全释放
-        FALLBACK = 2    ///< 分级回退：主网卡优先，若在 fallbackDelay 内未握手完成或快错，立即激活备选网卡
+        DEFAULT = 0, ///< 默认：仅走默认主路由网卡
+        HYBRID = 1,  ///< 混合赛马：所有网卡同时发起握手，最快连通者获胜，其余立即安全释放
+        FALLBACK = 2 ///< 分级回退：主网卡优先，若在 fallbackDelay 内未握手完成或快错，立即激活备选网卡
     };
 
     /**
@@ -656,13 +661,12 @@ namespace mynet
             std::chrono::steady_clock::time_point startTime{};
         };
 
-        static int initiateNonBlockingConnect(
-            const sockaddr_in &targetAddr,
-            const std::string &ifname,
-            uint32_t fwmark) noexcept
+        static int initiateNonBlockingConnect(const sockaddr_in &targetAddr, const std::string &ifname,
+                                              uint32_t fwmark) noexcept
         {
             int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) return -1;
+            if (fd < 0)
+                return -1;
 
             if (fwmark > 0)
             {
@@ -704,14 +708,13 @@ namespace mynet
          * @param totalTimeout 总超时时间
          * @param fwmark Linux SO_MARK
          */
-        static InterfaceRacerResult dialParallelInterface(
-            const sockaddr_in &targetAddr,
-            const std::vector<std::string> &primaryInterfaces,
-            const std::vector<std::string> &fallbackInterfaces,
-            InterfaceStrategy strategy = InterfaceStrategy::FALLBACK,
-            std::chrono::milliseconds fallbackDelay = std::chrono::milliseconds(300),
-            std::chrono::milliseconds totalTimeout = std::chrono::milliseconds(3000),
-            uint32_t fwmark = 0) noexcept
+        static InterfaceRacerResult
+        dialParallelInterface(const sockaddr_in &targetAddr, const std::vector<std::string> &primaryInterfaces,
+                              const std::vector<std::string> &fallbackInterfaces,
+                              InterfaceStrategy strategy = InterfaceStrategy::FALLBACK,
+                              std::chrono::milliseconds fallbackDelay = std::chrono::milliseconds(300),
+                              std::chrono::milliseconds totalTimeout = std::chrono::milliseconds(3000),
+                              uint32_t fwmark = 0) noexcept
         {
             const auto startTotal = std::chrono::steady_clock::now();
             std::vector<Racer> activeRacers;
@@ -733,12 +736,10 @@ namespace mynet
                 int fd = initiateNonBlockingConnect(targetAddr, ifname, fwmark);
                 if (fd >= 0)
                 {
-                    activeRacers.push_back(Racer{
-                        .fd = fd,
-                        .ifname = ifname,
-                        .isPrimary = isPrimary,
-                        .startTime = std::chrono::steady_clock::now()
-                    });
+                    activeRacers.push_back(Racer{.fd = fd,
+                                                 .ifname = ifname,
+                                                 .isPrimary = isPrimary,
+                                                 .startTime = std::chrono::steady_clock::now()});
                 }
             };
 
@@ -780,7 +781,11 @@ namespace mynet
                     bool allPrimaryDead = true;
                     for (const auto &r : activeRacers)
                     {
-                        if (r.isPrimary && r.fd >= 0) { allPrimaryDead = false; break; }
+                        if (r.isPrimary && r.fd >= 0)
+                        {
+                            allPrimaryDead = false;
+                            break;
+                        }
                     }
 
                     if (allPrimaryDead || elapsedTotal >= fallbackDelay)
@@ -800,11 +805,8 @@ namespace mynet
                 {
                     if (activeRacers[i].fd >= 0)
                     {
-                        pfds.push_back(pollfd{
-                            .fd = activeRacers[i].fd,
-                            .events = POLLOUT | POLLERR | POLLHUP,
-                            .revents = 0
-                        });
+                        pfds.push_back(
+                            pollfd{.fd = activeRacers[i].fd, .events = POLLOUT | POLLERR | POLLHUP, .revents = 0});
                         racerIdxs.push_back(i);
                     }
                 }
@@ -831,7 +833,8 @@ namespace mynet
                 {
                     for (size_t p = 0; p < pfds.size(); ++p)
                     {
-                        if (pfds[p].revents == 0) continue;
+                        if (pfds[p].revents == 0)
+                            continue;
 
                         size_t rIdx = racerIdxs[p];
                         auto &racer = activeRacers[rIdx];
@@ -861,12 +864,10 @@ namespace mynet
                                 // 立即关闭所有败选套接字
                                 cleanupRacers(winnerFd);
 
-                                return InterfaceRacerResult{
-                                    .winnerFd = winnerFd,
-                                    .winningInterface = winIf,
-                                    .isPrimary = isPrim,
-                                    .latency = latency
-                                };
+                                return InterfaceRacerResult{.winnerFd = winnerFd,
+                                                            .winningInterface = winIf,
+                                                            .isPrimary = isPrim,
+                                                            .latency = latency};
                             }
                             else
                             {

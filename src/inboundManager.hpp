@@ -14,9 +14,9 @@
 
 #include "acceptor.hpp"
 #include "address.hpp"
+#include "config/log.hpp"
 #include "error.hpp"
 #include "inbound.hpp"
-#include "config/log.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstdint>
@@ -77,7 +77,10 @@ namespace mynet
         [[nodiscard]] inline uint16_t port() const noexcept { return port_; }
         [[nodiscard]] inline int listenFd() const noexcept { return acceptor_.fd; }
         [[nodiscard]] inline AcceptorBase<handler::HandlerInboundConnection> &acceptor() noexcept { return acceptor_; }
-        [[nodiscard]] inline const AcceptorBase<handler::HandlerInboundConnection> &acceptor() const noexcept { return acceptor_; }
+        [[nodiscard]] inline const AcceptorBase<handler::HandlerInboundConnection> &acceptor() const noexcept
+        {
+            return acceptor_;
+        }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_; }
         [[nodiscard]] inline bool isSniffingEnabled() const noexcept { return enableSniffing_; }
         inline void setSniffingEnabled(bool enable) noexcept { enableSniffing_ = enable; }
@@ -112,10 +115,7 @@ namespace mynet
         /**
          * @brief 非阻塞接收一个接入的客户端连接 (委托给底层 AcceptorBase 基础设施)
          */
-        [[nodiscard]] virtual Result<std::pair<int, sockaddr_in>> acceptOne() noexcept
-        {
-            return acceptor_.accept();
-        }
+        [[nodiscard]] virtual Result<std::pair<int, sockaddr_in>> acceptOne() noexcept { return acceptor_.accept(); }
 
         /**
          * @brief 关闭监听套接字
@@ -144,6 +144,43 @@ namespace mynet
 #include "transparent/inbound.hpp"
 #include "trojan/inbound.hpp"
 #include "vless/inbound.hpp"
+#include "vmess/inbound.hpp"
+
+namespace mynet::inbound
+{
+    /**
+     * @brief 驱动新接入的客户端套接字完成入站协议握手与目标地址解析
+     */
+    inline bool driveHandshake(int clientFd, handler::HandlerInboundConnection &handler, int timeoutMs = 2000)
+    {
+        while (!handler.isEstablished() && handler.inboundStage() != handler::InboundStage::ERROR)
+        {
+            pollfd pfd{clientFd, POLLIN, 0};
+            int prc = ::poll(&pfd, 1, timeoutMs);
+            if (prc <= 0)
+            {
+                return false;
+            }
+            char buf[4096];
+            ssize_t n = ::read(clientFd, buf, sizeof(buf));
+            if (n <= 0)
+            {
+                return false;
+            }
+            [[maybe_unused]] auto _ = handler.appendRequest(buf, n);
+            handler.handle();
+            while (handler.hasResponse())
+            {
+                std::string resp = handler.takeResponse();
+                if (!resp.empty())
+                {
+                    ::send(clientFd, resp.data(), resp.size(), MSG_NOSIGNAL);
+                }
+            }
+        }
+        return handler.isEstablished();
+    }
+} // namespace mynet::inbound
 
 namespace mynet
 {
@@ -163,20 +200,14 @@ namespace mynet
     public:
         InboundManager() = default;
 
-        ~InboundManager() noexcept
-        {
-            stopAll();
-        }
+        ~InboundManager() noexcept { stopAll(); }
 
         InboundManager(const InboundManager &) = delete;
         InboundManager &operator=(const InboundManager &) = delete;
         InboundManager(InboundManager &&) = delete;
         InboundManager &operator=(InboundManager &&) = delete;
 
-        [[nodiscard]] inline bool isRunning() const noexcept
-        {
-            return running_.load(std::memory_order_acquire);
-        }
+        [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
         /**
          * @brief 注册一个入站节点
@@ -210,7 +241,8 @@ namespace mynet
          */
         [[nodiscard]] std::shared_ptr<InboundBase> findByListenFd(int fd) const
         {
-            if (fd < 0) return nullptr;
+            if (fd < 0)
+                return nullptr;
             std::lock_guard<std::mutex> lock(mutex_);
             for (const auto &pair : inbounds_)
             {

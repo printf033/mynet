@@ -5,7 +5,8 @@
  * @brief RFC 9204 QPACK 头部压缩静态表与字段编解码器。
  */
 
-#include "../v2/hpack.hpp"
+#include "../common.hpp"
+#include "../huffman.hpp"
 #include "frame.hpp"
 #include <array>
 #include <cstddef>
@@ -21,14 +22,7 @@ namespace mynet
 {
     namespace http::v3
     {
-        /**
-         * @brief 单个 HTTP 首部键值对
-         */
-        struct Header
-        {
-            std::string name{};
-            std::string value{};
-        };
+        using Header = mynet::http::Header;
 
         /**
          * @brief RFC 9204 Appendix A QPACK 静态表项
@@ -282,12 +276,12 @@ namespace mynet
             rem -= len;
             if (isHuffman)
             {
-                auto decRes = http::v2::hpack::huffmanDecode(raw);
+                auto decRes = http::huffman::decode(raw);
                 if (!decRes)
                 {
                     return std::unexpected(H3_ERROR::H3_FRAME_ERROR);
                 }
-                return *decRes;
+                return std::move(*decRes);
             }
             return std::string(raw);
         }
@@ -436,7 +430,7 @@ namespace mynet
                     std::string name;
                     if (nameHuffman)
                     {
-                        auto decRes = http::v2::hpack::huffmanDecode(rawName);
+                        auto decRes = http::huffman::decode(rawName);
                         if (!decRes)
                         {
                             return std::unexpected(H3_ERROR::H3_FRAME_ERROR);

@@ -20,7 +20,8 @@ namespace
     std::string httpExchange(uint16_t port, const std::string &request)
     {
         int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return "";
+        if (fd < 0)
+            return "";
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -40,7 +41,8 @@ namespace
         while (true)
         {
             ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-            if (n <= 0) break;
+            if (n <= 0)
+                break;
             response.append(buf, static_cast<size_t>(n));
         }
 
@@ -59,12 +61,12 @@ TEST(ControllerTest, RestApiEndpoints)
     Core core;
     core.outbounds().registerOutbound(std::make_shared<OutboundDirect>("direct"));
     core.outbounds().registerOutbound(std::make_shared<OutboundBlock>("block"));
-    auto sel = std::make_shared<OutboundSelector>(
-        "proxy", std::vector<std::string>{"direct", "block"}, &core.outbounds());
+    auto sel =
+        std::make_shared<OutboundSelector>("proxy", std::vector<std::string>{"direct", "block"}, &core.outbounds());
     core.outbounds().registerOutbound(sel);
 
-    auto urltest = std::make_shared<OutboundUrlTest>(
-        "auto", std::vector<std::string>{"direct", "block"}, &core.outbounds());
+    auto urltest =
+        std::make_shared<OutboundUrlTest>("auto", std::vector<std::string>{"direct", "block"}, &core.outbounds());
     core.outbounds().registerOutbound(urltest);
 
     // 绑定端口 19890
@@ -103,11 +105,10 @@ TEST(ControllerTest, RestApiEndpoints)
     // 4. PUT /proxies/proxy 动态切换出站节点
     {
         EXPECT_EQ(sel->selected(), "direct");
-        std::string putReq =
-            "PUT /proxies/proxy HTTP/1.1\r\n"
-            "Host: 127.0.0.1\r\n"
-            "Content-Length: 17\r\n\r\n"
-            R"({"name":"block"})";
+        std::string putReq = "PUT /proxies/proxy HTTP/1.1\r\n"
+                             "Host: 127.0.0.1\r\n"
+                             "Content-Length: 17\r\n\r\n"
+                             R"({"name":"block"})";
         std::string resp = httpExchange(apiPort, putReq);
         EXPECT_NE(resp.find("204 No Content"), std::string::npos);
         EXPECT_EQ(sel->selected(), "block");
@@ -217,8 +218,8 @@ TEST(ControllerTest, UrlTestProbeDirect)
     mgr.registerOutbound(std::make_shared<OutboundDirect>("direct-node"));
     mgr.registerOutbound(std::make_shared<OutboundBlock>("block-node"));
 
-    auto urltest = std::make_shared<OutboundUrlTest>(
-        "auto-probe", std::vector<std::string>{"direct-node", "block-node"}, &mgr);
+    auto urltest =
+        std::make_shared<OutboundUrlTest>("auto-probe", std::vector<std::string>{"direct-node", "block-node"}, &mgr);
     mgr.registerOutbound(urltest);
 
     // 探测 direct-node

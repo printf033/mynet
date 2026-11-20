@@ -12,16 +12,16 @@
  * 4. 全程基于原子计数与轻量级探针，现代 C++26 noexcept 实现。
  */
 
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <fstream>
-#include <string>
-#include <atomic>
-#include <optional>
-#include <algorithm>
-#include <sys/socket.h>
 #include <netinet/in.h>
+#include <optional>
+#include <string>
+#include <sys/socket.h>
 #include <unistd.h>
-#include <cerrno>
 
 namespace mynet::transparent
 {
@@ -99,13 +99,13 @@ namespace mynet::transparent
         {
         }
 
-        static KernelPortPool& instance() noexcept
+        static KernelPortPool &instance() noexcept
         {
             static KernelPortPool s_inst;
             return s_inst;
         }
 
-        [[nodiscard]] const PortRange& safeRange() const noexcept { return safeRange_; }
+        [[nodiscard]] const PortRange &safeRange() const noexcept { return safeRange_; }
 
         /**
          * @brief 执行探针式 bind 测试，确认端口在当前系统是否可用
@@ -114,18 +114,20 @@ namespace mynet::transparent
         {
             const int sockType = (protocol == IPPROTO_UDP) ? SOCK_DGRAM : SOCK_STREAM;
             int fd = ::socket(AF_INET, sockType | SOCK_CLOEXEC, 0);
-            if (fd < 0) return true; // 无法创建则视为不阻拦
+            if (fd < 0)
+                return true; // 无法创建则视为不阻拦
 
             sockaddr_in sin{};
             sin.sin_family = AF_INET;
             sin.sin_addr.s_addr = htonl(INADDR_ANY);
             sin.sin_port = htons(port);
 
-            int res = ::bind(fd, reinterpret_cast<sockaddr*>(&sin), sizeof(sin));
+            int res = ::bind(fd, reinterpret_cast<sockaddr *>(&sin), sizeof(sin));
             int err = errno;
             ::close(fd);
 
-            if (res == 0) return true;
+            if (res == 0)
+                return true;
             return err != EADDRINUSE;
         }
 
@@ -135,11 +137,11 @@ namespace mynet::transparent
          * @param protocol IPPROTO_TCP 或 IPPROTO_UDP
          * @param maxAttempts 最大探针探测尝试次数 (防止遍历死循环)
          */
-        [[nodiscard]] std::optional<uint16_t> allocatePort(
-            uint8_t protocol = IPPROTO_TCP,
-            size_t maxAttempts = 64) noexcept
+        [[nodiscard]] std::optional<uint16_t> allocatePort(uint8_t protocol = IPPROTO_TCP,
+                                                           size_t maxAttempts = 64) noexcept
         {
-            if (safeRange_.count == 0) return std::nullopt;
+            if (safeRange_.count == 0)
+                return std::nullopt;
 
             for (size_t attempt = 0; attempt < maxAttempts; ++attempt)
             {

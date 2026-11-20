@@ -88,8 +88,8 @@ namespace
 
         // 2. 构造 CRYPTO 帧 (Type 0x06, Offset 0, Length, Data)
         std::vector<uint8_t> payload;
-        payload.push_back(0x06); // Frame Type CRYPTO
-        detail::appendUvarint(payload, 0); // Offset = 0
+        payload.push_back(0x06);                            // Frame Type CRYPTO
+        detail::appendUvarint(payload, 0);                  // Offset = 0
         detail::appendUvarint(payload, clientHello.size()); // Length
         payload.insert(payload.end(), clientHello.begin(), clientHello.end());
         // 填充至 64 字节以上以保证采样空间
@@ -105,14 +105,15 @@ namespace
         uint8_t pnLen = 1;
 
         // 4. 派生密钥 (RFC 9000 v1)
-        auto initialSecret = mynet::handler::crypto::hkdfSha256Extract(detail::kQuicSaltV1, dcid);
+        auto initialSecret = mynet::kdf::hkdfSha256Extract(detail::kQuicSaltV1, dcid);
         if (!initialSecret.has_value())
         {
             return {};
         }
 
         std::array<uint8_t, 32> clientInitialSecret{};
-        [[maybe_unused]] bool ok = mynet::handler::crypto::hkdfExpandLabel(*initialSecret, "client in", {}, 32, clientInitialSecret);
+        [[maybe_unused]] bool ok =
+            mynet::kdf::hkdfExpandLabel(*initialSecret, "client in", {}, 32, clientInitialSecret);
         if (!ok)
         {
             return {};
@@ -121,11 +122,11 @@ namespace
         std::array<uint8_t, 16> hpKey{};
         std::array<uint8_t, 16> key{};
         std::array<uint8_t, 12> iv{};
-        ok = mynet::handler::crypto::hkdfExpandLabel(clientInitialSecret, "quic hp", {}, 16, hpKey);
+        ok = mynet::kdf::hkdfExpandLabel(clientInitialSecret, "quic hp", {}, 16, hpKey);
         EXPECT_TRUE(ok);
-        ok = mynet::handler::crypto::hkdfExpandLabel(clientInitialSecret, "quic key", {}, 16, key);
+        ok = mynet::kdf::hkdfExpandLabel(clientInitialSecret, "quic key", {}, 16, key);
         EXPECT_TRUE(ok);
-        ok = mynet::handler::crypto::hkdfExpandLabel(clientInitialSecret, "quic iv", {}, 12, iv);
+        ok = mynet::kdf::hkdfExpandLabel(clientInitialSecret, "quic iv", {}, 12, iv);
         EXPECT_TRUE(ok);
 
         // 5. 组装未加密头部
@@ -160,7 +161,7 @@ namespace
         std::span<const uint8_t> aad(packet.data(), extHdrLen);
         std::vector<uint8_t> ciphertext;
         std::array<uint8_t, 16> tag{};
-        ok = mynet::handler::crypto::aes128GcmEncryptWithAad(key, nonce, aad, payload, ciphertext, tag);
+        ok = mynet::cipher::aes128GcmEncryptWithAad(key, nonce, aad, payload, ciphertext, tag);
         EXPECT_TRUE(ok);
 
         packet.insert(packet.end(), ciphertext.begin(), ciphertext.end());
@@ -170,7 +171,7 @@ namespace
         std::array<uint8_t, 16> sample{};
         std::memcpy(sample.data(), packet.data() + hdrLen + 4, 16);
         std::array<uint8_t, 16> mask{};
-        ok = mynet::handler::crypto::aes128EcbEncryptBlock(hpKey, sample, mask);
+        ok = mynet::cipher::aes128EcbEncryptBlock(hpKey, sample, mask);
         EXPECT_TRUE(ok);
 
         packet[0] ^= (mask[0] & 0x0F);
@@ -260,18 +261,9 @@ TEST(DomainSnifferTest, DnsQuestionExtraction)
     // 标准 DNS 查询包: Transaction ID=0x1234, Flags=0x0100 (RD), QDCOUNT=1
     // QNAME: 3www6google3com0
     std::vector<uint8_t> dnsQuery = {
-        0x12, 0x34,
-        0x01, 0x00,
-        0x00, 0x01,
-        0x00, 0x00,
-        0x00, 0x00,
-        0x00, 0x00,
-        3, 'w', 'w', 'w',
-        6, 'g', 'o', 'o', 'g', 'l', 'e',
-        3, 'c', 'o', 'm',
-        0x00,
-        0x00, 0x01, // Type A
-        0x00, 0x01  // Class IN
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 3,    'w',  'w',
+        'w',  6,    'g',  'o',  'o',  'g',  'l',  'e',  3,    'c',  'o',  'm',  0x00, 0x00, 0x01, // Type A
+        0x00, 0x01                                                                                // Class IN
     };
 
     auto res = DomainSniffer::sniffDnsQuestion(dnsQuery);
@@ -290,7 +282,7 @@ TEST(DomainSnifferTest, BitTorrentHandshakeExtraction)
     std::string btHandshake;
     btHandshake.push_back(19);
     btHandshake.append("BitTorrent protocol");
-    btHandshake.append(std::string(8, '\0'));  // reserved
+    btHandshake.append(std::string(8, '\0')); // reserved
     btHandshake.append(std::string(20, 'A')); // info_hash
     btHandshake.append(std::string(20, 'B')); // peer_id
 

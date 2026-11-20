@@ -2,7 +2,8 @@
 
 /**
  * @file handler/socks/socks5.hpp
- * @brief SOCKS5 代理协议入站状态机处理器 (HandlerInboundSocks5) 与出站协议处理器 (HandlerOutboundSocks5)（RFC 1928 / RFC 1929）。
+ * @brief SOCKS5 代理协议入站状态机处理器 (HandlerInboundSocks5) 与出站协议处理器 (HandlerOutboundSocks5)（RFC 1928 /
+ * RFC 1929）。
  */
 
 #include "../address.hpp"
@@ -472,8 +473,8 @@ namespace mynet::handler
                 }
 
                 size_t consumed = 0;
-                auto boundAddr = ProxyAddress::decodeSocks5(
-                    std::span<const uint8_t>(data + 3, requestBytes() - 3), consumed);
+                auto boundAddr =
+                    ProxyAddress::decodeSocks5(std::span<const uint8_t>(data + 3, requestBytes() - 3), consumed);
                 if (!boundAddr.has_value())
                 {
                     return; // 数据尚不足

@@ -1,10 +1,10 @@
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <span>
-#include <vector>
 #include <utility>
+#include <vector>
 
 namespace mynet
 {

@@ -11,10 +11,10 @@
  */
 
 #include "../address.hpp"
+#include "../datagram.hpp"
+#include "../dns/cache.hpp"
 #include "../inbound.hpp"
 #include "../sniffer.hpp"
-#include "../dns/cache.hpp"
-#include "../datagram.hpp"
 #include <cstdint>
 #include <functional>
 #include <netinet/in.h>
@@ -94,8 +94,7 @@ namespace mynet::handler
             if (transparentStage_ == TransparentStage::RESOLVING)
             {
                 resolveOriginalDst();
-                if (transparentStage_ != TransparentStage::SNIFFING &&
-                    transparentStage_ != TransparentStage::STREAMING)
+                if (transparentStage_ != TransparentStage::SNIFFING && transparentStage_ != TransparentStage::STREAMING)
                 {
                     return;
                 }
@@ -175,8 +174,8 @@ namespace mynet::handler
             // 检查首字节是否可能属于已知可嗅探协议 (TCP 嗅探 TLS / HTTP / BitTorrent / SSH / RDP)
             const uint8_t b0 = data[0];
             const bool couldBeTls = (b0 == 0x16);
-            const bool couldBeHttp = (b0 == 'G' || b0 == 'P' || b0 == 'H' || b0 == 'D' ||
-                                      b0 == 'C' || b0 == 'O' || b0 == 'T');
+            const bool couldBeHttp =
+                (b0 == 'G' || b0 == 'P' || b0 == 'H' || b0 == 'D' || b0 == 'C' || b0 == 'O' || b0 == 'T');
             const bool couldBeBt = (b0 == 19);
             const bool couldBeSsh = (b0 == 'S');
             const bool couldBeRdp = (b0 == 0x03);
@@ -270,10 +269,7 @@ namespace mynet::handler
         void setSniffing(bool enable) noexcept { sniffingEnabled_ = enable; }
         [[nodiscard]] bool isSniffingEnabled() const noexcept { return sniffingEnabled_; }
 
-        void reset() noexcept override
-        {
-            HandlerInboundDatagram::reset();
-        }
+        void reset() noexcept override { HandlerInboundDatagram::reset(); }
 
         /**
          * @brief 处理带有原始目的地址的入站 UDP 报文
@@ -283,8 +279,7 @@ namespace mynet::handler
          * @param data 报文载荷
          * @param n 报文有效长度
          */
-        void onDatagramWithDst(const sockaddr_in &peer, const sockaddr_in &origDst,
-                               const char *data, size_t n) noexcept
+        void onDatagramWithDst(const sockaddr_in &peer, const sockaddr_in &origDst, const char *data, size_t n) noexcept
         {
             if (data == nullptr || n == 0)
             {
@@ -333,9 +328,11 @@ namespace mynet::handler
          */
         [[nodiscard]] static std::optional<sockaddr_in> extractOrigDst(const msghdr &msg) noexcept
         {
-            for (auto *cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr; cmsg = CMSG_NXTHDR(const_cast<msghdr *>(&msg), cmsg))
+            for (auto *cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
+                 cmsg = CMSG_NXTHDR(const_cast<msghdr *>(&msg), cmsg))
             {
-                if (cmsg->cmsg_level == SOL_IP && (cmsg->cmsg_type == IP_ORIGDSTADDR || cmsg->cmsg_type == IP_RECVORIGDSTADDR))
+                if (cmsg->cmsg_level == SOL_IP &&
+                    (cmsg->cmsg_type == IP_ORIGDSTADDR || cmsg->cmsg_type == IP_RECVORIGDSTADDR))
                 {
                     const auto *sin = reinterpret_cast<const sockaddr_in *>(CMSG_DATA(cmsg));
                     return *sin;

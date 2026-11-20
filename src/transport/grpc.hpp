@@ -5,8 +5,8 @@
  * @brief gRPC / Gun-lite (HTTP/2 流式封包) 协议传输抽象与消息帧编解码
  */
 
-#include "transport.hpp"
 #include "../uvarint.hpp"
+#include "transport.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -113,10 +113,8 @@ namespace mynet::transport::grpc
             return 0;
         }
 
-        const uint32_t msgLen = (static_cast<uint32_t>(data[1]) << 24) |
-                                (static_cast<uint32_t>(data[2]) << 16) |
-                                (static_cast<uint32_t>(data[3]) << 8) |
-                                static_cast<uint32_t>(data[4]);
+        const uint32_t msgLen = (static_cast<uint32_t>(data[1]) << 24) | (static_cast<uint32_t>(data[2]) << 16) |
+                                (static_cast<uint32_t>(data[3]) << 8) | static_cast<uint32_t>(data[4]);
 
         if (data.size() < 5 + msgLen)
         {

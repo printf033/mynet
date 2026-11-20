@@ -6,7 +6,7 @@
  */
 
 #include "../address.hpp"
-#include "../crypto.hpp"
+#include "../encoding.hpp"
 #include "../inbound.hpp"
 #include <array>
 #include <cstdint>
@@ -55,7 +55,7 @@ namespace mynet::handler
 
         void setUuid(std::string_view uuidStr)
         {
-            if (auto u = crypto::parseUuid(uuidStr); u.has_value())
+            if (auto u = encoding::parseUuid(uuidStr); u.has_value())
             {
                 expectedUuid_ = *u;
             }
@@ -64,10 +64,7 @@ namespace mynet::handler
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
         void setAutoReply(bool autoReply) noexcept { autoReplySuccess_ = autoReply; }
 
-        void reset() noexcept override
-        {
-            HandlerInboundConnection::reset();
-        }
+        void reset() noexcept override { HandlerInboundConnection::reset(); }
 
         void handle() override
         {
@@ -108,7 +105,7 @@ namespace mynet::handler
             }
             else
             {
-                authOk = crypto::constantTimeEqual(clientUuid, expectedUuid_);
+                authOk = encoding::constantTimeEqual(clientUuid, expectedUuid_);
             }
 
             if (!authOk)

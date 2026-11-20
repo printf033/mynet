@@ -51,10 +51,7 @@ namespace mynet
          *
          * @param value 新的配置实例（通过移动语义传入以避免冗余拷贝）
          */
-        void publish(T value)
-        {
-            publish(std::make_shared<const T>(std::move(value)));
-        }
+        void publish(T value) { publish(std::make_shared<const T>(std::move(value))); }
 
         /**
          * @brief 发布新的配置共享指针
@@ -220,8 +217,8 @@ namespace mynet
         bool tcpNoDelay = true;
         bool tcpQuickAck = false;
         bool enableSplice = true;
-        bool reuseAddr = true; ///< 是否开启 SO_REUSEADDR 允许快速复用处于 TIME_WAIT 状态的端口
-        bool reusePort = true; ///< 是否开启 SO_REUSEPORT 允许多线程/多进程监听同一端口负载均衡
+        bool reuseAddr = true;          ///< 是否开启 SO_REUSEADDR 允许快速复用处于 TIME_WAIT 状态的端口
+        bool reusePort = true;          ///< 是否开启 SO_REUSEPORT 允许多线程/多进程监听同一端口负载均衡
         std::string engine = "reactor"; ///< 运行引擎底层实现类型 ("reactor" 或 "proactor") [启动]
     };
 
@@ -371,19 +368,19 @@ namespace mynet
      */
     struct RouteRuleConfig
     {
-        std::string outbound = "direct";          ///< 命中的目标出站标签 (如 "direct", "block", "proxy-out")
+        std::string outbound = "direct";           ///< 命中的目标出站标签 (如 "direct", "block", "proxy-out")
         std::vector<std::string> domains{};        ///< 完整域名精确匹配列表
         std::vector<std::string> domainSuffixes{}; ///< 域名后缀匹配列表 (如 "google.com")
         std::vector<std::string> domainKeywords{}; ///< 域名关键字匹配列表 (如 "adserver")
         std::vector<std::string> ipCidrs{};        ///< IP CIDR 子网列表 (如 "192.168.0.0/16")
         std::vector<std::string> portRanges{};     ///< 端口/范围列表 (如 "80", "8000-8080")
         std::vector<std::string> protocols{};      ///< 嗅探协议名称列表 (如 "tls", "http", "quic")
-        std::string network = "any";              ///< 传输层网络协议 ("any", "tcp", "udp")
+        std::string network = "any";               ///< 传输层网络协议 ("any", "tcp", "udp")
         std::vector<std::string> inboundTags{};    ///< 入站来源标签列表 (如 "mixed-in")
-        bool invert = false;                      ///< 是否反转匹配条件 (NOT)
-        std::vector<std::string> geoIps{};        ///< GeoIP 国家/私网代码 (如 "cn", "private")
-        std::vector<std::string> geoSites{};      ///< GeoSite 域名资产分类 (如 "cn", "category-ads-all")
-        std::string processName{};                ///< 客户端发起进程名 (如 "curl", "chrome")
+        bool invert = false;                       ///< 是否反转匹配条件 (NOT)
+        std::vector<std::string> geoIps{};         ///< GeoIP 国家/私网代码 (如 "cn", "private")
+        std::vector<std::string> geoSites{};       ///< GeoSite 域名资产分类 (如 "cn", "category-ads-all")
+        std::string processName{};                 ///< 客户端发起进程名 (如 "curl", "chrome")
     };
 
     /**
@@ -401,9 +398,9 @@ namespace mynet
     struct DnsConfig
     {
         std::vector<std::string> servers = {"8.8.8.8", "1.1.1.1"}; ///< 上游 DNS 服务器列表
-        uint16_t port = 53;                                       ///< 默认 DNS 端口
-        uint32_t ttlSecs = 300;                                   ///< 默认 DNS 记录缓存存活期 (秒)
-        bool enableCache = true;                                  ///< 是否启用 DNS 查询结果内存缓存
+        uint16_t port = 53;                                        ///< 默认 DNS 端口
+        uint32_t ttlSecs = 300;                                    ///< 默认 DNS 记录缓存存活期 (秒)
+        bool enableCache = true;                                   ///< 是否启用 DNS 查询结果内存缓存
     };
 
     /**
@@ -411,18 +408,19 @@ namespace mynet
      */
     struct InboundConfig
     {
-        std::string tag = "mixed-in";   ///< 入站标签名称 (供分流规则匹配)
-        std::string protocol = "mixed"; ///< 入站协议类型 ("mixed", "socks5", "http", "trojan", "direct", "tproxy", "vless", "hysteria2", "shadowsocks", "tun")
-        std::string host = "0.0.0.0";   ///< 监听绑定地址
-        uint16_t port = 1080;           ///< 监听端口
-        std::string username{};        ///< 鉴权用户名 (可选)
-        std::string password{};        ///< 鉴权密码或密钥 (可选)
-        bool enableSniffing = true;     ///< 是否启用首包域名与协议嗅探
-        std::string uuid{};            ///< VLESS 用户 UUID (可选)
-        std::string ifName = "tun0";   ///< TUN 设备名称 (TUN 专用)
+        std::string tag = "mixed-in";      ///< 入站标签名称 (供分流规则匹配)
+        std::string protocol = "mixed";    ///< 入站协议类型 ("mixed", "socks5", "http", "trojan", "direct", "tproxy",
+                                           ///< "vless", "hysteria2", "shadowsocks", "tun")
+        std::string host = "0.0.0.0";      ///< 监听绑定地址
+        uint16_t port = 1080;              ///< 监听端口
+        std::string username{};            ///< 鉴权用户名 (可选)
+        std::string password{};            ///< 鉴权密码或密钥 (可选)
+        bool enableSniffing = true;        ///< 是否启用首包域名与协议嗅探
+        std::string uuid{};                ///< VLESS 用户 UUID (可选)
+        std::string ifName = "tun0";       ///< TUN 设备名称 (TUN 专用)
         std::string inetIp = "172.19.0.1"; ///< TUN 本地 IPv4 (TUN 专用)
         std::string inetMask = "255.255.255.0"; ///< TUN 掩码 (TUN 专用)
-        uint32_t mtu = 1500;           ///< TUN MTU (TUN 专用)
+        uint32_t mtu = 1500;                    ///< TUN MTU (TUN 专用)
     };
 
     /**
@@ -430,19 +428,21 @@ namespace mynet
      */
     struct OutboundConfig
     {
-        std::string tag = "direct";           ///< 出站标签名称
-        std::string type = "direct";          ///< 节点类型 ("direct", "block", "socks5", "trojan", "selector", "vless", "hysteria2", "urltest", "fallback")
-        std::string host{};                   ///< 远端服务器地址或域名 (代理节点使用)
-        uint16_t port = 0;                    ///< 远端服务器端口
-        std::string username{};               ///< 鉴权用户名 (SOCKS5 等可选)
-        std::string password{};               ///< 鉴权密码或密钥 (Trojan / SOCKS5 等可选)
-        std::string method{};                 ///< 加密方式 (Shadowsocks 专用，如 "aes-128-gcm", "aes-256-gcm", "chacha20-poly1305")
+        std::string tag = "direct";  ///< 出站标签名称
+        std::string type = "direct"; ///< 节点类型 ("direct", "block", "socks5", "trojan", "selector", "vless",
+                                     ///< "hysteria2", "urltest", "fallback")
+        std::string host{};          ///< 远端服务器地址或域名 (代理节点使用)
+        uint16_t port = 0;           ///< 远端服务器端口
+        std::string username{};      ///< 鉴权用户名 (SOCKS5 等可选)
+        std::string password{};      ///< 鉴权密码或密钥 (Trojan / SOCKS5 等可选)
+        std::string method{}; ///< 加密方式 (Shadowsocks 专用，如 "aes-128-gcm", "aes-256-gcm", "chacha20-poly1305")
         std::vector<std::string> outbounds{}; ///< 选择器子出站节点标签列表 (Selector / UrlTest / Fallback 专用)
         std::string defaultTag{};             ///< 选择器默认活动节点 (Selector 专用)
-        std::string uuid{};                   ///< VLESS 用户 UUID (VLESS 专用)
+        std::string uuid{};                   ///< VLESS / VMess 用户 UUID
+        std::string security = "auto";        ///< VMess 加密方式 (VMess 专用)
         std::string url = "http://cp.cloudflare.com/generate_204"; ///< 测速 URL (UrlTest 专用)
-        uint32_t intervalSecs = 300;          ///< 测速周期 (秒, UrlTest 专用)
-        uint32_t toleranceMs = 50;            ///< 延迟抖动容差 (毫秒, UrlTest 专用)
+        uint32_t intervalSecs = 300;                               ///< 测速周期 (秒, UrlTest 专用)
+        uint32_t toleranceMs = 50;                                 ///< 延迟抖动容差 (毫秒, UrlTest 专用)
     };
 
     /**
@@ -450,28 +450,28 @@ namespace mynet
      */
     struct EbpfConfig
     {
-        bool enabled = false;              ///< 是否启用 eBPF 透明代理与旁路加速
-        std::string wanInterface = "eth0"; ///< 外网流量拦截网卡 (WAN)
-        std::string lanInterface = "lo";   ///< 内网回环网卡 (LAN)
-        uint16_t tproxyPort = 12345;       ///< 本地 TProxy 代理监听端口 (Fwmark 重定向目标)
-        uint32_t fwmark = 0x1;             ///< 代理报文标记防火墙 Mark 值
-        bool enableDirectBypass = true;    ///< 是否开启内核级直连旁路 (TC_ACT_OK 放行)
-        bool enableLpmGeoIp = true;        ///< 是否在内核挂载 LPM Trie GeoIP 规则
-        bool dropQuic = false;             ///< 是否在内核 TC 层拦截 QUIC (UDP 443) 迫使其降级至 TCP
-        std::string bpfObjectPath{};       ///< 外部预编译 eBPF 目标文件路径 (可选，留空则使用嵌入式字节码)
-        std::string cgroupPath = "/sys/fs/cgroup"; ///< cgroupv2 挂载路径
-        bool enableDoubleEpoch = true;     ///< 是否开启双 Epoch 双缓冲路由表零停机原子热重载
-        bool enableMapPinning = false;     ///< 是否在 bpffs 持久化钉住 BPF Map 保证热重启连接不中断
+        bool enabled = false;                       ///< 是否启用 eBPF 透明代理与旁路加速
+        std::string wanInterface = "eth0";          ///< 外网流量拦截网卡 (WAN)
+        std::string lanInterface = "lo";            ///< 内网回环网卡 (LAN)
+        uint16_t tproxyPort = 12345;                ///< 本地 TProxy 代理监听端口 (Fwmark 重定向目标)
+        uint32_t fwmark = 0x1;                      ///< 代理报文标记防火墙 Mark 值
+        bool enableDirectBypass = true;             ///< 是否开启内核级直连旁路 (TC_ACT_OK 放行)
+        bool enableLpmGeoIp = true;                 ///< 是否在内核挂载 LPM Trie GeoIP 规则
+        bool dropQuic = false;                      ///< 是否在内核 TC 层拦截 QUIC (UDP 443) 迫使其降级至 TCP
+        std::string bpfObjectPath{};                ///< 外部预编译 eBPF 目标文件路径 (可选，留空则使用嵌入式字节码)
+        std::string cgroupPath = "/sys/fs/cgroup";  ///< cgroupv2 挂载路径
+        bool enableDoubleEpoch = true;              ///< 是否开启双 Epoch 双缓冲路由表零停机原子热重载
+        bool enableMapPinning = false;              ///< 是否在 bpffs 持久化钉住 BPF Map 保证热重启连接不中断
         std::string bpffsDir = "/sys/fs/bpf/mynet"; ///< BPF 文件系统钉住挂载目录
-        bool asymmetricGateway = false;    ///< 是否开启旁路由非对称 MAC 改写线速直连
-        std::string gatewayMac{};          ///< 上级主路由 MAC 地址 (例如 00:11:22:33:44:55)
-        std::string wanMac{};              ///< 本机 WAN 网卡 MAC 地址
-        bool enableConnStateJanitor = true;///< 是否开启 UDP 内核连接状态表与保活回收器
-        bool enableSkAssign = false;       ///< 是否启用 bpf_sk_assign 内核直接套接字绑定（免 iptables/nftables）
+        bool asymmetricGateway = false;             ///< 是否开启旁路由非对称 MAC 改写线速直连
+        std::string gatewayMac{};                   ///< 上级主路由 MAC 地址 (例如 00:11:22:33:44:55)
+        std::string wanMac{};                       ///< 本机 WAN 网卡 MAC 地址
+        bool enableConnStateJanitor = true;         ///< 是否开启 UDP 内核连接状态表与保活回收器
+        bool enableSkAssign = false; ///< 是否启用 bpf_sk_assign 内核直接套接字绑定（免 iptables/nftables）
         bool enableUnconnectedUdpAttribution = true; ///< 是否通过 cgroup/sendmsg4/6 捕获无连接 UDP 进程属主
-        std::string virtualInterface{};    ///< 隔离转发虚拟接口名 (如 mynet0/veth/netkit)，留空则走标准路由
-        uint16_t rateLimitWindowMs = 1000; ///< 阻断与恶意扫描在内核的令牌桶限速窗口 (毫秒)
-        bool tproxyPortProtect = false;    ///< 是否在内核 TC 层丢弃未经 eBPF 授权直连 tproxy 端口的外来报文
+        std::string virtualInterface{};              ///< 隔离转发虚拟接口名 (如 mynet0/veth/netkit)，留空则走标准路由
+        uint16_t rateLimitWindowMs = 1000;           ///< 阻断与恶意扫描在内核的令牌桶限速窗口 (毫秒)
+        bool tproxyPortProtect = false;              ///< 是否在内核 TC 层丢弃未经 eBPF 授权直连 tproxy 端口的外来报文
     };
 
     /**
@@ -791,8 +791,8 @@ namespace mynet
      */
     [[nodiscard]] constexpr bool validForwarderConfig(const ForwarderConfig &cfg) noexcept
     {
-        return cfg.spliceChunkSize >= 1 && cfg.bufferChunkSize >= 1 &&
-               cfg.sessionIdleTimeoutSecs >= 0 && cfg.udpSessionTimeoutSecs >= 0;
+        return cfg.spliceChunkSize >= 1 && cfg.bufferChunkSize >= 1 && cfg.sessionIdleTimeoutSecs >= 0 &&
+               cfg.udpSessionTimeoutSecs >= 0;
     }
 
     /**

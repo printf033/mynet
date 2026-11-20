@@ -1,8 +1,8 @@
 #include "common/http2.hpp"
 #include "common/endpoint.hpp"
+#include "config/log.hpp"
 #include "connection.hpp"
 #include "error.hpp"
-#include "config/log.hpp"
 #include "http/v2/handler.hpp"
 #include "reactor.hpp"
 

@@ -12,13 +12,13 @@
  *    根据目标 IP 与时间窗口精准反查还原客户端真正的访问域名，彻底解决 ECH 场景下的透明分流路由失准问题。
  */
 
+#include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
-#include <optional>
 #include <unordered_map>
-#include <mutex>
-#include <chrono>
 
 namespace mynet::dns
 {
@@ -40,15 +40,12 @@ namespace mynet::dns
             uint32_t ip{0};
             std::string publicName{};
 
-            bool operator==(const EchKey& o) const noexcept
-            {
-                return ip == o.ip && publicName == o.publicName;
-            }
+            bool operator==(const EchKey &o) const noexcept { return ip == o.ip && publicName == o.publicName; }
         };
 
         struct EchKeyHash
         {
-            size_t operator()(const EchKey& k) const noexcept
+            size_t operator()(const EchKey &k) const noexcept
             {
                 size_t h = std::hash<std::string>{}(k.publicName);
                 h ^= static_cast<size_t>(k.ip) + 0x9e3779b9 + (h << 6) + (h >> 2);
@@ -64,7 +61,7 @@ namespace mynet::dns
 
         void purgeExpiredLocked(std::chrono::steady_clock::time_point now) noexcept
         {
-            for (auto it = table_.begin(); it != table_.end(); )
+            for (auto it = table_.begin(); it != table_.end();)
             {
                 if (it->second.expireAt <= now)
                 {
@@ -72,7 +69,8 @@ namespace mynet::dns
                     if (refIt != publicNameRefCount_.end() && refIt->second > 0)
                     {
                         refIt->second--;
-                        if (refIt->second == 0) publicNameRefCount_.erase(refIt);
+                        if (refIt->second == 0)
+                            publicNameRefCount_.erase(refIt);
                     }
                     it = table_.erase(it);
                 }
@@ -84,7 +82,7 @@ namespace mynet::dns
         }
 
     public:
-        static EchReverseMapper& instance() noexcept
+        static EchReverseMapper &instance() noexcept
         {
             static EchReverseMapper s_inst;
             return s_inst;
@@ -98,11 +96,8 @@ namespace mynet::dns
          * @param ip 解析得到的目的 IP (主机字节序)
          * @param ttl 缓存有效期 (秒)
          */
-        void recordMapping(
-            std::string_view realDomain,
-            std::string_view publicName,
-            uint32_t ip,
-            std::chrono::seconds ttl = std::chrono::seconds(300)) noexcept
+        void recordMapping(std::string_view realDomain, std::string_view publicName, uint32_t ip,
+                           std::chrono::seconds ttl = std::chrono::seconds(300)) noexcept
         {
             if (realDomain.empty() || publicName.empty() || realDomain == publicName)
             {
@@ -123,7 +118,8 @@ namespace mynet::dns
                     if (refIt != publicNameRefCount_.end() && refIt->second > 0)
                     {
                         refIt->second--;
-                        if (refIt->second == 0) publicNameRefCount_.erase(refIt);
+                        if (refIt->second == 0)
+                            publicNameRefCount_.erase(refIt);
                     }
                     table_.erase(victim);
                 }
@@ -135,22 +131,20 @@ namespace mynet::dns
                 publicNameRefCount_[std::string(publicName)]++;
             }
 
-            table_[key] = EchMappingEntry{
-                .realDomain = std::string(realDomain),
-                .publicName = std::string(publicName),
-                .ip = ip,
-                .expireAt = now + ttl
-            };
+            table_[key] = EchMappingEntry{.realDomain = std::string(realDomain),
+                                          .publicName = std::string(publicName),
+                                          .ip = ip,
+                                          .expireAt = now + ttl};
         }
 
         /**
          * @brief 根据入站报文嗅探出的外层 public_name 和目标 IP，反查客户端真正的域名
          */
-        [[nodiscard]] std::optional<std::string> lookupRealDomain(
-            std::string_view publicName,
-            uint32_t ip) const noexcept
+        [[nodiscard]] std::optional<std::string> lookupRealDomain(std::string_view publicName,
+                                                                  uint32_t ip) const noexcept
         {
-            if (publicName.empty()) return std::nullopt;
+            if (publicName.empty())
+                return std::nullopt;
 
             const auto now = std::chrono::steady_clock::now();
             EchKey key{ip, std::string(publicName)};
@@ -172,7 +166,8 @@ namespace mynet::dns
          */
         [[nodiscard]] bool isKnownPublicName(std::string_view publicName) const noexcept
         {
-            if (publicName.empty()) return false;
+            if (publicName.empty())
+                return false;
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = publicNameRefCount_.find(std::string(publicName));
             return it != publicNameRefCount_.end() && it->second > 0;

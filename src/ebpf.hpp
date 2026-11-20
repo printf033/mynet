@@ -2,7 +2,8 @@
 
 /**
  * @file ebpf.hpp
- * @brief 基于 Linux eBPF 的高性能透明代理、内核套接字流卸载与 cgroupv2 进程感知引擎 (Production-Grade Real eBPF Engine)。
+ * @brief 基于 Linux eBPF 的高性能透明代理、内核套接字流卸载与 cgroupv2 进程感知引擎 (Production-Grade Real eBPF
+ * Engine)。
  *
  * 深度实现并对齐 dae 内核级流量拦截与旁路调度架构：
  * 1. 真实内核数据路径挂载 (TC / TCX Datapath Hook Attachment)：
@@ -22,12 +23,12 @@
  */
 
 #include "address.hpp"
+#include "config/log.hpp"
+#include "configHolder.hpp"
 #include "connection.hpp"
 #include "error.hpp"
 #include "geo.hpp"
 #include "router.hpp"
-#include "configHolder.hpp"
-#include "config/log.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
@@ -50,19 +51,19 @@
 #include <vector>
 
 #if defined(__linux__)
+#include <fcntl.h>
 #include <linux/bpf.h>
-#include <linux/pkt_cls.h>
 #include <linux/magic.h>
+#include <linux/pkt_cls.h>
 #include <net/if.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/vfs.h>
-#include <sys/prctl.h>
-#include <fcntl.h>
 
 #if defined(MYNET_HAVE_LIBBPF)
+#include "ebpf/kern/mynet_kernel_bpf_embedded.hpp"
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
-#include "ebpf/kern/mynet_kernel_bpf_embedded.hpp"
 #endif
 
 #ifndef BPF_FS_MAGIC
@@ -132,9 +133,11 @@ namespace mynet::ebpf
          */
         static bool setSysctl(std::string_view path, std::string_view value) noexcept
         {
-            if (path.empty()) return false;
+            if (path.empty())
+                return false;
             int fd = ::open(std::string(path).c_str(), O_WRONLY | O_CLOEXEC);
-            if (fd < 0) return false;
+            if (fd < 0)
+                return false;
             ssize_t n = ::write(fd, value.data(), value.size());
             ::close(fd);
             return n == static_cast<ssize_t>(value.size());
@@ -145,13 +148,16 @@ namespace mynet::ebpf
          */
         static std::optional<std::string> getSysctl(std::string_view path) noexcept
         {
-            if (path.empty()) return std::nullopt;
+            if (path.empty())
+                return std::nullopt;
             int fd = ::open(std::string(path).c_str(), O_RDONLY | O_CLOEXEC);
-            if (fd < 0) return std::nullopt;
+            if (fd < 0)
+                return std::nullopt;
             char buf[64] = {};
             ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
             ::close(fd);
-            if (n <= 0) return std::nullopt;
+            if (n <= 0)
+                return std::nullopt;
             std::string s(buf, static_cast<size_t>(n));
             while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
             {
@@ -214,11 +220,16 @@ namespace mynet::ebpf
         static bool tuneTransparentGateway(std::string_view lanIf, std::string_view wanIf) noexcept
         {
             bool ok = true;
-            if (!setSysctl("/proc/sys/net/ipv4/ip_forward", "1\n")) ok = false;
-            if (!setSysctl("/proc/sys/net/ipv4/conf/all/route_localnet", "1\n")) ok = false;
-            if (!setSendRedirects("all", false)) ok = false;
-            if (!lanIf.empty() && !setSendRedirects(lanIf, false)) ok = false;
-            if (!wanIf.empty() && !setSendRedirects(wanIf, false)) ok = false;
+            if (!setSysctl("/proc/sys/net/ipv4/ip_forward", "1\n"))
+                ok = false;
+            if (!setSysctl("/proc/sys/net/ipv4/conf/all/route_localnet", "1\n"))
+                ok = false;
+            if (!setSendRedirects("all", false))
+                ok = false;
+            if (!lanIf.empty() && !setSendRedirects(lanIf, false))
+                ok = false;
+            if (!wanIf.empty() && !setSendRedirects(wanIf, false))
+                ok = false;
             return ok;
         }
     };
@@ -261,7 +272,8 @@ namespace mynet::ebpf
     public:
         [[nodiscard]] std::chrono::seconds step(uint32_t currentEntries, uint32_t maxEntries) noexcept
         {
-            if (maxEntries == 0) return STEADY_INTERVAL;
+            if (maxEntries == 0)
+                return STEADY_INTERVAL;
             uint32_t usagePct = (currentEntries * 100) / maxEntries;
 
             if (!inPressureMode_)
@@ -339,9 +351,9 @@ namespace mynet::ebpf
     public:
         enum class PressureLevel : uint8_t
         {
-            NORMAL,   ///< 正常平稳运行
-            WARNING,  ///< 资源轻度承压或偶尔瞬态丢包
-            CRITICAL  ///< 表项打满，持续高频拒绝新连接
+            NORMAL,  ///< 正常平稳运行
+            WARNING, ///< 资源轻度承压或偶尔瞬态丢包
+            CRITICAL ///< 表项打满，持续高频拒绝新连接
         };
 
         struct Snapshot
@@ -386,8 +398,10 @@ namespace mynet::ebpf
             }
 
             IntervalReport report{};
-            auto computeDelta = [](uint64_t curr, uint64_t &base) -> uint64_t {
-                if (curr < base) {
+            auto computeDelta = [](uint64_t curr, uint64_t &base) -> uint64_t
+            {
+                if (curr < base)
+                {
                     base = curr; // 计数器复位或重新挂载
                     return 0;
                 }
@@ -398,11 +412,11 @@ namespace mynet::ebpf
 
             report.deltaUdpOverflow = computeDelta(current.udpConnOverflow, baseline_.udpConnOverflow);
             report.deltaTcpOverflow = computeDelta(current.tcpConnOverflow, baseline_.tcpConnOverflow);
-            report.deltaBlockDrops  = computeDelta(current.blockRateDrops,  baseline_.blockRateDrops);
-            report.deltaEventDrops  = computeDelta(current.eventDrops,      baseline_.eventDrops);
+            report.deltaBlockDrops = computeDelta(current.blockRateDrops, baseline_.blockRateDrops);
+            report.deltaEventDrops = computeDelta(current.eventDrops, baseline_.eventDrops);
 
-            uint64_t totalDelta = report.deltaUdpOverflow + report.deltaTcpOverflow +
-                                  report.deltaBlockDrops + report.deltaEventDrops;
+            uint64_t totalDelta =
+                report.deltaUdpOverflow + report.deltaTcpOverflow + report.deltaBlockDrops + report.deltaEventDrops;
 
             if (totalDelta == 0)
             {
@@ -480,10 +494,7 @@ namespace mynet::ebpf
 
         constexpr bool operator==(const TuplesKey &other) const noexcept
         {
-            return saddr == other.saddr &&
-                   daddr == other.daddr &&
-                   sport == other.sport &&
-                   dport == other.dport &&
+            return saddr == other.saddr && daddr == other.daddr && sport == other.sport && dport == other.dport &&
                    proto == other.proto;
         }
     };
@@ -573,9 +584,7 @@ namespace mynet::ebpf
         uint32_t ip{0};
         uint8_t slot{0};
         uint8_t pad[3]{0, 0, 0};
-        bool operator==(const DomainRoutingKey &o) const noexcept {
-            return ip == o.ip && slot == o.slot;
-        }
+        bool operator==(const DomainRoutingKey &o) const noexcept { return ip == o.ip && slot == o.slot; }
     };
 
     struct DomainRoutingVal
@@ -623,10 +632,7 @@ namespace mynet::ebpf
             uint32_t prefixlen;
             Action action;
 
-            [[nodiscard]] constexpr bool matches(uint32_t hIp) const noexcept
-            {
-                return (hIp & mask) == net;
-            }
+            [[nodiscard]] constexpr bool matches(uint32_t hIp) const noexcept { return (hIp & mask) == net; }
         };
 
         struct LpmEntryIpv6
@@ -640,7 +646,8 @@ namespace mynet::ebpf
             {
                 for (size_t i = 0; i < 16; ++i)
                 {
-                    if ((ip[i] & mask[i]) != net[i]) return false;
+                    if ((ip[i] & mask[i]) != net[i])
+                        return false;
                 }
                 return true;
             }
@@ -729,15 +736,9 @@ namespace mynet::ebpf
     public:
         EbpfEngine() noexcept = default;
 
-        explicit EbpfEngine(const EbpfConfig &cfg)
-        {
-            init(cfg);
-        }
+        explicit EbpfEngine(const EbpfConfig &cfg) { init(cfg); }
 
-        ~EbpfEngine()
-        {
-            cleanup();
-        }
+        ~EbpfEngine() { cleanup(); }
 
         EbpfEngine(const EbpfEngine &) = delete;
         EbpfEngine &operator=(const EbpfEngine &) = delete;
@@ -757,7 +758,10 @@ namespace mynet::ebpf
         [[nodiscard]] inline int tcpOffloadPauseMapFd() const noexcept { return tcpOffloadPauseMapFd_; }
         [[nodiscard]] inline int outboundConnectivityMapFd() const noexcept { return outboundConnectivityMapFd_; }
         [[nodiscard]] inline int virtualIfIndex() const noexcept { return virtualIfIndex_; }
-        [[nodiscard]] inline uint8_t activeEpoch() const noexcept { return activeEpoch_.load(std::memory_order_relaxed); }
+        [[nodiscard]] inline uint8_t activeEpoch() const noexcept
+        {
+            return activeEpoch_.load(std::memory_order_relaxed);
+        }
 
         /**
          * @brief 初始化 dae eBPF 运行时与驱动映射结构
@@ -849,7 +853,8 @@ namespace mynet::ebpf
 
             for (const auto &entry : std::filesystem::directory_iterator(brifPath, ec))
             {
-                if (ec) break;
+                if (ec)
+                    break;
                 slaves.push_back(entry.path().filename().string());
             }
             std::sort(slaves.begin(), slaves.end());
@@ -998,7 +1003,8 @@ namespace mynet::ebpf
         /**
          * @brief DNS 域名规则位图内核投影查询
          */
-        [[nodiscard]] std::optional<std::array<uint32_t, 4>> lookupDomainRouting(uint32_t ip, uint8_t slot) const noexcept
+        [[nodiscard]] std::optional<std::array<uint32_t, 4>> lookupDomainRouting(uint32_t ip,
+                                                                                 uint8_t slot) const noexcept
         {
             std::lock_guard<std::mutex> lock(mutex_);
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
@@ -1074,8 +1080,7 @@ namespace mynet::ebpf
             if (it != redirectTrackMap_.end())
             {
                 const auto &existing = it->second;
-                bool samePub = (existing.ifindex == entry.ifindex &&
-                                existing.fromWan == entry.fromWan &&
+                bool samePub = (existing.ifindex == entry.ifindex && existing.fromWan == entry.fromWan &&
                                 std::memcmp(existing.smac, entry.smac, 6) == 0);
                 if (!samePub)
                 {
@@ -1180,9 +1185,11 @@ namespace mynet::ebpf
         /**
          * @brief Linux 6.7+ Netkit 下一代虚拟网卡自适应协商创建 (借鉴 dae netkit_linux)
          */
-        static bool detectAndCreateNetkitDevice(const std::string &name, const std::string &peerName, bool scrubNone = true) noexcept
+        static bool detectAndCreateNetkitDevice(const std::string &name, const std::string &peerName,
+                                                bool scrubNone = true) noexcept
         {
-            if (name.empty() || peerName.empty()) return false;
+            if (name.empty() || peerName.empty())
+                return false;
 #if defined(__linux__)
             std::string cmd = "ip link add " + name + " type netkit mode l2";
             if (scrubNone)
@@ -1194,7 +1201,8 @@ namespace mynet::ebpf
                 cmd += " peer " + peerName;
             }
             int ret = ::system((cmd + " 2>/dev/null").c_str());
-            if (ret == 0) return true;
+            if (ret == 0)
+                return true;
             // 回落至经典 veth pair
             std::string fallbackCmd = "ip link add " + name + " type veth peer name " + peerName;
             return ::system((fallbackCmd + " 2>/dev/null").c_str()) == 0;
@@ -1250,7 +1258,8 @@ namespace mynet::ebpf
 
         bool addLpmCidrLocked(uint32_t netBe, uint8_t prefix, Action action, int epochSlot = -1)
         {
-            if (prefix > 32) return false;
+            if (prefix > 32)
+                return false;
 
             const uint8_t curEpoch = activeEpoch_.load(std::memory_order_relaxed);
             const uint8_t slot = (epochSlot >= 0 && epochSlot <= 1) ? static_cast<uint8_t>(epochSlot) : curEpoch;
@@ -1258,17 +1267,12 @@ namespace mynet::ebpf
             uint32_t hIp = ntohl(netBe);
             uint32_t mask = (prefix == 0) ? 0 : (~0U << (32 - prefix));
 
-            lpmEntries_[slot].push_back({
-                .net = hIp & mask,
-                .mask = mask,
-                .prefixlen = static_cast<uint32_t>(prefix),
-                .action = action
-            });
+            lpmEntries_[slot].push_back(
+                {.net = hIp & mask, .mask = mask, .prefixlen = static_cast<uint32_t>(prefix), .action = action});
 
             // 按前缀长度降序排序，保证最长前缀优先匹配 (Longest Prefix Match)
-            std::sort(lpmEntries_[slot].begin(), lpmEntries_[slot].end(), [](const LpmEntry &a, const LpmEntry &b) {
-                return a.prefixlen > b.prefixlen;
-            });
+            std::sort(lpmEntries_[slot].begin(), lpmEntries_[slot].end(),
+                      [](const LpmEntry &a, const LpmEntry &b) { return a.prefixlen > b.prefixlen; });
             flowCache_.clear();
             connStateMap_.clear();
 
@@ -1276,13 +1280,12 @@ namespace mynet::ebpf
 #if defined(__linux__)
             if (kernelBpfActive_)
             {
-                BpfLpmKeyIpv4 key{
-                    .prefixlen = static_cast<uint32_t>(prefix),
-                    .ip = netBe
-                };
+                BpfLpmKeyIpv4 key{.prefixlen = static_cast<uint32_t>(prefix), .ip = netBe};
                 uint32_t val = static_cast<uint32_t>(action);
-                auto updateKernelMap = [&](int mapFd) {
-                    if (mapFd < 0) return;
+                auto updateKernelMap = [&](int mapFd)
+                {
+                    if (mapFd < 0)
+                        return;
 #if defined(MYNET_HAVE_LIBBPF)
                     ::bpf_map_update_elem(mapFd, &key, &val, BPF_ANY);
 #elif defined(__NR_bpf)
@@ -1312,7 +1315,8 @@ namespace mynet::ebpf
         bool addLpmCidrLocked(std::string_view cidrStr, Action action, int epochSlot = -1)
         {
             auto cidr = handler::IpCidr::parse(cidrStr);
-            if (!cidr) return false;
+            if (!cidr)
+                return false;
             return addLpmCidrLocked(cidr->networkBe, cidr->prefix(), action, epochSlot);
         }
 
@@ -1328,7 +1332,8 @@ namespace mynet::ebpf
         bool addLpmCidrIpv6Locked(std::string_view cidrStr, Action action, int epochSlot = -1)
         {
             auto cidr6 = handler::Ip6Cidr::parse(cidrStr);
-            if (!cidr6) return false;
+            if (!cidr6)
+                return false;
 
             const uint8_t curEpoch = activeEpoch_.load(std::memory_order_relaxed);
             const uint8_t slot = (epochSlot >= 0 && epochSlot <= 1) ? static_cast<uint8_t>(epochSlot) : curEpoch;
@@ -1356,9 +1361,8 @@ namespace mynet::ebpf
             }
 
             lpmEntriesIpv6_[slot].push_back(entry);
-            std::sort(lpmEntriesIpv6_[slot].begin(), lpmEntriesIpv6_[slot].end(), [](const LpmEntryIpv6 &a, const LpmEntryIpv6 &b) {
-                return a.prefixlen > b.prefixlen;
-            });
+            std::sort(lpmEntriesIpv6_[slot].begin(), lpmEntriesIpv6_[slot].end(),
+                      [](const LpmEntryIpv6 &a, const LpmEntryIpv6 &b) { return a.prefixlen > b.prefixlen; });
             flowCache_.clear();
             connStateMap_.clear();
 
@@ -1476,13 +1480,11 @@ namespace mynet::ebpf
             // 2. 检查 UDP 5元组连接状态表 (借鉴 dae conn_state_map)
             if (pkt.protocol == IPPROTO_UDP && !pkt.isIpv6)
             {
-                TuplesKey udpKey{
-                    .saddr = pkt.srcIp.s_addr,
-                    .daddr = pkt.dstIp.s_addr,
-                    .sport = htons(pkt.srcPort),
-                    .dport = htons(pkt.dstPort),
-                    .proto = IPPROTO_UDP
-                };
+                TuplesKey udpKey{.saddr = pkt.srcIp.s_addr,
+                                 .daddr = pkt.dstIp.s_addr,
+                                 .sport = htons(pkt.srcPort),
+                                 .dport = htons(pkt.dstPort),
+                                 .proto = IPPROTO_UDP};
                 if (auto it = connStateMap_.find(udpKey); it != connStateMap_.end())
                 {
                     it->second.lastSeenNs = getMonotonicTimeNs();
@@ -1526,26 +1528,23 @@ namespace mynet::ebpf
                 directBypassedPackets_.fetch_add(1, std::memory_order_relaxed);
                 if (pkt.protocol == IPPROTO_UDP)
                 {
-                    TuplesKey udpKey{
-                        .saddr = pkt.srcIp.s_addr,
-                        .daddr = pkt.dstIp.s_addr,
-                        .sport = htons(pkt.srcPort),
-                        .dport = htons(pkt.dstPort),
-                        .proto = IPPROTO_UDP
-                    };
-                    connStateMap_[udpKey] = ConnStateEntry{
-                        .action = static_cast<uint32_t>(Action::DIRECT),
-                        .fwmark = config_.fwmark,
-                        .lastSeenNs = getMonotonicTimeNs(),
-                        .packets = 1,
-                        .bytes = pkt.length
-                    };
+                    TuplesKey udpKey{.saddr = pkt.srcIp.s_addr,
+                                     .daddr = pkt.dstIp.s_addr,
+                                     .sport = htons(pkt.srcPort),
+                                     .dport = htons(pkt.dstPort),
+                                     .proto = IPPROTO_UDP};
+                    connStateMap_[udpKey] = ConnStateEntry{.action = static_cast<uint32_t>(Action::DIRECT),
+                                                           .fwmark = config_.fwmark,
+                                                           .lastSeenNs = getMonotonicTimeNs(),
+                                                           .packets = 1,
+                                                           .bytes = pkt.length};
                 }
                 return Action::DIRECT;
             }
 
             // 4. 检查流缓存 (Flow Cache) 达到 O(1) 用户态快速命中
-            const uint64_t flowKey = static_cast<uint64_t>(pkt.dstIp.s_addr) | (static_cast<uint64_t>(pkt.protocol) << 32);
+            const uint64_t flowKey =
+                static_cast<uint64_t>(pkt.dstIp.s_addr) | (static_cast<uint64_t>(pkt.protocol) << 32);
             if (auto it = flowCache_.find(flowKey); it != flowCache_.end())
             {
                 Action act = it->second;
@@ -1582,20 +1581,16 @@ namespace mynet::ebpf
                     }
                     if (pkt.protocol == IPPROTO_UDP)
                     {
-                        TuplesKey udpKey{
-                            .saddr = pkt.srcIp.s_addr,
-                            .daddr = pkt.dstIp.s_addr,
-                            .sport = htons(pkt.srcPort),
-                            .dport = htons(pkt.dstPort),
-                            .proto = IPPROTO_UDP
-                        };
-                        connStateMap_[udpKey] = ConnStateEntry{
-                            .action = static_cast<uint32_t>(entry.action),
-                            .fwmark = config_.fwmark,
-                            .lastSeenNs = getMonotonicTimeNs(),
-                            .packets = 1,
-                            .bytes = pkt.length
-                        };
+                        TuplesKey udpKey{.saddr = pkt.srcIp.s_addr,
+                                         .daddr = pkt.dstIp.s_addr,
+                                         .sport = htons(pkt.srcPort),
+                                         .dport = htons(pkt.dstPort),
+                                         .proto = IPPROTO_UDP};
+                        connStateMap_[udpKey] = ConnStateEntry{.action = static_cast<uint32_t>(entry.action),
+                                                               .fwmark = config_.fwmark,
+                                                               .lastSeenNs = getMonotonicTimeNs(),
+                                                               .packets = 1,
+                                                               .bytes = pkt.length};
                     }
                     return entry.action;
                 }
@@ -1609,20 +1604,16 @@ namespace mynet::ebpf
             }
             if (pkt.protocol == IPPROTO_UDP)
             {
-                TuplesKey udpKey{
-                    .saddr = pkt.srcIp.s_addr,
-                    .daddr = pkt.dstIp.s_addr,
-                    .sport = htons(pkt.srcPort),
-                    .dport = htons(pkt.dstPort),
-                    .proto = IPPROTO_UDP
-                };
-                connStateMap_[udpKey] = ConnStateEntry{
-                    .action = static_cast<uint32_t>(Action::PROXY),
-                    .fwmark = config_.fwmark,
-                    .lastSeenNs = getMonotonicTimeNs(),
-                    .packets = 1,
-                    .bytes = pkt.length
-                };
+                TuplesKey udpKey{.saddr = pkt.srcIp.s_addr,
+                                 .daddr = pkt.dstIp.s_addr,
+                                 .sport = htons(pkt.srcPort),
+                                 .dport = htons(pkt.dstPort),
+                                 .proto = IPPROTO_UDP};
+                connStateMap_[udpKey] = ConnStateEntry{.action = static_cast<uint32_t>(Action::PROXY),
+                                                       .fwmark = config_.fwmark,
+                                                       .lastSeenNs = getMonotonicTimeNs(),
+                                                       .packets = 1,
+                                                       .bytes = pkt.length};
             }
             return Action::PROXY;
         }
@@ -1634,7 +1625,8 @@ namespace mynet::ebpf
                 return Action::BLOCK;
             }
 
-            // 局域网组播 (224.0.0.0/4) 与广播/保留网段 (240.0.0.0/4 - 255.255.255.255) 绝对放行直连 (借鉴 dae 224.0.0.0/3)
+            // 局域网组播 (224.0.0.0/4) 与广播/保留网段 (240.0.0.0/4 - 255.255.255.255) 绝对放行直连 (借鉴 dae
+            // 224.0.0.0/3)
             if (!pkt.isIpv6 && (ntohl(pkt.dstIp.s_addr) & 0xE0000000) == 0xE0000000)
             {
                 return Action::DIRECT;
@@ -1647,13 +1639,11 @@ namespace mynet::ebpf
             std::lock_guard<std::mutex> lock(mutex_);
             if (!pkt.isIpv6)
             {
-                TuplesKey key{
-                    .saddr = pkt.srcIp.s_addr,
-                    .daddr = pkt.dstIp.s_addr,
-                    .sport = htons(pkt.srcPort),
-                    .dport = htons(pkt.dstPort),
-                    .proto = pkt.protocol
-                };
+                TuplesKey key{.saddr = pkt.srcIp.s_addr,
+                              .daddr = pkt.dstIp.s_addr,
+                              .sport = htons(pkt.srcPort),
+                              .dport = htons(pkt.dstPort),
+                              .proto = pkt.protocol};
                 if (auto it = connStateMap_.find(key); it != connStateMap_.end())
                 {
                     return static_cast<Action>(it->second.action);
@@ -1665,20 +1655,25 @@ namespace mynet::ebpf
             {
                 for (const auto &entry : lpmEntriesIpv6_[epoch])
                 {
-                    if (entry.matches(pkt.dstIp6.s6_addr)) return entry.action;
+                    if (entry.matches(pkt.dstIp6.s6_addr))
+                        return entry.action;
                 }
                 return Action::PROXY;
             }
 
-            if (directIps_.contains(pkt.dstIp.s_addr)) return Action::DIRECT;
+            if (directIps_.contains(pkt.dstIp.s_addr))
+                return Action::DIRECT;
 
-            const uint64_t flowKey = static_cast<uint64_t>(pkt.dstIp.s_addr) | (static_cast<uint64_t>(pkt.protocol) << 32);
-            if (auto it = flowCache_.find(flowKey); it != flowCache_.end()) return it->second;
+            const uint64_t flowKey =
+                static_cast<uint64_t>(pkt.dstIp.s_addr) | (static_cast<uint64_t>(pkt.protocol) << 32);
+            if (auto it = flowCache_.find(flowKey); it != flowCache_.end())
+                return it->second;
 
             const uint32_t hIp = ntohl(pkt.dstIp.s_addr);
             for (const auto &entry : lpmEntries_[epoch])
             {
-                if (entry.matches(hIp)) return entry.action;
+                if (entry.matches(hIp))
+                    return entry.action;
             }
             return Action::PROXY;
         }
@@ -1686,22 +1681,26 @@ namespace mynet::ebpf
         /**
          * @brief 同步 GeoIPMatcher 中的国家/私网网段至 eBPF LPM Trie (消除硬编码重复造轮子)
          */
-        void syncGeoIp(const GeoIpMatcher &geoIp, std::string_view country = "cn", Action action = Action::DIRECT, int epochSlot = -1)
+        void syncGeoIp(const GeoIpMatcher &geoIp, std::string_view country = "cn", Action action = Action::DIRECT,
+                       int epochSlot = -1)
         {
             std::lock_guard<std::mutex> lock(mutex_);
             syncGeoIpLocked(geoIp, country, action, epochSlot);
         }
 
-        void syncGeoIpLocked(const GeoIpMatcher &geoIp, std::string_view country = "cn", Action action = Action::DIRECT, int epochSlot = -1)
+        void syncGeoIpLocked(const GeoIpMatcher &geoIp, std::string_view country = "cn", Action action = Action::DIRECT,
+                             int epochSlot = -1)
         {
             // 同步私网网段与基础配置
             loadDefaultPrivateCidrs(epochSlot);
 
             // 直接通过 GeoIpMatcher 动态遍历，彻底消除重复造轮子与死代码硬编码
-            geoIp.forEachCidr(country, [this, action, epochSlot](uint32_t netHost, uint32_t mask) {
-                uint8_t prefix = static_cast<uint8_t>(__builtin_popcount(mask));
-                addLpmCidrLocked(htonl(netHost), prefix, action, epochSlot);
-            });
+            geoIp.forEachCidr(country,
+                              [this, action, epochSlot](uint32_t netHost, uint32_t mask)
+                              {
+                                  uint8_t prefix = static_cast<uint8_t>(__builtin_popcount(mask));
+                                  addLpmCidrLocked(htonl(netHost), prefix, action, epochSlot);
+                              });
         }
 
         /**
@@ -1739,9 +1738,8 @@ namespace mynet::ebpf
                 }
             } adderIpv4{this, nextSlot};
 
-            auto adderIpv6 = [this, nextSlot](std::string_view cidrStr, Action action) {
-                this->addLpmCidrIpv6Locked(cidrStr, action, nextSlot);
-            };
+            auto adderIpv6 = [this, nextSlot](std::string_view cidrStr, Action action)
+            { this->addLpmCidrIpv6Locked(cidrStr, action, nextSlot); };
 
             populateFn(adderIpv4, adderIpv6);
 
@@ -1766,40 +1764,47 @@ namespace mynet::ebpf
             std::lock_guard<std::mutex> lock(mutex_);
             if (config_.enableDoubleEpoch)
             {
-                reloadRoutingEpochLocked([&](auto &&addIpv4, auto &&) {
-                    loadDefaultPrivateCidrs(1 - activeEpoch_.load(std::memory_order_relaxed));
-                    for (const auto &rule : router.rulesSnapshot())
+                reloadRoutingEpochLocked(
+                    [&](auto &&addIpv4, auto &&)
                     {
-                        Action act = Action::PROXY;
-                        if (rule.outboundTag == "direct") act = Action::DIRECT;
-                        else if (rule.outboundTag == "block") act = Action::BLOCK;
-
-                        if (act != Action::PROXY)
+                        loadDefaultPrivateCidrs(1 - activeEpoch_.load(std::memory_order_relaxed));
+                        for (const auto &rule : router.rulesSnapshot())
                         {
-                            for (const auto &cidr : rule.ipCidrs)
+                            Action act = Action::PROXY;
+                            if (rule.outboundTag == "direct")
+                                act = Action::DIRECT;
+                            else if (rule.outboundTag == "block")
+                                act = Action::BLOCK;
+
+                            if (act != Action::PROXY)
                             {
-                                addIpv4(cidr.networkBe, cidr.prefixLen, act);
-                            }
-                            for (const auto &geo : rule.geoIps)
-                            {
-                                GeoIpMatcher::instance().forEachCidr(geo, [&](uint32_t netHost, uint32_t mask) {
-                                    uint8_t prefix = static_cast<uint8_t>(__builtin_popcount(mask));
-                                    addIpv4(htonl(netHost), prefix, act);
-                                });
-                            }
-                            if (act == Action::BLOCK && rule.network == NetworkType::UDP)
-                            {
-                                for (const auto &pr : rule.portRanges)
+                                for (const auto &cidr : rule.ipCidrs)
                                 {
-                                    if (pr.matches(443))
+                                    addIpv4(cidr.networkBe, cidr.prefixLen, act);
+                                }
+                                for (const auto &geo : rule.geoIps)
+                                {
+                                    GeoIpMatcher::instance().forEachCidr(geo,
+                                                                         [&](uint32_t netHost, uint32_t mask)
+                                                                         {
+                                                                             uint8_t prefix = static_cast<uint8_t>(
+                                                                                 __builtin_popcount(mask));
+                                                                             addIpv4(htonl(netHost), prefix, act);
+                                                                         });
+                                }
+                                if (act == Action::BLOCK && rule.network == NetworkType::UDP)
+                                {
+                                    for (const auto &pr : rule.portRanges)
                                     {
-                                        config_.dropQuic = true;
+                                        if (pr.matches(443))
+                                        {
+                                            config_.dropQuic = true;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                });
+                    });
             }
             else
             {
@@ -1894,13 +1899,11 @@ namespace mynet::ebpf
                 lastSeenNs = getMonotonicTimeNs();
             }
 
-            ConnStateEntry entry{
-                .action = static_cast<uint32_t>(action),
-                .fwmark = config_.fwmark,
-                .lastSeenNs = lastSeenNs,
-                .packets = 1,
-                .bytes = 0
-            };
+            ConnStateEntry entry{.action = static_cast<uint32_t>(action),
+                                 .fwmark = config_.fwmark,
+                                 .lastSeenNs = lastSeenNs,
+                                 .packets = 1,
+                                 .bytes = 0};
             connStateMap_[key] = entry;
 
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
@@ -1947,7 +1950,8 @@ namespace mynet::ebpf
         template <typename Key>
         static size_t deleteBatchResilient(int mapFd, std::span<const Key> keys) noexcept
         {
-            if (mapFd < 0 || keys.empty()) return 0;
+            if (mapFd < 0 || keys.empty())
+                return 0;
             size_t totalDeleted = 0;
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
             size_t offset = 0;
@@ -2042,7 +2046,7 @@ namespace mynet::ebpf
                 swept += deleteBatchResilient(connStateMapFd_, std::span<const TuplesKey>(toDelete));
             }
 #endif
-            for (auto it = connStateMap_.begin(); it != connStateMap_.end(); )
+            for (auto it = connStateMap_.begin(); it != connStateMap_.end();)
             {
                 bool isExpired = false;
                 if (nowNs >= it->second.lastSeenNs)
@@ -2070,12 +2074,10 @@ namespace mynet::ebpf
 
         [[nodiscard]] EbpfStats getStats() const noexcept
         {
-            return EbpfStats{
-                .directBypassedPackets = directBypassedPackets_.load(std::memory_order_relaxed),
-                .proxiedPackets = proxiedPackets_.load(std::memory_order_relaxed),
-                .blockedPackets = blockedPackets_.load(std::memory_order_relaxed),
-                .totalBytesEvaluated = totalBytesEvaluated_.load(std::memory_order_relaxed)
-            };
+            return EbpfStats{.directBypassedPackets = directBypassedPackets_.load(std::memory_order_relaxed),
+                             .proxiedPackets = proxiedPackets_.load(std::memory_order_relaxed),
+                             .blockedPackets = blockedPackets_.load(std::memory_order_relaxed),
+                             .totalBytesEvaluated = totalBytesEvaluated_.load(std::memory_order_relaxed)};
         }
 
         // =====================================================================
@@ -2108,10 +2110,7 @@ namespace mynet::ebpf
                 if (::bpf_map_lookup_elem(cookieMapFd_, &cookie, &val) == 0)
                 {
                     val.pname[15] = '\0';
-                    return ProcessInfo{
-                        .pid = val.pid,
-                        .name = std::string(val.pname)
-                    };
+                    return ProcessInfo{.pid = val.pid, .name = std::string(val.pname)};
                 }
             }
 #endif
@@ -2127,7 +2126,8 @@ namespace mynet::ebpf
          */
         [[nodiscard]] std::optional<ProcessInfo> getProcessBySocket(int socketFd) const noexcept
         {
-            if (socketFd < 0) return std::nullopt;
+            if (socketFd < 0)
+                return std::nullopt;
 #if defined(__linux__)
             uint64_t cookie = 0;
             socklen_t len = sizeof(cookie);
@@ -2156,8 +2156,10 @@ namespace mynet::ebpf
                 uint32_t k0 = 0, k1 = 1, k2 = 2;
                 uint64_t v0 = static_cast<uint64_t>(tcp4Fd);
                 uint64_t v1 = static_cast<uint64_t>(udpFd);
-                if (tcp4Fd >= 0) ::bpf_map_update_elem(listenSockMapFd_, &k0, &v0, BPF_ANY);
-                if (udpFd >= 0) ::bpf_map_update_elem(listenSockMapFd_, &k1, &v1, BPF_ANY);
+                if (tcp4Fd >= 0)
+                    ::bpf_map_update_elem(listenSockMapFd_, &k0, &v0, BPF_ANY);
+                if (udpFd >= 0)
+                    ::bpf_map_update_elem(listenSockMapFd_, &k1, &v1, BPF_ANY);
                 if (tcp6Fd >= 0)
                 {
                     uint64_t v2 = static_cast<uint64_t>(tcp6Fd);
@@ -2171,7 +2173,8 @@ namespace mynet::ebpf
         [[nodiscard]] int getAssignedSocket(uint8_t protocol, bool isIpv6 = false) const noexcept
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!config_.enableSkAssign) return -1;
+            if (!config_.enableSkAssign)
+                return -1;
             if (protocol == IPPROTO_TCP)
             {
                 return isIpv6 ? listenSockets_[2] : listenSockets_[0];
@@ -2181,7 +2184,12 @@ namespace mynet::ebpf
 
         struct ProxyDispatchResult
         {
-            enum class Mode { FWMARK, SK_ASSIGN, REDIRECT };
+            enum class Mode
+            {
+                FWMARK,
+                SK_ASSIGN,
+                REDIRECT
+            };
             Mode mode{Mode::FWMARK};
             int assignedFd{-1};
             int redirectIfIndex{0};
@@ -2320,23 +2328,19 @@ namespace mynet::ebpf
                 return false;
             }
 
-            TuplesKey fwdKey{
-                .saddr = cRemote.sin_addr.s_addr,
-                .daddr = cLocal.sin_addr.s_addr,
-                .sport = cRemote.sin_port,
-                .dport = cLocal.sin_port,
-                .proto = IPPROTO_TCP,
-                .pad = {0, 0, 0}
-            };
+            TuplesKey fwdKey{.saddr = cRemote.sin_addr.s_addr,
+                             .daddr = cLocal.sin_addr.s_addr,
+                             .sport = cRemote.sin_port,
+                             .dport = cLocal.sin_port,
+                             .proto = IPPROTO_TCP,
+                             .pad = {0, 0, 0}};
 
-            TuplesKey revKey{
-                .saddr = uRemote.sin_addr.s_addr,
-                .daddr = uLocal.sin_addr.s_addr,
-                .sport = uRemote.sin_port,
-                .dport = uLocal.sin_port,
-                .proto = IPPROTO_TCP,
-                .pad = {0, 0, 0}
-            };
+            TuplesKey revKey{.saddr = uRemote.sin_addr.s_addr,
+                             .daddr = uLocal.sin_addr.s_addr,
+                             .sport = uRemote.sin_port,
+                             .dport = uLocal.sin_port,
+                             .proto = IPPROTO_TCP,
+                             .pad = {0, 0, 0}};
 
             uint64_t uVal = static_cast<uint64_t>(upstreamFd);
             uint64_t cVal = static_cast<uint64_t>(clientFd);
@@ -2353,19 +2357,18 @@ namespace mynet::ebpf
             }
             return true;
 #else
-            (void)uVal; (void)cVal;
+            (void)uVal;
+            (void)cVal;
             return false;
 #endif
         }
 
-        bool attachPair(int clientFd, int upstreamFd) noexcept
-        {
-            return attachPair(sockMapFd_, clientFd, upstreamFd);
-        }
+        bool attachPair(int clientFd, int upstreamFd) noexcept { return attachPair(sockMapFd_, clientFd, upstreamFd); }
 
         static bool detachPair(int mapFd, int clientFd, int upstreamFd = -1) noexcept
         {
-            if (mapFd < 0 || clientFd < 0) return false;
+            if (mapFd < 0 || clientFd < 0)
+                return false;
 
             sockaddr_in cLocal{}, cRemote{};
             socklen_t l1 = sizeof(cLocal), l2 = sizeof(cRemote);
@@ -2373,14 +2376,12 @@ namespace mynet::ebpf
                 ::getpeername(clientFd, reinterpret_cast<sockaddr *>(&cRemote), &l2) == 0 &&
                 cLocal.sin_family == AF_INET)
             {
-                TuplesKey fwdKey{
-                    .saddr = cRemote.sin_addr.s_addr,
-                    .daddr = cLocal.sin_addr.s_addr,
-                    .sport = cRemote.sin_port,
-                    .dport = cLocal.sin_port,
-                    .proto = IPPROTO_TCP,
-                    .pad = {0, 0, 0}
-                };
+                TuplesKey fwdKey{.saddr = cRemote.sin_addr.s_addr,
+                                 .daddr = cLocal.sin_addr.s_addr,
+                                 .sport = cRemote.sin_port,
+                                 .dport = cLocal.sin_port,
+                                 .proto = IPPROTO_TCP,
+                                 .pad = {0, 0, 0}};
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
                 ::bpf_map_delete_elem(mapFd, &fwdKey);
 #endif
@@ -2394,14 +2395,12 @@ namespace mynet::ebpf
                     ::getpeername(upstreamFd, reinterpret_cast<sockaddr *>(&uRemote), &l4) == 0 &&
                     uLocal.sin_family == AF_INET)
                 {
-                    TuplesKey revKey{
-                        .saddr = uRemote.sin_addr.s_addr,
-                        .daddr = uLocal.sin_addr.s_addr,
-                        .sport = uRemote.sin_port,
-                        .dport = uLocal.sin_port,
-                        .proto = IPPROTO_TCP,
-                        .pad = {0, 0, 0}
-                    };
+                    TuplesKey revKey{.saddr = uRemote.sin_addr.s_addr,
+                                     .daddr = uLocal.sin_addr.s_addr,
+                                     .sport = uRemote.sin_port,
+                                     .dport = uLocal.sin_port,
+                                     .proto = IPPROTO_TCP,
+                                     .pad = {0, 0, 0}};
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
                     ::bpf_map_delete_elem(mapFd, &revKey);
 #endif
@@ -2797,7 +2796,8 @@ char _license[] SEC("license") = "GPL";
         }
 
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
-        static void reusePinnedMapIfExists(struct bpf_object *obj, const char *mapName, const std::string &bpffsDir) noexcept
+        static void reusePinnedMapIfExists(struct bpf_object *obj, const char *mapName,
+                                           const std::string &bpffsDir) noexcept
         {
             std::string pinPath = bpffsDir + "/" + mapName;
             int pinnedFd = ::bpf_obj_get(pinPath.c_str());
@@ -2818,8 +2818,10 @@ char _license[] SEC("license") = "GPL";
         static void pinMapIfNotPinned(struct bpf_object *obj, const char *mapName, const std::string &bpffsDir) noexcept
         {
             auto *map = ::bpf_object__find_map_by_name(obj, mapName);
-            if (!map) return;
-            if (::bpf_map__is_pinned(map)) return;
+            if (!map)
+                return;
+            if (::bpf_map__is_pinned(map))
+                return;
 
             std::string pinPath = bpffsDir + "/" + mapName;
             int err = ::bpf_map__pin(map, pinPath.c_str());
@@ -2836,11 +2838,9 @@ char _license[] SEC("license") = "GPL";
 
         static void unpinAllMaps(const std::string &bpffsDir) noexcept
         {
-            const char *maps[] = {
-                "mynet_fast_sock", "mynet_conn_state_map", "mynet_cookie_pid_map",
-                "mynet_direct_stats", "mynet_listen_sock_map", "mynet_block_rate_map",
-                "mynet_tcp_offload_pause", "mynet_outbound_connectivity"
-            };
+            const char *maps[] = {"mynet_fast_sock",         "mynet_conn_state_map",       "mynet_cookie_pid_map",
+                                  "mynet_direct_stats",      "mynet_listen_sock_map",      "mynet_block_rate_map",
+                                  "mynet_tcp_offload_pause", "mynet_outbound_connectivity"};
             for (const char *m : maps)
             {
                 std::string pinPath = bpffsDir + "/" + m;
@@ -2853,36 +2853,152 @@ char _license[] SEC("license") = "GPL";
         void cleanup() noexcept
         {
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
-            if (tcLink_) { ::bpf_link__destroy(tcLink_); tcLink_ = nullptr; }
-            if (tcHookClassic_) { ::bpf_tc_hook_destroy(&tcHook_); tcHookClassic_ = false; }
-            if (cgConn4Link_) { ::bpf_link__destroy(cgConn4Link_); cgConn4Link_ = nullptr; }
-            if (cgConn6Link_) { ::bpf_link__destroy(cgConn6Link_); cgConn6Link_ = nullptr; }
-            if (cgSend4Link_) { ::bpf_link__destroy(cgSend4Link_); cgSend4Link_ = nullptr; }
-            if (cgSend6Link_) { ::bpf_link__destroy(cgSend6Link_); cgSend6Link_ = nullptr; }
-            if (cgCreateLink_) { ::bpf_link__destroy(cgCreateLink_); cgCreateLink_ = nullptr; }
-            if (cgReleaseLink_) { ::bpf_link__destroy(cgReleaseLink_); cgReleaseLink_ = nullptr; }
-            if (cgroupFd_ >= 0) { ::close(cgroupFd_); cgroupFd_ = -1; }
-            if (bpfObj_) { ::bpf_object__close(bpfObj_); bpfObj_ = nullptr; }
+            if (tcLink_)
+            {
+                ::bpf_link__destroy(tcLink_);
+                tcLink_ = nullptr;
+            }
+            if (tcHookClassic_)
+            {
+                ::bpf_tc_hook_destroy(&tcHook_);
+                tcHookClassic_ = false;
+            }
+            if (cgConn4Link_)
+            {
+                ::bpf_link__destroy(cgConn4Link_);
+                cgConn4Link_ = nullptr;
+            }
+            if (cgConn6Link_)
+            {
+                ::bpf_link__destroy(cgConn6Link_);
+                cgConn6Link_ = nullptr;
+            }
+            if (cgSend4Link_)
+            {
+                ::bpf_link__destroy(cgSend4Link_);
+                cgSend4Link_ = nullptr;
+            }
+            if (cgSend6Link_)
+            {
+                ::bpf_link__destroy(cgSend6Link_);
+                cgSend6Link_ = nullptr;
+            }
+            if (cgCreateLink_)
+            {
+                ::bpf_link__destroy(cgCreateLink_);
+                cgCreateLink_ = nullptr;
+            }
+            if (cgReleaseLink_)
+            {
+                ::bpf_link__destroy(cgReleaseLink_);
+                cgReleaseLink_ = nullptr;
+            }
+            if (cgroupFd_ >= 0)
+            {
+                ::close(cgroupFd_);
+                cgroupFd_ = -1;
+            }
+            if (bpfObj_)
+            {
+                ::bpf_object__close(bpfObj_);
+                bpfObj_ = nullptr;
+            }
 #endif
-            if (lpmMapFd_[0] >= 0) { ::close(lpmMapFd_[0]); lpmMapFd_[0] = -1; }
-            if (lpmMapFd_[1] >= 0) { ::close(lpmMapFd_[1]); lpmMapFd_[1] = -1; }
-            if (lpmMapIpv6Fd_[0] >= 0) { ::close(lpmMapIpv6Fd_[0]); lpmMapIpv6Fd_[0] = -1; }
-            if (lpmMapIpv6Fd_[1] >= 0) { ::close(lpmMapIpv6Fd_[1]); lpmMapIpv6Fd_[1] = -1; }
-            if (directMapFd_ >= 0) { ::close(directMapFd_); directMapFd_ = -1; }
-            if (directStatsMapFd_ >= 0) { ::close(directStatsMapFd_); directStatsMapFd_ = -1; }
-            if (configMapFd_ >= 0) { ::close(configMapFd_); configMapFd_ = -1; }
-            if (sockMapFd_ >= 0) { ::close(sockMapFd_); sockMapFd_ = -1; }
-            if (cookieMapFd_ >= 0) { ::close(cookieMapFd_); cookieMapFd_ = -1; }
-            if (connStateMapFd_ >= 0) { ::close(connStateMapFd_); connStateMapFd_ = -1; }
-            if (listenSockMapFd_ >= 0) { ::close(listenSockMapFd_); listenSockMapFd_ = -1; }
-            if (blockRateMapFd_ >= 0) { ::close(blockRateMapFd_); blockRateMapFd_ = -1; }
-            if (tcpOffloadPauseMapFd_ >= 0) { ::close(tcpOffloadPauseMapFd_); tcpOffloadPauseMapFd_ = -1; }
-            if (outboundConnectivityMapFd_ >= 0) { ::close(outboundConnectivityMapFd_); outboundConnectivityMapFd_ = -1; }
-            if (eventRingbufFd_ >= 0) { ::close(eventRingbufFd_); eventRingbufFd_ = -1; }
-            if (bpfStatsMapFd_ >= 0) { ::close(bpfStatsMapFd_); bpfStatsMapFd_ = -1; }
-            if (domainRoutingMapFd_ >= 0) { ::close(domainRoutingMapFd_); domainRoutingMapFd_ = -1; }
-            if (routingHandoffMapFd_ >= 0) { ::close(routingHandoffMapFd_); routingHandoffMapFd_ = -1; }
-            if (redirectTrackMapFd_ >= 0) { ::close(redirectTrackMapFd_); redirectTrackMapFd_ = -1; }
+            if (lpmMapFd_[0] >= 0)
+            {
+                ::close(lpmMapFd_[0]);
+                lpmMapFd_[0] = -1;
+            }
+            if (lpmMapFd_[1] >= 0)
+            {
+                ::close(lpmMapFd_[1]);
+                lpmMapFd_[1] = -1;
+            }
+            if (lpmMapIpv6Fd_[0] >= 0)
+            {
+                ::close(lpmMapIpv6Fd_[0]);
+                lpmMapIpv6Fd_[0] = -1;
+            }
+            if (lpmMapIpv6Fd_[1] >= 0)
+            {
+                ::close(lpmMapIpv6Fd_[1]);
+                lpmMapIpv6Fd_[1] = -1;
+            }
+            if (directMapFd_ >= 0)
+            {
+                ::close(directMapFd_);
+                directMapFd_ = -1;
+            }
+            if (directStatsMapFd_ >= 0)
+            {
+                ::close(directStatsMapFd_);
+                directStatsMapFd_ = -1;
+            }
+            if (configMapFd_ >= 0)
+            {
+                ::close(configMapFd_);
+                configMapFd_ = -1;
+            }
+            if (sockMapFd_ >= 0)
+            {
+                ::close(sockMapFd_);
+                sockMapFd_ = -1;
+            }
+            if (cookieMapFd_ >= 0)
+            {
+                ::close(cookieMapFd_);
+                cookieMapFd_ = -1;
+            }
+            if (connStateMapFd_ >= 0)
+            {
+                ::close(connStateMapFd_);
+                connStateMapFd_ = -1;
+            }
+            if (listenSockMapFd_ >= 0)
+            {
+                ::close(listenSockMapFd_);
+                listenSockMapFd_ = -1;
+            }
+            if (blockRateMapFd_ >= 0)
+            {
+                ::close(blockRateMapFd_);
+                blockRateMapFd_ = -1;
+            }
+            if (tcpOffloadPauseMapFd_ >= 0)
+            {
+                ::close(tcpOffloadPauseMapFd_);
+                tcpOffloadPauseMapFd_ = -1;
+            }
+            if (outboundConnectivityMapFd_ >= 0)
+            {
+                ::close(outboundConnectivityMapFd_);
+                outboundConnectivityMapFd_ = -1;
+            }
+            if (eventRingbufFd_ >= 0)
+            {
+                ::close(eventRingbufFd_);
+                eventRingbufFd_ = -1;
+            }
+            if (bpfStatsMapFd_ >= 0)
+            {
+                ::close(bpfStatsMapFd_);
+                bpfStatsMapFd_ = -1;
+            }
+            if (domainRoutingMapFd_ >= 0)
+            {
+                ::close(domainRoutingMapFd_);
+                domainRoutingMapFd_ = -1;
+            }
+            if (routingHandoffMapFd_ >= 0)
+            {
+                ::close(routingHandoffMapFd_);
+                routingHandoffMapFd_ = -1;
+            }
+            if (redirectTrackMapFd_ >= 0)
+            {
+                ::close(redirectTrackMapFd_);
+                redirectTrackMapFd_ = -1;
+            }
 
             listenSockets_[0] = -1;
             listenSockets_[1] = -1;
@@ -2974,7 +3090,8 @@ char _license[] SEC("license") = "GPL";
 
             bpfObj_ = obj;
 
-            auto getMapFd = [obj](const char *name) -> int {
+            auto getMapFd = [obj](const char *name) -> int
+            {
                 auto *m = ::bpf_object__find_map_by_name(obj, name);
                 return m ? ::bpf_map__fd(m) : -1;
             };
@@ -3017,12 +3134,15 @@ char _license[] SEC("license") = "GPL";
         bool attachStreamVerdictLocked()
         {
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
-            if (!bpfObj_ || sockMapFd_ < 0) return false;
+            if (!bpfObj_ || sockMapFd_ < 0)
+                return false;
             auto *prog = ::bpf_object__find_program_by_name(bpfObj_, "mynet_sockmap_verdict");
-            if (!prog) return false;
+            if (!prog)
+                return false;
 
             int progFd = ::bpf_program__fd(prog);
-            if (progFd < 0) return false;
+            if (progFd < 0)
+                return false;
 
             int ret = ::bpf_prog_attach(progFd, sockMapFd_, BPF_SK_SKB_STREAM_VERDICT, 0);
             if (ret == 0)
@@ -3040,9 +3160,11 @@ char _license[] SEC("license") = "GPL";
         bool attachTcFilterLocked(std::string_view ifName, bool ingress = true)
         {
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
-            if (!bpfObj_) return false;
+            if (!bpfObj_)
+                return false;
             auto *prog = ::bpf_object__find_program_by_name(bpfObj_, "mynet_tc_filter");
-            if (!prog) return false;
+            if (!prog)
+                return false;
 
             std::string name(ifName);
             int ifindex = static_cast<int>(::if_nametoindex(name.c_str()));
@@ -3053,12 +3175,14 @@ char _license[] SEC("license") = "GPL";
             }
             wanIfIndex_ = ifindex;
 
-            auto attachSlaves = [this, prog, ingress](std::string_view masterName) {
+            auto attachSlaves = [this, prog, ingress](std::string_view masterName)
+            {
                 auto slaves = discoverBridgeSlaves(masterName);
                 for (const auto &slaveName : slaves)
                 {
                     int sIndex = static_cast<int>(::if_nametoindex(slaveName.c_str()));
-                    if (sIndex <= 0) continue;
+                    if (sIndex <= 0)
+                        continue;
 
                     SlaveTcAttachment att{.ifName = slaveName, .ifindex = sIndex};
                     struct bpf_tcx_opts sOpts{};
@@ -3068,7 +3192,8 @@ char _license[] SEC("license") = "GPL";
                     {
                         slaveTcAttachments_.push_back(att);
                         attachedInterfaces_.push_back(slaveName);
-                        LOG_INFO("eBPF: Attached TCX filter to bridge slave member '{}' (ifindex: {})", slaveName, sIndex);
+                        LOG_INFO("eBPF: Attached TCX filter to bridge slave member '{}' (ifindex: {})", slaveName,
+                                 sIndex);
                     }
                     else
                     {
@@ -3126,7 +3251,8 @@ char _license[] SEC("license") = "GPL";
             }
             return false;
 #else
-            (void)ifName; (void)ingress;
+            (void)ifName;
+            (void)ingress;
             return false;
 #endif
         }
@@ -3166,13 +3292,16 @@ char _license[] SEC("license") = "GPL";
         bool attachCgroupLocked(const std::string &cgroupPath = "/sys/fs/cgroup")
         {
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
-            if (!bpfObj_) return false;
+            if (!bpfObj_)
+                return false;
 
             int cgFd = ::open(cgroupPath.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            if (cgFd < 0) return false;
+            if (cgFd < 0)
+                return false;
             cgroupFd_ = cgFd;
 
-            auto attachProg = [this, cgFd](const char *name) -> struct bpf_link * {
+            auto attachProg = [this, cgFd](const char *name) -> struct bpf_link *
+            {
                 auto *prog = ::bpf_object__find_program_by_name(bpfObj_, name);
                 return prog ? ::bpf_program__attach_cgroup(prog, cgFd) : nullptr;
             };
@@ -3200,13 +3329,41 @@ char _license[] SEC("license") = "GPL";
         void detachCgroupLocked()
         {
 #if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
-            if (cgConn4Link_) { ::bpf_link__destroy(cgConn4Link_); cgConn4Link_ = nullptr; }
-            if (cgConn6Link_) { ::bpf_link__destroy(cgConn6Link_); cgConn6Link_ = nullptr; }
-            if (cgSend4Link_) { ::bpf_link__destroy(cgSend4Link_); cgSend4Link_ = nullptr; }
-            if (cgSend6Link_) { ::bpf_link__destroy(cgSend6Link_); cgSend6Link_ = nullptr; }
-            if (cgCreateLink_) { ::bpf_link__destroy(cgCreateLink_); cgCreateLink_ = nullptr; }
-            if (cgReleaseLink_) { ::bpf_link__destroy(cgReleaseLink_); cgReleaseLink_ = nullptr; }
-            if (cgroupFd_ >= 0) { ::close(cgroupFd_); cgroupFd_ = -1; }
+            if (cgConn4Link_)
+            {
+                ::bpf_link__destroy(cgConn4Link_);
+                cgConn4Link_ = nullptr;
+            }
+            if (cgConn6Link_)
+            {
+                ::bpf_link__destroy(cgConn6Link_);
+                cgConn6Link_ = nullptr;
+            }
+            if (cgSend4Link_)
+            {
+                ::bpf_link__destroy(cgSend4Link_);
+                cgSend4Link_ = nullptr;
+            }
+            if (cgSend6Link_)
+            {
+                ::bpf_link__destroy(cgSend6Link_);
+                cgSend6Link_ = nullptr;
+            }
+            if (cgCreateLink_)
+            {
+                ::bpf_link__destroy(cgCreateLink_);
+                cgCreateLink_ = nullptr;
+            }
+            if (cgReleaseLink_)
+            {
+                ::bpf_link__destroy(cgReleaseLink_);
+                cgReleaseLink_ = nullptr;
+            }
+            if (cgroupFd_ >= 0)
+            {
+                ::close(cgroupFd_);
+                cgroupFd_ = -1;
+            }
             cgroupAttached_ = false;
 #endif
         }
@@ -3222,7 +3379,8 @@ char _license[] SEC("license") = "GPL";
             lpmAttr.max_entries = 65536;
             lpmAttr.map_flags = BPF_F_NO_PREALLOC;
             long lpmFd0 = ::syscall(__NR_bpf, BPF_MAP_CREATE, &lpmAttr, sizeof(lpmAttr));
-            if (lpmFd0 < 0) return false;
+            if (lpmFd0 < 0)
+                return false;
             lpmMapFd_[0] = static_cast<int>(lpmFd0);
 
             long lpmFd1 = ::syscall(__NR_bpf, BPF_MAP_CREATE, &lpmAttr, sizeof(lpmAttr));
@@ -3238,7 +3396,8 @@ char _license[] SEC("license") = "GPL";
             hashAttr.value_size = sizeof(uint8_t);
             hashAttr.max_entries = 16384;
             long directFd = ::syscall(__NR_bpf, BPF_MAP_CREATE, &hashAttr, sizeof(hashAttr));
-            if (directFd < 0) return false;
+            if (directFd < 0)
+                return false;
             directMapFd_ = static_cast<int>(directFd);
 
             // 3. Config Array Map
@@ -3248,7 +3407,8 @@ char _license[] SEC("license") = "GPL";
             arrAttr.value_size = sizeof(BpfConfigVal);
             arrAttr.max_entries = 1;
             long cfgFd = ::syscall(__NR_bpf, BPF_MAP_CREATE, &arrAttr, sizeof(arrAttr));
-            if (cfgFd < 0) return false;
+            if (cfgFd < 0)
+                return false;
             configMapFd_ = static_cast<int>(cfgFd);
 
             // 4. SockMap
@@ -3279,23 +3439,21 @@ char _license[] SEC("license") = "GPL";
             if (kernelBpfActive_ && configMapFd_ >= 0)
             {
                 uint32_t key = 0;
-                BpfConfigVal val{
-                    .tproxyPort = config_.tproxyPort,
-                    .pad = 0,
-                    .fwmark = config_.fwmark,
-                    .directBypassEnabled = static_cast<uint8_t>(config_.enableDirectBypass ? 1 : 0),
-                    .dropQuic = static_cast<uint8_t>(config_.dropQuic ? 1 : 0),
-                    .wanIfIndex = static_cast<uint16_t>(wanIfIndex_),
-                    .activeEpoch = activeEpoch_.load(std::memory_order_relaxed),
-                    .asymmetricGateway = static_cast<uint8_t>(config_.asymmetricGateway ? 1 : 0),
-                    .gatewayMac = {},
-                    .wanMac = {},
-                    .enableSkAssign = static_cast<uint8_t>(config_.enableSkAssign ? 1 : 0),
-                    .redirectIfindex = static_cast<uint8_t>(virtualIfIndex_),
-                    .rateLimitWindowMs = config_.rateLimitWindowMs,
-                    .tproxyPortProtect = static_cast<uint8_t>(config_.tproxyPortProtect ? 1 : 0),
-                    .pad3 = 0
-                };
+                BpfConfigVal val{.tproxyPort = config_.tproxyPort,
+                                 .pad = 0,
+                                 .fwmark = config_.fwmark,
+                                 .directBypassEnabled = static_cast<uint8_t>(config_.enableDirectBypass ? 1 : 0),
+                                 .dropQuic = static_cast<uint8_t>(config_.dropQuic ? 1 : 0),
+                                 .wanIfIndex = static_cast<uint16_t>(wanIfIndex_),
+                                 .activeEpoch = activeEpoch_.load(std::memory_order_relaxed),
+                                 .asymmetricGateway = static_cast<uint8_t>(config_.asymmetricGateway ? 1 : 0),
+                                 .gatewayMac = {},
+                                 .wanMac = {},
+                                 .enableSkAssign = static_cast<uint8_t>(config_.enableSkAssign ? 1 : 0),
+                                 .redirectIfindex = static_cast<uint8_t>(virtualIfIndex_),
+                                 .rateLimitWindowMs = config_.rateLimitWindowMs,
+                                 .tproxyPortProtect = static_cast<uint8_t>(config_.tproxyPortProtect ? 1 : 0),
+                                 .pad3 = 0};
                 if (auto gMac = MacAddress::parse(config_.gatewayMac))
                 {
                     std::memcpy(val.gatewayMac, gMac->bytes, 6);
@@ -3326,7 +3484,8 @@ char _license[] SEC("license") = "GPL";
             addLpmCidrLocked("127.0.0.0/8", Action::DIRECT, epochSlot);
             addLpmCidrLocked("100.64.0.0/10", Action::DIRECT, epochSlot);
             addLpmCidrLocked("169.254.0.0/16", Action::DIRECT, epochSlot);
-            addLpmCidrLocked("224.0.0.0/3", Action::DIRECT, epochSlot); // 局域网组播与广播网段 (224.0.0.0 - 255.255.255.255, 借鉴 dae)
+            addLpmCidrLocked("224.0.0.0/3", Action::DIRECT,
+                             epochSlot); // 局域网组播与广播网段 (224.0.0.0 - 255.255.255.255, 借鉴 dae)
             addLpmCidrIpv6Locked("ff00::/8", Action::DIRECT, epochSlot); // IPv6 组播网段 (借鉴 dae)
             addLpmCidrLocked("198.18.0.0/15", Action::PROXY, epochSlot); // FakeIP
         }

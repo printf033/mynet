@@ -13,10 +13,10 @@
  */
 
 #include "address.hpp"
+#include "config/log.hpp"
 #include "dialer.hpp"
 #include "error.hpp"
 #include "outbound.hpp"
-#include "config/log.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
@@ -44,11 +44,11 @@ namespace mynet
      */
     struct DialerOptions
     {
-        uint32_t fwmark{0};                       ///< Linux SO_MARK 策略路由打标（防止回环死锁）
-        std::string bindInterface{};              ///< SO_BINDTODEVICE 绑定出口网卡 (例如 eth0, wan1)
-        std::string bindAddress{};                ///< 绑定本地特定出口 IP 地址
-        bool tcpFastOpen{false};                  ///< 是否启用 TCP Fast Open (MSG_FASTOPEN)
-        std::chrono::milliseconds timeout{5000};  ///< 拨号超时
+        uint32_t fwmark{0};                      ///< Linux SO_MARK 策略路由打标（防止回环死锁）
+        std::string bindInterface{};             ///< SO_BINDTODEVICE 绑定出口网卡 (例如 eth0, wan1)
+        std::string bindAddress{};               ///< 绑定本地特定出口 IP 地址
+        bool tcpFastOpen{false};                 ///< 是否启用 TCP Fast Open (MSG_FASTOPEN)
+        std::chrono::milliseconds timeout{5000}; ///< 拨号超时
     };
 
     /**
@@ -56,11 +56,11 @@ namespace mynet
      */
     struct OutboundDialResult
     {
-        int fd{-1};                                                            ///< 拨号成功的套接字描述符
-        std::unique_ptr<handler::HandlerOutboundConnection> handler{nullptr};  ///< 对应的出站协议状态机处理器
-        std::string outboundTag{};                                             ///< 命中的出站标签
-        std::string targetEndpoint{};                                          ///< 目标端点字符串表示
-        bool immediateConnected{false};                                        ///< 连接是否立即可用（已非阻塞连上）
+        int fd{-1};                                                           ///< 拨号成功的套接字描述符
+        std::unique_ptr<handler::HandlerOutboundConnection> handler{nullptr}; ///< 对应的出站协议状态机处理器
+        std::string outboundTag{};                                            ///< 命中的出站标签
+        std::string targetEndpoint{};                                         ///< 目标端点字符串表示
+        bool immediateConnected{false};                                       ///< 连接是否立即可用（已非阻塞连上）
 
         [[nodiscard]] inline bool ok() const noexcept { return handler != nullptr; }
     };
@@ -116,7 +116,7 @@ namespace mynet
          */
         template <typename HandlerType, typename... Args>
         Result<OutboundDialResult> dialStreamHelper(std::string_view serverHost, uint16_t serverPort,
-                                                   const handler::ProxyAddress &target, Args &&...args)
+                                                    const handler::ProxyAddress &target, Args &&...args)
         {
             DialerBase<HandlerType> dialer;
             if (options_.fwmark != 0)
@@ -147,7 +147,9 @@ namespace mynet
 
     public:
         OutboundBase(std::string tag, std::string type, DialerOptions options = {})
-            : tag_(std::move(tag)), type_(std::move(type)), options_(std::move(options))
+            : tag_(std::move(tag)),
+              type_(std::move(type)),
+              options_(std::move(options))
         {
         }
 
@@ -174,10 +176,7 @@ namespace mynet
         /**
          * @brief 停止出站节点生命周期
          */
-        virtual void stop() noexcept
-        {
-            running_.store(false, std::memory_order_release);
-        }
+        virtual void stop() noexcept { running_.store(false, std::memory_order_release); }
 
         /**
          * @brief 发起流式出站建连 (TCP / TLS / 代理协议)
@@ -260,6 +259,7 @@ namespace mynet
     class LatenciesN
     {
         static_assert(N > 0, "LatenciesN window size must be greater than 0");
+
     private:
         std::array<uint32_t, N> samples_{};
         size_t head_{0};
@@ -289,13 +289,15 @@ namespace mynet
 
         [[nodiscard]] uint32_t average() const noexcept
         {
-            if (count_ == 0) return 9999;
+            if (count_ == 0)
+                return 9999;
             return static_cast<uint32_t>(sum_ / count_);
         }
 
         [[nodiscard]] uint32_t latest() const noexcept
         {
-            if (count_ == 0) return 9999;
+            if (count_ == 0)
+                return 9999;
             size_t idx = (head_ + N - 1) % N;
             return samples_[idx];
         }
@@ -317,9 +319,9 @@ namespace mynet
      */
     enum class DialerSelectionPolicy : uint8_t
     {
-        MIN = 0,        ///< 瞬时延迟最低最优 (默认，严格对齐 dae 行为)
-        MIN_AVG10 = 1,  ///< 10 样本滑动平均延迟最优 (Min Avg 10)
-        RANDOM = 2      ///< 随机分发
+        MIN = 0,       ///< 瞬时延迟最低最优 (默认，严格对齐 dae 行为)
+        MIN_AVG10 = 1, ///< 10 样本滑动平均延迟最优 (Min Avg 10)
+        RANDOM = 2     ///< 随机分发
     };
 
     /**
@@ -342,9 +344,8 @@ namespace mynet
 
     public:
         OutboundUrlTest(std::string tag, std::vector<std::string> candidates, OutboundManager *mgr = nullptr,
-                        std::string url = "http://cp.cloudflare.com/generate_204",
-                        uint32_t intervalSecs = 300, uint32_t toleranceMs = 0,
-                        DialerSelectionPolicy policy = DialerSelectionPolicy::MIN)
+                        std::string url = "http://cp.cloudflare.com/generate_204", uint32_t intervalSecs = 300,
+                        uint32_t toleranceMs = 0, DialerSelectionPolicy policy = DialerSelectionPolicy::MIN)
             : OutboundBase(std::move(tag), "urltest"),
               candidateTags_(std::move(candidates)),
               manager_(mgr),
@@ -415,14 +416,17 @@ namespace mynet
         [[nodiscard]] std::string getBestTag() const
         {
             std::lock_guard<std::mutex> lock(rttMutex_);
-            if (candidateTags_.empty()) return "";
+            if (candidateTags_.empty())
+                return "";
 
             std::string best = currentBestTag_.empty() ? candidateTags_.front() : currentBestTag_;
-            auto getScore = [&](const std::string &t) -> uint32_t {
+            auto getScore = [&](const std::string &t) -> uint32_t
+            {
                 if (policy_ == DialerSelectionPolicy::MIN_AVG10)
                 {
                     auto it = latenciesMap_.find(t);
-                    if (it != latenciesMap_.end() && it->second.size() > 0) return it->second.average();
+                    if (it != latenciesMap_.end() && it->second.size() > 0)
+                        return it->second.average();
                 }
                 auto it = rttMap_.find(t);
                 return (it != rttMap_.end()) ? it->second : 9999;
@@ -446,7 +450,8 @@ namespace mynet
             // 仅当新候选节点的延迟优势达到或超过 toleranceMs_ 时才触发切换
             if (candidateBest != best)
             {
-                if (currentBestScore == 9999 || minScore <= (currentBestScore > toleranceMs_ ? currentBestScore - toleranceMs_ : 0))
+                if (currentBestScore == 9999 ||
+                    minScore <= (currentBestScore > toleranceMs_ ? currentBestScore - toleranceMs_ : 0))
                 {
                     currentBestTag_ = candidateBest;
                     return candidateBest;
@@ -461,10 +466,7 @@ namespace mynet
         uint32_t probeNode(std::string_view tag, std::chrono::milliseconds timeout = std::chrono::milliseconds(2000));
         void probeAll(std::chrono::milliseconds timeout = std::chrono::milliseconds(2000));
 
-        Result<> start() noexcept override
-        {
-            return OutboundBase::start();
-        }
+        Result<> start() noexcept override { return OutboundBase::start(); }
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
         Result<int> dialDatagram(const handler::ProxyAddress &target) override;
@@ -490,10 +492,7 @@ namespace mynet
         inline void setManager(OutboundManager *mgr) noexcept { manager_ = mgr; }
         [[nodiscard]] inline const std::vector<std::string> &candidates() const noexcept { return candidateTags_; }
 
-        Result<> start() noexcept override
-        {
-            return OutboundBase::start();
-        }
+        Result<> start() noexcept override { return OutboundBase::start(); }
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
         Result<int> dialDatagram(const handler::ProxyAddress &target) override;
@@ -504,11 +503,13 @@ namespace mynet
 // 拆分到各协议独立目录下的具体出站端点实现
 #include "block/outbound.hpp"
 #include "direct/outbound.hpp"
+#include "http/outbound.hpp"
 #include "hysteria2/outbound.hpp"
 #include "shadowsocks/outbound.hpp"
 #include "socks/outbound.hpp"
 #include "trojan/outbound.hpp"
 #include "vless/outbound.hpp"
+#include "vmess/outbound.hpp"
 
 namespace mynet
 {
@@ -534,10 +535,7 @@ namespace mynet
             registerOutbound(std::make_shared<OutboundBlock>("block"));
         }
 
-        ~OutboundManager() noexcept
-        {
-            stopAll();
-        }
+        ~OutboundManager() noexcept { stopAll(); }
 
         OutboundManager(const OutboundManager &) = delete;
         OutboundManager &operator=(const OutboundManager &) = delete;
@@ -581,10 +579,7 @@ namespace mynet
             running_.store(false, std::memory_order_release);
         }
 
-        [[nodiscard]] inline bool isRunning() const noexcept
-        {
-            return running_.load(std::memory_order_acquire);
-        }
+        [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
 
         [[nodiscard]] inline std::string_view defaultTag() const noexcept { return defaultTag_; }
         inline void setDefaultTag(std::string tag)
@@ -753,9 +748,11 @@ namespace mynet
 
     inline uint32_t OutboundUrlTest::probeNode(std::string_view tag, std::chrono::milliseconds timeout)
     {
-        if (manager_ == nullptr) return 9999;
+        if (manager_ == nullptr)
+            return 9999;
         auto outbound = manager_->get(tag);
-        if (!outbound) return 9999;
+        if (!outbound)
+            return 9999;
 
         if (outbound->type() == "direct")
         {
@@ -798,9 +795,10 @@ namespace mynet
             }
             ::close(dialRes->fd);
             const auto tEnd = std::chrono::steady_clock::now();
-            auto elapsedMs = static_cast<uint32_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStart).count());
-            if (elapsedMs == 0) elapsedMs = 1;
+            auto elapsedMs =
+                static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStart).count());
+            if (elapsedMs == 0)
+                elapsedMs = 1;
             setRtt(tag, elapsedMs);
             return elapsedMs;
         }

@@ -1,6 +1,6 @@
-#include "forwarder.hpp"
 #include "address.hpp"
 #include "direct/direct.hpp"
+#include "forwarder.hpp"
 #include "socks/socks5.hpp"
 #include <gtest/gtest.h>
 #include <string>

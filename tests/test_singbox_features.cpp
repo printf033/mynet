@@ -1,21 +1,20 @@
-#include <gtest/gtest.h>
-#include "tls/fragmenter.hpp"
-#include "tls/spoof.hpp"
-#include "tls/pinning.hpp"
-#include "transport/uot.hpp"
-#include "transparent/port_pool.hpp"
-#include "dns/ech.hpp"
-#include "dialer.hpp"
-#include "process.hpp"
-#include "uvarint.hpp"
 #include "checksum.hpp"
-
-#include <sys/socket.h>
-#include <unistd.h>
+#include "dialer.hpp"
+#include "dns/ech.hpp"
+#include "process.hpp"
+#include "tls/fragmenter.hpp"
+#include "tls/pinning.hpp"
+#include "tls/spoof.hpp"
+#include "transparent/port_pool.hpp"
+#include "transport/uot.hpp"
+#include "uvarint.hpp"
 #include <arpa/inet.h>
-#include <thread>
-#include <vector>
+#include <gtest/gtest.h>
 #include <string>
+#include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
+#include <vector>
 
 using namespace mynet;
 using namespace mynet::tls;
@@ -69,7 +68,7 @@ TEST(SingboxFeaturesTest, TlsFragmenterSplitRecordsValidity)
 
     // 验证每个分片都是合规的 TLS 记录层 (0x16 0x03 0x01/0x03 [len 2B])
     size_t totalPayload = 0;
-    for (const auto& rec : records)
+    for (const auto &rec : records)
     {
         ASSERT_GE(rec.size(), 5u);
         EXPECT_EQ(rec[0], 0x16);
@@ -93,15 +92,18 @@ TEST(SingboxFeaturesTest, TlsFragmenterSendOverSocketPair)
 
     // 启动线程在接收端读取并重组
     std::vector<uint8_t> received;
-    std::thread receiver([&]() {
-        uint8_t buf[512];
-        while (received.size() < ch.size())
+    std::thread receiver(
+        [&]()
         {
-            ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
-            if (n <= 0) break;
-            received.insert(received.end(), buf, buf + n);
-        }
-    });
+            uint8_t buf[512];
+            while (received.size() < ch.size())
+            {
+                ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
+                if (n <= 0)
+                    break;
+                received.insert(received.end(), buf, buf + n);
+            }
+        });
 
     // 发送分片 (RECORD_ONLY 模式)
     bool ok = TlsFragmenter::sendFragmentedClientHello(sv[0], ch, FragmentMode::RECORD_ONLY);
@@ -132,35 +134,29 @@ TEST(SingboxFeaturesTest, TlsSpoofBuildFakeClientHello)
 
 TEST(SingboxFeaturesTest, TlsSpoofFrameMethods)
 {
-    TcpEndpoints ep{
-        .srcIp = 0x7F000001, // 127.0.0.1
-        .srcPort = 12345,
-        .dstIp = 0x7F000001,
-        .dstPort = 443
-    };
+    TcpEndpoints ep{.srcIp = 0x7F000001, // 127.0.0.1
+                    .srcPort = 12345,
+                    .dstIp = 0x7F000001,
+                    .dstPort = 443};
 
     auto fakeHello = TlsSpoofer::buildFakeClientHello("whitelist.gov");
 
     // 1. WRONG_CHECKSUM
-    auto frameCksum = TlsSpoofer::buildSpoofFrame(
-        SpoofMethod::WRONG_CHECKSUM, ep, 1000, 2000, 50000, fakeHello);
+    auto frameCksum = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_CHECKSUM, ep, 1000, 2000, 50000, fakeHello);
     ASSERT_GT(frameCksum.size(), 40u);
     EXPECT_EQ(frameCksum[0], 0x45); // IPv4
     EXPECT_EQ(frameCksum[9], IPPROTO_TCP);
 
     // 2. WRONG_SEQUENCE
-    auto frameSeq = TlsSpoofer::buildSpoofFrame(
-        SpoofMethod::WRONG_SEQUENCE, ep, 1000, 2000, 50000, fakeHello);
+    auto frameSeq = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_SEQUENCE, ep, 1000, 2000, 50000, fakeHello);
     ASSERT_GT(frameSeq.size(), 40u);
 
     // 3. WRONG_TIMESTAMP
-    auto frameTs = TlsSpoofer::buildSpoofFrame(
-        SpoofMethod::WRONG_TIMESTAMP, ep, 1000, 2000, 50000, fakeHello);
+    auto frameTs = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_TIMESTAMP, ep, 1000, 2000, 50000, fakeHello);
     ASSERT_GT(frameTs.size(), 40u);
 
     // 4. WRONG_MD5
-    auto frameMd5 = TlsSpoofer::buildSpoofFrame(
-        SpoofMethod::WRONG_MD5, ep, 1000, 2000, 50000, fakeHello);
+    auto frameMd5 = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_MD5, ep, 1000, 2000, 50000, fakeHello);
     ASSERT_GT(frameMd5.size(), 40u);
 }
 
@@ -179,14 +175,10 @@ TEST(SingboxFeaturesTest, UotMagicAddressDetection)
 TEST(SingboxFeaturesTest, UotRequestEncodeDecodeRoundtrip)
 {
     // 1. IPv4 目标
-    UotRequest req4{
-        .isConnect = true,
-        .destination = {
-            .type = UotAddressType::IPV4,
-            .ipv4 = 0x08080808, // 8.8.8.8
-            .port = 53
-        }
-    };
+    UotRequest req4{.isConnect = true,
+                    .destination = {.type = UotAddressType::IPV4,
+                                    .ipv4 = 0x08080808, // 8.8.8.8
+                                    .port = 53}};
     auto enc4 = UotProtocol::encodeRequest(req4);
     auto dec4 = UotProtocol::decodeRequest(enc4);
     ASSERT_TRUE(dec4.has_value());
@@ -196,14 +188,8 @@ TEST(SingboxFeaturesTest, UotRequestEncodeDecodeRoundtrip)
     EXPECT_EQ(dec4->first.destination.port, 53);
 
     // 2. FQDN 目标
-    UotRequest reqDomain{
-        .isConnect = false,
-        .destination = {
-            .type = UotAddressType::FQDN,
-            .domain = "dns.google",
-            .port = 853
-        }
-    };
+    UotRequest reqDomain{.isConnect = false,
+                         .destination = {.type = UotAddressType::FQDN, .domain = "dns.google", .port = 853}};
     auto encDomain = UotProtocol::encodeRequest(reqDomain);
     auto decDomain = UotProtocol::decodeRequest(encDomain);
     ASSERT_TRUE(decDomain.has_value());
@@ -231,11 +217,9 @@ TEST(SingboxFeaturesTest, UotConnectedFrameEncodeDecode)
 
 TEST(SingboxFeaturesTest, UotPacketFrameEncodeDecode)
 {
-    UotEndpoint ep{
-        .type = UotAddressType::IPV4,
-        .ipv4 = 0x01010101, // 1.1.1.1
-        .port = 53
-    };
+    UotEndpoint ep{.type = UotAddressType::IPV4,
+                   .ipv4 = 0x01010101, // 1.1.1.1
+                   .port = 53};
     std::vector<uint8_t> dnsQuery = {0x12, 0x34, 0x01, 0x00, 0x00, 0x01};
 
     auto frame = UotProtocol::encodePacketFrame(ep, dnsQuery);
@@ -264,19 +248,19 @@ TEST(SingboxFeaturesTest, ParallelInterfaceDialerLocalEchoRace)
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sin.sin_port = 0; // 自动分配端口
-    ASSERT_EQ(::bind(listenFd, reinterpret_cast<sockaddr*>(&sin), sizeof(sin)), 0);
+    ASSERT_EQ(::bind(listenFd, reinterpret_cast<sockaddr *>(&sin), sizeof(sin)), 0);
     ASSERT_EQ(::listen(listenFd, 5), 0);
 
     socklen_t slen = sizeof(sin);
-    ASSERT_EQ(::getsockname(listenFd, reinterpret_cast<sockaddr*>(&sin), &slen), 0);
+    ASSERT_EQ(::getsockname(listenFd, reinterpret_cast<sockaddr *>(&sin), &slen), 0);
 
     // 启动多网卡赛马测试
     std::vector<std::string> primary = {""}; // 回环/默认接口
     std::vector<std::string> fallback = {""};
 
-    auto res = ParallelInterfaceDialer::dialParallelInterface(
-        sin, primary, fallback, InterfaceStrategy::HYBRID,
-        std::chrono::milliseconds(50), std::chrono::milliseconds(1000));
+    auto res =
+        ParallelInterfaceDialer::dialParallelInterface(sin, primary, fallback, InterfaceStrategy::HYBRID,
+                                                       std::chrono::milliseconds(50), std::chrono::milliseconds(1000));
 
     EXPECT_GE(res.winnerFd, 0);
 
@@ -284,8 +268,10 @@ TEST(SingboxFeaturesTest, ParallelInterfaceDialerLocalEchoRace)
     int clientFd = ::accept(listenFd, nullptr, nullptr);
     EXPECT_GE(clientFd, 0);
 
-    if (res.winnerFd >= 0) ::close(res.winnerFd);
-    if (clientFd >= 0) ::close(clientFd);
+    if (res.winnerFd >= 0)
+        ::close(res.winnerFd);
+    if (clientFd >= 0)
+        ::close(clientFd);
     ::close(listenFd);
 }
 
@@ -317,8 +303,8 @@ TEST(SingboxFeaturesTest, ProcessResolverCacheClear)
 TEST(SingboxFeaturesTest, CertPinnerSha256)
 {
     std::string testData = "Singbox Certificate Pinning Test Data";
-    auto digest = CertPinner::sha256(std::span<const uint8_t>(
-        reinterpret_cast<const uint8_t*>(testData.data()), testData.size()));
+    auto digest = CertPinner::sha256(
+        std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(testData.data()), testData.size()));
     ASSERT_EQ(digest.size(), 32u);
 
     // 空白白名单默认通过
@@ -331,7 +317,7 @@ TEST(SingboxFeaturesTest, CertPinnerSha256)
 
 TEST(SingboxFeaturesTest, KernelPortPoolSafeRangeAndAlloc)
 {
-    auto& pool = mynet::transparent::KernelPortPool::instance();
+    auto &pool = mynet::transparent::KernelPortPool::instance();
     auto safeRange = pool.safeRange();
 
     EXPECT_GE(safeRange.start, 1024u);
@@ -350,7 +336,7 @@ TEST(SingboxFeaturesTest, KernelPortPoolSafeRangeAndAlloc)
 
 TEST(SingboxFeaturesTest, EchReverseMapperResolution)
 {
-    auto& mapper = mynet::dns::EchReverseMapper::instance();
+    auto &mapper = mynet::dns::EchReverseMapper::instance();
     mapper.clear();
 
     const std::string realDomain = "chat.openai.com";
@@ -381,10 +367,11 @@ TEST(SingboxFeaturesTest, TcpPrefixInjection)
     int sv[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
 
-    struct DummyHandler {
+    struct DummyHandler
+    {
         void reset() noexcept {}
         void onMessageComplete() noexcept {}
-        void onParseError(const char*) noexcept {}
+        void onParseError(const char *) noexcept {}
     };
 
     DialerBase<DummyHandler> dialer;
@@ -421,7 +408,7 @@ TEST(SingboxFeaturesTest, TlsFragmenterUnsortedAndDuplicateOffsets)
     // 依然应当按单调递增合规切分，且首个与末尾分片头部完整
     ASSERT_GT(records.size(), 1);
     size_t reassembledPayloadLen = 0;
-    for (const auto& rec : records)
+    for (const auto &rec : records)
     {
         ASSERT_GE(rec.size(), 5);
         EXPECT_EQ(rec[0], 0x16); // ContentType Handshake
@@ -466,29 +453,34 @@ TEST(SingboxFeaturesTest, UvarintBoundaryAndOverflow)
 
     std::span<const uint8_t> stream(buf);
     auto [v0, n0] = mynet::uvarint::decode(stream);
-    EXPECT_EQ(v0, 0); EXPECT_EQ(n0, 1);
+    EXPECT_EQ(v0, 0);
+    EXPECT_EQ(n0, 1);
     stream = stream.subspan(n0);
 
     auto [v1, n1] = mynet::uvarint::decode(stream);
-    EXPECT_EQ(v1, 127); EXPECT_EQ(n1, 1);
+    EXPECT_EQ(v1, 127);
+    EXPECT_EQ(n1, 1);
     stream = stream.subspan(n1);
 
     auto [v2, n2] = mynet::uvarint::decode(stream);
-    EXPECT_EQ(v2, 128); EXPECT_EQ(n2, 2);
+    EXPECT_EQ(v2, 128);
+    EXPECT_EQ(n2, 2);
     stream = stream.subspan(n2);
 
     auto [v3, n3] = mynet::uvarint::decode(stream);
-    EXPECT_EQ(v3, 16384); EXPECT_EQ(n3, 3);
+    EXPECT_EQ(v3, 16384);
+    EXPECT_EQ(n3, 3);
     stream = stream.subspan(n3);
 
     auto [v4, n4] = mynet::uvarint::decode(stream);
-    EXPECT_EQ(v4, 0xFFFFFFFFFFFFFFFFULL); EXPECT_EQ(n4, 10);
+    EXPECT_EQ(v4, 0xFFFFFFFFFFFFFFFFULL);
+    EXPECT_EQ(n4, 10);
     stream = stream.subspan(n4);
 
     EXPECT_TRUE(stream.empty());
 
     // 溢出序列防御测试 (第10字节 > 1)
-    uint8_t overflowBuf[10] = {0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x7F};
+    uint8_t overflowBuf[10] = {0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7F};
     auto [vOverflow, nOverflow] = mynet::uvarint::decode(overflowBuf);
     EXPECT_EQ(nOverflow, 0); // 必须判定为溢出非法
 }
@@ -504,4 +496,3 @@ TEST(SingboxFeaturesTest, ChecksumParityAndZeroHandling)
     uint16_t udpCsum = mynet::rfcUdp4Checksum(0x7F000001, 0x7F000001, 1234, 5678, {});
     EXPECT_NE(udpCsum, 0);
 }
-

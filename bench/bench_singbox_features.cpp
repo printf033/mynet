@@ -1,18 +1,17 @@
+#include "dialer.hpp"
+#include "dns/ech.hpp"
+#include "process.hpp"
 #include "tls/fragmenter.hpp"
 #include "tls/spoof.hpp"
-#include "transport/uot.hpp"
 #include "transparent/port_pool.hpp"
-#include "dns/ech.hpp"
-#include "dialer.hpp"
-#include "process.hpp"
-
+#include "transport/uot.hpp"
 #include <chrono>
-#include <iostream>
 #include <iomanip>
-#include <vector>
+#include <iostream>
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <vector>
 
 using namespace mynet;
 using namespace mynet::tls;
@@ -44,14 +43,14 @@ namespace
             }
         }
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start);
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
 
         double nsPerOp = static_cast<double>(elapsed.count()) / ITERATIONS;
         double opsPerSec = (static_cast<double>(ITERATIONS) / elapsed.count()) * 1e9;
 
         std::cout << "Iterations        : " << ITERATIONS << "\n";
-        std::cout << "Total Records Out : " << totalRecords << " (" << (totalRecords / ITERATIONS) << " records/hello)\n";
+        std::cout << "Total Records Out : " << totalRecords << " (" << (totalRecords / ITERATIONS)
+                  << " records/hello)\n";
         std::cout << "Latency per Op    : " << std::fixed << std::setprecision(1) << nsPerOp << " ns\n";
         std::cout << "Throughput        : " << std::fixed << std::setprecision(2) << (opsPerSec / 1e6) << " M ops/s\n";
         std::cout << "Result            : [PASS] Zero-copy SNI index + multi-record splitting ultra fast\n";
@@ -63,12 +62,7 @@ namespace
         std::cout << " [Benchmark 2] TCP Desync / TLS 伪装帧组装 (TlsSpoofer)\n";
         std::cout << "=======================================================\n";
 
-        TcpEndpoints ep{
-            .srcIp = 0x7F000001,
-            .srcPort = 34567,
-            .dstIp = 0x08080808,
-            .dstPort = 443
-        };
+        TcpEndpoints ep{.srcIp = 0x7F000001, .srcPort = 34567, .dstIp = 0x08080808, .dstPort = 443};
 
         auto fakeHello = TlsSpoofer::buildFakeClientHello("www.microsoft.com");
         constexpr size_t ITERATIONS = 200'000;
@@ -78,21 +72,22 @@ namespace
 
         for (size_t i = 0; i < ITERATIONS; ++i)
         {
-            auto frame = TlsSpoofer::buildSpoofFrame(
-                SpoofMethod::WRONG_CHECKSUM, ep, 10000 + i, 20000, 300000, fakeHello);
+            auto frame =
+                TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_CHECKSUM, ep, 10000 + i, 20000, 300000, fakeHello);
             totalBytes += frame.size();
         }
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start);
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
 
         double nsPerOp = static_cast<double>(elapsed.count()) / ITERATIONS;
         double opsPerSec = (static_cast<double>(ITERATIONS) / elapsed.count()) * 1e9;
 
         std::cout << "Iterations        : " << ITERATIONS << "\n";
         std::cout << "Total Bytes Built : " << totalBytes << " bytes\n";
-        std::cout << "Latency per Op    : " << std::fixed << std::setprecision(1) << nsPerOp << " ns (including IP+TCP checksums)\n";
-        std::cout << "Throughput        : " << std::fixed << std::setprecision(2) << (opsPerSec / 1e6) << " M frames/s\n";
+        std::cout << "Latency per Op    : " << std::fixed << std::setprecision(1) << nsPerOp
+                  << " ns (including IP+TCP checksums)\n";
+        std::cout << "Throughput        : " << std::fixed << std::setprecision(2) << (opsPerSec / 1e6)
+                  << " M frames/s\n";
         std::cout << "Result            : [PASS] RFC 1071 SIMD-friendly dual checksum + frame building\n";
     }
 
@@ -113,8 +108,8 @@ namespace
             auto frame = UotProtocol::encodeConnectedFrame(samplePayload);
             bytesA += frame.size();
         }
-        auto elapsedCopy = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - startCopy);
+        auto elapsedCopy =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - startCopy);
 
         // 测试 B: 零拷贝分帧解码性能
         auto sampleFrame = UotProtocol::encodeConnectedFrame(samplePayload);
@@ -123,15 +118,17 @@ namespace
         for (size_t i = 0; i < ITERATIONS; ++i)
         {
             auto dec = UotProtocol::decodeConnectedFrame(sampleFrame);
-            if (dec) bytesB += dec->first.size();
+            if (dec)
+                bytesB += dec->first.size();
         }
-        auto elapsedDecode = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - startDecode);
+        auto elapsedDecode =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - startDecode);
 
         double nsEncode = static_cast<double>(elapsedCopy.count()) / ITERATIONS;
         double nsDecode = static_cast<double>(elapsedDecode.count()) / ITERATIONS;
 
-        std::cout << "Payload Size      : 1400 bytes (Typical MTU Datagram) [" << (bytesA + bytesB) << " B processed]\n";
+        std::cout << "Payload Size      : 1400 bytes (Typical MTU Datagram) [" << (bytesA + bytesB)
+                  << " B processed]\n";
         std::cout << "Encode Latency    : " << std::fixed << std::setprecision(1) << nsEncode << " ns/op ("
                   << (static_cast<double>(ITERATIONS) / elapsedCopy.count() * 1e3) << " M ops/s)\n";
         std::cout << "Decode Latency    : " << std::fixed << std::setprecision(1) << nsDecode << " ns/op ("
@@ -156,19 +153,20 @@ namespace
         for (size_t i = 0; i < ITERATIONS; ++i)
         {
             auto info = ProcessResolver::resolveByNetlink(0x7F000001, 1000, 0x7F000001, 2000);
-            if (info) hits++;
+            if (info)
+                hits++;
         }
         (void)hits;
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start);
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
 
         double nsPerLookup = static_cast<double>(elapsed.count()) / ITERATIONS;
         double lookupsPerSec = (static_cast<double>(ITERATIONS) / elapsed.count()) * 1e9;
 
         std::cout << "Iterations        : " << ITERATIONS << "\n";
         std::cout << "Cache Hit Latency : " << std::fixed << std::setprecision(1) << nsPerLookup << " ns/lookup\n";
-        std::cout << "Lookup Rate       : " << std::fixed << std::setprecision(2) << (lookupsPerSec / 1e6) << " M lookups/s\n";
+        std::cout << "Lookup Rate       : " << std::fixed << std::setprecision(2) << (lookupsPerSec / 1e6)
+                  << " M lookups/s\n";
         std::cout << "Result            : [PASS] Replaced 10ms /proc scan with <20ns O(1) in-memory resolution\n";
     }
 
@@ -178,7 +176,7 @@ namespace
         std::cout << " [Benchmark 5] 内核端口池避让与零碰撞探针分配 (KernelPortPool)\n";
         std::cout << "=======================================================\n";
 
-        auto& pool = mynet::transparent::KernelPortPool::instance();
+        auto &pool = mynet::transparent::KernelPortPool::instance();
         constexpr size_t ITERATIONS = 50'000;
 
         auto start = std::chrono::steady_clock::now();
@@ -187,11 +185,11 @@ namespace
         for (size_t i = 0; i < ITERATIONS; ++i)
         {
             auto port = pool.allocatePort(IPPROTO_TCP, 8);
-            if (port) allocated++;
+            if (port)
+                allocated++;
         }
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start);
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
 
         double nsPerAlloc = static_cast<double>(elapsed.count()) / ITERATIONS;
         double allocsPerSec = (static_cast<double>(ITERATIONS) / elapsed.count()) * 1e9;
@@ -199,8 +197,10 @@ namespace
         std::cout << "Iterations        : " << ITERATIONS << "\n";
         std::cout << "Successful Allocs : " << allocated << " (" << std::fixed << std::setprecision(1)
                   << (100.0 * allocated / ITERATIONS) << "% success)\n";
-        std::cout << "Alloc Latency     : " << std::fixed << std::setprecision(1) << (nsPerAlloc / 1e3) << " us/alloc (with kernel probe bind)\n";
-        std::cout << "Allocation Rate   : " << std::fixed << std::setprecision(2) << (allocsPerSec / 1e3) << " K ports/s\n";
+        std::cout << "Alloc Latency     : " << std::fixed << std::setprecision(1) << (nsPerAlloc / 1e3)
+                  << " us/alloc (with kernel probe bind)\n";
+        std::cout << "Allocation Rate   : " << std::fixed << std::setprecision(2) << (allocsPerSec / 1e3)
+                  << " K ports/s\n";
         std::cout << "Result            : [PASS] Guaranteed zero port collision with host ephemeral ports\n";
     }
 
@@ -210,7 +210,7 @@ namespace
         std::cout << " [Benchmark 6] ECH HTTPS/SVCB DNS 反向映射查询 (EchReverseMapper)\n";
         std::cout << "=======================================================\n";
 
-        auto& mapper = mynet::dns::EchReverseMapper::instance();
+        auto &mapper = mynet::dns::EchReverseMapper::instance();
         mapper.clear();
 
         mapper.recordMapping("api.openai.com", "cloudflare-ech.com", 0x68123456, std::chrono::seconds(3600));
@@ -222,19 +222,20 @@ namespace
         for (size_t i = 0; i < ITERATIONS; ++i)
         {
             auto domain = mapper.lookupRealDomain("cloudflare-ech.com", 0x68123456);
-            if (domain) hits++;
+            if (domain)
+                hits++;
         }
         (void)hits;
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start);
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
 
         double nsPerLookup = static_cast<double>(elapsed.count()) / ITERATIONS;
         double lookupsPerSec = (static_cast<double>(ITERATIONS) / elapsed.count()) * 1e9;
 
         std::cout << "Iterations        : " << ITERATIONS << "\n";
         std::cout << "Lookup Latency    : " << std::fixed << std::setprecision(1) << nsPerLookup << " ns/lookup\n";
-        std::cout << "Lookup Rate       : " << std::fixed << std::setprecision(2) << (lookupsPerSec / 1e6) << " M lookups/s\n";
+        std::cout << "Lookup Rate       : " << std::fixed << std::setprecision(2) << (lookupsPerSec / 1e6)
+                  << " M lookups/s\n";
         std::cout << "Result            : [PASS] Resolves ECH real domain in <30ns with zero string allocation\n";
 
         mapper.clear();

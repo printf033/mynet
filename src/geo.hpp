@@ -40,10 +40,7 @@ namespace mynet
             uint32_t net;
             uint32_t mask;
 
-            [[nodiscard]] constexpr bool matches(uint32_t ip) const noexcept
-            {
-                return (ip & mask) == net;
-            }
+            [[nodiscard]] constexpr bool matches(uint32_t ip) const noexcept { return (ip & mask) == net; }
         };
 
     private:
@@ -51,10 +48,7 @@ namespace mynet
         std::unordered_map<std::string, std::vector<CidrBlock>> countryCidrs_{};
 
     public:
-        GeoIpMatcher() noexcept
-        {
-            initDefaults();
-        }
+        GeoIpMatcher() noexcept { initDefaults(); }
 
         [[nodiscard]] static GeoIpMatcher &instance() noexcept
         {
@@ -69,7 +63,8 @@ namespace mynet
             std::transform(c.begin(), c.end(), c.begin(), ::tolower);
 
             auto parsed = handler::IpCidr::parse(cidrStr);
-            if (!parsed) return;
+            if (!parsed)
+                return;
 
             countryCidrs_[c].push_back({.net = ntohl(parsed->networkBe), .mask = ntohl(parsed->maskBe)});
         }
@@ -77,13 +72,16 @@ namespace mynet
         bool loadFromFile(const std::string &filePath, std::string_view country)
         {
             std::ifstream file(filePath);
-            if (!file.is_open()) return false;
+            if (!file.is_open())
+                return false;
             std::string line;
             while (std::getline(file, line))
             {
                 size_t start = line.find_first_not_of(" \t\r\n");
-                if (start == std::string::npos) continue;
-                if (line[start] == '#' || line[start] == ';') continue;
+                if (start == std::string::npos)
+                    continue;
+                if (line[start] == '#' || line[start] == ';')
+                    continue;
                 size_t end = line.find_last_not_of(" \t\r\n");
                 std::string_view trimmed = std::string_view(line).substr(start, end - start + 1);
                 addCidr(country, trimmed);
@@ -107,10 +105,7 @@ namespace mynet
             }
         }
 
-        [[nodiscard]] bool isPrivate(in_addr ip) const noexcept
-        {
-            return handler::isPrivateAddress(ip);
-        }
+        [[nodiscard]] bool isPrivate(in_addr ip) const noexcept { return handler::isPrivateAddress(ip); }
 
         [[nodiscard]] bool matches(in_addr ip, std::string_view country) const noexcept
         {
@@ -124,12 +119,14 @@ namespace mynet
 
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = countryCidrs_.find(c);
-            if (it == countryCidrs_.end()) return false;
+            if (it == countryCidrs_.end())
+                return false;
 
             const uint32_t h = ntohl(ip.s_addr);
             for (const auto &block : it->second)
             {
-                if (block.matches(h)) return true;
+                if (block.matches(h))
+                    return true;
             }
             return false;
         }
@@ -139,18 +136,13 @@ namespace mynet
         {
             // 内置主要 CN 网段
             static constexpr const char *kCnCidrs[] = {
-                "1.0.1.0/24", "1.0.2.0/23", "1.0.8.0/21", "1.0.32.0/19",
-                "14.0.0.0/8", "27.0.0.0/8", "36.0.0.0/8", "39.0.0.0/8",
-                "42.0.0.0/8", "49.0.0.0/8", "58.0.0.0/8", "59.0.0.0/8",
-                "60.0.0.0/8", "61.0.0.0/8", "101.0.0.0/8", "103.0.0.0/8",
-                "106.0.0.0/8", "110.0.0.0/8", "111.0.0.0/8", "112.0.0.0/8",
-                "113.0.0.0/8", "114.0.0.0/8", "115.0.0.0/8", "116.0.0.0/8",
-                "117.0.0.0/8", "118.0.0.0/8", "119.0.0.0/8", "120.0.0.0/8",
-                "121.0.0.0/8", "122.0.0.0/8", "123.0.0.0/8", "124.0.0.0/8",
-                "125.0.0.0/8", "175.0.0.0/8", "180.0.0.0/8", "182.0.0.0/8",
-                "183.0.0.0/8", "218.0.0.0/8", "219.0.0.0/8", "220.0.0.0/8",
-                "221.0.0.0/8", "222.0.0.0/8", "223.0.0.0/8"
-            };
+                "1.0.1.0/24",  "1.0.2.0/23",  "1.0.8.0/21",  "1.0.32.0/19", "14.0.0.0/8",  "27.0.0.0/8",  "36.0.0.0/8",
+                "39.0.0.0/8",  "42.0.0.0/8",  "49.0.0.0/8",  "58.0.0.0/8",  "59.0.0.0/8",  "60.0.0.0/8",  "61.0.0.0/8",
+                "101.0.0.0/8", "103.0.0.0/8", "106.0.0.0/8", "110.0.0.0/8", "111.0.0.0/8", "112.0.0.0/8", "113.0.0.0/8",
+                "114.0.0.0/8", "115.0.0.0/8", "116.0.0.0/8", "117.0.0.0/8", "118.0.0.0/8", "119.0.0.0/8", "120.0.0.0/8",
+                "121.0.0.0/8", "122.0.0.0/8", "123.0.0.0/8", "124.0.0.0/8", "125.0.0.0/8", "175.0.0.0/8", "180.0.0.0/8",
+                "182.0.0.0/8", "183.0.0.0/8", "218.0.0.0/8", "219.0.0.0/8", "220.0.0.0/8", "221.0.0.0/8", "222.0.0.0/8",
+                "223.0.0.0/8"};
             for (const auto *cidr : kCnCidrs)
             {
                 addCidr("cn", cidr);
@@ -169,10 +161,7 @@ namespace mynet
         std::unordered_map<std::string, std::vector<std::string>> suffixDomains_{};
 
     public:
-        GeoSiteMatcher() noexcept
-        {
-            initDefaults();
-        }
+        GeoSiteMatcher() noexcept { initDefaults(); }
 
         [[nodiscard]] static GeoSiteMatcher &instance() noexcept
         {
@@ -203,13 +192,16 @@ namespace mynet
         bool loadFromFile(const std::string &filePath, std::string_view category)
         {
             std::ifstream file(filePath);
-            if (!file.is_open()) return false;
+            if (!file.is_open())
+                return false;
             std::string line;
             while (std::getline(file, line))
             {
                 size_t start = line.find_first_not_of(" \t\r\n");
-                if (start == std::string::npos) continue;
-                if (line[start] == '#' || line[start] == ';') continue;
+                if (start == std::string::npos)
+                    continue;
+                if (line[start] == '#' || line[start] == ';')
+                    continue;
                 size_t end = line.find_last_not_of(" \t\r\n");
                 std::string_view trimmed = std::string_view(line).substr(start, end - start + 1);
                 if (trimmed.starts_with("domain:") || trimmed.starts_with("full:"))
@@ -230,7 +222,8 @@ namespace mynet
 
         [[nodiscard]] bool matches(std::string_view domain, std::string_view category) const noexcept
         {
-            if (domain.empty()) return false;
+            if (domain.empty())
+                return false;
 
             std::string cat(category);
             std::transform(cat.begin(), cat.end(), cat.begin(), ::tolower);
@@ -241,7 +234,8 @@ namespace mynet
             // 若匹配 cn 分类，且域名直接以 .cn 结尾
             if (cat == "cn")
             {
-                if (dom.ends_with(".cn")) return true;
+                if (dom.ends_with(".cn"))
+                    return true;
             }
 
             std::lock_guard<std::mutex> lock(mutex_);
@@ -249,7 +243,8 @@ namespace mynet
             // 精确域名匹配
             if (auto it = exactDomains_.find(cat); it != exactDomains_.end())
             {
-                if (it->second.contains(dom)) return true;
+                if (it->second.contains(dom))
+                    return true;
             }
 
             // 后缀匹配
@@ -257,10 +252,12 @@ namespace mynet
             {
                 for (const auto &suf : it->second)
                 {
-                    if (dom == suf) return true;
+                    if (dom == suf)
+                        return true;
                     if (dom.size() > suf.size() && dom.ends_with(suf))
                     {
-                        if (dom[dom.size() - suf.size() - 1] == '.') return true;
+                        if (dom[dom.size() - suf.size() - 1] == '.')
+                            return true;
                     }
                 }
             }
@@ -273,48 +270,46 @@ namespace mynet
         {
             // 1. 中国主流域名
             static constexpr const char *kCnSuffixes[] = {
-                "baidu.com", "qq.com", "tencent.com", "taobao.com", "tmall.com",
-                "alipay.com", "aliyun.com", "jd.com", "weibo.com", "bilibili.com",
-                "zhihu.com", "163.com", "126.net", "sohu.com", "sina.com.cn",
-                "bytedance.com", "douyin.com", "xiaomi.com", "meituan.com",
-                "kuaishou.com", "csdn.net", "gitee.com", "douyu.com", "huya.com",
-                "ctrip.com", "pinduoduo.com", "dingtalk.com", "feishu.cn",
-                "youku.com", "iqiyi.com", "netease.com", "ximalaya.com"
-            };
-            for (const auto *s : kCnSuffixes) addDomainSuffix("cn", s);
+                "baidu.com",   "qq.com",        "tencent.com",  "taobao.com",    "tmall.com",  "alipay.com",
+                "aliyun.com",  "jd.com",        "weibo.com",    "bilibili.com",  "zhihu.com",  "163.com",
+                "126.net",     "sohu.com",      "sina.com.cn",  "bytedance.com", "douyin.com", "xiaomi.com",
+                "meituan.com", "kuaishou.com",  "csdn.net",     "gitee.com",     "douyu.com",  "huya.com",
+                "ctrip.com",   "pinduoduo.com", "dingtalk.com", "feishu.cn",     "youku.com",  "iqiyi.com",
+                "netease.com", "ximalaya.com"};
+            for (const auto *s : kCnSuffixes)
+                addDomainSuffix("cn", s);
 
             // 2. 常见广告/追踪服务
             static constexpr const char *kAdSuffixes[] = {
-                "doubleclick.net", "googleadservices.com", "adservice.google.com",
-                "adservice.com", "applovin.com", "unityads", "crashlytics.com",
-                "bugly.qq.com", "umeng.com", "flurry.com", "admob.com", "adcolony.com"
-            };
-            for (const auto *s : kAdSuffixes) addDomainSuffix("category-ads-all", s);
+                "doubleclick.net", "googleadservices.com", "adservice.google.com", "adservice.com", "applovin.com",
+                "unityads",        "crashlytics.com",      "bugly.qq.com",         "umeng.com",     "flurry.com",
+                "admob.com",       "adcolony.com"};
+            for (const auto *s : kAdSuffixes)
+                addDomainSuffix("category-ads-all", s);
 
             // 3. Google
-            static constexpr const char *kGoogleSuffixes[] = {
-                "google.com", "youtube.com", "gmail.com", "android.com",
-                "gstatic.com", "googlevideo.com", "googleapis.com", "golang.org"
-            };
-            for (const auto *s : kGoogleSuffixes) addDomainSuffix("google", s);
+            static constexpr const char *kGoogleSuffixes[] = {"google.com",     "youtube.com", "gmail.com",
+                                                              "android.com",    "gstatic.com", "googlevideo.com",
+                                                              "googleapis.com", "golang.org"};
+            for (const auto *s : kGoogleSuffixes)
+                addDomainSuffix("google", s);
 
             // 4. GitHub
-            static constexpr const char *kGithubSuffixes[] = {
-                "github.com", "githubassets.com", "githubusercontent.com", "ghcr.io"
-            };
-            for (const auto *s : kGithubSuffixes) addDomainSuffix("github", s);
+            static constexpr const char *kGithubSuffixes[] = {"github.com", "githubassets.com", "githubusercontent.com",
+                                                              "ghcr.io"};
+            for (const auto *s : kGithubSuffixes)
+                addDomainSuffix("github", s);
 
             // 5. Telegram
-            static constexpr const char *kTelegramSuffixes[] = {
-                "t.me", "telegram.org", "telegram.me", "telegra.ph"
-            };
-            for (const auto *s : kTelegramSuffixes) addDomainSuffix("telegram", s);
+            static constexpr const char *kTelegramSuffixes[] = {"t.me", "telegram.org", "telegram.me", "telegra.ph"};
+            for (const auto *s : kTelegramSuffixes)
+                addDomainSuffix("telegram", s);
 
             // 6. Netflix
-            static constexpr const char *kNetflixSuffixes[] = {
-                "netflix.com", "nflxvideo.net", "nflxext.com", "nflximg.net", "netflix.net"
-            };
-            for (const auto *s : kNetflixSuffixes) addDomainSuffix("netflix", s);
+            static constexpr const char *kNetflixSuffixes[] = {"netflix.com", "nflxvideo.net", "nflxext.com",
+                                                               "nflximg.net", "netflix.net"};
+            for (const auto *s : kNetflixSuffixes)
+                addDomainSuffix("netflix", s);
         }
     };
 

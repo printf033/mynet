@@ -6,7 +6,6 @@
  */
 
 #include "../address.hpp"
-#include "../crypto.hpp"
 #include "../inbound.hpp"
 #include "../outbound.hpp"
 #include <cstdint>
@@ -59,10 +58,7 @@ namespace mynet::handler
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
         void setAutoReply(bool autoReply) noexcept { autoReplyOk_ = autoReply; }
 
-        void reset() noexcept override
-        {
-            HandlerInboundConnection::reset();
-        }
+        void reset() noexcept override { HandlerInboundConnection::reset(); }
 
         void handle() override
         {

@@ -9,10 +9,11 @@
  * http::v3::HandlerHttp3 的用法保持一致。
  */
 
+#include "../common.hpp"
+#include "config/log.hpp"
 #include "connection.hpp"
 #include "frame.hpp"
 #include "hpack.hpp"
-#include "config/log.hpp"
 #include "objectPool.hpp"
 #include "requestBuffer.hpp"
 #include "streamTable.hpp"
@@ -102,10 +103,11 @@ namespace mynet
 
         HandlerHttp2() noexcept = default;
         ~HandlerHttp2() noexcept override = default;
-        HandlerHttp2(const HandlerHttp2 &) = delete; // an http2 handler owns the stream table and the frames bound to it
+        HandlerHttp2(const HandlerHttp2 &) =
+            delete; // an http2 handler owns the stream table and the frames bound to it
         HandlerHttp2 &
         operator=(const HandlerHttp2 &) = delete; // an http2 handler owns the stream table and the frames bound to it
-        HandlerHttp2(HandlerHttp2 &&) = delete; // an http2 handler owns the stream table and the frames bound to it
+        HandlerHttp2(HandlerHttp2 &&) = delete;   // an http2 handler owns the stream table and the frames bound to it
         HandlerHttp2 &
         operator=(HandlerHttp2 &&) = delete; // an http2 handler owns the stream table and the frames bound to it
 

@@ -10,10 +10,10 @@
 
 #include "../connection.hpp"
 #include "../datagram.hpp"
-#include "cache.hpp"
-#include "dns.hpp"
 #include "../inbound.hpp"
 #include "../outbound.hpp"
+#include "cache.hpp"
+#include "dns.hpp"
 #include <functional>
 #include <optional>
 #include <span>
@@ -48,10 +48,7 @@ namespace mynet::handler
         /**
          * @brief 设置自定义 DNS 查询应答处理器（服务端场景）
          */
-        void setResponder(QueryResponder responder) noexcept
-        {
-            responder_ = std::move(responder);
-        }
+        void setResponder(QueryResponder responder) noexcept { responder_ = std::move(responder); }
 
         [[nodiscard]] const std::optional<dns::DnsMessage> &lastQuery() const noexcept { return lastQuery_; }
         [[nodiscard]] const std::optional<dns::DnsMessage> &lastResponse() const noexcept { return lastResponse_; }
@@ -157,15 +154,9 @@ namespace mynet::handler
         HandlerInboundDatagramDns() noexcept = default;
         ~HandlerInboundDatagramDns() noexcept override = default;
 
-        void setResponder(QueryResponder responder) noexcept
-        {
-            responder_ = std::move(responder);
-        }
+        void setResponder(QueryResponder responder) noexcept { responder_ = std::move(responder); }
 
-        void reset() noexcept override
-        {
-            HandlerInboundDatagram::reset();
-        }
+        void reset() noexcept override { HandlerInboundDatagram::reset(); }
 
         /**
          * @brief 数据报入站事件
@@ -251,8 +242,8 @@ namespace mynet::handler
                 frame.push_back(static_cast<uint8_t>(queryBytes.size() & 0xFF));
                 frame.insert(frame.end(), queryBytes.begin(), queryBytes.end());
 
-                [[maybe_unused]] auto _ = pushResponse(
-                    std::string_view(reinterpret_cast<const char *>(frame.data()), frame.size()));
+                [[maybe_unused]] auto _ =
+                    pushResponse(std::string_view(reinterpret_cast<const char *>(frame.data()), frame.size()));
                 querySent_ = true;
                 stage_ = OutboundStage::CONNECTING;
             }

@@ -17,21 +17,21 @@
  * 5. WRONG_MD5 (非法 MD5 签名选项)：触发内核 RFC 2385 签名校验失败丢弃。
  */
 
+#include "../checksum.hpp"
+#include <arpa/inet.h>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <optional>
 #include <span>
-#include <vector>
 #include <string>
 #include <string_view>
-#include <optional>
-#include <chrono>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include "../checksum.hpp"
+#include <vector>
 
 #ifndef TCP_REPAIR
 #define TCP_REPAIR 19
@@ -54,19 +54,19 @@ namespace mynet::tls
 
     enum class SpoofMethod : uint8_t
     {
-        WRONG_CHECKSUM = 0,     ///< 校验和反转 (DPI 旁路放行，服务端校验和错误丢弃)
-        WRONG_SEQUENCE = 1,     ///< 过期序列号 (DPI 解析，服务端因过时包丢弃)
-        WRONG_ACK = 2,          ///< 非法 ACK (服务端丢弃)
-        WRONG_TIMESTAMP = 3,    ///< PAWS 时间戳倒退 (服务端因 PAWS 机制静默丢弃)
-        WRONG_MD5 = 4           ///< 注入非法 TCP MD5 签名 (RFC 2385)
+        WRONG_CHECKSUM = 0,  ///< 校验和反转 (DPI 旁路放行，服务端校验和错误丢弃)
+        WRONG_SEQUENCE = 1,  ///< 过期序列号 (DPI 解析，服务端因过时包丢弃)
+        WRONG_ACK = 2,       ///< 非法 ACK (服务端丢弃)
+        WRONG_TIMESTAMP = 3, ///< PAWS 时间戳倒退 (服务端因 PAWS 机制静默丢弃)
+        WRONG_MD5 = 4        ///< 注入非法 TCP MD5 签名 (RFC 2385)
     };
 
     struct TcpEndpoints
     {
-        uint32_t srcIp{0};      ///< 主机字节序 IPv4
-        uint16_t srcPort{0};    ///< 主机字节序
-        uint32_t dstIp{0};      ///< 主机字节序 IPv4
-        uint16_t dstPort{0};    ///< 主机字节序
+        uint32_t srcIp{0};   ///< 主机字节序 IPv4
+        uint16_t srcPort{0}; ///< 主机字节序
+        uint32_t dstIp{0};   ///< 主机字节序 IPv4
+        uint16_t dstPort{0}; ///< 主机字节序
     };
 
     struct SpoofPacketInfo
@@ -95,9 +95,8 @@ namespace mynet::tls
         /**
          * @brief 构建 IPv4 伪首部并计算 TCP 报文校验和
          */
-        [[nodiscard]] static uint16_t calculateTcpChecksum(
-            uint32_t srcIp, uint32_t dstIp,
-            std::span<const uint8_t> tcpHeaderAndPayload) noexcept
+        [[nodiscard]] static uint16_t calculateTcpChecksum(uint32_t srcIp, uint32_t dstIp,
+                                                           std::span<const uint8_t> tcpHeaderAndPayload) noexcept
         {
             uint32_t sum = 0;
             // 伪头部: 源IP (4B) + 目的IP (4B) + 零/协议号 (2B) + TCP长度 (2B)
@@ -116,7 +115,8 @@ namespace mynet::tls
          */
         [[nodiscard]] static std::vector<uint8_t> buildFakeClientHello(std::string_view fakeSni) noexcept
         {
-            if (fakeSni.empty()) fakeSni = "www.microsoft.com";
+            if (fakeSni.empty())
+                fakeSni = "www.microsoft.com";
 
             // 构造一个标准 TLS 1.2/1.3 ClientHello 框架
             std::vector<uint8_t> ch;
@@ -129,21 +129,28 @@ namespace mynet::tls
             // Handshake 头部: Type=1 (ClientHello), Length (3 bytes)
             ch.push_back(0x01);
             size_t hsLenOffset = ch.size();
-            ch.push_back(0x00); ch.push_back(0x00); ch.push_back(0x00); // 占位
+            ch.push_back(0x00);
+            ch.push_back(0x00);
+            ch.push_back(0x00); // 占位
 
             // Client Version: TLS 1.2 (0x0303)
-            ch.push_back(0x03); ch.push_back(0x03);
+            ch.push_back(0x03);
+            ch.push_back(0x03);
 
             // Random: 32 bytes
-            for (size_t i = 0; i < 32; ++i) ch.push_back(static_cast<uint8_t>(0xAA + (i % 7)));
+            for (size_t i = 0; i < 32; ++i)
+                ch.push_back(static_cast<uint8_t>(0xAA + (i % 7)));
 
             // Session ID: 0 (len=0)
             ch.push_back(0x00);
 
             // Cipher Suites (2 suites: TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256)
-            ch.push_back(0x00); ch.push_back(0x04);
-            ch.push_back(0x13); ch.push_back(0x01);
-            ch.push_back(0x13); ch.push_back(0x03);
+            ch.push_back(0x00);
+            ch.push_back(0x04);
+            ch.push_back(0x13);
+            ch.push_back(0x01);
+            ch.push_back(0x13);
+            ch.push_back(0x03);
 
             // Compression Methods: 1 (null=0)
             ch.push_back(0x01);
@@ -151,11 +158,13 @@ namespace mynet::tls
 
             // Extensions
             size_t extLenOffset = ch.size();
-            ch.push_back(0x00); ch.push_back(0x00); // extensions total len 占位
+            ch.push_back(0x00);
+            ch.push_back(0x00); // extensions total len 占位
             size_t extStart = ch.size();
 
             // SNI Extension: Type=0x0000
-            ch.push_back(0x00); ch.push_back(0x00);
+            ch.push_back(0x00);
+            ch.push_back(0x00);
             const uint16_t sniExtLen = static_cast<uint16_t>(5 + fakeSni.size());
             ch.push_back(static_cast<uint8_t>((sniExtLen >> 8) & 0xFF));
             ch.push_back(static_cast<uint8_t>(sniExtLen & 0xFF));
@@ -192,19 +201,11 @@ namespace mynet::tls
         /**
          * @brief 解析欺骗参数并生成对应欺骗策略的报文信息
          */
-        [[nodiscard]] static SpoofPacketInfo resolveSpoofPacketInfo(
-            SpoofMethod method,
-            uint32_t sendNext,
-            uint32_t receiveNext,
-            uint32_t timestamp,
-            size_t payloadLen) noexcept
+        [[nodiscard]] static SpoofPacketInfo resolveSpoofPacketInfo(SpoofMethod method, uint32_t sendNext,
+                                                                    uint32_t receiveNext, uint32_t timestamp,
+                                                                    size_t payloadLen) noexcept
         {
-            SpoofPacketInfo info{
-                .seqNum = sendNext,
-                .ackNum = receiveNext,
-                .corruptChecksum = false,
-                .tcpOptions = {}
-            };
+            SpoofPacketInfo info{.seqNum = sendNext, .ackNum = receiveNext, .corruptChecksum = false, .tcpOptions = {}};
 
             switch (method)
             {
@@ -234,8 +235,10 @@ namespace mynet::tls
                 info.tcpOptions[6] = static_cast<uint8_t>((spoofedTs >> 8) & 0xFF);
                 info.tcpOptions[7] = static_cast<uint8_t>(spoofedTs & 0xFF);
                 // TSEcr (Echo 0)
-                info.tcpOptions[8] = 0; info.tcpOptions[9] = 0;
-                info.tcpOptions[10] = 0; info.tcpOptions[11] = 0;
+                info.tcpOptions[8] = 0;
+                info.tcpOptions[9] = 0;
+                info.tcpOptions[10] = 0;
+                info.tcpOptions[11] = 0;
                 break;
             }
             case SpoofMethod::WRONG_MD5:
@@ -246,7 +249,8 @@ namespace mynet::tls
                 info.tcpOptions[1] = 0x01; // NOP
                 info.tcpOptions[2] = 19;   // Kind = 19 (MD5 Signature)
                 info.tcpOptions[3] = 18;   // Length = 18
-                for (size_t i = 4; i < 20; ++i) info.tcpOptions[i] = static_cast<uint8_t>(0xDE + i);
+                for (size_t i = 4; i < 20; ++i)
+                    info.tcpOptions[i] = static_cast<uint8_t>(0xDE + i);
                 break;
             }
             }
@@ -256,13 +260,10 @@ namespace mynet::tls
         /**
          * @brief 组装完整的 IPv4 + TCP 欺骗数据帧 (可以直接注入 SOCK_RAW)
          */
-        [[nodiscard]] static std::vector<uint8_t> buildSpoofFrame(
-            SpoofMethod method,
-            const TcpEndpoints& endpoints,
-            uint32_t sendNext,
-            uint32_t receiveNext,
-            uint32_t timestamp,
-            std::span<const uint8_t> payload) noexcept
+        [[nodiscard]] static std::vector<uint8_t> buildSpoofFrame(SpoofMethod method, const TcpEndpoints &endpoints,
+                                                                  uint32_t sendNext, uint32_t receiveNext,
+                                                                  uint32_t timestamp,
+                                                                  std::span<const uint8_t> payload) noexcept
         {
             auto packetInfo = resolveSpoofPacketInfo(method, sendNext, receiveNext, timestamp, payload.size());
 
@@ -277,11 +278,14 @@ namespace mynet::tls
             frame[1] = 0x00; // TOS
             frame[2] = static_cast<uint8_t>((totalLen >> 8) & 0xFF);
             frame[3] = static_cast<uint8_t>(totalLen & 0xFF);
-            frame[4] = 0x00; frame[5] = 0x00; // ID
-            frame[6] = 0x40; frame[7] = 0x00; // DF flag
+            frame[4] = 0x00;
+            frame[5] = 0x00; // ID
+            frame[6] = 0x40;
+            frame[7] = 0x00; // DF flag
             frame[8] = DEFAULT_TTL;
             frame[9] = IPPROTO_TCP;
-            frame[10] = 0x00; frame[11] = 0x00; // Checksum 占位
+            frame[10] = 0x00;
+            frame[11] = 0x00; // Checksum 占位
 
             // 源 IP
             frame[12] = static_cast<uint8_t>((endpoints.srcIp >> 24) & 0xFF);
@@ -301,7 +305,7 @@ namespace mynet::tls
             frame[11] = static_cast<uint8_t>(ipCksum & 0xFF);
 
             // 2. 构建 TCP 首部
-            uint8_t* tcp = frame.data() + ipHeaderLen;
+            uint8_t *tcp = frame.data() + ipHeaderLen;
             tcp[0] = static_cast<uint8_t>((endpoints.srcPort >> 8) & 0xFF);
             tcp[1] = static_cast<uint8_t>(endpoints.srcPort & 0xFF);
             tcp[2] = static_cast<uint8_t>((endpoints.dstPort >> 8) & 0xFF);
@@ -329,9 +333,11 @@ namespace mynet::tls
             tcp[15] = static_cast<uint8_t>(DEFAULT_WINDOW_SIZE & 0xFF);
 
             // Checksum 占位
-            tcp[16] = 0; tcp[17] = 0;
+            tcp[16] = 0;
+            tcp[17] = 0;
             // Urgent Pointer
-            tcp[18] = 0; tcp[19] = 0;
+            tcp[18] = 0;
+            tcp[19] = 0;
 
             // 写入 TCP Options
             if (!packetInfo.tcpOptions.empty())
@@ -369,7 +375,7 @@ namespace mynet::tls
          * @param outRecvNext 输出期望接收的序列号
          * @return 是否成功读取
          */
-        static bool loadSequenceNumbers(int tcpFd, uint32_t& outSendNext, uint32_t& outRecvNext) noexcept
+        static bool loadSequenceNumbers(int tcpFd, uint32_t &outSendNext, uint32_t &outRecvNext) noexcept
         {
 #if defined(__linux__)
             int on = 1;
@@ -405,7 +411,9 @@ namespace mynet::tls
             ::setsockopt(tcpFd, IPPROTO_TCP, TCP_REPAIR, &off, sizeof(off));
             return ok;
 #else
-            (void)tcpFd; (void)outSendNext; (void)outRecvNext;
+            (void)tcpFd;
+            (void)outSendNext;
+            (void)outRecvNext;
             return false;
 #endif
         }
@@ -413,22 +421,18 @@ namespace mynet::tls
         /**
          * @brief 向指定连接注入伪造的 ClientHello 帧 (TCP Desync)
          */
-        static bool injectSpoof(
-            int rawFd,
-            SpoofMethod method,
-            const TcpEndpoints& endpoints,
-            uint32_t sendNext,
-            uint32_t receiveNext,
-            std::string_view fakeSni = "www.microsoft.com",
-            uint32_t timestamp = 0) noexcept
+        static bool injectSpoof(int rawFd, SpoofMethod method, const TcpEndpoints &endpoints, uint32_t sendNext,
+                                uint32_t receiveNext, std::string_view fakeSni = "www.microsoft.com",
+                                uint32_t timestamp = 0) noexcept
         {
-            if (rawFd < 0) return false;
+            if (rawFd < 0)
+                return false;
 
             if (timestamp == 0)
             {
-                timestamp = static_cast<uint32_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                timestamp = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                      std::chrono::steady_clock::now().time_since_epoch())
+                                                      .count());
             }
 
             auto fakeHello = buildFakeClientHello(fakeSni);
@@ -439,8 +443,8 @@ namespace mynet::tls
             sin.sin_port = htons(endpoints.dstPort);
             sin.sin_addr.s_addr = htonl(endpoints.dstIp);
 
-            ssize_t sent = ::sendto(rawFd, frame.data(), frame.size(), 0,
-                                   reinterpret_cast<struct sockaddr*>(&sin), sizeof(sin));
+            ssize_t sent =
+                ::sendto(rawFd, frame.data(), frame.size(), 0, reinterpret_cast<struct sockaddr *>(&sin), sizeof(sin));
             return sent == static_cast<ssize_t>(frame.size());
         }
     };

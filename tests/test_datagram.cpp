@@ -567,8 +567,7 @@ TEST(Datagram, BatchIoRecvmmsgAndSendmmsg)
     {
         std::string payload = "batch-packet-" + std::to_string(i);
         ssize_t s = ::sendto(pair.tx, payload.data(), payload.size(), 0,
-                             reinterpret_cast<const sockaddr *>(&pair.rxAddr),
-                             sizeof(pair.rxAddr));
+                             reinterpret_cast<const sockaddr *>(&pair.rxAddr), sizeof(pair.rxAddr));
         ASSERT_EQ(s, static_cast<ssize_t>(payload.size()));
     }
 
@@ -768,7 +767,8 @@ TEST(Datagram, UdpTaskPoolSerializationAndThrottle)
     for (int i = 0; i < 10; ++i)
     {
         std::string s = "flow-pkt-" + std::to_string(i);
-        EXPECT_TRUE(taskPool.enqueue(flowKey, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(s.data()), s.size())));
+        EXPECT_TRUE(
+            taskPool.enqueue(flowKey, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(s.data()), s.size())));
     }
     EXPECT_EQ(taskPool.queueDepth(flowKey), 10u);
     EXPECT_EQ(taskPool.flowCount(), 1u);

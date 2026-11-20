@@ -1,9 +1,9 @@
-#include "connection.hpp"
 #include "config/lua.hpp"
-#include "reactor.hpp"
 #include "config/tls.hpp"
+#include "connection.hpp"
 #include "core.hpp"
 #include "direct/direct.hpp"
+#include "reactor.hpp"
 #include <arpa/inet.h>
 #include <chrono>
 #include <filesystem>
@@ -439,7 +439,7 @@ TEST(ConfigLua, RcuGracefulDrainKeepsOldConfigAliveUntilSessionReleases)
     // 关键断言：旧代际配置绝不就地析构！会话 A 依然稳定持有，完全杜绝 ECONNRESET
     EXPECT_EQ(sessionA->port, 8080);
     EXPECT_EQ(sessionA.use_count(), 1); // holder 已置换，仅剩 sessionA 活跃
-    EXPECT_EQ(g_rcuLiveInstances, 2); // 代际 1 (sessionA) 与 代际 2 (holder) 共存
+    EXPECT_EQ(g_rcuLiveInstances, 2);   // 代际 1 (sessionA) 与 代际 2 (holder) 共存
 
     // 会话 A 结束并释放句柄 -> 触发旧代际资源优雅排空 (Drain) 与自动安全析构
     sessionA.reset();
@@ -1353,32 +1353,31 @@ TEST(ConfigLua, SecurityCaFileEnablesClientCertificateVerification)
 TEST(ConfigLua, CoreLoadLuaConfigEndToEnd)
 {
     const std::filesystem::path configPath = "test_config_proxy_core.lua";
-    writeTestConfigFile(configPath,
-                        "router = {\n"
-                        "  defaultOutbound = \"direct\",\n"
-                        "  rules = {\n"
-                        "    {\n"
-                        "      outbound = \"block\",\n"
-                        "      domainKeywords = {\"ads\"}\n"
-                        "    }\n"
-                        "  }\n"
-                        "}\n"
-                        "inbounds = {\n"
-                        "  {\n"
-                        "    tag = \"mixed-in\",\n"
-                        "    protocol = \"mixed\",\n"
-                        "    host = \"127.0.0.1\",\n"
-                        "    port = 7890\n"
-                        "  }\n"
-                        "}\n"
-                        "outbounds = {\n"
-                        "  {\n"
-                        "    tag = \"proxy-node\",\n"
-                        "    type = \"socks5\",\n"
-                        "    server = \"127.0.0.1\",\n"
-                        "    port = 1080\n"
-                        "  }\n"
-                        "}\n");
+    writeTestConfigFile(configPath, "router = {\n"
+                                    "  defaultOutbound = \"direct\",\n"
+                                    "  rules = {\n"
+                                    "    {\n"
+                                    "      outbound = \"block\",\n"
+                                    "      domainKeywords = {\"ads\"}\n"
+                                    "    }\n"
+                                    "  }\n"
+                                    "}\n"
+                                    "inbounds = {\n"
+                                    "  {\n"
+                                    "    tag = \"mixed-in\",\n"
+                                    "    protocol = \"mixed\",\n"
+                                    "    host = \"127.0.0.1\",\n"
+                                    "    port = 7890\n"
+                                    "  }\n"
+                                    "}\n"
+                                    "outbounds = {\n"
+                                    "  {\n"
+                                    "    tag = \"proxy-node\",\n"
+                                    "    type = \"socks5\",\n"
+                                    "    server = \"127.0.0.1\",\n"
+                                    "    port = 1080\n"
+                                    "  }\n"
+                                    "}\n");
 
     EXPECT_TRUE(mynet::reloadConfig(configPath));
     const auto netCfg = mynet::getMynetConfig();

@@ -18,8 +18,8 @@
  */
 
 #include "acceptor.hpp"
-#include "core.hpp"
 #include "config/log.hpp"
+#include "core.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <cstdint>
@@ -63,10 +63,7 @@ namespace mynet
         {
         }
 
-        ~Controller()
-        {
-            stop();
-        }
+        ~Controller() { stop(); }
 
         Controller(const Controller &) = delete;
         Controller &operator=(const Controller &) = delete;
@@ -82,7 +79,8 @@ namespace mynet
 
         Result<> listen()
         {
-            if (acceptor_.fd >= 0) return {};
+            if (acceptor_.fd >= 0)
+                return {};
 
             auto res = acceptor_.listenTcp(listenHost_.c_str(), listenPort_, 128);
             if (!res)
@@ -122,24 +120,27 @@ namespace mynet
                 return res;
             }
 
-            workerThread_ = std::make_unique<std::thread>([this]() {
-                while (running_.load(std::memory_order_relaxed))
+            workerThread_ = std::make_unique<std::thread>(
+                [this]()
                 {
-                    auto accRes = acceptor_.accept();
-                    if (!accRes)
+                    while (running_.load(std::memory_order_relaxed))
                     {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        auto accRes = acceptor_.accept();
+                        if (!accRes)
                         {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                            continue;
+                            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                            {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                                continue;
+                            }
+                            if (errno == EINTR)
+                                continue;
+                            break;
                         }
-                        if (errno == EINTR) continue;
-                        break;
-                    }
 
-                    handleClient(accRes->first);
-                }
-            });
+                        handleClient(accRes->first);
+                    }
+                });
 
             return {};
         }
@@ -175,7 +176,8 @@ namespace mynet
             }
             std::string_view method = firstLine.substr(0, space1);
             auto space2 = firstLine.find(' ', space1 + 1);
-            if (space2 == std::string_view::npos) space2 = firstLine.size();
+            if (space2 == std::string_view::npos)
+                space2 = firstLine.size();
             std::string_view fullPath = firstLine.substr(space1 + 1, space2 - (space1 + 1));
 
             // 分离路径与查询参数
@@ -190,14 +192,13 @@ namespace mynet
             // CORS 预检请求 (OPTIONS)
             if (method == "OPTIONS")
             {
-                std::string resp =
-                    "HTTP/1.1 204 No Content\r\n"
-                    "Access-Control-Allow-Origin: *\r\n"
-                    "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-                    "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-                    "Access-Control-Max-Age: 86400\r\n"
-                    "Content-Length: 0\r\n"
-                    "Connection: close\r\n\r\n";
+                std::string resp = "HTTP/1.1 204 No Content\r\n"
+                                   "Access-Control-Allow-Origin: *\r\n"
+                                   "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+                                   "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+                                   "Access-Control-Max-Age: 86400\r\n"
+                                   "Content-Length: 0\r\n"
+                                   "Connection: close\r\n\r\n";
                 ::send(clientFd, resp.data(), resp.size(), MSG_NOSIGNAL);
                 ::close(clientFd);
                 return;
@@ -273,8 +274,11 @@ namespace mynet
     private:
         void sendResponse(int fd, int code, std::string_view contentType, std::string_view body)
         {
-            std::string statusText = (code == 200) ? "OK" : (code == 204) ? "No Content" :
-                                     (code == 400) ? "Bad Request" : (code == 404) ? "Not Found" : "Internal Server Error";
+            std::string statusText = (code == 200)   ? "OK"
+                                     : (code == 204) ? "No Content"
+                                     : (code == 400) ? "Bad Request"
+                                     : (code == 404) ? "Not Found"
+                                                     : "Internal Server Error";
             std::ostringstream ss;
             ss << "HTTP/1.1 " << code << " " << statusText << "\r\n";
             ss << "Content-Type: " << contentType << "\r\n";
@@ -291,10 +295,7 @@ namespace mynet
             ::send(fd, data.data(), data.size(), MSG_NOSIGNAL);
         }
 
-        [[nodiscard]] std::string handleVersion() const
-        {
-            return R"({"version":"1.0.0","premium":false})";
-        }
+        [[nodiscard]] std::string handleVersion() const { return R"({"version":"1.0.0","premium":false})"; }
 
         [[nodiscard]] std::string handleConfigs() const
         {
@@ -319,13 +320,15 @@ namespace mynet
 
         [[nodiscard]] std::string handleRules() const
         {
-            if (core_ == nullptr) return R"({"rules":[]})";
+            if (core_ == nullptr)
+                return R"({"rules":[]})";
             std::ostringstream ss;
             ss << R"({"rules":[)";
             const auto &rules = core_->router().rules();
             for (size_t i = 0; i < rules.size(); ++i)
             {
-                if (i > 0) ss << ",";
+                if (i > 0)
+                    ss << ",";
                 ss << R"({"type":"Rule","payload":"target","proxy":")" << rules[i].outboundTag << R"("})";
             }
             ss << "]}";
@@ -334,7 +337,8 @@ namespace mynet
 
         [[nodiscard]] std::string handleProxies() const
         {
-            if (core_ == nullptr) return R"({"proxies":{}})";
+            if (core_ == nullptr)
+                return R"({"proxies":{}})";
 
             std::ostringstream ss;
             ss << R"({"proxies":{)";
@@ -342,7 +346,8 @@ namespace mynet
             bool first = true;
             for (const auto &outbound : core_->outbounds().outbounds())
             {
-                if (!first) ss << ",";
+                if (!first)
+                    ss << ",";
                 first = false;
 
                 ss << "\"" << outbound->tag() << "\":{";
@@ -358,7 +363,8 @@ namespace mynet
                     {
                         for (size_t k = 0; k < sel->candidates().size(); ++k)
                         {
-                            if (k > 0) ss << ",";
+                            if (k > 0)
+                                ss << ",";
                             ss << "\"" << sel->candidates()[k] << "\"";
                         }
                     }
@@ -374,7 +380,8 @@ namespace mynet
                     {
                         for (size_t k = 0; k < urlTest->candidates().size(); ++k)
                         {
-                            if (k > 0) ss << ",";
+                            if (k > 0)
+                                ss << ",";
                             ss << "\"" << urlTest->candidates()[k] << "\"";
                         }
                     }
@@ -416,9 +423,11 @@ namespace mynet
 
         [[nodiscard]] std::string handleSingleProxy(const std::string &name) const
         {
-            if (core_ == nullptr) return "{}";
+            if (core_ == nullptr)
+                return "{}";
             auto outbound = core_->outbounds().get(name);
-            if (!outbound) return R"({"error":"Proxy not found"})";
+            if (!outbound)
+                return R"({"error":"Proxy not found"})";
 
             std::ostringstream ss;
             ss << "{\"name\":\"" << outbound->tag() << "\",";
@@ -439,22 +448,29 @@ namespace mynet
 
         bool handleSelectProxy(const std::string &name, std::string_view body)
         {
-            if (core_ == nullptr) return false;
+            if (core_ == nullptr)
+                return false;
             auto outbound = core_->outbounds().get(name);
-            if (!outbound) return false;
+            if (!outbound)
+                return false;
 
             auto sel = std::dynamic_pointer_cast<OutboundSelector>(outbound);
-            if (!sel) return false;
+            if (!sel)
+                return false;
 
             // 从 body JSON 提取 {"name": "target"}
             auto pos = body.find("\"name\"");
-            if (pos == std::string_view::npos) return false;
+            if (pos == std::string_view::npos)
+                return false;
             auto colon = body.find(':', pos);
-            if (colon == std::string_view::npos) return false;
+            if (colon == std::string_view::npos)
+                return false;
             auto q1 = body.find('"', colon + 1);
-            if (q1 == std::string_view::npos) return false;
+            if (q1 == std::string_view::npos)
+                return false;
             auto q2 = body.find('"', q1 + 1);
-            if (q2 == std::string_view::npos) return false;
+            if (q2 == std::string_view::npos)
+                return false;
 
             std::string_view target = body.substr(q1 + 1, q2 - (q1 + 1));
             return sel->setSelected(target);
@@ -462,17 +478,22 @@ namespace mynet
 
         [[nodiscard]] std::string handleProxyDelay(const std::string &name, std::string_view /*query*/) const
         {
-            if (core_ == nullptr) return R"({"delay":9999})";
+            if (core_ == nullptr)
+                return R"({"delay":9999})";
             auto outbound = core_->outbounds().get(name);
-            if (!outbound) return R"({"delay":9999})";
+            if (!outbound)
+                return R"({"delay":9999})";
 
             uint32_t delay = 50;
-            if (outbound->type() == "direct") delay = 1;
-            else if (outbound->type() == "block") delay = 9999;
+            if (outbound->type() == "direct")
+                delay = 1;
+            else if (outbound->type() == "block")
+                delay = 9999;
             else if (outbound->type() == "urltest")
             {
                 auto ut = std::dynamic_pointer_cast<OutboundUrlTest>(outbound);
-                if (ut) delay = ut->getRtt(ut->getBestTag());
+                if (ut)
+                    delay = ut->getRtt(ut->getBestTag());
             }
 
             std::ostringstream ss;

@@ -1,7 +1,9 @@
 #pragma once
 
-#include "../crypto.hpp"
+#include "../cipher.hpp"
+#include "../kdf.hpp"
 #include "../tls/sniff.hpp"
+#include "varint.hpp"
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -17,72 +19,25 @@ namespace mynet::handler::sniffing
     namespace detail
     {
         // QUIC RFC 9000 Initial Salt (v1)
-        inline constexpr uint8_t kQuicSaltV1[20] = {
-            0x38, 0x7b, 0x23, 0x23, 0x9f, 0x61, 0xca, 0x73, 0x01, 0x21,
-            0x2c, 0x29, 0x60, 0x53, 0x98, 0x8d, 0x85, 0x29, 0xae, 0x4d};
+        inline constexpr uint8_t kQuicSaltV1[20] = {0x38, 0x7b, 0x23, 0x23, 0x9f, 0x61, 0xca, 0x73, 0x01, 0x21,
+                                                    0x2c, 0x29, 0x60, 0x53, 0x98, 0x8d, 0x85, 0x29, 0xae, 0x4d};
 
         // QUIC RFC 9369 Initial Salt (v2)
-        inline constexpr uint8_t kQuicSaltV2[20] = {
-            0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93,
-            0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9};
+        inline constexpr uint8_t kQuicSaltV2[20] = {0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93,
+                                                    0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9};
 
         // draft-29 Salt
-        inline constexpr uint8_t kQuicSaltDraft29[20] = {
-            0xaf, 0xbf, 0xec, 0x28, 0x99, 0x93, 0xd2, 0x4c, 0x9e, 0x97,
-            0x86, 0xf1, 0x9c, 0x3f, 0xe1, 0x44, 0x75, 0xe8, 0x35, 0x44};
+        inline constexpr uint8_t kQuicSaltDraft29[20] = {0xaf, 0xbf, 0xec, 0x28, 0x99, 0x93, 0xd2, 0x4c, 0x9e, 0x97,
+                                                         0x86, 0xf1, 0x9c, 0x3f, 0xe1, 0x44, 0x75, 0xe8, 0x35, 0x44};
 
-        /**
-         * @brief 读取 QUIC 变长整数 (RFC 9000 Section 16 Variable-Length Integer Encoding)
-         *
-         * @param data 字节流切片
-         * @return std::pair<uint64_t, size_t> 数值与消费的字节数（0 表示错误）
-         */
         [[nodiscard]] inline std::pair<uint64_t, size_t> readUvarint(std::span<const uint8_t> data) noexcept
         {
-            if (data.empty())
-            {
-                return {0, 0};
-            }
-            const uint8_t first = data[0];
-            const size_t len = 1ULL << ((first & 0xC0) >> 6);
-            if (data.size() < len)
-            {
-                return {0, 0};
-            }
-            uint64_t val = first & 0x3F;
-            for (size_t i = 1; i < len; ++i)
-            {
-                val = (val << 8) | data[i];
-            }
-            return {val, len};
+            return quic::readVarint(data);
         }
 
         inline void appendUvarint(std::vector<uint8_t> &buf, uint64_t val)
         {
-            if (val <= 63)
-            {
-                buf.push_back(static_cast<uint8_t>(val));
-            }
-            else if (val <= 16383)
-            {
-                buf.push_back(static_cast<uint8_t>(0x40 | ((val >> 8) & 0x3F)));
-                buf.push_back(static_cast<uint8_t>(val & 0xFF));
-            }
-            else if (val <= 1073741823)
-            {
-                buf.push_back(static_cast<uint8_t>(0x80 | ((val >> 24) & 0x3F)));
-                buf.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
-                buf.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-                buf.push_back(static_cast<uint8_t>(val & 0xFF));
-            }
-            else
-            {
-                buf.push_back(static_cast<uint8_t>(0xC0 | ((val >> 56) & 0x3F)));
-                for (int i = 6; i >= 0; --i)
-                {
-                    buf.push_back(static_cast<uint8_t>((val >> (i * 8)) & 0xFF));
-                }
-            }
+            quic::appendVarint(buf, val);
         }
     } // namespace detail
 
@@ -107,8 +62,7 @@ namespace mynet::handler::sniffing
         }
 
         // 版本号 (4B BE)
-        const uint32_t version = (static_cast<uint32_t>(data[1]) << 24) |
-                                 (static_cast<uint32_t>(data[2]) << 16) |
+        const uint32_t version = (static_cast<uint32_t>(data[1]) << 24) | (static_cast<uint32_t>(data[2]) << 16) |
                                  (static_cast<uint32_t>(data[3]) << 8) | static_cast<uint32_t>(data[4]);
 
         // Packet Type (bits 4..5)
@@ -196,14 +150,14 @@ namespace mynet::handler::sniffing
         }
 
         // HKDF 密钥派生 (RFC 9000 Initial secrets)
-        auto initialSecret = crypto::hkdfSha256Extract(salt, dcid);
+        auto initialSecret = kdf::hkdfSha256Extract(salt, dcid);
         if (!initialSecret.has_value())
         {
             return std::nullopt;
         }
 
         std::array<uint8_t, 32> clientInitialSecret{};
-        if (!crypto::hkdfExpandLabel(*initialSecret, "client in", {}, 32, clientInitialSecret))
+        if (!kdf::hkdfExpandLabel(*initialSecret, "client in", {}, 32, clientInitialSecret))
         {
             return std::nullopt;
         }
@@ -212,16 +166,16 @@ namespace mynet::handler::sniffing
         std::array<uint8_t, 16> key{};
         std::array<uint8_t, 12> iv{};
 
-        if (!crypto::hkdfExpandLabel(clientInitialSecret, labelHp, {}, 16, hpKey) ||
-            !crypto::hkdfExpandLabel(clientInitialSecret, labelKey, {}, 16, key) ||
-            !crypto::hkdfExpandLabel(clientInitialSecret, labelIv, {}, 12, iv))
+        if (!kdf::hkdfExpandLabel(clientInitialSecret, labelHp, {}, 16, hpKey) ||
+            !kdf::hkdfExpandLabel(clientInitialSecret, labelKey, {}, 16, key) ||
+            !kdf::hkdfExpandLabel(clientInitialSecret, labelIv, {}, 12, iv))
         {
             return std::nullopt;
         }
 
         // 计算报头掩码
         std::array<uint8_t, 16> mask{};
-        if (!crypto::aes128EcbEncryptBlock(hpKey, sample, mask))
+        if (!cipher::aes128EcbEncryptBlock(hpKey, sample, mask))
         {
             return std::nullopt;
         }
@@ -270,7 +224,7 @@ namespace mynet::handler::sniffing
         std::memcpy(tag.data(), pkt.data() + extHdrLen + cipherLen, 16);
 
         std::vector<uint8_t> plaintext;
-        if (!crypto::aes128GcmDecryptWithAad(key, nonce, aad, ciphertext, tag, plaintext))
+        if (!cipher::aes128GcmDecryptWithAad(key, nonce, aad, ciphertext, tag, plaintext))
         {
             return std::nullopt;
         }

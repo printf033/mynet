@@ -5,7 +5,10 @@
  * @brief VLESS REALITY 协议认证与无证书透明借壳实现
  */
 
-#include "../crypto.hpp"
+#include "../cipher.hpp"
+#include "../encoding.hpp"
+#include "../kdf.hpp"
+#include "../x25519.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -51,7 +54,7 @@ namespace mynet::handler::vless::reality
             stdB64.push_back('=');
         }
         std::string decodedStr;
-        if (!handler::crypto::base64Decode(stdB64, decodedStr))
+        if (!encoding::base64Decode(stdB64, decodedStr))
         {
             return std::nullopt;
         }
@@ -61,7 +64,7 @@ namespace mynet::handler::vless::reality
 
     inline std::string encodeBase64RawUrl(std::span<const uint8_t> in)
     {
-        std::string s = handler::crypto::base64Encode(in);
+        std::string s = encoding::base64Encode(in);
         std::string urlSafe;
         urlSafe.reserve(s.size());
         for (char c : s)
@@ -98,9 +101,10 @@ namespace mynet::handler::vless::reality
         }
         for (size_t i = 0; i < hex.size(); i += 2)
         {
-            int hi = handler::crypto::hexCharToNibble(hex[i]);
-            int lo = handler::crypto::hexCharToNibble(hex[i + 1]);
-            if (hi < 0 || lo < 0) return std::nullopt;
+            int hi = encoding::hexCharToNibble(hex[i]);
+            int lo = encoding::hexCharToNibble(hex[i + 1]);
+            if (hi < 0 || lo < 0)
+                return std::nullopt;
             out[i / 2] = static_cast<uint8_t>((hi << 4) | lo);
         }
         return out;
@@ -136,7 +140,7 @@ namespace mynet::handler::vless::reality
     enum class AuthStatus : uint8_t
     {
         AUTHENTICATED = 0, ///< 确认为合法 Reality 客户端，接管并建立代理连接
-        FALLBACK_DEST = 1,  ///< 主动探测/常规访客，透明转发到被借壳的 dest SNI
+        FALLBACK_DEST = 1, ///< 主动探测/常规访客，透明转发到被借壳的 dest SNI
         INVALID_PACKET = 2 ///< 非 TLS ClientHello 畸变报文
     };
 
@@ -181,16 +185,19 @@ namespace mynet::handler::vless::reality
         ClientHelloInfo info;
         size_t offset = 5 + 4; // 跳过 Record Header + Handshake Header
         // 客户端 TLS 版本 2B
-        if (offset + 2 > data.size()) return std::nullopt;
+        if (offset + 2 > data.size())
+            return std::nullopt;
         offset += 2;
 
         // ClientRandom 32B
-        if (offset + 32 > data.size()) return std::nullopt;
+        if (offset + 32 > data.size())
+            return std::nullopt;
         std::memcpy(info.clientRandom.data(), data.data() + offset, 32);
         offset += 32;
 
         // Session ID: 1B length + N bytes
-        if (offset + 1 > data.size()) return std::nullopt;
+        if (offset + 1 > data.size())
+            return std::nullopt;
         uint8_t sessionLen = data[offset++];
         if (sessionLen != 32 || offset + sessionLen > data.size())
         {
@@ -201,17 +208,20 @@ namespace mynet::handler::vless::reality
         offset += sessionLen;
 
         // Cipher Suites: 2B length + N
-        if (offset + 2 > data.size()) return std::nullopt;
+        if (offset + 2 > data.size())
+            return std::nullopt;
         uint16_t cipherLen = (static_cast<uint16_t>(data[offset]) << 8) | data[offset + 1];
         offset += 2 + cipherLen;
 
         // Compression Methods: 1B length + N
-        if (offset + 1 > data.size()) return std::nullopt;
+        if (offset + 1 > data.size())
+            return std::nullopt;
         uint8_t compLen = data[offset++];
         offset += compLen;
 
         // Extensions: 2B length + N
-        if (offset + 2 > data.size()) return std::nullopt;
+        if (offset + 2 > data.size())
+            return std::nullopt;
         uint16_t extTotalLen = (static_cast<uint16_t>(data[offset]) << 8) | data[offset + 1];
         offset += 2;
         const size_t extEnd = std::min<size_t>(offset + extTotalLen, data.size());
@@ -269,8 +279,7 @@ namespace mynet::handler::vless::reality
     /**
      * @brief 客户端封包：生成带有 REALITY 签名认证的 Session ID 并写回 ClientHello
      */
-    inline bool sealClientHello(std::span<uint8_t> clientHelloRaw,
-                                const ClientConfig &config,
+    inline bool sealClientHello(std::span<uint8_t> clientHelloRaw, const ClientConfig &config,
                                 std::span<const uint8_t, 32> clientEcdhePrivKey)
     {
         auto info = parseClientHello(clientHelloRaw);
@@ -280,7 +289,7 @@ namespace mynet::handler::vless::reality
         }
 
         // 1. 计算 authKey = X25519(clientECDHEKey, serverPublicKey)
-        auto authKey = handler::crypto::computeX25519SharedSecret(clientEcdhePrivKey, config.publicKey);
+        auto authKey = x25519::computeSharedSecret(clientEcdhePrivKey, config.publicKey);
         if (!authKey.has_value())
         {
             return false;
@@ -289,8 +298,9 @@ namespace mynet::handler::vless::reality
         // 2. 派生 derivedKey = HKDF-SHA256(authKey, clientRandom[0..20], "REALITY")
         std::array<uint8_t, 32> derivedKey{};
         std::span<const uint8_t> salt(info->clientRandom.data(), 20);
-        std::span<const uint8_t> hkdfInfo(reinterpret_cast<const uint8_t *>(kRealityHkdfInfo.data()), kRealityHkdfInfo.size());
-        if (!handler::crypto::hkdfSha256(*authKey, salt, hkdfInfo, derivedKey))
+        std::span<const uint8_t> hkdfInfo(reinterpret_cast<const uint8_t *>(kRealityHkdfInfo.data()),
+                                          kRealityHkdfInfo.size());
+        if (!kdf::hkdfSha256(*authKey, salt, hkdfInfo, derivedKey))
         {
             return false;
         }
@@ -300,9 +310,9 @@ namespace mynet::handler::vless::reality
         std::array<uint8_t, 16> plainSessionId{};
         std::memcpy(plainSessionId.data(), kVersionMagic, 4);
 
-        auto nowSec = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(
-                                                std::chrono::system_clock::now().time_since_epoch())
-                                                .count());
+        auto nowSec = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count());
         plainSessionId[4] = static_cast<uint8_t>((nowSec >> 24) & 0xFF);
         plainSessionId[5] = static_cast<uint8_t>((nowSec >> 16) & 0xFF);
         plainSessionId[6] = static_cast<uint8_t>((nowSec >> 8) & 0xFF);
@@ -316,8 +326,7 @@ namespace mynet::handler::vless::reality
 
         std::vector<uint8_t> ciphertext;
         std::array<uint8_t, 16> tag{};
-        if (!handler::crypto::aeadEncryptWithAad(EVP_aes_256_gcm(), derivedKey, nonce,
-                                                {}, plainSessionId, ciphertext, tag))
+        if (!cipher::aeadEncryptWithAad(EVP_aes_256_gcm(), derivedKey, nonce, {}, plainSessionId, ciphertext, tag))
         {
             return false;
         }
@@ -331,8 +340,7 @@ namespace mynet::handler::vless::reality
     /**
      * @brief 服务端验证：解析 ClientHello 判定是否为合法的 REALITY 客户端
      */
-    inline AuthResult verifyClientHello(std::span<const uint8_t> clientHelloRaw,
-                                        const ServerConfig &config)
+    inline AuthResult verifyClientHello(std::span<const uint8_t> clientHelloRaw, const ServerConfig &config)
     {
         AuthResult result;
         auto info = parseClientHello(clientHelloRaw);
@@ -376,7 +384,7 @@ namespace mynet::handler::vless::reality
         }
 
         // 1. 计算 authKey = X25519(serverPrivateKey, clientKeySharePubKey)
-        auto authKey = handler::crypto::computeX25519SharedSecret(config.privateKey, info->keyShareX25519);
+        auto authKey = x25519::computeSharedSecret(config.privateKey, info->keyShareX25519);
         if (!authKey.has_value())
         {
             result.status = AuthStatus::FALLBACK_DEST;
@@ -387,8 +395,9 @@ namespace mynet::handler::vless::reality
         // 2. 派生 derivedKey = HKDF-SHA256(authKey, clientRandom[0..20], "REALITY")
         std::array<uint8_t, 32> derivedKey{};
         std::span<const uint8_t> salt(info->clientRandom.data(), 20);
-        std::span<const uint8_t> hkdfInfo(reinterpret_cast<const uint8_t *>(kRealityHkdfInfo.data()), kRealityHkdfInfo.size());
-        if (!handler::crypto::hkdfSha256(*authKey, salt, hkdfInfo, derivedKey))
+        std::span<const uint8_t> hkdfInfo(reinterpret_cast<const uint8_t *>(kRealityHkdfInfo.data()),
+                                          kRealityHkdfInfo.size());
+        if (!kdf::hkdfSha256(*authKey, salt, hkdfInfo, derivedKey))
         {
             result.status = AuthStatus::FALLBACK_DEST;
             return result;
@@ -403,8 +412,7 @@ namespace mynet::handler::vless::reality
         std::span<const uint8_t, 16> tagSpan(info->sessionId.data() + 16, 16);
         std::vector<uint8_t> plain;
 
-        if (!handler::crypto::aeadDecryptWithAad(EVP_aes_256_gcm(), derivedKey, nonce,
-                                                {}, cipherSpan, tagSpan, plain) ||
+        if (!cipher::aeadDecryptWithAad(EVP_aes_256_gcm(), derivedKey, nonce, {}, cipherSpan, tagSpan, plain) ||
             plain.size() != 16)
         {
             // 解密失败或 Tag 校验不匹配 -> 非合法 Reality 客户端，转入目标站点回落
@@ -420,13 +428,11 @@ namespace mynet::handler::vless::reality
         }
 
         // 5. 校验时间戳 (防御重放攻击)
-        uint32_t ts = (static_cast<uint32_t>(plain[4]) << 24) |
-                      (static_cast<uint32_t>(plain[5]) << 16) |
-                      (static_cast<uint32_t>(plain[6]) << 8) |
-                      static_cast<uint32_t>(plain[7]);
-        auto nowSec = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::seconds>(
-                                                std::chrono::system_clock::now().time_since_epoch())
-                                                .count());
+        uint32_t ts = (static_cast<uint32_t>(plain[4]) << 24) | (static_cast<uint32_t>(plain[5]) << 16) |
+                      (static_cast<uint32_t>(plain[6]) << 8) | static_cast<uint32_t>(plain[7]);
+        auto nowSec = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count());
         uint32_t diff = (nowSec > ts) ? (nowSec - ts) : (ts - nowSec);
         if (diff > config.maxTimeDifference)
         {

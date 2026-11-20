@@ -8,7 +8,8 @@ using namespace mynet;
 using namespace mynet::handler;
 
 static_assert(HandlerConstraint<HandlerInboundSocks5>, "HandlerInboundSocks5 must satisfy HandlerConstraint");
-static_assert(MandatoryMethodConnection<HandlerInboundSocks5>, "HandlerInboundSocks5 must satisfy MandatoryMethodConnection");
+static_assert(MandatoryMethodConnection<HandlerInboundSocks5>,
+              "HandlerInboundSocks5 must satisfy MandatoryMethodConnection");
 
 namespace
 {

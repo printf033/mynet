@@ -12,30 +12,29 @@
  * 4. 赋能策略路由 Router 根据 processName / process / uid 规则进行精准应用级分流。
  */
 
+#include <arpa/inet.h>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <netinet/in.h>
+#include <optional>
 #include <string>
 #include <string_view>
-#include <optional>
-#include <unordered_map>
-#include <mutex>
-#include <chrono>
-#include <fstream>
-#include <filesystem>
-#include <vector>
-
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <unordered_map>
+#include <vector>
 
 #if defined(__linux__)
+#include <linux/inet_diag.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/sock_diag.h>
-#include <linux/inet_diag.h>
 #endif
 
 namespace mynet
@@ -68,17 +67,16 @@ namespace mynet
             uint16_t dstPort{0};
             uint8_t protocol{IPPROTO_TCP};
 
-            bool operator==(const EndpointsKey& o) const noexcept
+            bool operator==(const EndpointsKey &o) const noexcept
             {
-                return srcIp == o.srcIp && srcPort == o.srcPort &&
-                       dstIp == o.dstIp && dstPort == o.dstPort &&
+                return srcIp == o.srcIp && srcPort == o.srcPort && dstIp == o.dstIp && dstPort == o.dstPort &&
                        protocol == o.protocol;
             }
         };
 
         struct EndpointsKeyHash
         {
-            size_t operator()(const EndpointsKey& k) const noexcept
+            size_t operator()(const EndpointsKey &k) const noexcept
             {
                 size_t h = k.srcIp;
                 h ^= (static_cast<size_t>(k.srcPort) << 16) + 0x9e3779b9 + (h << 6) + (h >> 2);
@@ -99,10 +97,12 @@ namespace mynet
          */
         [[nodiscard]] static std::string getProcessNameByPid(pid_t pid) noexcept
         {
-            if (pid <= 0) return "";
+            if (pid <= 0)
+                return "";
             std::string path = "/proc/" + std::to_string(pid) + "/comm";
             std::ifstream file(path);
-            if (!file.is_open()) return "";
+            if (!file.is_open())
+                return "";
             std::string name;
             if (std::getline(file, name))
             {
@@ -121,7 +121,8 @@ namespace mynet
          */
         [[nodiscard]] static std::string getProcessPathByPid(pid_t pid) noexcept
         {
-            if (pid <= 0) return "";
+            if (pid <= 0)
+                return "";
             std::string path = "/proc/" + std::to_string(pid) + "/exe";
             char buf[1024];
             ssize_t len = ::readlink(path.c_str(), buf, sizeof(buf) - 1);
@@ -138,7 +139,8 @@ namespace mynet
          */
         [[nodiscard]] static std::string getProcessNameBySocket(int fd) noexcept
         {
-            if (fd < 0) return "";
+            if (fd < 0)
+                return "";
             struct ucred cred{};
             socklen_t len = sizeof(cred);
             if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0 && cred.pid > 0)
@@ -151,29 +153,36 @@ namespace mynet
         /**
          * @brief 根据套接字 Inode 寻找所属进程 (遍历目标 UID 或相关 PID)
          */
-        [[nodiscard]] static std::optional<ProcessInfo> findProcessByInode(uint32_t targetInode, uint32_t uid = 0) noexcept
+        [[nodiscard]] static std::optional<ProcessInfo> findProcessByInode(uint32_t targetInode,
+                                                                           uint32_t uid = 0) noexcept
         {
-            if (targetInode == 0) return std::nullopt;
+            if (targetInode == 0)
+                return std::nullopt;
 
             const std::string targetTarget = "socket:[" + std::to_string(targetInode) + "]";
 
             std::error_code procEc;
-            for (const auto& entry : std::filesystem::directory_iterator("/proc", procEc))
+            for (const auto &entry : std::filesystem::directory_iterator("/proc", procEc))
             {
-                if (procEc) break;
-                if (!entry.is_directory()) continue;
+                if (procEc)
+                    break;
+                if (!entry.is_directory())
+                    continue;
                 std::string dirName = entry.path().filename().string();
-                if (dirName.empty() || !std::isdigit(dirName[0])) continue;
+                if (dirName.empty() || !std::isdigit(dirName[0]))
+                    continue;
 
                 pid_t pid = std::atoi(dirName.c_str());
-                if (pid <= 0) continue;
+                if (pid <= 0)
+                    continue;
 
                 // 检查 /proc/[pid]/fd
                 std::string fdDirPath = entry.path().string() + "/fd";
                 std::error_code ec;
-                for (const auto& fdEntry : std::filesystem::directory_iterator(fdDirPath, ec))
+                for (const auto &fdEntry : std::filesystem::directory_iterator(fdDirPath, ec))
                 {
-                    if (ec) break;
+                    if (ec)
+                        break;
                     char linkTarget[256];
                     ssize_t len = ::readlink(fdEntry.path().c_str(), linkTarget, sizeof(linkTarget) - 1);
                     if (len > 0)
@@ -205,10 +214,9 @@ namespace mynet
          * @param dstPort 主机字节序端口
          * @param protocol IPPROTO_TCP 或 IPPROTO_UDP
          */
-        [[nodiscard]] static std::optional<ProcessInfo> resolveByNetlink(
-            uint32_t srcIp, uint16_t srcPort,
-            uint32_t dstIp, uint16_t dstPort,
-            uint8_t protocol = IPPROTO_TCP) noexcept
+        [[nodiscard]] static std::optional<ProcessInfo> resolveByNetlink(uint32_t srcIp, uint16_t srcPort,
+                                                                         uint32_t dstIp, uint16_t dstPort,
+                                                                         uint8_t protocol = IPPROTO_TCP) noexcept
         {
 #if defined(__linux__)
             EndpointsKey key{srcIp, srcPort, dstIp, dstPort, protocol};
@@ -226,7 +234,8 @@ namespace mynet
 
             // 2. 发起 Netlink Socket Diag 请求
             int nlFd = ::socket(AF_NETLINK, SOCK_RAW, NETLINK_INET_DIAG);
-            if (nlFd < 0) return std::nullopt;
+            if (nlFd < 0)
+                return std::nullopt;
 
             struct
             {
@@ -248,8 +257,7 @@ namespace mynet
             struct sockaddr_nl nladdr{};
             nladdr.nl_family = AF_NETLINK;
 
-            if (::sendto(nlFd, &sa, sizeof(sa), 0,
-                         reinterpret_cast<struct sockaddr*>(&nladdr), sizeof(nladdr)) <= 0)
+            if (::sendto(nlFd, &sa, sizeof(sa), 0, reinterpret_cast<struct sockaddr *>(&nladdr), sizeof(nladdr)) <= 0)
             {
                 ::close(nlFd);
                 return std::nullopt;
@@ -259,15 +267,16 @@ namespace mynet
             ssize_t n = ::recv(nlFd, rcvBuf, sizeof(rcvBuf), 0);
             ::close(nlFd);
 
-            if (n <= 0) return std::nullopt;
+            if (n <= 0)
+                return std::nullopt;
 
-            struct nlmsghdr* h = reinterpret_cast<struct nlmsghdr*>(rcvBuf);
+            struct nlmsghdr *h = reinterpret_cast<struct nlmsghdr *>(rcvBuf);
             if (!NLMSG_OK(h, static_cast<size_t>(n)) || h->nlmsg_type == NLMSG_ERROR)
             {
                 return std::nullopt;
             }
 
-            struct inet_diag_msg* diagMsg = reinterpret_cast<struct inet_diag_msg*>(NLMSG_DATA(h));
+            struct inet_diag_msg *diagMsg = reinterpret_cast<struct inet_diag_msg *>(NLMSG_DATA(h));
             uint32_t inode = diagMsg->idiag_inode;
             uint32_t uid = diagMsg->idiag_uid;
 
@@ -289,7 +298,7 @@ namespace mynet
                 std::lock_guard<std::mutex> lock(s_mutex);
                 if (s_cache.size() >= 4096)
                 {
-                    for (auto it = s_cache.begin(); it != s_cache.end(); )
+                    for (auto it = s_cache.begin(); it != s_cache.end();)
                     {
                         if (it->second.expireAt <= now)
                         {
@@ -310,7 +319,11 @@ namespace mynet
 
             return resInfo;
 #else
-            (void)srcIp; (void)srcPort; (void)dstIp; (void)dstPort; (void)protocol;
+            (void)srcIp;
+            (void)srcPort;
+            (void)dstIp;
+            (void)dstPort;
+            (void)protocol;
             return std::nullopt;
 #endif
         }

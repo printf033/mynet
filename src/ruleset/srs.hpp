@@ -16,8 +16,8 @@
  * 4. 零堆分配高性能匹配：提供纳秒级规则判定与路由协同。
  */
 
-#include "error.hpp"
 #include "../uvarint.hpp"
+#include "error.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -98,10 +98,7 @@ namespace mynet::ruleset
         uint32_t from{0};
         uint32_t to{0};
 
-        [[nodiscard]] constexpr bool contains(uint32_t ip) const noexcept
-        {
-            return ip >= from && ip <= to;
-        }
+        [[nodiscard]] constexpr bool contains(uint32_t ip) const noexcept { return ip >= from && ip <= to; }
     };
 
     struct IpRange6
@@ -111,8 +108,7 @@ namespace mynet::ruleset
 
         [[nodiscard]] bool contains(std::span<const uint8_t, 16> ip) const noexcept
         {
-            return std::memcmp(ip.data(), from.data(), 16) >= 0 &&
-                   std::memcmp(ip.data(), to.data(), 16) <= 0;
+            return std::memcmp(ip.data(), from.data(), 16) >= 0 && std::memcmp(ip.data(), to.data(), 16) <= 0;
         }
     };
 
@@ -121,10 +117,7 @@ namespace mynet::ruleset
         uint16_t from{0};
         uint16_t to{0};
 
-        [[nodiscard]] constexpr bool contains(uint16_t port) const noexcept
-        {
-            return port >= from && port <= to;
-        }
+        [[nodiscard]] constexpr bool contains(uint16_t port) const noexcept { return port >= from && port <= to; }
     };
 
     namespace detail
@@ -219,7 +212,8 @@ namespace mynet::ruleset
             return {std::move(str), n + len};
         }
 
-        [[nodiscard]] inline std::pair<std::vector<std::string>, size_t> readStringSlice(std::span<const uint8_t> data) noexcept
+        [[nodiscard]] inline std::pair<std::vector<std::string>, size_t>
+        readStringSlice(std::span<const uint8_t> data) noexcept
         {
             auto [count, n] = readUvarint(data);
             if (n == 0)
@@ -242,7 +236,8 @@ namespace mynet::ruleset
             return {std::move(res), offset};
         }
 
-        [[nodiscard]] inline std::pair<std::vector<uint16_t>, size_t> readUint16Slice(std::span<const uint8_t> data) noexcept
+        [[nodiscard]] inline std::pair<std::vector<uint16_t>, size_t>
+        readUint16Slice(std::span<const uint8_t> data) noexcept
         {
             auto [count, n] = readUvarint(data);
             if (n == 0 || data.size() < n + count * 2)
@@ -288,9 +283,7 @@ namespace mynet::ruleset
         // 嵌套子规则 (Logical rule)
         std::vector<SrsRule> subRules{};
 
-        [[nodiscard]] bool match(std::string_view domain,
-                                 const sockaddr_in *dstAddr,
-                                 uint16_t dstPort,
+        [[nodiscard]] bool match(std::string_view domain, const sockaddr_in *dstAddr, uint16_t dstPort,
                                  std::string_view network = "tcp") const noexcept
         {
             bool matched = evaluate(domain, dstAddr, dstPort, network);
@@ -298,9 +291,7 @@ namespace mynet::ruleset
         }
 
     private:
-        [[nodiscard]] bool evaluate(std::string_view domain,
-                                    const sockaddr_in *dstAddr,
-                                    uint16_t dstPort,
+        [[nodiscard]] bool evaluate(std::string_view domain, const sockaddr_in *dstAddr, uint16_t dstPort,
                                     std::string_view network) const noexcept
         {
             if (isLogical)
@@ -412,8 +403,7 @@ namespace mynet::ruleset
                         {
                             if (domain.ends_with(sfx))
                             {
-                                if (domain.size() == sfx.size() ||
-                                    sfx.starts_with('.') ||
+                                if (domain.size() == sfx.size() || sfx.starts_with('.') ||
                                     domain[domain.size() - sfx.size() - 1] == '.')
                                 {
                                     addrMatched = true;
@@ -455,7 +445,8 @@ namespace mynet::ruleset
                 }
             }
 
-            const bool hasAnyCond = (!networks.empty() || !ports.empty() || !portRanges.empty() || hasDomainCond || hasIpCond);
+            const bool hasAnyCond =
+                (!networks.empty() || !ports.empty() || !portRanges.empty() || hasDomainCond || hasIpCond);
             return hasAnyCond;
         }
     };
@@ -485,9 +476,7 @@ namespace mynet::ruleset
         /**
          * @brief 快速匹配判定
          */
-        [[nodiscard]] bool match(std::string_view domain,
-                                 const sockaddr_in *dstAddr = nullptr,
-                                 uint16_t dstPort = 0,
+        [[nodiscard]] bool match(std::string_view domain, const sockaddr_in *dstAddr = nullptr, uint16_t dstPort = 0,
                                  std::string_view network = "tcp") const noexcept
         {
             for (const auto &rule : rules_)
@@ -632,7 +621,8 @@ namespace mynet::ruleset
                     case SrsItemType::NETWORK:
                     {
                         auto [nets, nLen] = detail::readStringSlice(stream.subspan(offset));
-                        if (nLen == 0) return std::unexpected(SrsError::MALFORMED_DATA);
+                        if (nLen == 0)
+                            return std::unexpected(SrsError::MALFORMED_DATA);
                         rule.networks = std::move(nets);
                         offset += nLen;
                         break;
@@ -640,7 +630,8 @@ namespace mynet::ruleset
                     case SrsItemType::DOMAIN_KEYWORD:
                     {
                         auto [kws, nLen] = detail::readStringSlice(stream.subspan(offset));
-                        if (nLen == 0) return std::unexpected(SrsError::MALFORMED_DATA);
+                        if (nLen == 0)
+                            return std::unexpected(SrsError::MALFORMED_DATA);
                         rule.domainKeywords = std::move(kws);
                         offset += nLen;
                         break;
@@ -649,7 +640,8 @@ namespace mynet::ruleset
                     {
                         // sing-box domain succinct tree / matcher format:
                         // 1 byte version (0), then leaves, bitmap, labels
-                        if (offset >= stream.size()) return std::unexpected(SrsError::MALFORMED_DATA);
+                        if (offset >= stream.size())
+                            return std::unexpected(SrsError::MALFORMED_DATA);
                         offset++; // skip version byte
                         // Read leaves slice
                         auto [leavesCount, nLeaves] = detail::readUvarint(stream.subspan(offset));
@@ -665,7 +657,8 @@ namespace mynet::ruleset
                     case SrsItemType::PORT:
                     {
                         auto [ports, nLen] = detail::readUint16Slice(stream.subspan(offset));
-                        if (nLen == 0) return std::unexpected(SrsError::MALFORMED_DATA);
+                        if (nLen == 0)
+                            return std::unexpected(SrsError::MALFORMED_DATA);
                         rule.ports = std::move(ports);
                         offset += nLen;
                         break;
@@ -673,7 +666,8 @@ namespace mynet::ruleset
                     case SrsItemType::PORT_RANGE:
                     {
                         auto [ranges, nLen] = detail::readStringSlice(stream.subspan(offset));
-                        if (nLen == 0) return std::unexpected(SrsError::MALFORMED_DATA);
+                        if (nLen == 0)
+                            return std::unexpected(SrsError::MALFORMED_DATA);
                         for (const auto &rStr : ranges)
                         {
                             auto colon = rStr.find(':');
@@ -690,7 +684,8 @@ namespace mynet::ruleset
                     case SrsItemType::IP_CIDR:
                     {
                         // IPSet format: 1B ver (1), 8B length, then ranges
-                        if (offset + 9 > stream.size()) return std::unexpected(SrsError::MALFORMED_DATA);
+                        if (offset + 9 > stream.size())
+                            return std::unexpected(SrsError::MALFORMED_DATA);
                         offset++; // ver
                         uint64_t count = (static_cast<uint64_t>(stream[offset]) << 56) |
                                          (static_cast<uint64_t>(stream[offset + 1]) << 48) |
@@ -698,8 +693,7 @@ namespace mynet::ruleset
                                          (static_cast<uint64_t>(stream[offset + 3]) << 32) |
                                          (static_cast<uint64_t>(stream[offset + 4]) << 24) |
                                          (static_cast<uint64_t>(stream[offset + 5]) << 16) |
-                                         (static_cast<uint64_t>(stream[offset + 6]) << 8) |
-                                         stream[offset + 7];
+                                         (static_cast<uint64_t>(stream[offset + 6]) << 8) | stream[offset + 7];
                         offset += 8;
                         for (uint64_t c = 0; c < count && offset < stream.size(); ++c)
                         {
@@ -736,14 +730,16 @@ namespace mynet::ruleset
             else if (ruleType == 1) // Logical Rule
             {
                 rule.isLogical = true;
-                if (offset >= stream.size()) return std::unexpected(SrsError::MALFORMED_DATA);
+                if (offset >= stream.size())
+                    return std::unexpected(SrsError::MALFORMED_DATA);
                 rule.isAnd = (stream[offset++] == 0); // 0 = AND, 1 = OR
                 auto [subCount, n] = detail::readUvarint(stream.subspan(offset));
                 offset += n;
                 for (uint64_t i = 0; i < subCount; ++i)
                 {
                     auto subRes = parseRule(stream.subspan(offset), depth + 1);
-                    if (!subRes) return std::unexpected(subRes.error());
+                    if (!subRes)
+                        return std::unexpected(subRes.error());
                     rule.subRules.push_back(std::move(subRes->first));
                     offset += subRes->second;
                 }

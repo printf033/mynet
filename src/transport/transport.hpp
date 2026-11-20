@@ -64,11 +64,11 @@ namespace mynet::transport
     struct TransportConfig
     {
         TransportType type{TransportType::TCP};
-        std::string path{"/"};                ///< WebSocket 路径或 gRPC service 名
-        std::string host{""};                 ///< HTTP Host / SNI 报头覆盖
-        std::string serviceName{""};          ///< gRPC 专属 service 命名 (如 "TunService")
-        uint32_t maxEarlyData{0};             ///< 0-RTT Early-Data 限制 (WebSocket / TLS 1.3)
-        std::string earlyDataHeaderName{""};  ///< Early Data 携带 HTTP 请求头名 (如 "Sec-WebSocket-Protocol")
+        std::string path{"/"};               ///< WebSocket 路径或 gRPC service 名
+        std::string host{""};                ///< HTTP Host / SNI 报头覆盖
+        std::string serviceName{""};         ///< gRPC 专属 service 命名 (如 "TunService")
+        uint32_t maxEarlyData{0};            ///< 0-RTT Early-Data 限制 (WebSocket / TLS 1.3)
+        std::string earlyDataHeaderName{""}; ///< Early Data 携带 HTTP 请求头名 (如 "Sec-WebSocket-Protocol")
 
         TransportConfig() = default;
     };

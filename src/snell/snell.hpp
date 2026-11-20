@@ -52,10 +52,7 @@ namespace mynet::handler
         void setVersion(uint8_t ver) noexcept { version_ = ver; }
         void setPsk(std::string_view psk) { psk_ = std::string(psk); }
 
-        void reset() noexcept override
-        {
-            HandlerInboundConnection::reset();
-        }
+        void reset() noexcept override { HandlerInboundConnection::reset(); }
 
         void handle() override
         {
