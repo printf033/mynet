@@ -141,7 +141,6 @@ namespace mynet
 #include "direct/inbound.hpp"
 #include "http/inbound.hpp"
 #include "hysteria2/inbound.hpp"
-#include "inboundMux.hpp"
 #include "shadowsocks/inbound.hpp"
 #include "socks/inbound.hpp"
 #include "transparent.hpp"

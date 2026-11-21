@@ -19,7 +19,10 @@
 #include "config/log.hpp"
 #include "config/lua.hpp"
 #include "configHolder.hpp"
-#include "inboundMux.hpp"
+#include "http/http.hpp"
+#include "inboundHandler.hpp"
+#include "socks/socks4.hpp"
+#include "socks/socks5.hpp"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -36,38 +39,86 @@
 namespace
 {
 
-    class KernelProxyHandler : public mynet::handler::HandlerInboundMux
+    class KernelProxyHandler : public mynet::handler::HandlerInboundConnectionBase
     {
     public:
         inline static mynet::Core *g_core = nullptr;
 
         KernelProxyHandler() noexcept = default;
+        ~KernelProxyHandler() noexcept override = default;
 
-        void handle()
+        KernelProxyHandler(const KernelProxyHandler &) = delete;
+        KernelProxyHandler &operator=(const KernelProxyHandler &) = delete;
+        KernelProxyHandler(KernelProxyHandler &&) = delete;
+        KernelProxyHandler &operator=(KernelProxyHandler &&) = delete;
+
+        void handle() override
         {
-            mynet::handler::HandlerInboundMux::handle();
-            if (isEstablished() && !dispatched_ && g_core != nullptr)
+            if (activeHandler_ == nullptr)
             {
-                dispatched_ = true;
-                auto res = g_core->dispatch(*this, fd(), "default-mux", true);
-                if (res.ok() && res.session != nullptr)
+                if (requestBytes() == 0)
                 {
-                    session_ = res.session;
-                    if (session_->outboundFd() >= 0)
-                    {
-                        enableSpliceForward(session_->outboundFd());
-                    }
+                    return;
+                }
+
+                const uint8_t b = static_cast<uint8_t>(*requestBegin());
+                if (b == mynet::handler::socks4::kVersion)
+                {
+                    activeHandler_ = &s4_;
+                }
+                else if (b == mynet::handler::socks5::kVersion)
+                {
+                    activeHandler_ = &s5_;
+                }
+                else if (isHttpChar(b))
+                {
+                    activeHandler_ = &http_;
                 }
                 else
                 {
+                    onParseError("KernelProxyHandler: Unrecognized protocol byte");
                     setCloseAfterResponse(true);
+                    return;
+                }
+            }
+
+            syncToChild(*activeHandler_);
+            activeHandler_->handle();
+            syncFromChild(*activeHandler_);
+
+            if (activeHandler_->isEstablished())
+            {
+                stage_ = mynet::handler::InboundStage::STREAMING;
+                targetAddress_ = activeHandler_->targetAddress();
+                command_ = activeHandler_->command();
+
+                if (!dispatched_ && g_core != nullptr)
+                {
+                    dispatched_ = true;
+                    auto res = g_core->dispatch(*activeHandler_, fd(), "default-mixed", true);
+                    if (res.ok() && res.session != nullptr)
+                    {
+                        session_ = res.session;
+                        if (session_->outboundFd() >= 0)
+                        {
+                            enableSpliceForward(session_->outboundFd());
+                        }
+                    }
+                    else
+                    {
+                        setCloseAfterResponse(true);
+                    }
                 }
             }
         }
 
         void reset() noexcept override
         {
-            mynet::handler::HandlerInboundMux::reset();
+            HandlerInboundConnectionBase::reset();
+            activeHandler_ = nullptr;
+            s4_.reset();
+            s5_.reset();
+            http_.reset();
             dispatched_ = false;
             if (session_ != nullptr)
             {
@@ -77,7 +128,53 @@ namespace
         }
 
     private:
+        static bool isHttpChar(uint8_t b) noexcept
+        {
+            return (b == 'C' || b == 'G' || b == 'P' || b == 'H' || b == 'D' || b == 'O' || b == 'T' ||
+                    (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'));
+        }
+
+        void syncToChild(mynet::handler::HandlerInboundConnectionBase &child)
+        {
+            const size_t avail = requestBytes();
+            if (avail > child.requestBytes())
+            {
+                const size_t diff = avail - child.requestBytes();
+                const char *p = requestBegin() + child.requestBytes();
+                [[maybe_unused]] auto _ = child.appendRequest(p, static_cast<ssize_t>(diff));
+            }
+        }
+
+        void syncFromChild(mynet::handler::HandlerInboundConnectionBase &child)
+        {
+            const size_t childAvail = child.requestBytes();
+            if (requestBytes() > childAvail)
+            {
+                requestConsume(requestBytes() - childAvail);
+            }
+
+            while (child.hasResponse())
+            {
+                std::string resp = child.takeResponse();
+                [[maybe_unused]] auto _ = pushResponse(resp);
+            }
+
+            if (child.closeAfterResponse())
+            {
+                setCloseAfterResponse(true);
+            }
+
+            if (child.isSpliceActive())
+            {
+                setSpliceTarget(child.spliceTarget());
+            }
+        }
+
         bool dispatched_{false};
+        mynet::handler::HandlerInboundConnectionBase *activeHandler_{nullptr};
+        mynet::handler::HandlerInboundSocks4 s4_{};
+        mynet::handler::HandlerInboundSocks5 s5_{};
+        mynet::handler::HandlerInboundHttpProxy http_{};
         std::shared_ptr<mynet::ForwarderStreamSession> session_{nullptr};
     };
 

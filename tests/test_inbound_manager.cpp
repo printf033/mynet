@@ -40,16 +40,16 @@ TEST(InboundManagerTest, RegistryAndTypes)
     auto direct = std::make_shared<InboundDirect>("direct-in", "127.0.0.1", 9000);
     EXPECT_EQ(direct->type(), "direct");
 
-    auto mux = std::make_shared<InboundMux>("mux-in", "127.0.0.1", 7890);
-    EXPECT_EQ(mux->tag(), "mux-in");
-    EXPECT_EQ(mux->type(), "mux");
+    auto ss = std::make_shared<InboundShadowsocks>("ss-in", "127.0.0.1", 8388, "aes-128-gcm", "password");
+    EXPECT_EQ(ss->tag(), "ss-in");
+    EXPECT_EQ(ss->type(), "shadowsocks");
 
     mgr.registerInbound(vless);
     mgr.registerInbound(socks);
     mgr.registerInbound(http);
     mgr.registerInbound(trojan);
     mgr.registerInbound(direct);
-    mgr.registerInbound(mux);
+    mgr.registerInbound(ss);
 
     EXPECT_EQ(mgr.size(), 6u);
     EXPECT_TRUE(mgr.has("vless-in"));
@@ -57,7 +57,7 @@ TEST(InboundManagerTest, RegistryAndTypes)
     EXPECT_TRUE(mgr.has("http-in"));
     EXPECT_TRUE(mgr.has("trojan-in"));
     EXPECT_TRUE(mgr.has("direct-in"));
-    EXPECT_TRUE(mgr.has("mux-in"));
+    EXPECT_TRUE(mgr.has("ss-in"));
 
     auto tags = mgr.listTags();
     EXPECT_EQ(tags.size(), 6u);
@@ -95,10 +95,10 @@ TEST(InboundManagerTest, HandlerFactoryProduction)
     ASSERT_NE(hDirect, nullptr);
     EXPECT_EQ(hDirect->stage(), InboundStage::STREAMING);
 
-    InboundMux mux("mux", "127.0.0.1", 7890, "user", "pass");
-    auto hMux = mux.createHandler();
-    ASSERT_NE(hMux, nullptr);
-    EXPECT_EQ(hMux->stage(), InboundStage::HANDSHAKE);
+    InboundShadowsocks ssIn("ss", "127.0.0.1", 8388, "aes-128-gcm", "pass");
+    auto hSs = ssIn.createHandler();
+    ASSERT_NE(hSs, nullptr);
+    EXPECT_EQ(hSs->stage(), InboundStage::HANDSHAKE);
 }
 
 // =============================================================================
