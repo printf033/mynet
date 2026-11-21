@@ -61,7 +61,7 @@
 #include <sys/vfs.h>
 
 #if defined(MYNET_HAVE_LIBBPF)
-#include "ebpf/kern/mynet_kernel_bpf_embedded.hpp"
+#include "ebpf/mynet_kernel_bpf_embedded.hpp"
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #endif

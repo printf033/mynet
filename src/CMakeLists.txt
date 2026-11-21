@@ -94,9 +94,9 @@ endif()
 
 find_program(CLANG_BPF_EXE clang)
 if(CLANG_BPF_EXE)
-    set(MYNET_BPF_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ebpf/kern/mynet_kernel.bpf.c")
+    set(MYNET_BPF_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ebpf/mynet_kernel.bpf.c")
     set(MYNET_BPF_OBJ "${CMAKE_CURRENT_BINARY_DIR}/mynet_kernel.bpf.o")
-    set(MYNET_BPF_EMBED "${CMAKE_CURRENT_SOURCE_DIR}/ebpf/kern/mynet_kernel_bpf_embedded.hpp")
+    set(MYNET_BPF_EMBED "${CMAKE_CURRENT_SOURCE_DIR}/ebpf/mynet_kernel_bpf_embedded.hpp")
     add_custom_command(
         OUTPUT "${MYNET_BPF_OBJ}" "${MYNET_BPF_EMBED}"
         COMMAND ${CLANG_BPF_EXE} -O2 -g -target bpf -c "${MYNET_BPF_SRC}" -o "${MYNET_BPF_OBJ}"
