@@ -27,7 +27,7 @@ namespace mynet
 
         [[nodiscard]] inline const std::string &password() const noexcept { return password_; }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnection> createHandler() override
+        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundTrojan>(password_);
         }

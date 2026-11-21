@@ -10,8 +10,8 @@
 
 #include "../connection.hpp"
 #include "../datagram.hpp"
-#include "../inbound.hpp"
-#include "../outbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 #include "cache.hpp"
 #include "dns.hpp"
 #include <functional>
@@ -26,7 +26,7 @@ namespace mynet::handler
      * 满足 HandlerConstraint 与 MandatoryMethodConnection。
      * 每个 TCP DNS 报文均拥有 2 字节大端序长度前缀。
      */
-    class HandlerInboundConnectionDns : public HandlerInboundConnection
+    class HandlerInboundConnectionDns : public HandlerInboundConnectionBase
     {
     public:
         using QueryResponder = std::function<std::optional<dns::DnsMessage>(const dns::DnsMessage &)>;
@@ -142,7 +142,7 @@ namespace mynet::handler
      *
      * 满足 DatagramConstraint 静态约束，直连 UDP 53 端口。
      */
-    class HandlerInboundDatagramDns : public HandlerInboundDatagram
+    class HandlerInboundDatagramDns : public HandlerInboundDatagramBase
     {
     public:
         using QueryResponder = std::function<std::optional<dns::DnsMessage>(const dns::DnsMessage &)>;
@@ -156,7 +156,7 @@ namespace mynet::handler
 
         void setResponder(QueryResponder responder) noexcept { responder_ = std::move(responder); }
 
-        void reset() noexcept override { HandlerInboundDatagram::reset(); }
+        void reset() noexcept override { HandlerInboundDatagramBase::reset(); }
 
         /**
          * @brief 数据报入站事件
@@ -195,7 +195,7 @@ namespace mynet::handler
      *
      * 负责向上游 DNS 服务器发起标准 TCP DNS 递归查询。
      */
-    class HandlerOutboundConnectionDns : public HandlerOutboundConnection
+    class HandlerOutboundConnectionDns : public HandlerOutboundConnectionBase
     {
     private:
         std::string queryDomain_{};
@@ -226,7 +226,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             querySent_ = false;
             responseMessage_.reset();
         }
@@ -276,7 +276,7 @@ namespace mynet::handler
     /**
      * @brief UDP DNS 数据报客户端出站处理器
      */
-    class HandlerOutboundDatagramDns : public HandlerOutboundDatagram
+    class HandlerOutboundDatagramDns : public HandlerOutboundDatagramBase
     {
     private:
         std::string queryDomain_{};
@@ -288,7 +288,7 @@ namespace mynet::handler
         HandlerOutboundDatagramDns() noexcept = default;
         HandlerOutboundDatagramDns(const sockaddr_in &server, std::string domain, uint16_t qtype = dns::kTypeA,
                                    uint16_t txid = 0x1234)
-            : HandlerOutboundDatagram(server),
+            : HandlerOutboundDatagramBase(server),
               queryDomain_(std::move(domain)),
               queryType_(qtype),
               txid_(txid)
@@ -299,7 +299,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundDatagram::reset();
+            HandlerOutboundDatagramBase::reset();
             responseMessage_.reset();
         }
 

@@ -135,7 +135,7 @@ TEST(DialerBaseTest, LifecycleAndReset)
 }
 
 // =============================================================================
-// 3. HandlerOutboundConnection 出站协议族测试
+// 3. HandlerOutboundConnectionBase 出站协议族测试
 // =============================================================================
 
 TEST(HandlerOutboundTest, OutboundDirect)

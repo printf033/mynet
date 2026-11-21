@@ -6,7 +6,7 @@
  *
  * 与 InboundManager 形成严格对称的架构设计：
  * 1. 统一拨号抽象：提供面向流式 (TCP) 与数据报 (UDP) 的异步非阻塞出站建连；
- * 2. 状态机就绪装配：拨号成功后自动构造匹配的出站协议状态机处理器 (HandlerOutboundConnection)；
+ * 2. 状态机就绪装配：拨号成功后自动构造匹配的出站协议状态机处理器 (HandlerOutboundConnectionBase)；
  * 3. 统一出口策略：支持通过 DialerOptions 下发 Linux SO_MARK 策略路由打标、绑定物理网卡与超时；
  * 4. 节点调度与选择器：原生支持 Selector、UrlTest 与 Fallback 等节点调度组；
  * 5. 全生命周期描述符托管：确保套接字在拨号成功时通过 release() 安全转移给上层会话。
@@ -16,7 +16,7 @@
 #include "config/log.hpp"
 #include "dialer.hpp"
 #include "error.hpp"
-#include "outbound.hpp"
+#include "outboundHandler.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
@@ -56,11 +56,11 @@ namespace mynet
      */
     struct OutboundDialResult
     {
-        int fd{-1};                                                           ///< 拨号成功的套接字描述符
-        std::unique_ptr<handler::HandlerOutboundConnection> handler{nullptr}; ///< 对应的出站协议状态机处理器
-        std::string outboundTag{};                                            ///< 命中的出站标签
-        std::string targetEndpoint{};                                         ///< 目标端点字符串表示
-        bool immediateConnected{false};                                       ///< 连接是否立即可用（已非阻塞连上）
+        int fd{-1};                                                               ///< 拨号成功的套接字描述符
+        std::unique_ptr<handler::HandlerOutboundConnectionBase> handler{nullptr}; ///< 对应的出站协议状态机处理器
+        std::string outboundTag{};                                                ///< 命中的出站标签
+        std::string targetEndpoint{};                                             ///< 目标端点字符串表示
+        bool immediateConnected{false};                                           ///< 连接是否立即可用（已非阻塞连上）
 
         [[nodiscard]] inline bool ok() const noexcept { return handler != nullptr; }
     };

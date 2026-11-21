@@ -1,8 +1,9 @@
 #pragma once
 
 /**
- * @file handler/inbound.hpp
- * @brief 入站协议状态机处理器基类（面向流式连接 HandlerInboundConnection 与面向数据报 HandlerInboundDatagram）。
+ * @file handler/inboundHandler.hpp
+ * @brief 入站协议状态机处理器基类（面向流式连接 HandlerInboundConnectionBase 与面向数据报
+ * HandlerInboundDatagramBase）。
  */
 
 #include "address.hpp"
@@ -24,12 +25,12 @@ namespace mynet::handler
     };
 
     /**
-     * @brief 服务端流式连接入站协议处理器基类 (Stream Inbound Connection)
+     * @brief 服务端流式连接入站协议处理器基类 (Stream Inbound Connection Base)
      *
      * 派生自 HandlerConnection，满足 HandlerConstraint 与 MandatoryMethodConnection。
      * 适用于 TCP、TLS 以及基于 QUIC 逻辑流的代理入站协议（如 SOCKS5、Trojan、VLESS、Hysteria2、TUIC、HTTP Proxy 等）。
      */
-    class HandlerInboundConnection : public HandlerConnection
+    class HandlerInboundConnectionBase : public HandlerConnection
     {
     public:
         using RequestCallback = std::function<void(uint8_t cmd, const ProxyAddress &target)>;
@@ -48,13 +49,13 @@ namespace mynet::handler
         RequestCallback requestCallback_{nullptr};
 
     public:
-        HandlerInboundConnection() noexcept = default;
-        ~HandlerInboundConnection() noexcept override = default;
+        HandlerInboundConnectionBase() noexcept = default;
+        ~HandlerInboundConnectionBase() noexcept override = default;
 
-        HandlerInboundConnection(const HandlerInboundConnection &) = delete;
-        HandlerInboundConnection &operator=(const HandlerInboundConnection &) = delete;
-        HandlerInboundConnection(HandlerInboundConnection &&) = delete;
-        HandlerInboundConnection &operator=(HandlerInboundConnection &&) = delete;
+        HandlerInboundConnectionBase(const HandlerInboundConnectionBase &) = delete;
+        HandlerInboundConnectionBase &operator=(const HandlerInboundConnectionBase &) = delete;
+        HandlerInboundConnectionBase(HandlerInboundConnectionBase &&) = delete;
+        HandlerInboundConnectionBase &operator=(HandlerInboundConnectionBase &&) = delete;
 
         void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
         void setTarget(const ProxyAddress &target) noexcept { targetAddress_ = target; }
@@ -95,12 +96,12 @@ namespace mynet::handler
     };
 
     /**
-     * @brief 服务端数据报入站协议处理器基类 (Datagram Inbound)
+     * @brief 服务端数据报入站协议处理器基类 (Datagram Inbound Base)
      *
      * 派生自 HandlerDatagram，满足 DatagramConstraint。
      * 适用于纯 UDP、DNS、QUIC 原始数据报等无连接/报文级入站协议。
      */
-    class HandlerInboundDatagram : public HandlerDatagram
+    class HandlerInboundDatagramBase : public HandlerDatagram
     {
     public:
         using DatagramCallback = std::function<void(const sockaddr_in &peer, std::string_view payload)>;
@@ -110,17 +111,17 @@ namespace mynet::handler
         DatagramCallback datagramCallback_{nullptr};
 
     public:
-        HandlerInboundDatagram() noexcept = default;
-        explicit HandlerInboundDatagram(const DatagramConfig &config) noexcept
+        HandlerInboundDatagramBase() noexcept = default;
+        explicit HandlerInboundDatagramBase(const DatagramConfig &config) noexcept
             : HandlerDatagram(config)
         {
         }
-        ~HandlerInboundDatagram() noexcept override = default;
+        ~HandlerInboundDatagramBase() noexcept override = default;
 
-        HandlerInboundDatagram(const HandlerInboundDatagram &) = delete;
-        HandlerInboundDatagram &operator=(const HandlerInboundDatagram &) = delete;
-        HandlerInboundDatagram(HandlerInboundDatagram &&) = delete;
-        HandlerInboundDatagram &operator=(HandlerInboundDatagram &&) = delete;
+        HandlerInboundDatagramBase(const HandlerInboundDatagramBase &) = delete;
+        HandlerInboundDatagramBase &operator=(const HandlerInboundDatagramBase &) = delete;
+        HandlerInboundDatagramBase(HandlerInboundDatagramBase &&) = delete;
+        HandlerInboundDatagramBase &operator=(HandlerInboundDatagramBase &&) = delete;
 
         void setOnDatagram(DatagramCallback cb) noexcept { datagramCallback_ = std::move(cb); }
         void setStage(InboundStage st) noexcept { stage_ = st; }

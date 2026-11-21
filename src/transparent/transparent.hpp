@@ -13,7 +13,7 @@
 #include "../address.hpp"
 #include "../datagram.hpp"
 #include "../dns/cache.hpp"
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include "../sniffer.hpp"
 #include <cstdint>
 #include <functional>
@@ -45,7 +45,7 @@ namespace mynet::handler
     /**
      * @brief Linux Redirect 透明代理入站处理器 (iptables -j REDIRECT)
      */
-    class HandlerInboundRedirect : public HandlerInboundConnection
+    class HandlerInboundRedirect : public HandlerInboundConnectionBase
     {
     protected:
         TransparentStage transparentStage_{TransparentStage::RESOLVING};
@@ -75,7 +75,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             transparentStage_ = TransparentStage::RESOLVING;
             clientFd_ = -1;
         }
@@ -247,7 +247,7 @@ namespace mynet::handler
      * 负责解析带有 IP_RECVORIGDSTADDR 原始目的地址控制消息的 UDP 报文，
      * 联动 QUIC Initial 与 DNS 嗅探器还原目标域名。
      */
-    class HandlerInboundDatagramTProxy : public HandlerInboundDatagram
+    class HandlerInboundDatagramTProxy : public HandlerInboundDatagramBase
     {
     public:
         using TProxyPacketCallback =
@@ -269,7 +269,7 @@ namespace mynet::handler
         void setSniffing(bool enable) noexcept { sniffingEnabled_ = enable; }
         [[nodiscard]] bool isSniffingEnabled() const noexcept { return sniffingEnabled_; }
 
-        void reset() noexcept override { HandlerInboundDatagram::reset(); }
+        void reset() noexcept override { HandlerInboundDatagramBase::reset(); }
 
         /**
          * @brief 处理带有原始目的地址的入站 UDP 报文

@@ -23,8 +23,8 @@
 #include "dialer.hpp"
 #include "ebpf.hpp"
 #include "error.hpp"
-#include "inbound.hpp"
-#include "outbound.hpp"
+#include "inboundHandler.hpp"
+#include "outboundHandler.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -264,8 +264,8 @@ namespace mynet
         ForwarderConfig config_{};
         ForwarderStats stats_{};
 
-        handler::HandlerInboundConnection *inbound_{nullptr};
-        handler::HandlerOutboundConnection *outbound_{nullptr};
+        handler::HandlerInboundConnectionBase *inbound_{nullptr};
+        handler::HandlerOutboundConnectionBase *outbound_{nullptr};
         int inboundFd_{-1};
         int outboundFd_{-1};
         int sockmapFd_{-1};
@@ -306,8 +306,8 @@ namespace mynet
         [[nodiscard]] inline int inboundFd() const noexcept { return inboundFd_; }
         [[nodiscard]] inline int outboundFd() const noexcept { return outboundFd_; }
         [[nodiscard]] inline int sockmapFd() const noexcept { return sockmapFd_; }
-        [[nodiscard]] inline handler::HandlerInboundConnection *inbound() noexcept { return inbound_; }
-        [[nodiscard]] inline handler::HandlerOutboundConnection *outbound() noexcept { return outbound_; }
+        [[nodiscard]] inline handler::HandlerInboundConnectionBase *inbound() noexcept { return inbound_; }
+        [[nodiscard]] inline handler::HandlerOutboundConnectionBase *outbound() noexcept { return outbound_; }
         [[nodiscard]] inline const handler::ProxyAddress &target() const noexcept { return target_; }
 
         inline void setTarget(const handler::ProxyAddress &target) noexcept { target_ = target; }
@@ -349,8 +349,8 @@ namespace mynet
          * @param userSslActive 是否存在用户态 SSL（若为 true 则禁止 splice 强制走用户态缓冲）
          * @return size_t 桥接初始化阶段预排空摄入的残余字节数
          */
-        size_t attach(handler::HandlerInboundConnection &in, handler::HandlerOutboundConnection &out, int inFd = -1,
-                      int outFd = -1, bool userSslActive = false)
+        size_t attach(handler::HandlerInboundConnectionBase &in, handler::HandlerOutboundConnectionBase &out,
+                      int inFd = -1, int outFd = -1, bool userSslActive = false)
         {
             inbound_ = &in;
             outbound_ = &out;
@@ -1131,8 +1131,8 @@ namespace mynet
          * @param cfg 显式转发配置覆盖（可选）
          * @return std::shared_ptr<ForwarderStreamSession> 转发会话句柄
          */
-        std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnection &inbound,
-                                                       handler::HandlerOutboundConnection &outbound,
+        std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnectionBase &inbound,
+                                                       handler::HandlerOutboundConnectionBase &outbound,
                                                        std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
@@ -1165,8 +1165,8 @@ namespace mynet
          * 自动检查双端是否启用 SSL，自动提取套接字描述符并装配零拷贝 splice 或用户态泵送。
          */
         template <typename InHandler, typename OutHandler>
-            requires std::derived_from<InHandler, handler::HandlerInboundConnection> &&
-                     std::derived_from<OutHandler, handler::HandlerOutboundConnection>
+            requires std::derived_from<InHandler, handler::HandlerInboundConnectionBase> &&
+                     std::derived_from<OutHandler, handler::HandlerOutboundConnectionBase>
         std::shared_ptr<ForwarderStreamSession> bridge(Connection<InHandler> &inboundConn,
                                                        Connection<OutHandler> &outboundConn,
                                                        std::optional<ForwarderConfig> cfg = std::nullopt)
@@ -1429,7 +1429,7 @@ namespace mynet
         /**
          * @brief 将上游响应的数据报封装并回传给客户端
          */
-        [[nodiscard]] Result<size_t> forwardDatagramToClient(handler::HandlerInboundDatagram &inbound,
+        [[nodiscard]] Result<size_t> forwardDatagramToClient(handler::HandlerInboundDatagramBase &inbound,
                                                              const sockaddr_in &client, std::string_view payload,
                                                              ForwarderDatagramSession *session = nullptr) noexcept
         {

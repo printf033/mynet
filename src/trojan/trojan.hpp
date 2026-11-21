@@ -8,8 +8,8 @@
 #include "../address.hpp"
 #include "../digest.hpp"
 #include "../encoding.hpp"
-#include "../inbound.hpp"
-#include "../outbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -32,7 +32,7 @@ namespace mynet::handler
     /**
      * @brief Trojan 协议入站状态机处理器
      */
-    class HandlerInboundTrojan : public HandlerInboundConnection
+    class HandlerInboundTrojan : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(std::string_view hexHash)>;
@@ -70,7 +70,7 @@ namespace mynet::handler
          */
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
 
-        void reset() noexcept override { HandlerInboundConnection::reset(); }
+        void reset() noexcept override { HandlerInboundConnectionBase::reset(); }
 
         void handle() override
         {
@@ -180,7 +180,7 @@ namespace mynet::handler
      * 建立四元组连接后，在流首部自动填充并推送 Trojan 鉴权报文头：
      * [SHA-224 Hex Key (56B)][CRLF][CMD (0x01)][SOCKS5 Target Address][CRLF]
      */
-    class HandlerOutboundTrojan : public HandlerOutboundConnection
+    class HandlerOutboundTrojan : public HandlerOutboundConnectionBase
     {
     private:
         std::string hexKey_{};
@@ -189,7 +189,7 @@ namespace mynet::handler
     public:
         HandlerOutboundTrojan() noexcept = default;
         HandlerOutboundTrojan(std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnection(target),
+            : HandlerOutboundConnectionBase(target),
               hexKey_(digest::sha224Hex(password))
         {
         }
@@ -198,7 +198,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             headerSent_ = false;
         }
 

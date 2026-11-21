@@ -28,7 +28,7 @@ namespace mynet
         {
         }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnection> createHandler() override
+        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
         {
             auto h = std::make_unique<handler::HandlerInboundHttpProxy>();
             if (!username_.empty() || !password_.empty())

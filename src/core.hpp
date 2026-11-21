@@ -22,9 +22,9 @@
 #include "fakeip.hpp"
 #include "forwarder.hpp"
 #include "geo.hpp"
-#include "inbound.hpp"
+#include "inboundHandler.hpp"
 #include "inboundManager.hpp"
-#include "outbound.hpp"
+#include "outboundHandler.hpp"
 #include "outboundManager.hpp"
 #include "router.hpp"
 #include "sniffer.hpp"
@@ -474,8 +474,8 @@ namespace mynet
         /**
          * @brief 直接桥接入站与出站协议处理器并纳入数据面流中继
          */
-        inline std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnection &inbound,
-                                                              handler::HandlerOutboundConnection &outbound,
+        inline std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnectionBase &inbound,
+                                                              handler::HandlerOutboundConnectionBase &outbound,
                                                               std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             if (forwarder_ != nullptr)
@@ -575,7 +575,7 @@ namespace mynet
          * @param enableSniffing 是否开启首包域名嗅探
          * @return CoreDispatchResult 调度决断与转发会话结果
          */
-        CoreDispatchResult dispatch(handler::HandlerInboundConnection &inbound, int inFd = -1,
+        CoreDispatchResult dispatch(handler::HandlerInboundConnectionBase &inbound, int inFd = -1,
                                     std::string_view inboundTag = "", bool enableSniffing = true)
         {
             CoreDispatchResult result;

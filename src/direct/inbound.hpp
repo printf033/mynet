@@ -20,7 +20,7 @@ namespace mynet
         {
         }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnection> createHandler() override
+        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundDirect>();
         }

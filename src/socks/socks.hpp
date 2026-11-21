@@ -25,7 +25,7 @@ namespace mynet::handler
      * - 0x04: 路由至 SOCKS4 / SOCKS4a 处理逻辑
      * - 0x05: 路由至 SOCKS5 (RFC 1928 / RFC 1929) 处理逻辑
      */
-    class HandlerInboundSocks : public HandlerInboundConnection
+    class HandlerInboundSocks : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
@@ -85,7 +85,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             version_ = SocksProtocolVersion::UNKNOWN;
             s4_.reset();
             s5_.reset();

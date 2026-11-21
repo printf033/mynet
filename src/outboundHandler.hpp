@@ -1,8 +1,9 @@
 #pragma once
 
 /**
- * @file handler/outbound.hpp
- * @brief 出站协议状态机处理器基类（面向流式连接 HandlerOutboundConnection 与面向数据报 HandlerOutboundDatagram）。
+ * @file handler/outboundHandler.hpp
+ * @brief 出站协议状态机处理器基类（面向流式连接 HandlerOutboundConnectionBase 与面向数据报
+ * HandlerOutboundDatagramBase）。
  */
 
 #include "address.hpp"
@@ -24,12 +25,12 @@ namespace mynet::handler
     };
 
     /**
-     * @brief 客户端流式连接出站协议处理器基类 (Stream Outbound Connection)
+     * @brief 客户端流式连接出站协议处理器基类 (Stream Outbound Connection Base)
      *
      * 派生自 HandlerConnection，满足 HandlerConstraint 与 MandatoryMethodConnection。
      * 适用于直连、SOCKS5、Trojan、VLESS、Hysteria2 等客户端出站协议。
      */
-    class HandlerOutboundConnection : public HandlerConnection
+    class HandlerOutboundConnectionBase : public HandlerConnection
     {
     public:
         static constexpr bool kEnableSplice = true;
@@ -44,30 +45,31 @@ namespace mynet::handler
         ProxyAddress target_{};
 
     public:
-        HandlerOutboundConnection() noexcept = default;
-        explicit HandlerOutboundConnection(const ProxyAddress &target) noexcept
+        HandlerOutboundConnectionBase() noexcept = default;
+        explicit HandlerOutboundConnectionBase(const ProxyAddress &target) noexcept
             : target_(target)
         {
         }
-        ~HandlerOutboundConnection() noexcept override = default;
+        ~HandlerOutboundConnectionBase() noexcept override = default;
 
-        HandlerOutboundConnection(const HandlerOutboundConnection &) = delete;
-        HandlerOutboundConnection &operator=(const HandlerOutboundConnection &) = delete;
-        HandlerOutboundConnection(HandlerOutboundConnection &&) = delete;
-        HandlerOutboundConnection &operator=(HandlerOutboundConnection &&) = delete;
+        HandlerOutboundConnectionBase(const HandlerOutboundConnectionBase &) = delete;
+        HandlerOutboundConnectionBase &operator=(const HandlerOutboundConnectionBase &) = delete;
+        HandlerOutboundConnectionBase(HandlerOutboundConnectionBase &&) = delete;
+        HandlerOutboundConnectionBase &operator=(HandlerOutboundConnectionBase &&) = delete;
 
         void setTarget(const ProxyAddress &target) noexcept { target_ = target; }
         void setStage(OutboundStage st) noexcept { stage_ = st; }
 
-        [[nodiscard]] inline const ProxyAddress &target() const noexcept { return target_; }
+        [[nodiscard]] inline OutboundStage outboundStage() const noexcept { return stage_; }
         [[nodiscard]] inline OutboundStage stage() const noexcept { return stage_; }
         [[nodiscard]] inline bool isEstablished() const noexcept { return stage_ == OutboundStage::STREAMING; }
+        [[nodiscard]] inline const ProxyAddress &target() const noexcept { return target_; }
 
         void reset() noexcept override
         {
             HandlerConnection::reset();
             stage_ = OutboundStage::INITIAL;
-            target_ = {};
+            target_ = ProxyAddress{};
             disableSplice();
         }
 
@@ -82,38 +84,39 @@ namespace mynet::handler
     };
 
     /**
-     * @brief 客户端数据报出站协议处理器基类 (Datagram Outbound)
+     * @brief 客户端数据报出站协议处理器基类 (Datagram Outbound Base)
      *
      * 派生自 HandlerDatagram，满足 DatagramConstraint。
-     * 适用于纯 UDP、DNS 查询、QUIC 原始数据报等无连接/报文级出站协议。
+     * 适用于纯 UDP、DNS 数据报出站等无连接/报文级出站协议。
      */
-    class HandlerOutboundDatagram : public HandlerDatagram
+    class HandlerOutboundDatagramBase : public HandlerDatagram
     {
     protected:
         OutboundStage stage_{OutboundStage::STREAMING};
         sockaddr_in remotePeer_{};
 
     public:
-        HandlerOutboundDatagram() noexcept = default;
-        explicit HandlerOutboundDatagram(const DatagramConfig &config) noexcept
+        HandlerOutboundDatagramBase() noexcept = default;
+        explicit HandlerOutboundDatagramBase(const DatagramConfig &config) noexcept
             : HandlerDatagram(config)
         {
         }
-        explicit HandlerOutboundDatagram(const sockaddr_in &peer) noexcept
+        explicit HandlerOutboundDatagramBase(const sockaddr_in &peer) noexcept
             : remotePeer_(peer)
         {
         }
-        ~HandlerOutboundDatagram() noexcept override = default;
+        ~HandlerOutboundDatagramBase() noexcept override = default;
 
-        HandlerOutboundDatagram(const HandlerOutboundDatagram &) = delete;
-        HandlerOutboundDatagram &operator=(const HandlerOutboundDatagram &) = delete;
-        HandlerOutboundDatagram(HandlerOutboundDatagram &&) = delete;
-        HandlerOutboundDatagram &operator=(HandlerOutboundDatagram &&) = delete;
+        HandlerOutboundDatagramBase(const HandlerOutboundDatagramBase &) = delete;
+        HandlerOutboundDatagramBase &operator=(const HandlerOutboundDatagramBase &) = delete;
+        HandlerOutboundDatagramBase(HandlerOutboundDatagramBase &&) = delete;
+        HandlerOutboundDatagramBase &operator=(HandlerOutboundDatagramBase &&) = delete;
 
         void setRemotePeer(const sockaddr_in &peer) noexcept { remotePeer_ = peer; }
         void setStage(OutboundStage st) noexcept { stage_ = st; }
 
         [[nodiscard]] inline const sockaddr_in &remotePeer() const noexcept { return remotePeer_; }
+        [[nodiscard]] inline OutboundStage outboundStage() const noexcept { return stage_; }
         [[nodiscard]] inline OutboundStage stage() const noexcept { return stage_; }
         [[nodiscard]] inline bool isEstablished() const noexcept { return stage_ == OutboundStage::STREAMING; }
 

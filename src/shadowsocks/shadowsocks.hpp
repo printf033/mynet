@@ -8,9 +8,9 @@
 #include "../address.hpp"
 #include "../cipher.hpp"
 #include "../connection.hpp"
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include "../kdf.hpp"
-#include "../outbound.hpp"
+#include "../outboundHandler.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -47,7 +47,7 @@ namespace mynet::handler
     /**
      * @brief Shadowsocks AEAD 协议入站状态机处理器
      */
-    class HandlerInboundShadowsocks : public HandlerInboundConnection
+    class HandlerInboundShadowsocks : public HandlerInboundConnectionBase
     {
     public:
         static constexpr bool kEnableSplice = false;
@@ -116,7 +116,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             ssStage_ =
                 (cipherType_ == ShadowsocksCipher::NONE) ? ShadowsocksStage::CHUNK_PAYLOAD : ShadowsocksStage::SALT;
             rxSubkey_.clear();
@@ -410,7 +410,7 @@ namespace mynet::handler
     /**
      * @brief Shadowsocks AEAD 客户端出站状态机处理器
      */
-    class HandlerOutboundShadowsocks : public HandlerOutboundConnection
+    class HandlerOutboundShadowsocks : public HandlerOutboundConnectionBase
     {
     private:
         ShadowsocksCipher cipherType_{ShadowsocksCipher::AES_128_GCM};
@@ -422,7 +422,7 @@ namespace mynet::handler
     public:
         HandlerOutboundShadowsocks() noexcept = default;
         HandlerOutboundShadowsocks(std::string_view method, std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnection(target)
+            : HandlerOutboundConnectionBase(target)
         {
             setMethod(method, password);
         }
@@ -455,7 +455,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             handshakeSent_ = false;
         }
 

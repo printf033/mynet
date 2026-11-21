@@ -5,7 +5,7 @@
  * @brief VMess 代理协议入站节点 (InboundVmess)。
  */
 
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include "../inboundManager.hpp"
 #include "vmess.hpp"
 #include <cstdint>
@@ -30,7 +30,7 @@ namespace mynet
 
         [[nodiscard]] std::string_view uuid() const noexcept { return uuid_; }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnection> createHandler() override
+        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
         {
             auto h = std::make_unique<handler::HandlerInboundVmess>(uuid_);
             return h;

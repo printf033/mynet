@@ -8,7 +8,8 @@
 #include "../address.hpp"
 #include "../connection.hpp"
 #include "../encoding.hpp"
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -49,7 +50,7 @@ namespace mynet::handler
     /**
      * @brief VMess 协议服务端入站状态机处理器
      */
-    class HandlerInboundVmess : public HandlerInboundConnection
+    class HandlerInboundVmess : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &authId)>;
@@ -96,7 +97,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             vmessStage_ = VmessStage::AUTH;
             std::memset(authId_.data(), 0, 16);
         }
@@ -231,7 +232,7 @@ namespace mynet::handler
     /**
      * @brief VMess 客户端出站协议处理器 (VMess Outbound)
      */
-    class HandlerOutboundVmess : public HandlerOutboundConnection
+    class HandlerOutboundVmess : public HandlerOutboundConnectionBase
     {
     private:
         std::array<uint8_t, 16> uuid_{};
@@ -241,13 +242,13 @@ namespace mynet::handler
     public:
         HandlerOutboundVmess() noexcept = default;
         HandlerOutboundVmess(std::string_view uuidStr, std::string_view security, const ProxyAddress &target)
-            : HandlerOutboundConnection(target),
+            : HandlerOutboundConnectionBase(target),
               security_(security)
         {
             setUuid(uuidStr);
         }
         HandlerOutboundVmess(const std::array<uint8_t, 16> &uuid, std::string_view security, const ProxyAddress &target)
-            : HandlerOutboundConnection(target),
+            : HandlerOutboundConnectionBase(target),
               uuid_(uuid),
               security_(security)
         {
@@ -263,7 +264,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             headerSent_ = false;
         }
 

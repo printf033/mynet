@@ -8,8 +8,8 @@
  * 无需任何封装包装，直接与目标服务器建立原始 TCP/UDP 会话，并通过 Linux splice 零拷贝高速桥接。
  */
 
-#include "../inbound.hpp"
-#include "../outbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 #include <functional>
 #include <utility>
 
@@ -19,7 +19,7 @@ namespace mynet::handler
     /**
      * @brief 广义代理协议：直连入站直通处理器 (Direct Inbound Proxy Handler)
      */
-    class HandlerInboundDirect : public HandlerInboundConnection
+    class HandlerInboundDirect : public HandlerInboundConnectionBase
     {
     public:
         using DirectRequestCallback = std::function<void(const ProxyAddress &target)>;
@@ -47,11 +47,11 @@ namespace mynet::handler
         void setTarget(const ProxyAddress &target) { targetAddress_ = target; }
         void setOnDirectRequest(DirectRequestCallback cb) noexcept { directCallback_ = std::move(cb); }
         void setOnRequest(DirectRequestCallback cb) noexcept { directCallback_ = std::move(cb); }
-        using HandlerInboundConnection::setOnRequest;
+        using HandlerInboundConnectionBase::setOnRequest;
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             stage_ = InboundStage::STREAMING;
             triggered_ = false;
         }
@@ -79,20 +79,20 @@ namespace mynet::handler
      *
      * 初始即处于 STREAMING 状态，建连后可直接通过 Linux splice 桥接入站。
      */
-    class HandlerOutboundDirect : public HandlerOutboundConnection
+    class HandlerOutboundDirect : public HandlerOutboundConnectionBase
     {
     public:
         HandlerOutboundDirect() noexcept { stage_ = OutboundStage::STREAMING; }
 
         explicit HandlerOutboundDirect(const ProxyAddress &target) noexcept
-            : HandlerOutboundConnection(target)
+            : HandlerOutboundConnectionBase(target)
         {
             stage_ = OutboundStage::STREAMING;
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             stage_ = OutboundStage::STREAMING;
         }
 

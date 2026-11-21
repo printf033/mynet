@@ -7,7 +7,7 @@
 
 #include "../address.hpp"
 #include "../connection.hpp"
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -48,7 +48,7 @@ namespace mynet::handler
     /**
      * @brief SOCKS4 / SOCKS4a 协议入站状态机处理器
      */
-    class HandlerInboundSocks4 : public HandlerInboundConnection
+    class HandlerInboundSocks4 : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(std::string_view userId)>;
@@ -85,7 +85,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             socks4Stage_ = Socks4Stage::REQUEST;
             userId_.clear();
             autoReplyConnectSuccess_ = getProxyConfig().autoReplyConnectSuccess;

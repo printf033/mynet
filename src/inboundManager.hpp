@@ -7,7 +7,7 @@
  * 与 OutboundManager 形成严格对称的架构设计：
  * 1. 统一入站抽象：抽象基类 InboundBase 统领各类协议入站端点；
  * 2. 描述符与生命周期：统一管理监听套接字 (listenFd) 的绑定、非阻塞 accept 与优雅停机；
- * 3. 状态机工厂化产出：为新接入的客户端套接字创建匹配的协议状态机 (HandlerInboundConnection)；
+ * 3. 状态机工厂化产出：为新接入的客户端套接字创建匹配的协议状态机 (HandlerInboundConnectionBase)；
  * 4. 嗅探配置协同：按入站维度灵活开启/关闭首包应用层协议与域名嗅探；
  * 5. 全局注册与一键启停：支持多端口/多协议并发监听、批量拉起 (startAll) 与停止 (stopAll)。
  */
@@ -16,7 +16,7 @@
 #include "address.hpp"
 #include "config/log.hpp"
 #include "error.hpp"
-#include "inbound.hpp"
+#include "inboundHandler.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstdint>
@@ -50,7 +50,7 @@ namespace mynet
         std::string type_{};
         std::string host_{"0.0.0.0"};
         uint16_t port_{0};
-        AcceptorBase<handler::HandlerInboundConnection> acceptor_{};
+        AcceptorBase<handler::HandlerInboundConnectionBase> acceptor_{};
         bool running_{false};
         bool enableSniffing_{true};
 
@@ -76,8 +76,11 @@ namespace mynet
         [[nodiscard]] inline const std::string &host() const noexcept { return host_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return port_; }
         [[nodiscard]] inline int listenFd() const noexcept { return acceptor_.fd; }
-        [[nodiscard]] inline AcceptorBase<handler::HandlerInboundConnection> &acceptor() noexcept { return acceptor_; }
-        [[nodiscard]] inline const AcceptorBase<handler::HandlerInboundConnection> &acceptor() const noexcept
+        [[nodiscard]] inline AcceptorBase<handler::HandlerInboundConnectionBase> &acceptor() noexcept
+        {
+            return acceptor_;
+        }
+        [[nodiscard]] inline const AcceptorBase<handler::HandlerInboundConnectionBase> &acceptor() const noexcept
         {
             return acceptor_;
         }
@@ -129,7 +132,7 @@ namespace mynet
         /**
          * @brief 为新接入的连接创建对应的协议状态机处理器
          */
-        [[nodiscard]] virtual std::unique_ptr<handler::HandlerInboundConnection> createHandler() = 0;
+        [[nodiscard]] virtual std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() = 0;
     };
 
 } // namespace mynet
@@ -151,7 +154,7 @@ namespace mynet::inbound
     /**
      * @brief 驱动新接入的客户端套接字完成入站协议握手与目标地址解析
      */
-    inline bool driveHandshake(int clientFd, handler::HandlerInboundConnection &handler, int timeoutMs = 2000)
+    inline bool driveHandshake(int clientFd, handler::HandlerInboundConnectionBase &handler, int timeoutMs = 2000)
     {
         while (!handler.isEstablished() && handler.inboundStage() != handler::InboundStage::ERROR)
         {

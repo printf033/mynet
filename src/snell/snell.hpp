@@ -6,7 +6,7 @@
  */
 
 #include "../address.hpp"
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -26,7 +26,7 @@ namespace mynet::handler
     /**
      * @brief Snell 协议入站状态机处理器
      */
-    class HandlerInboundSnell : public HandlerInboundConnection
+    class HandlerInboundSnell : public HandlerInboundConnectionBase
     {
     public:
         static constexpr bool kEnableSplice = true;
@@ -52,7 +52,7 @@ namespace mynet::handler
         void setVersion(uint8_t ver) noexcept { version_ = ver; }
         void setPsk(std::string_view psk) { psk_ = std::string(psk); }
 
-        void reset() noexcept override { HandlerInboundConnection::reset(); }
+        void reset() noexcept override { HandlerInboundConnectionBase::reset(); }
 
         void handle() override
         {

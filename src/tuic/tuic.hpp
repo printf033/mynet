@@ -7,7 +7,7 @@
 
 #include "../address.hpp"
 #include "../encoding.hpp"
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -33,7 +33,7 @@ namespace mynet::handler
     /**
      * @brief TUIC 协议入站状态机处理器
      */
-    class HandlerInboundTuic : public HandlerInboundConnection
+    class HandlerInboundTuic : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &uuid)>;
@@ -64,7 +64,7 @@ namespace mynet::handler
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
         void setAutoReply(bool autoReply) noexcept { autoReplySuccess_ = autoReply; }
 
-        void reset() noexcept override { HandlerInboundConnection::reset(); }
+        void reset() noexcept override { HandlerInboundConnectionBase::reset(); }
 
         void handle() override
         {

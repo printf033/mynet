@@ -5,7 +5,7 @@
  * @brief VLESS XTLS Vision (xtls-rprx-vision) 流式填充、握手探测与零拷贝直通 (Splice)
  */
 
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>

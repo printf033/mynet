@@ -10,8 +10,8 @@
 #include "http/v1/handler.hpp"
 #include "http/v3/handler.hpp"
 #include "hysteria2/hysteria2.hpp"
-#include "inbound.hpp"
-#include "outbound.hpp"
+#include "inboundHandler.hpp"
+#include "outboundHandler.hpp"
 #include "proactor.hpp"
 #include "reactor.hpp"
 #include "socks/socks5.hpp"
@@ -256,10 +256,10 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<AcceptorSsl<HandlerDatagram>>);
     static_assert(Resettable<DialerBase<HandlerConnection>>);
     static_assert(Resettable<DialerSsl<HandlerConnection>>);
-    static_assert(Resettable<HandlerInboundConnection>);
-    static_assert(Resettable<HandlerInboundDatagram>);
-    static_assert(Resettable<HandlerOutboundConnection>);
-    static_assert(Resettable<HandlerOutboundDatagram>);
+    static_assert(Resettable<HandlerInboundConnectionBase>);
+    static_assert(Resettable<HandlerInboundDatagramBase>);
+    static_assert(Resettable<HandlerOutboundConnectionBase>);
+    static_assert(Resettable<HandlerOutboundDatagramBase>);
     static_assert(Resettable<HandlerOutboundDirect>);
     static_assert(Resettable<HandlerOutboundTrojan>);
     static_assert(Resettable<HandlerOutboundVless>);
@@ -488,17 +488,17 @@ TEST(Constraints, DialerAndOutboundConceptsEvaluation)
     EXPECT_FALSE(BaseDialer<SslDial>);
 
     // 出站协议处理器约束测试：全部满足 HandlerConstraint 与 MandatoryMethodConnection
-    static_assert(HandlerConstraint<HandlerOutboundConnection>);
-    static_assert(MandatoryMethodConnection<HandlerOutboundConnection>);
+    static_assert(HandlerConstraint<HandlerOutboundConnectionBase>);
+    static_assert(MandatoryMethodConnection<HandlerOutboundConnectionBase>);
 
-    static_assert(HandlerConstraint<HandlerOutboundDatagram>);
-    static_assert(MandatoryMethodDatagram<HandlerOutboundDatagram>);
+    static_assert(HandlerConstraint<HandlerOutboundDatagramBase>);
+    static_assert(MandatoryMethodDatagram<HandlerOutboundDatagramBase>);
 
-    static_assert(HandlerConstraint<HandlerInboundConnection>);
-    static_assert(MandatoryMethodConnection<HandlerInboundConnection>);
+    static_assert(HandlerConstraint<HandlerInboundConnectionBase>);
+    static_assert(MandatoryMethodConnection<HandlerInboundConnectionBase>);
 
-    static_assert(HandlerConstraint<HandlerInboundDatagram>);
-    static_assert(MandatoryMethodDatagram<HandlerInboundDatagram>);
+    static_assert(HandlerConstraint<HandlerInboundDatagramBase>);
+    static_assert(MandatoryMethodDatagram<HandlerInboundDatagramBase>);
 
     static_assert(HandlerConstraint<HandlerOutboundDirect>);
     static_assert(MandatoryMethodConnection<HandlerOutboundDirect>);

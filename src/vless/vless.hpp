@@ -7,8 +7,8 @@
 
 #include "../address.hpp"
 #include "../encoding.hpp"
-#include "../inbound.hpp"
-#include "../outbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 #include "reality.hpp"
 #include "vision.hpp"
 #include <array>
@@ -35,7 +35,7 @@ namespace mynet::handler
     /**
      * @brief VLESS (v0) 入站协议状态机处理器
      */
-    class HandlerInboundVless : public HandlerInboundConnection
+    class HandlerInboundVless : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &uuid)>;
@@ -87,7 +87,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             std::memset(clientUuid_.data(), 0, 16);
             visionContext_.reset();
         }
@@ -222,7 +222,7 @@ namespace mynet::handler
      * [Version 0x00][UUID 16B][AddonLen 0x00][CMD 0x01][Port 2B BE][Address ATYP + Body]
      * 接收 2 字节回执 [0x00, 0x00] 后进入 STREAMING 阶段。
      */
-    class HandlerOutboundVless : public HandlerOutboundConnection
+    class HandlerOutboundVless : public HandlerOutboundConnectionBase
     {
     private:
         std::array<uint8_t, 16> uuid_{};
@@ -233,7 +233,7 @@ namespace mynet::handler
     public:
         HandlerOutboundVless() noexcept = default;
         HandlerOutboundVless(const std::array<uint8_t, 16> &uuid, const ProxyAddress &target)
-            : HandlerOutboundConnection(target),
+            : HandlerOutboundConnectionBase(target),
               uuid_(uuid),
               visionContext_(uuid)
         {
@@ -268,7 +268,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             headerSent_ = false;
             visionContext_.reset();
         }

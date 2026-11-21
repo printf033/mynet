@@ -33,7 +33,7 @@ namespace mynet
         [[nodiscard]] inline std::string_view uuid() const noexcept { return uuidStr_; }
         [[nodiscard]] inline const std::array<uint8_t, 16> &uuidBytes() const noexcept { return uuid_; }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnection> createHandler() override
+        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundVless>(uuid_);
         }

@@ -8,8 +8,8 @@
  * 立即断开或丢弃数据，实现针对恶意流量、广告过滤与安全策略的高性能黑洞处置。
  */
 
-#include "../inbound.hpp"
-#include "../outbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 
 namespace mynet::handler
 {
@@ -17,7 +17,7 @@ namespace mynet::handler
     /**
      * @brief 广义代理协议：拦截阻断入站处理器 (Block Inbound Proxy Handler)
      */
-    class HandlerInboundBlock : public HandlerInboundConnection
+    class HandlerInboundBlock : public HandlerInboundConnectionBase
     {
     public:
         static constexpr bool kEnableSplice = false;
@@ -37,7 +37,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             setCloseAfterResponse(true);
             stage_ = InboundStage::ERROR;
         }
@@ -55,7 +55,7 @@ namespace mynet::handler
     /**
      * @brief 广义代理协议：拦截阻断出站处理器 (Block Outbound Proxy Handler)
      */
-    class HandlerOutboundBlock : public HandlerOutboundConnection
+    class HandlerOutboundBlock : public HandlerOutboundConnectionBase
     {
     public:
         static constexpr bool kEnableSplice = false;
@@ -68,7 +68,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             setCloseAfterResponse(true);
             stage_ = OutboundStage::ERROR;
         }

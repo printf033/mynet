@@ -14,7 +14,7 @@
 #include "address.hpp"
 #include "connection.hpp"
 #include "http/http.hpp"
-#include "inbound.hpp"
+#include "inboundHandler.hpp"
 #include "inboundManager.hpp"
 #include "socks/socks4.hpp"
 #include "socks/socks5.hpp"
@@ -37,20 +37,20 @@ namespace mynet::handler
     {
         std::string name;
         std::function<bool(std::span<const uint8_t>)> probe;
-        std::function<std::unique_ptr<HandlerInboundConnection>()> factory;
+        std::function<std::unique_ptr<HandlerInboundConnectionBase>()> factory;
     };
 
     /**
      * @brief 通用多协议自适应入站处理器 (HandlerInboundMux)
      */
-    class HandlerInboundMux : public HandlerInboundConnection
+    class HandlerInboundMux : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
 
     private:
         std::string activeProtocol_{};
-        HandlerInboundConnection *activeHandler_{nullptr};
+        HandlerInboundConnectionBase *activeHandler_{nullptr};
 
         // 内置零堆分配默认子处理器（针对最高频的 SOCKS4/SOCKS5/HTTP 混合场景）
         HandlerInboundSocks4 s4_{};
@@ -59,7 +59,7 @@ namespace mynet::handler
 
         // 扩展自定义探针与其动态创建的 Handler
         std::vector<InboundProbeMatcher> customProbes_{};
-        std::unique_ptr<HandlerInboundConnection> customHandler_{nullptr};
+        std::unique_ptr<HandlerInboundConnectionBase> customHandler_{nullptr};
 
         AuthCallback authCallback_{nullptr};
 
@@ -114,7 +114,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             activeHandler_ = nullptr;
             activeProtocol_.clear();
             customHandler_.reset();
@@ -268,7 +268,7 @@ namespace mynet
         [[nodiscard]] inline const std::string &password() const noexcept { return password_; }
         [[nodiscard]] const std::vector<std::string> &protocols() const noexcept { return protocols_; }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnection> createHandler() override
+        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
         {
             auto h = std::make_unique<handler::HandlerInboundMux>();
             if (!username_.empty() || !password_.empty())

@@ -7,8 +7,8 @@
  */
 
 #include "../address.hpp"
-#include "../inbound.hpp"
-#include "../outbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -66,9 +66,9 @@ namespace mynet::handler
     /**
      * @brief SOCKS5 协议入站状态机处理器
      *
-     * 派生自 HandlerInboundConnection，满足 HandlerConstraint 与 MandatoryMethodConnection。
+     * 派生自 HandlerInboundConnectionBase，满足 HandlerConstraint 与 MandatoryMethodConnection。
      */
-    class HandlerInboundSocks5 : public HandlerInboundConnection
+    class HandlerInboundSocks5 : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(std::string_view username, std::string_view password)>;
@@ -105,7 +105,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             socks5Stage_ = Socks5Stage::METHOD_SELECT;
             selectedMethod_ = socks5::kMethodNoAcceptable;
         }
@@ -397,7 +397,7 @@ namespace mynet::handler
      *
      * 自动处理与上游 SOCKS5 代理服务器的握手与 CONNECT 建连指令。
      */
-    class HandlerOutboundSocks5 : public HandlerOutboundConnection
+    class HandlerOutboundSocks5 : public HandlerOutboundConnectionBase
     {
     private:
         enum class Step : uint8_t
@@ -412,13 +412,13 @@ namespace mynet::handler
     public:
         HandlerOutboundSocks5() noexcept = default;
         explicit HandlerOutboundSocks5(const ProxyAddress &target) noexcept
-            : HandlerOutboundConnection(target)
+            : HandlerOutboundConnectionBase(target)
         {
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             step_ = Step::SEND_GREETING;
         }
 

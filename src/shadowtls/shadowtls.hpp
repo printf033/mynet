@@ -8,7 +8,7 @@
 #include "../address.hpp"
 #include "../connection.hpp"
 #include "../digest.hpp"
-#include "../inbound.hpp"
+#include "../inboundHandler.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -37,7 +37,7 @@ namespace mynet::handler
     /**
      * @brief ShadowTLS 服务端入站处理器
      */
-    class HandlerInboundShadowTls : public HandlerInboundConnection
+    class HandlerInboundShadowTls : public HandlerInboundConnectionBase
     {
     public:
         using ShadowTlsRequestCallback = std::function<void(bool authenticated, const ProxyAddress &target)>;
@@ -88,7 +88,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             shadowTlsStage_ = ShadowTlsStage::INSPECT_CLIENT_HELLO;
             clientAuthenticated_ = false;
             sni_.clear();

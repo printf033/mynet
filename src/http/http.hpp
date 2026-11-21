@@ -8,8 +8,8 @@
 #include "../address.hpp"
 #include "../connection.hpp"
 #include "../encoding.hpp"
-#include "../inbound.hpp"
-#include "../outbound.hpp"
+#include "../inboundHandler.hpp"
+#include "../outboundHandler.hpp"
 #include "common.hpp"
 #include <cstdint>
 #include <functional>
@@ -41,7 +41,7 @@ namespace mynet::handler
     /**
      * @brief HTTP 代理协议服务端入站状态机处理器
      */
-    class HandlerInboundHttpProxy : public HandlerInboundConnection
+    class HandlerInboundHttpProxy : public HandlerInboundConnectionBase
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
@@ -70,7 +70,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnection::reset();
+            HandlerInboundConnectionBase::reset();
             httpStage_ = HttpProxyStage::REQUEST;
             isConnectMethod_ = false;
             method_.clear();
@@ -371,7 +371,7 @@ namespace mynet::handler
      *
      * 自动向上游 HTTP 代理服务器发送 CONNECT 隧道建连指令，并等待 HTTP/1.x 200 响应。
      */
-    class HandlerOutboundHttp : public HandlerOutboundConnection
+    class HandlerOutboundHttp : public HandlerOutboundConnectionBase
     {
     public:
         static constexpr bool kEnableSplice = true;
@@ -390,19 +390,19 @@ namespace mynet::handler
     public:
         HandlerOutboundHttp() noexcept = default;
         HandlerOutboundHttp(std::string_view username, std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnection(target),
+            : HandlerOutboundConnectionBase(target),
               username_(username),
               password_(password)
         {
         }
         explicit HandlerOutboundHttp(const ProxyAddress &target)
-            : HandlerOutboundConnection(target)
+            : HandlerOutboundConnectionBase(target)
         {
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnection::reset();
+            HandlerOutboundConnectionBase::reset();
             step_ = Step::SEND_CONNECT;
         }
 
