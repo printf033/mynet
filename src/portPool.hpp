@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file port_pool.hpp
+ * @file portPool.hpp
  * @brief 内核临时端口池避让与零碰撞探针预留分配器 (借鉴 sing-box common/kernelports)
  *
  * 核心机制：
@@ -23,7 +23,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-namespace mynet::transparent
+namespace mynet
 {
 
     struct PortRange
@@ -157,4 +157,10 @@ namespace mynet::transparent
         }
     };
 
+} // namespace mynet
+
+namespace mynet::transparent
+{
+    using mynet::KernelPortPool;
+    using mynet::PortRange;
 } // namespace mynet::transparent

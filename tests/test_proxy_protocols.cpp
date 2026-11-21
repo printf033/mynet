@@ -20,7 +20,7 @@
 #include "socks/socks.hpp"
 #include "socks/socks4.hpp"
 #include "socks/socks5.hpp"
-#include "transparent/transparent.hpp"
+#include "transparent.hpp"
 #include "trojan/trojan.hpp"
 #include "tuic/tuic.hpp"
 #include "vless/vless.hpp"

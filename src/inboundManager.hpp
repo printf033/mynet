@@ -144,7 +144,7 @@ namespace mynet
 #include "inboundMux.hpp"
 #include "shadowsocks/inbound.hpp"
 #include "socks/inbound.hpp"
-#include "transparent/inbound.hpp"
+#include "transparent.hpp"
 #include "trojan/inbound.hpp"
 #include "vless/inbound.hpp"
 #include "vmess/inbound.hpp"
