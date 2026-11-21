@@ -1,12 +1,12 @@
 #pragma once
 
 /**
- * @file transport/grpc.hpp
+ * @file grpc/grpc.hpp
  * @brief gRPC / Gun-lite (HTTP/2 流式封包) 协议传输抽象与消息帧编解码
  */
 
+#include "../transport.hpp"
 #include "../uvarint.hpp"
-#include "transport.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -17,8 +17,9 @@
 #include <string_view>
 #include <vector>
 
-namespace mynet::transport::grpc
+namespace mynet::grpc
 {
+    using namespace mynet::transport;
 
     namespace detail
     {
@@ -204,4 +205,9 @@ namespace mynet::transport::grpc
         }
     };
 
-} // namespace mynet::transport::grpc
+} // namespace mynet::grpc
+
+namespace mynet::transport::grpc
+{
+    using namespace mynet::grpc;
+}

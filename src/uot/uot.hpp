@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file uot.hpp
+ * @file uot/uot.hpp
  * @brief UoT (UDP over TCP) v1/v2 协议编解码与隧道封装引擎 (借鉴 sing-box common/uot)
  *
  * 核心设计原理：
@@ -28,7 +28,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace mynet::transport
+namespace mynet::uot
 {
 
     inline constexpr std::string_view UOT_V2_MAGIC_ADDRESS = "sp.v2.udp-over-tcp.arpa";
@@ -338,4 +338,9 @@ namespace mynet::transport
         }
     };
 
-} // namespace mynet::transport
+} // namespace mynet::uot
+
+namespace mynet::transport
+{
+    using namespace mynet::uot;
+}

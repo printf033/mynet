@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file transport/websocket.hpp
+ * @file websocket/websocket.hpp
  * @brief RFC 6455 WebSocket 协议编解码与会话实现
  */
 
 #include "../digest.hpp"
 #include "../encoding.hpp"
-#include "transport.hpp"
+#include "../transport.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -19,8 +19,9 @@
 #include <string_view>
 #include <vector>
 
-namespace mynet::transport::ws
+namespace mynet::websocket
 {
+    using namespace mynet::transport;
 
     inline constexpr std::string_view kWsGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -530,4 +531,13 @@ namespace mynet::transport::ws
         }
     };
 
-} // namespace mynet::transport::ws
+} // namespace mynet::websocket
+
+namespace mynet
+{
+    namespace ws = websocket;
+    namespace transport
+    {
+        namespace ws = mynet::websocket;
+    }
+} // namespace mynet

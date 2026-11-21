@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * @file transport/transport.hpp
+ * @file transport.hpp
  * @brief 通用传输层抽象 (Universal Transport Abstraction)
  *
  * 支持 TCP、TLS、WebSocket (RFC 6455) 与 gRPC / Gun-lite (HTTP/2 流式封包) 协议传输抽象。
  */
 
-#include "../error.hpp"
+#include "error.hpp"
 #include <cstdint>
 #include <memory>
 #include <span>

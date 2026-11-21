@@ -1,6 +1,6 @@
-#include "transport/grpc.hpp"
-#include "transport/transport.hpp"
-#include "transport/websocket.hpp"
+#include "grpc/grpc.hpp"
+#include "transport.hpp"
+#include "websocket/websocket.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>

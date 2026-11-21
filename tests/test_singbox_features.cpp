@@ -6,7 +6,7 @@
 #include "tls/pinning.hpp"
 #include "tls/spoof.hpp"
 #include "transparent/port_pool.hpp"
-#include "transport/uot.hpp"
+#include "uot/uot.hpp"
 #include "uvarint.hpp"
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
