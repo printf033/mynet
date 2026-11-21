@@ -6,10 +6,9 @@
  */
 
 #include "../address.hpp"
+#include "../connection.hpp"
 #include "../digest.hpp"
 #include "../encoding.hpp"
-#include "../inboundHandler.hpp"
-#include "../outboundHandler.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

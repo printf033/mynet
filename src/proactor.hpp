@@ -44,7 +44,7 @@ namespace mynet
      * @tparam Acceptor 满足 DerivedFromAcceptorBase 与 Resettable 约束的套接字接收器包装类型。
      */
     template <typename Acceptor>
-        requires DerivedFromAcceptorBase<Acceptor> && Resettable<Acceptor> &&
+        requires DerivedFromAcceptor<Acceptor> && Resettable<Acceptor> &&
                  (MandatoryMethodConnection<typename Acceptor::Handler> ||
                   MandatoryMethodDatagram<typename Acceptor::Handler>)
     class Proactor
@@ -133,7 +133,7 @@ namespace mynet
          * @brief 注册外部 Acceptor 实例到 Proactor 异步引擎
          */
         template <typename AnyHandler>
-        Result<> addAcceptor(AcceptorBase<AnyHandler> &acc, AcceptCallback onAccept = nullptr)
+        Result<> addAcceptor(mynet::Acceptor<AnyHandler> &acc, AcceptCallback onAccept = nullptr)
         {
             if (acc.fd < 0)
             {
@@ -222,7 +222,7 @@ namespace mynet
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl()
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             if (cfg.security.certFile.empty() || cfg.security.keyFile.empty()) [[unlikely]]
@@ -239,7 +239,7 @@ namespace mynet
          * @brief 以全局配置的监听地址 + 显式证书路径运行 TLS 服务器。
          */
         [[nodiscard]] Result<> runSsl(const char *crt, const char *key)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), crt, key, cfg.server,
@@ -255,7 +255,7 @@ namespace mynet
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.proactor, cfg.security);
@@ -272,7 +272,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
                                       const SecurityConfig &security)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.proactor, security);
@@ -292,7 +292,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
                                       const ServerConfig &server, const ProactorConfig &proactor,
                                       const SecurityConfig &security)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validProactorConfig(proactor));
@@ -310,7 +310,7 @@ namespace mynet
                 reset();
                 return std::unexpected(ctxRes.error());
             }
-            protocol_.ctx = *ctxRes;
+            sslCtx_ = *ctxRes;
             Result<> rc = serve(server, proactor, true);
             reset();
             return rc;
@@ -321,7 +321,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager,
                                       const ServerConfig &server, const ProactorConfig &proactor)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validProactorConfig(proactor));
@@ -331,28 +331,28 @@ namespace mynet
                 reset();
                 return err;
             }
-            protocol_.ctx = sniManager.defaultContext();
-            if (protocol_.ctx == nullptr) [[unlikely]]
+            sslCtx_ = sniManager.defaultContext();
+            if (sslCtx_ == nullptr) [[unlikely]]
             {
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
             Result<> rc = serve(server, proactor, true);
             // 由 sniManager 管理其托管的 SSL_CTX 生命周期，退出时置空避免 double-free
-            protocol_.ctx = nullptr;
+            sslCtx_ = nullptr;
             reset();
             return rc;
         }
 
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, sniManager, cfg.server, cfg.proactor);
         }
 
         [[nodiscard]] Result<> runSsl(SniCertificateManager &sniManager)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), sniManager, cfg.server,
@@ -640,9 +640,10 @@ namespace mynet
             extraListeners_.clear();
             datagram_.reset();
             cancelScratch_.clear();
-            if constexpr (SslAcceptor<Acceptor>)
+            if (sslCtx_ != nullptr)
             {
-                detail::freeContext(protocol_.ctx);
+                detail::freeContext(sslCtx_);
+                sslCtx_ = nullptr;
             }
             security_ = {};
             alpnList_.clear();
@@ -953,14 +954,11 @@ namespace mynet
             session->conn.setFd(fd);
             session->conn.addr() = addr;
             session->conn.touch();
-            if constexpr (SslAcceptor<Acceptor>)
+            if (sslCtx_ != nullptr && !session->conn.startTLS(sslCtx_)) [[unlikely]]
             {
-                if (protocol_.ctx == nullptr || !session->conn.startTLS(protocol_.ctx)) [[unlikely]]
-                {
-                    LOG_WARN("Proactor::onNewConnection: TLS setup for fd {} failed: {}", fd, sslText());
-                    sessionPool_.release(session);
-                    return;
-                }
+                LOG_WARN("Proactor::onNewConnection: TLS setup for fd {} failed: {}", fd, sslText());
+                sessionPool_.release(session);
+                return;
             }
             session->slot = sessions_.size();
             sessions_.push_back(session);
@@ -1451,7 +1449,7 @@ namespace mynet
         int bufSize_ = 0;
         void *bufBase_ = nullptr;
         Acceptor acceptor_;
-        Protocol<Acceptor> protocol_{};
+        SSL_CTX *sslCtx_{nullptr};
         ObjectPool<Session> sessionPool_{};
         ObjectPool<AcceptOp> acceptPool_{};
         std::vector<Session *> sessions_{};

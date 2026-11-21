@@ -1103,7 +1103,7 @@ TEST(ConfigLua, ReactorAppliesMaxEventsToTheEventLoop)
     cfg.server.maxConnections = 16;
     mynet::publishMynetConfig(cfg);
 
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> server;
+    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> server;
     // 端口 0 交给内核挑，避免与本机其他测试/服务抢端口
     std::thread runner([&] { (void)server.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -1190,7 +1190,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     cfg.reactor.maxEvents = 384;
     mynet::publishMynetConfig(cfg);
 
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> running;
+    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> running;
     std::thread runner([&] { (void)running.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     ASSERT_EQ(running.loop().eventCapacity(), 384u);
@@ -1205,7 +1205,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     runner.join();
 
     // 新启动的实例则采用新值。
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> fresh;
+    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> fresh;
     std::thread runner2([&] { (void)fresh.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     EXPECT_EQ(fresh.loop().eventCapacity(), 768u);

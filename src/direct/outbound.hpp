@@ -22,7 +22,7 @@ namespace mynet
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
         {
-            DialerBase<handler::HandlerOutboundDirect> dialer;
+            Dialer<handler::HandlerOutboundDirect> dialer;
             if (options_.fwmark != 0)
             {
                 dialer.setMark(options_.fwmark);
@@ -58,7 +58,7 @@ namespace mynet
 
         Result<int> dialDatagram(const handler::ProxyAddress &target) override
         {
-            DialerBase<handler::HandlerOutboundDirect> dialer;
+            Dialer<handler::HandlerOutboundDirect> dialer;
             if (options_.fwmark != 0)
             {
                 dialer.setMark(options_.fwmark);

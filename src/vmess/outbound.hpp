@@ -5,7 +5,7 @@
  * @brief VMess 代理协议出站节点 (OutboundVmess)。
  */
 
-#include "../outboundHandler.hpp"
+#include "../connection.hpp"
 #include "../outboundManager.hpp"
 #include "vmess.hpp"
 #include <cstdint>

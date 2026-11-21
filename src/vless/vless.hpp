@@ -6,9 +6,8 @@
  */
 
 #include "../address.hpp"
+#include "../connection.hpp"
 #include "../encoding.hpp"
-#include "../inboundHandler.hpp"
-#include "../outboundHandler.hpp"
 #include "reality.hpp"
 #include "vision.hpp"
 #include <array>

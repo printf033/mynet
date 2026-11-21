@@ -13,9 +13,9 @@
  */
 
 #include "address.hpp"
+#include "connection.hpp"
 #include "datagram.hpp"
 #include "dns/cache.hpp"
-#include "inboundHandler.hpp"
 #include "inboundManager.hpp"
 #include "sniffer.hpp"
 #include <cstdint>

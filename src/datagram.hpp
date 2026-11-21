@@ -4,6 +4,7 @@
 #include "config/log.hpp"
 #include "config/tls.hpp"
 #include "configHolder.hpp"
+#include "connection.hpp"
 #include "constraints.hpp"
 #include "error.hpp"
 #include "http/common.hpp"
@@ -20,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -386,6 +388,12 @@ namespace mynet
             [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
         }
 
+        explicit HandlerDatagram(const sockaddr_in &peer) noexcept
+            : HandlerDatagram()
+        {
+            remotePeer_ = peer;
+        }
+
         virtual ~HandlerDatagram() noexcept = default;
 
         HandlerDatagram(const HandlerDatagram &) = delete; // a datagram handler owns the outgoing queue for one socket
@@ -426,6 +434,10 @@ namespace mynet
                 outgoing_.reset();
             }
             droppedOutgoing_ = 0;
+            inboundStage_ = handler::InboundStage::STREAMING;
+            outboundStage_ = handler::OutboundStage::STREAMING;
+            remotePeer_ = {};
+            datagramCallback_ = nullptr;
         }
 
         /**
@@ -531,11 +543,32 @@ namespace mynet
         }
         [[nodiscard]] inline size_t maxPendingOutgoing() const noexcept { return maxPendingOutgoing_; }
 
+        using DatagramCallback = std::function<void(const sockaddr_in &peer, std::string_view payload)>;
+
+        void setOnDatagram(DatagramCallback cb) noexcept { datagramCallback_ = std::move(cb); }
+        void setRemotePeer(const sockaddr_in &peer) noexcept { remotePeer_ = peer; }
+        void setStage(handler::InboundStage st) noexcept { inboundStage_ = st; }
+        void setStage(handler::OutboundStage st) noexcept { outboundStage_ = st; }
+
+        [[nodiscard]] inline const sockaddr_in &remotePeer() const noexcept { return remotePeer_; }
+        [[nodiscard]] inline handler::InboundStage inboundStage() const noexcept { return inboundStage_; }
+        [[nodiscard]] inline handler::OutboundStage outboundStage() const noexcept { return outboundStage_; }
+        [[nodiscard]] inline handler::InboundStage stage() const noexcept { return inboundStage_; }
+        [[nodiscard]] virtual bool isEstablished() const noexcept
+        {
+            return inboundStage_ == handler::InboundStage::STREAMING ||
+                   outboundStage_ == handler::OutboundStage::STREAMING;
+        }
+
     protected:
         size_t maxDatagramBytes_ = getDatagramConfig().maxDatagramBytes;
         size_t maxPendingOutgoing_ = getDatagramConfig().maxPendingOutgoing;
         size_t droppedOutgoing_ = 0;
         DatagramQueue outgoing_{};
+        handler::InboundStage inboundStage_{handler::InboundStage::STREAMING};
+        handler::OutboundStage outboundStage_{handler::OutboundStage::STREAMING};
+        sockaddr_in remotePeer_{};
+        DatagramCallback datagramCallback_{nullptr};
     };
 
     /**
@@ -1894,3 +1927,62 @@ namespace mynet
     };
 
 } // namespace mynet
+
+namespace mynet::handler
+{
+    class HandlerInboundDatagramBase : public mynet::HandlerDatagram
+    {
+    protected:
+        InboundStage stage_{InboundStage::STREAMING};
+
+    public:
+        using DatagramCallback = HandlerDatagram::DatagramCallback;
+
+        HandlerInboundDatagramBase() noexcept = default;
+        explicit HandlerInboundDatagramBase(const DatagramConfig &config) noexcept
+            : HandlerDatagram(config)
+        {
+        }
+        ~HandlerInboundDatagramBase() noexcept override = default;
+
+        void setStage(InboundStage st) noexcept { stage_ = st; }
+        [[nodiscard]] inline InboundStage inboundStage() const noexcept { return stage_; }
+        [[nodiscard]] inline InboundStage stage() const noexcept { return stage_; }
+        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == InboundStage::STREAMING; }
+
+        void reset() noexcept override
+        {
+            HandlerDatagram::reset();
+            stage_ = InboundStage::STREAMING;
+        }
+    };
+
+    class HandlerOutboundDatagramBase : public mynet::HandlerDatagram
+    {
+    protected:
+        OutboundStage stage_{OutboundStage::STREAMING};
+
+    public:
+        HandlerOutboundDatagramBase() noexcept = default;
+        explicit HandlerOutboundDatagramBase(const DatagramConfig &config) noexcept
+            : HandlerDatagram(config)
+        {
+        }
+        explicit HandlerOutboundDatagramBase(const sockaddr_in &peer) noexcept
+            : HandlerDatagram(peer)
+        {
+        }
+        ~HandlerOutboundDatagramBase() noexcept override = default;
+
+        void setStage(OutboundStage st) noexcept { stage_ = st; }
+        [[nodiscard]] inline OutboundStage outboundStage() const noexcept { return stage_; }
+        [[nodiscard]] inline OutboundStage stage() const noexcept { return stage_; }
+        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == OutboundStage::STREAMING; }
+
+        void reset() noexcept override
+        {
+            HandlerDatagram::reset();
+            stage_ = OutboundStage::STREAMING;
+        }
+    };
+} // namespace mynet::handler

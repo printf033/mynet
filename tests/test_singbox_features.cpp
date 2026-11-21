@@ -374,7 +374,7 @@ TEST(SingboxFeaturesTest, TcpPrefixInjection)
         void onParseError(const char *) noexcept {}
     };
 
-    DialerBase<DummyHandler> dialer;
+    Dialer<DummyHandler> dialer;
     dialer.attach(sv[0]);
 
     std::vector<uint8_t> prefix = {'P', 'R', 'E', 'F', 'I', 'X', 0x01, 0x02};

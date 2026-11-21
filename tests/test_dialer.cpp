@@ -99,12 +99,12 @@ TEST(DnsResolverTest, DecodeResponseAndCache)
 }
 
 // =============================================================================
-// 2. DialerBase 单元测试
+// 2. Dialer 单元测试
 // =============================================================================
 
-TEST(DialerBaseTest, LifecycleAndReset)
+TEST(DialerTest, LifecycleAndReset)
 {
-    DialerBase<HandlerConnection> dialer;
+    Dialer<HandlerConnection> dialer;
     EXPECT_EQ(dialer.fd, -1);
 
     // 拨号非法 IP 格式失败
@@ -410,14 +410,14 @@ TEST(HandlerDnsTest, OutboundDatagramDnsClient)
     EXPECT_EQ(client.response()->answers[0].ipString(), "1.1.1.1");
 }
 
-TEST(DialerBaseTest, StrategyRoutingOptionsFwmarkAndTransparent)
+TEST(DialerTest, StrategyRoutingOptionsFwmarkAndTransparent)
 {
     struct DummyHandler : HandlerConnection
     {
         void handle() {}
     };
 
-    DialerBase<DummyHandler> dialer;
+    Dialer<DummyHandler> dialer;
     EXPECT_EQ(dialer.mark(), 0u);
     EXPECT_FALSE(dialer.isTransparent());
 

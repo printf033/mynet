@@ -200,7 +200,7 @@ TEST(InboundManagerTest, ReactorDrivesInboundAcceptor)
     ASSERT_GT(port, 0);
 
     // 2. Reactor 反应器引擎纳管该 Inbound 的套接字
-    using Server = Reactor<AcceptorBase<HandlerConnection>>;
+    using Server = Reactor<Acceptor<HandlerConnection>>;
     Server reactor;
 
     std::atomic<bool> accepted{false};
@@ -266,7 +266,7 @@ TEST(InboundManagerTest, ProactorDrivesInboundAcceptor)
     ASSERT_GT(port, 0);
 
     // 2. Proactor 前摄器引擎纳管该 Inbound 的套接字
-    using Server = Proactor<AcceptorBase<HandlerConnection>>;
+    using Server = Proactor<Acceptor<HandlerConnection>>;
     Server proactor;
 
     std::atomic<bool> accepted{false};

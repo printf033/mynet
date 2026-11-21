@@ -8,8 +8,6 @@
 #include "../address.hpp"
 #include "../connection.hpp"
 #include "../encoding.hpp"
-#include "../inboundHandler.hpp"
-#include "../outboundHandler.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>

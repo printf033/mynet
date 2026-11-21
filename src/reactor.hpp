@@ -486,7 +486,7 @@ namespace mynet
      * @tparam Acceptor 满足 DerivedFromAcceptorBase 与 Resettable 约束的套接字接收器包装类型。
      */
     template <typename Acceptor>
-        requires DerivedFromAcceptorBase<Acceptor> && Resettable<Acceptor> &&
+        requires DerivedFromAcceptor<Acceptor> && Resettable<Acceptor> &&
                  (MandatoryMethodConnection<typename Acceptor::Handler> ||
                   MandatoryMethodDatagram<typename Acceptor::Handler>)
     class Reactor
@@ -585,7 +585,7 @@ namespace mynet
          * @brief 注册外部 Acceptor 实例到事件循环
          */
         template <typename AnyHandler>
-        Result<> addAcceptor(AcceptorBase<AnyHandler> &acc, AcceptCallback onAccept = nullptr)
+        Result<> addAcceptor(mynet::Acceptor<AnyHandler> &acc, AcceptCallback onAccept = nullptr)
         {
             if (acc.fd < 0)
             {
@@ -683,7 +683,7 @@ namespace mynet
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl()
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             if (cfg.security.certFile.empty() || cfg.security.keyFile.empty()) [[unlikely]]
@@ -700,7 +700,7 @@ namespace mynet
          * @brief 以全局配置的监听地址 + 显式证书路径运行 TLS 服务器。
          */
         [[nodiscard]] Result<> runSsl(const char *crt, const char *key)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), crt, key, cfg.server, cfg.reactor,
@@ -716,7 +716,7 @@ namespace mynet
          * @return 正常停止返回 {}，启动或运行时失败返回错误码。
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, cfg.security);
@@ -733,7 +733,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
                                       const SecurityConfig &security)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, crt, key, cfg.server, cfg.reactor, security);
@@ -753,7 +753,7 @@ namespace mynet
         [[nodiscard]] Result<> runSsl(const char *ip, int port, const char *crt, const char *key,
                                       const ServerConfig &server, const ReactorConfig &reactor,
                                       const SecurityConfig &security)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validReactorConfig(reactor));
@@ -771,7 +771,7 @@ namespace mynet
                 reset();
                 return std::unexpected(ctxRes.error());
             }
-            protocol_.ctx = *ctxRes;
+            sslCtx_ = *ctxRes;
             Result<> rc = serve(server, reactor);
             reset();
             return rc;
@@ -782,7 +782,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager,
                                       const ServerConfig &server, const ReactorConfig &reactor)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             contract_assert(validServerConfig(server));
             contract_assert(validReactorConfig(reactor));
@@ -792,28 +792,28 @@ namespace mynet
                 reset();
                 return err;
             }
-            protocol_.ctx = sniManager.defaultContext();
-            if (protocol_.ctx == nullptr) [[unlikely]]
+            sslCtx_ = sniManager.defaultContext();
+            if (sslCtx_ == nullptr) [[unlikely]]
             {
                 reset();
                 return std::unexpected(ERR::SSL_CTX_FAILED);
             }
             Result<> rc = serve(server, reactor);
             // 由 sniManager 管理其托管的 SSL_CTX 生命周期，退出时置空避免 double-free
-            protocol_.ctx = nullptr;
+            sslCtx_ = nullptr;
             reset();
             return rc;
         }
 
         [[nodiscard]] Result<> runSsl(const char *ip, int port, SniCertificateManager &sniManager)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(ip, port, sniManager, cfg.server, cfg.reactor);
         }
 
         [[nodiscard]] Result<> runSsl(SniCertificateManager &sniManager)
-            requires SslAcceptor<Acceptor> && kStreaming
+            requires kStreaming
         {
             const MynetConfig cfg = getMynetConfig();
             return runSsl(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), sniManager, cfg.server,
@@ -874,7 +874,7 @@ namespace mynet
          * @brief 完全以全局配置运行 QUIC (HTTP/3 over UDP) 服务器。
          */
         [[nodiscard]] Result<> runQuic(Handler &handler)
-            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+            requires MandatoryMethodDatagram<Handler>
         {
             const MynetConfig cfg = getMynetConfig();
             return runQuic(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler);
@@ -884,7 +884,7 @@ namespace mynet
          * @brief 以全局配置（reactor/security 段）运行 QUIC 服务器。
          */
         [[nodiscard]] Result<> runQuic(const char *ip, int port, Handler &handler)
-            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+            requires MandatoryMethodDatagram<Handler>
         {
             const MynetConfig cfg = getMynetConfig();
             const char *crt = cfg.security.certFile.empty() ? "certs/ser.crt" : cfg.security.certFile.c_str();
@@ -896,7 +896,7 @@ namespace mynet
          * @brief 以显式证书路径 + 全局 reactor 配置运行 QUIC 服务器。
          */
         [[nodiscard]] Result<> runQuic(const char *ip, int port, const char *crt, const char *key, Handler &handler)
-            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+            requires MandatoryMethodDatagram<Handler>
         {
             const ReactorConfig cfg = getReactorConfig();
             return runQuic(ip, port, crt, key, handler, cfg);
@@ -907,7 +907,7 @@ namespace mynet
          */
         [[nodiscard]] Result<> runQuic(const char *ip, int port, const char *crt, const char *key, Handler &handler,
                                        const ReactorConfig &reactor)
-            requires QuicAcceptor<Acceptor> && MandatoryMethodDatagram<Handler>
+            requires MandatoryMethodDatagram<Handler>
         {
             contract_assert(validReactorConfig(reactor));
             if (auto err = acceptor_.listenUdp(ip, port); !err) [[unlikely]]
@@ -927,9 +927,9 @@ namespace mynet
                 reset();
                 return std::unexpected(ctxRes.error());
             }
-            protocol_.ctx = *ctxRes;
+            sslCtx_ = *ctxRes;
 
-            if (auto tlsErr = datagram_.startTLS(protocol_.ctx, acceptor_.fd); !tlsErr) [[unlikely]]
+            if (auto tlsErr = datagram_.startTLS(sslCtx_, acceptor_.fd); !tlsErr) [[unlikely]]
             {
                 LOG_ERROR("Reactor::runQuic: datagram startTLS failed: {}", tlsErr.error());
                 reset();
@@ -1106,9 +1106,10 @@ namespace mynet
             index_.clear();
             connPool_.reset();
             loop_.setEventCallback({});
-            if constexpr (SslAcceptor<Acceptor> || QuicAcceptor<Acceptor>)
+            if (sslCtx_ != nullptr)
             {
-                detail::freeContext(protocol_.ctx);
+                detail::freeContext(sslCtx_);
+                sslCtx_ = nullptr;
             }
             acceptor_.reset();
             datagram_.reset();
@@ -1390,14 +1391,11 @@ namespace mynet
             conn->setFd(fd);
             conn->addr() = addr;
             conn->touch();
-            if constexpr (SslAcceptor<Acceptor>)
+            if (sslCtx_ != nullptr && !conn->startTLS(sslCtx_)) [[unlikely]]
             {
-                if (protocol_.ctx != nullptr && !conn->startTLS(protocol_.ctx)) [[unlikely]]
-                {
-                    LOG_WARN("Reactor::onNewConnection: TLS setup for fd {} failed: {}", fd, sslText());
-                    connPool_.release(conn);
-                    return;
-                }
+                LOG_WARN("Reactor::onNewConnection: TLS setup for fd {} failed: {}", fd, sslText());
+                connPool_.release(conn);
+                return;
             }
             index_.emplace(fd, conn);
             uint32_t events = EPOLLIN | EPOLLET;
@@ -1453,7 +1451,7 @@ namespace mynet
 
         Acceptor acceptor_;
         EventLoop loop_;
-        Protocol<Acceptor> protocol_{};
+        SSL_CTX *sslCtx_{nullptr};
         ObjectPool<Conn> connPool_{};
         std::unordered_map<int, Conn *> index_{};
         std::vector<Conn *> sweepScratch_{};

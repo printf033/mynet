@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (tls, proactor)", listen.text);
 
     using namespace mynet;
-    if (auto res = Proactor<AcceptorSsl<HandlerConnection>>().runSsl(listen.ip, listen.port(), crt, key); !res)
+    if (auto res = Proactor<Acceptor<HandlerConnection>>().runSsl(listen.ip, listen.port(), crt, key); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

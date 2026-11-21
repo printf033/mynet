@@ -8,8 +8,7 @@
  * 立即断开或丢弃数据，实现针对恶意流量、广告过滤与安全策略的高性能黑洞处置。
  */
 
-#include "../inboundHandler.hpp"
-#include "../outboundHandler.hpp"
+#include "../connection.hpp"
 
 namespace mynet::handler
 {

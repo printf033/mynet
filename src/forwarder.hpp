@@ -23,8 +23,6 @@
 #include "dialer.hpp"
 #include "ebpf.hpp"
 #include "error.hpp"
-#include "inboundHandler.hpp"
-#include "outboundHandler.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>

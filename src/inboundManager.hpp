@@ -15,8 +15,8 @@
 #include "acceptor.hpp"
 #include "address.hpp"
 #include "config/log.hpp"
+#include "connection.hpp"
 #include "error.hpp"
-#include "inboundHandler.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstdint>
@@ -50,7 +50,7 @@ namespace mynet
         std::string type_{};
         std::string host_{"0.0.0.0"};
         uint16_t port_{0};
-        AcceptorBase<handler::HandlerInboundConnectionBase> acceptor_{};
+        Acceptor<HandlerConnection> acceptor_{};
         bool running_{false};
         bool enableSniffing_{true};
 
@@ -76,14 +76,8 @@ namespace mynet
         [[nodiscard]] inline const std::string &host() const noexcept { return host_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return port_; }
         [[nodiscard]] inline int listenFd() const noexcept { return acceptor_.fd; }
-        [[nodiscard]] inline AcceptorBase<handler::HandlerInboundConnectionBase> &acceptor() noexcept
-        {
-            return acceptor_;
-        }
-        [[nodiscard]] inline const AcceptorBase<handler::HandlerInboundConnectionBase> &acceptor() const noexcept
-        {
-            return acceptor_;
-        }
+        [[nodiscard]] inline Acceptor<HandlerConnection> &acceptor() noexcept { return acceptor_; }
+        [[nodiscard]] inline const Acceptor<HandlerConnection> &acceptor() const noexcept { return acceptor_; }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_; }
         [[nodiscard]] inline bool isSniffingEnabled() const noexcept { return enableSniffing_; }
         inline void setSniffingEnabled(bool enable) noexcept { enableSniffing_ = enable; }

@@ -10,8 +10,6 @@
 
 #include "../connection.hpp"
 #include "../datagram.hpp"
-#include "../inboundHandler.hpp"
-#include "../outboundHandler.hpp"
 #include "cache.hpp"
 #include "dns.hpp"
 #include <functional>

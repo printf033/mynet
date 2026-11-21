@@ -5,7 +5,7 @@
  * @brief VMess 代理协议入站节点 (InboundVmess)。
  */
 
-#include "../inboundHandler.hpp"
+#include "../connection.hpp"
 #include "../inboundManager.hpp"
 #include "vmess.hpp"
 #include <cstdint>

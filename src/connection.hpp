@@ -3,6 +3,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "address.hpp"
 #include "config/log.hpp"
 #include "configHolder.hpp"
 #include "constraints.hpp"
@@ -16,6 +17,7 @@
 #include <deque>
 #include <expected>
 #include <fcntl.h>
+#include <functional>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <openssl/err.h>
@@ -95,6 +97,33 @@ namespace mynet
         [[nodiscard]] bool isFrozen() const noexcept { return flowId != 0; }
         void freeze(uint64_t id) noexcept { flowId = id; }
     };
+
+    namespace handler
+    {
+        enum class InboundStage : uint8_t
+        {
+            HANDSHAKE, ///< 正在接收并解析入站握手报文/鉴权/提取目标地址
+            STREAMING, ///< 握手完成，进入数据流式透传/内核零拷贝转发阶段
+            ERROR      ///< 鉴权失败或协议格式畸变
+        };
+
+        enum class OutboundStage : uint8_t
+        {
+            INITIAL,    ///< 初始未握手状态
+            CONNECTING, ///< 正在发送出站协议头部或等待对端认证回执
+            STREAMING,  ///< 握手完成，进入流式数据透传/内核零拷贝转发
+            ERROR       ///< 出站协议握手失败或对端报错
+        };
+
+        enum class ProxyStage : uint8_t
+        {
+            INITIAL,
+            HANDSHAKE,
+            CONNECTING,
+            STREAMING,
+            ERROR
+        };
+    } // namespace handler
 
     class HandlerConnection;
 
@@ -179,7 +208,49 @@ namespace mynet
         using SPLICE_CONTROL = mynet::SPLICE_CONTROL;
 
         /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝（派生类按协议特性开启）
-        static constexpr bool kEnableSplice = false;
+        static constexpr bool kEnableSplice = true;
+
+        using RequestCallback = std::function<void(uint8_t cmd, const handler::ProxyAddress &target)>;
+
+        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
+        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
+        inline void disableSpliceForward() noexcept { disableSplice(); }
+        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
+
+        // ---- 代理与状态机公共接口 (Proxy & State Machine Hooks) ----
+        virtual void handle() {}
+
+        void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
+        void setTarget(const handler::ProxyAddress &target) noexcept
+        {
+            targetAddress_ = target;
+            target_ = target;
+        }
+        void setCommand(uint8_t cmd) noexcept { command_ = cmd; }
+        void setStage(handler::InboundStage st) noexcept { inboundStage_ = st; }
+        void setStage(handler::OutboundStage st) noexcept { outboundStage_ = st; }
+
+        [[nodiscard]] inline handler::InboundStage inboundStage() const noexcept { return inboundStage_; }
+        [[nodiscard]] inline handler::OutboundStage outboundStage() const noexcept { return outboundStage_; }
+        [[nodiscard]] inline handler::InboundStage stage() const noexcept { return inboundStage_; }
+        [[nodiscard]] virtual bool isEstablished() const noexcept
+        {
+            return inboundStage_ == handler::InboundStage::STREAMING ||
+                   outboundStage_ == handler::OutboundStage::STREAMING;
+        }
+        [[nodiscard]] inline uint8_t command() const noexcept { return command_; }
+        [[nodiscard]] inline const std::optional<handler::ProxyAddress> &targetAddress() const noexcept
+        {
+            return targetAddress_;
+        }
+        [[nodiscard]] inline const handler::ProxyAddress &target() const noexcept
+        {
+            if (targetAddress_.has_value())
+            {
+                return *targetAddress_;
+            }
+            return target_;
+        }
 
         /**
          * @brief 默认构造函数（使用全局 ConnectionConfig 设定的默认响应队列容量与参数）
@@ -210,6 +281,16 @@ namespace mynet
             [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
         }
 
+        /**
+         * @brief 显式传入目标地址构造（出站代理协议使用）
+         */
+        explicit HandlerConnection(const handler::ProxyAddress &target) noexcept
+            : HandlerConnection()
+        {
+            targetAddress_ = target;
+            target_ = target;
+        }
+
         virtual ~HandlerConnection() noexcept = default;
 
         HandlerConnection(const HandlerConnection &) =
@@ -235,6 +316,12 @@ namespace mynet
             spliceTargetFd_ = -1;
             maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
             fd_ = -1;
+            inboundStage_ = handler::InboundStage::HANDSHAKE;
+            outboundStage_ = handler::OutboundStage::INITIAL;
+            targetAddress_.reset();
+            target_ = {};
+            command_ = 0;
+            requestCallback_ = nullptr;
         }
 
         // ---- 读取侧控制 (Read Side) ----
@@ -529,12 +616,11 @@ namespace mynet
          *
          * @param reason 人类可读的失败原因，允许为空指针
          */
-        virtual void onParseError([[maybe_unused]] const char *reason) noexcept {}
-
-        /**
-         * @brief 默认业务处理入口：无操作，具体业务由派生处理器实现
-         */
-        inline void handle() {}
+        virtual void onParseError([[maybe_unused]] const char *reason) noexcept
+        {
+            inboundStage_ = handler::InboundStage::ERROR;
+            outboundStage_ = handler::OutboundStage::ERROR;
+        }
 
     protected:
         RequestBuffer requestBuffer_;
@@ -545,6 +631,12 @@ namespace mynet
         SPLICE_CONTROL spliceControl_ = SPLICE_CONTROL::DISABLED;
         int spliceTargetFd_ = -1;
         int fd_ = -1;
+        handler::InboundStage inboundStage_{handler::InboundStage::HANDSHAKE};
+        handler::OutboundStage outboundStage_{handler::OutboundStage::INITIAL};
+        std::optional<handler::ProxyAddress> targetAddress_{std::nullopt};
+        handler::ProxyAddress target_{};
+        uint8_t command_{0};
+        RequestCallback requestCallback_{nullptr};
     };
 
     /**
@@ -1989,3 +2081,58 @@ namespace mynet
     };
 
 } // namespace mynet
+
+namespace mynet::handler
+{
+    class HandlerInboundConnectionBase : public mynet::HandlerConnection
+    {
+    protected:
+        InboundStage stage_{InboundStage::HANDSHAKE};
+
+    public:
+        using RequestCallback = HandlerConnection::RequestCallback;
+
+        HandlerInboundConnectionBase() noexcept = default;
+        ~HandlerInboundConnectionBase() noexcept override = default;
+
+        void setStage(InboundStage st) noexcept { stage_ = st; }
+        [[nodiscard]] inline InboundStage inboundStage() const noexcept { return stage_; }
+        [[nodiscard]] inline InboundStage stage() const noexcept { return stage_; }
+        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == InboundStage::STREAMING; }
+
+        void reset() noexcept override
+        {
+            HandlerConnection::reset();
+            stage_ = InboundStage::HANDSHAKE;
+        }
+
+        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = InboundStage::ERROR; }
+    };
+
+    class HandlerOutboundConnectionBase : public mynet::HandlerConnection
+    {
+    protected:
+        OutboundStage stage_{OutboundStage::INITIAL};
+
+    public:
+        HandlerOutboundConnectionBase() noexcept = default;
+        explicit HandlerOutboundConnectionBase(const handler::ProxyAddress &target) noexcept
+            : HandlerConnection(target)
+        {
+        }
+        ~HandlerOutboundConnectionBase() noexcept override = default;
+
+        void setStage(OutboundStage st) noexcept { stage_ = st; }
+        [[nodiscard]] inline OutboundStage outboundStage() const noexcept { return stage_; }
+        [[nodiscard]] inline OutboundStage stage() const noexcept { return stage_; }
+        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == OutboundStage::STREAMING; }
+
+        void reset() noexcept override
+        {
+            HandlerConnection::reset();
+            stage_ = OutboundStage::INITIAL;
+        }
+
+        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = OutboundStage::ERROR; }
+    };
+} // namespace mynet::handler

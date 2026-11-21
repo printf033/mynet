@@ -6,7 +6,7 @@
  */
 
 #include "../address.hpp"
-#include "../inboundHandler.hpp"
+#include "../connection.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>

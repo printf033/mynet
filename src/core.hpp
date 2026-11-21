@@ -17,14 +17,13 @@
  */
 
 #include "config/log.hpp"
+#include "connection.hpp"
 #include "ebpf.hpp"
 #include "error.hpp"
 #include "fakeip.hpp"
 #include "forwarder.hpp"
 #include "geo.hpp"
-#include "inboundHandler.hpp"
 #include "inboundManager.hpp"
-#include "outboundHandler.hpp"
 #include "outboundManager.hpp"
 #include "router.hpp"
 #include "sniffer.hpp"

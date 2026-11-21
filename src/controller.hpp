@@ -45,7 +45,7 @@ namespace mynet
         std::string listenHost_{"127.0.0.1"};
         uint16_t listenPort_{9090};
         std::string secret_{};
-        AcceptorBase<HandlerConnection> acceptor_{};
+        Acceptor<HandlerConnection> acceptor_{};
         std::atomic<bool> running_{false};
         std::unique_ptr<std::thread> workerThread_{nullptr};
 
@@ -71,8 +71,8 @@ namespace mynet
         Controller &operator=(Controller &&) = delete;
 
         [[nodiscard]] inline int listenFd() const noexcept { return acceptor_.fd; }
-        [[nodiscard]] inline AcceptorBase<HandlerConnection> &acceptor() noexcept { return acceptor_; }
-        [[nodiscard]] inline const AcceptorBase<HandlerConnection> &acceptor() const noexcept { return acceptor_; }
+        [[nodiscard]] inline Acceptor<HandlerConnection> &acceptor() noexcept { return acceptor_; }
+        [[nodiscard]] inline const Acceptor<HandlerConnection> &acceptor() const noexcept { return acceptor_; }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
         [[nodiscard]] inline const std::string &host() const noexcept { return listenHost_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return listenPort_; }

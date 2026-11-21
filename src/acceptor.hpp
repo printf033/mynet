@@ -17,28 +17,27 @@ namespace mynet
 {
 
     /**
-     * @brief 监听接收器基类
+     * @brief 监听接收器
      *
      * 绑定基础套接字描述符、地址与处理器类型，并提供标准的非阻塞 TCP 与 UDP 监听绑定逻辑。
      * 处理器只需满足 HandlerConstraint。
-     * 后续传输层接收器（如 AcceptorSsl、AcceptorQuic 等）均直接派生自本类。
      */
     template <typename HandlerType>
         requires HandlerConstraint<HandlerType>
-    struct AcceptorBase
+    struct Acceptor
     {
     public:
         int fd = -1;
         using Handler = HandlerType;
         sockaddr_in addr{};
 
-        AcceptorBase() = default;
-        virtual ~AcceptorBase() noexcept { reset(); }
+        Acceptor() = default;
+        virtual ~Acceptor() noexcept { reset(); }
 
-        AcceptorBase(const AcceptorBase &) = delete;
-        AcceptorBase &operator=(const AcceptorBase &) = delete;
+        Acceptor(const Acceptor &) = delete;
+        Acceptor &operator=(const Acceptor &) = delete;
 
-        AcceptorBase(AcceptorBase &&other) noexcept
+        Acceptor(Acceptor &&other) noexcept
             : fd(other.fd),
               addr(other.addr)
         {
@@ -46,7 +45,7 @@ namespace mynet
             other.addr = {};
         }
 
-        AcceptorBase &operator=(AcceptorBase &&other) noexcept
+        Acceptor &operator=(Acceptor &&other) noexcept
         {
             if (this != &other)
             {
@@ -242,64 +241,37 @@ namespace mynet
     };
 
     /**
-     * @brief 约束从 AcceptorBase 派生的所有接收器通道类型
+     * @brief 监听接收器兼容别名
+     */
+    template <typename HandlerType>
+    using AcceptorBase = Acceptor<HandlerType>;
+
+    /**
+     * @brief 约束从 Acceptor 派生或满足的接收器通道类型
      */
     template <typename A>
-    concept DerivedFromAcceptorBase =
-        requires { typename A::Handler; } && std::derived_from<A, AcceptorBase<typename A::Handler>>;
+    concept DerivedFromAcceptor =
+        requires { typename A::Handler; } && std::derived_from<A, Acceptor<typename A::Handler>>;
+
+    template <typename A>
+    concept DerivedFromAcceptorBase = DerivedFromAcceptor<A>;
 
     /**
      * @brief 基础监听接收器通道约束
      */
     template <typename A>
-    concept BaseAcceptor = requires { typename A::Handler; } && std::same_as<A, AcceptorBase<typename A::Handler>>;
+    concept BaseAcceptor = requires { typename A::Handler; } && std::same_as<A, Acceptor<typename A::Handler>>;
 
-    /**
-     * @brief SSL / TLS 传输层监听接收器标签特化类型
-     */
     template <typename HandlerType>
-        requires HandlerConstraint<HandlerType>
-    struct AcceptorSsl : public AcceptorBase<HandlerType>
-    {
-    };
+    using AcceptorSsl = Acceptor<HandlerType>;
 
-    /**
-     * @brief SSL 接收器通道约束
-     */
-    template <typename A>
-    concept SslAcceptor = requires { typename A::Handler; } && std::same_as<A, AcceptorSsl<typename A::Handler>>;
-
-    /**
-     * @brief 监听接收器协议运行时上下文状态特化特征模板
-     */
-    template <typename H>
-    struct Protocol<AcceptorSsl<H>>
-    {
-        SSL_CTX *ctx = nullptr;
-    };
-
-    /**
-     * @brief QUIC (UDP + TLS 1.3) 传输层监听接收器标签特化类型
-     */
     template <typename HandlerType>
-        requires HandlerConstraint<HandlerType>
-    struct AcceptorQuic : public AcceptorBase<HandlerType>
-    {
-    };
+    using AcceptorQuic = Acceptor<HandlerType>;
 
-    /**
-     * @brief QUIC 接收器通道约束
-     */
     template <typename A>
-    concept QuicAcceptor = requires { typename A::Handler; } && std::same_as<A, AcceptorQuic<typename A::Handler>>;
+    concept SslAcceptor = DerivedFromAcceptor<A>;
 
-    /**
-     * @brief QUIC 监听接收器协议运行时上下文状态特化特征模板
-     */
-    template <typename H>
-    struct Protocol<AcceptorQuic<H>>
-    {
-        SSL_CTX *ctx = nullptr;
-    };
+    template <typename A>
+    concept QuicAcceptor = DerivedFromAcceptor<A>;
 
 } // namespace mynet

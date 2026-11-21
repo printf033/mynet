@@ -145,7 +145,7 @@ namespace mynet
      */
     template <typename HandlerType>
         requires HandlerConstraint<HandlerType>
-    struct DialerBase
+    struct Dialer
     {
     public:
         int fd = -1;
@@ -158,13 +158,13 @@ namespace mynet
         std::string bindInterface{};      ///< SO_BINDTODEVICE 绑定网卡
         std::vector<uint8_t> tcpPrefix{}; ///< TCP 前置注入前缀 (借鉴 sing-box tcp_prefix)
 
-        DialerBase() = default;
-        virtual ~DialerBase() noexcept { reset(); }
+        Dialer() = default;
+        virtual ~Dialer() noexcept { reset(); }
 
-        DialerBase(const DialerBase &) = delete;
-        DialerBase &operator=(const DialerBase &) = delete;
+        Dialer(const Dialer &) = delete;
+        Dialer &operator=(const Dialer &) = delete;
 
-        DialerBase(DialerBase &&other) noexcept
+        Dialer(Dialer &&other) noexcept
             : fd(other.fd),
               targetAddr(other.targetAddr),
               fwmark(other.fwmark),
@@ -184,7 +184,7 @@ namespace mynet
             other.tcpPrefix.clear();
         }
 
-        DialerBase &operator=(DialerBase &&other) noexcept
+        Dialer &operator=(Dialer &&other) noexcept
         {
             if (this != &other)
             {
@@ -561,70 +561,37 @@ namespace mynet
     };
 
     /**
-     * @brief 约束从 DialerBase 派生的所有出站通道类型
+     * @brief 出站建连器兼容别名
+     */
+    template <typename HandlerType>
+    using DialerBase = Dialer<HandlerType>;
+
+    /**
+     * @brief 约束从 Dialer 派生或满足的出站通道类型
      */
     template <typename D>
-    concept DerivedFromDialerBase =
-        requires { typename D::Handler; } && std::derived_from<D, DialerBase<typename D::Handler>>;
+    concept DerivedFromDialer = requires { typename D::Handler; } && std::derived_from<D, Dialer<typename D::Handler>>;
+
+    template <typename D>
+    concept DerivedFromDialerBase = DerivedFromDialer<D>;
 
     /**
      * @brief 基础出站建连器通道约束
      */
     template <typename D>
-    concept BaseDialer = requires { typename D::Handler; } && std::same_as<D, DialerBase<typename D::Handler>>;
+    concept BaseDialer = requires { typename D::Handler; } && std::same_as<D, Dialer<typename D::Handler>>;
 
-    /**
-     * @brief SSL / TLS 传输层出站建连器特化类型（支持携带 SNI 与 ALPN）
-     */
     template <typename HandlerType>
-        requires HandlerConstraint<HandlerType>
-    struct DialerSsl : public DialerBase<HandlerType>
-    {
-    public:
-        std::string sni{};
-        std::string alpn{"h2,http/1.1"};
-    };
+    using DialerSsl = Dialer<HandlerType>;
 
-    /**
-     * @brief SSL 出站建连器通道约束
-     */
-    template <typename D>
-    concept SslDialer = requires { typename D::Handler; } && std::same_as<D, DialerSsl<typename D::Handler>>;
-
-    /**
-     * @brief 出站建连器协议运行时上下文状态特化特征模板
-     */
-    template <typename H>
-    struct Protocol<DialerSsl<H>>
-    {
-        SSL_CTX *ctx = nullptr;
-    };
-
-    /**
-     * @brief QUIC 出站建连器特化类型
-     */
     template <typename HandlerType>
-        requires HandlerConstraint<HandlerType>
-    struct DialerQuic : public DialerBase<HandlerType>
-    {
-    public:
-        std::string sni{};
-    };
+    using DialerQuic = Dialer<HandlerType>;
 
-    /**
-     * @brief QUIC 出站建连器通道约束
-     */
     template <typename D>
-    concept QuicDialer = requires { typename D::Handler; } && std::same_as<D, DialerQuic<typename D::Handler>>;
+    concept SslDialer = DerivedFromDialer<D>;
 
-    /**
-     * @brief QUIC 出站建连器协议运行时上下文状态特化特征模板
-     */
-    template <typename H>
-    struct Protocol<DialerQuic<H>>
-    {
-        SSL_CTX *ctx = nullptr;
-    };
+    template <typename D>
+    concept QuicDialer = DerivedFromDialer<D>;
 
     /**
      * @brief 多网卡出站策略 (借鉴 sing-box C.NetworkStrategy)

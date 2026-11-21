@@ -5,7 +5,7 @@
  * @brief HTTP 代理协议出站节点 (OutboundHttp)。
  */
 
-#include "../outboundHandler.hpp"
+#include "../connection.hpp"
 #include "../outboundManager.hpp"
 #include "http.hpp"
 #include <cstdint>

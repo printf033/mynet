@@ -8,8 +8,7 @@
  * 无需任何封装包装，直接与目标服务器建立原始 TCP/UDP 会话，并通过 Linux splice 零拷贝高速桥接。
  */
 
-#include "../inboundHandler.hpp"
-#include "../outboundHandler.hpp"
+#include "../connection.hpp"
 #include <functional>
 #include <utility>
 

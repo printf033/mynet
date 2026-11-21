@@ -10,8 +10,6 @@
 #include "http/v1/handler.hpp"
 #include "http/v3/handler.hpp"
 #include "hysteria2/hysteria2.hpp"
-#include "inboundHandler.hpp"
-#include "outboundHandler.hpp"
 #include "proactor.hpp"
 #include "reactor.hpp"
 #include "socks/socks5.hpp"
@@ -119,7 +117,7 @@ namespace
         void appendRequest(const char *, ssize_t) {}
     };
 
-    struct DeletedHandleHandler : public HandlerConnection
+    struct DeletedHandleHandler
     {
         void handle() = delete;
     };
@@ -252,10 +250,10 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<DatagramQueue>);
     static_assert(Resettable<HandlerConnection>);
     static_assert(Resettable<HandlerDatagram>);
+    static_assert(Resettable<Acceptor<HandlerConnection>>);
     static_assert(Resettable<AcceptorBase<HandlerConnection>>);
-    static_assert(Resettable<AcceptorSsl<HandlerDatagram>>);
+    static_assert(Resettable<Dialer<HandlerConnection>>);
     static_assert(Resettable<DialerBase<HandlerConnection>>);
-    static_assert(Resettable<DialerSsl<HandlerConnection>>);
     static_assert(Resettable<HandlerInboundConnectionBase>);
     static_assert(Resettable<HandlerInboundDatagramBase>);
     static_assert(Resettable<HandlerOutboundConnectionBase>);
@@ -434,58 +432,37 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
 
 TEST(Constraints, AcceptorConceptsEvaluationOnCompleteTypes)
 {
+    using Acc = Acceptor<HandlerConnection>;
     using BaseAcc = AcceptorBase<HandlerConnection>;
-    using SslAcc = AcceptorSsl<HandlerDatagram>;
-    using QuicAcc = AcceptorQuic<HandlerDatagram>;
 
-    // 概念约束测试：DerivedFromAcceptorBase
+    // 概念约束测试：DerivedFromAcceptor & DerivedFromAcceptorBase
+    static_assert(DerivedFromAcceptor<Acc>);
     static_assert(DerivedFromAcceptorBase<BaseAcc>);
-    static_assert(DerivedFromAcceptorBase<SslAcc>);
-    static_assert(DerivedFromAcceptorBase<QuicAcc>);
-    static_assert(!DerivedFromAcceptorBase<HandlerConnection>);
+    static_assert(!DerivedFromAcceptor<HandlerConnection>);
 
     // 概念约束测试：BaseAcceptor
+    static_assert(BaseAcceptor<Acc>);
     static_assert(BaseAcceptor<BaseAcc>);
-    static_assert(!BaseAcceptor<SslAcc>);
-    static_assert(!BaseAcceptor<QuicAcc>);
 
-    // 概念约束测试：SslAcceptor
-    static_assert(SslAcceptor<SslAcc>);
-    static_assert(!SslAcceptor<BaseAcc>);
-    static_assert(!SslAcceptor<QuicAcc>);
-
-    // 概念约束测试：QuicAcceptor
-    static_assert(QuicAcceptor<QuicAcc>);
-    static_assert(!QuicAcceptor<BaseAcc>);
-    static_assert(!QuicAcceptor<SslAcc>);
-
-    EXPECT_TRUE(DerivedFromAcceptorBase<BaseAcc>);
-    EXPECT_TRUE(BaseAcceptor<BaseAcc>);
-    EXPECT_TRUE(SslAcceptor<SslAcc>);
-    EXPECT_TRUE(QuicAcceptor<QuicAcc>);
-    EXPECT_FALSE(BaseAcceptor<SslAcc>);
-    EXPECT_FALSE(BaseAcceptor<QuicAcc>);
-    EXPECT_FALSE(SslAcceptor<BaseAcc>);
-    EXPECT_FALSE(QuicAcceptor<BaseAcc>);
+    EXPECT_TRUE(DerivedFromAcceptor<Acc>);
+    EXPECT_TRUE(BaseAcceptor<Acc>);
 }
 
 TEST(Constraints, DialerAndOutboundConceptsEvaluation)
 {
+    using Dial = Dialer<HandlerConnection>;
     using BaseDial = DialerBase<HandlerConnection>;
-    using SslDial = DialerSsl<HandlerConnection>;
 
-    // 概念约束测试：DerivedFromDialerBase & BaseDialer
+    // 概念约束测试：DerivedFromDialer & DerivedFromDialerBase
+    static_assert(DerivedFromDialer<Dial>);
     static_assert(DerivedFromDialerBase<BaseDial>);
-    static_assert(DerivedFromDialerBase<SslDial>);
-    static_assert(!DerivedFromDialerBase<HandlerConnection>);
+    static_assert(!DerivedFromDialer<HandlerConnection>);
 
+    static_assert(BaseDialer<Dial>);
     static_assert(BaseDialer<BaseDial>);
-    static_assert(!BaseDialer<SslDial>);
 
-    EXPECT_TRUE(DerivedFromDialerBase<BaseDial>);
-    EXPECT_TRUE(DerivedFromDialerBase<SslDial>);
-    EXPECT_TRUE(BaseDialer<BaseDial>);
-    EXPECT_FALSE(BaseDialer<SslDial>);
+    EXPECT_TRUE(DerivedFromDialer<Dial>);
+    EXPECT_TRUE(BaseDialer<Dial>);
 
     // 出站协议处理器约束测试：全部满足 HandlerConstraint 与 MandatoryMethodConnection
     static_assert(HandlerConstraint<HandlerOutboundConnectionBase>);
@@ -639,15 +616,12 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     poison.server.port = 1;
     mynet::publishMynetConfig(poison);
 
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> reactorStream;
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerDatagram>> reactorDatagram;
-    mynet::Reactor<mynet::AcceptorSsl<mynet::HandlerConnection>> reactorTls;
-    mynet::Reactor<mynet::AcceptorQuic<mynet::HandlerDatagram>> reactorQuic;
+    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> reactorStream;
+    mynet::Reactor<mynet::Acceptor<mynet::HandlerDatagram>> reactorDatagram;
 
 #if defined(MYNET_ENABLE_URING)
-    mynet::Proactor<mynet::AcceptorBase<mynet::HandlerConnection>> proactorStream;
-    mynet::Proactor<mynet::AcceptorBase<mynet::HandlerDatagram>> proactorDatagram;
-    mynet::Proactor<mynet::AcceptorSsl<mynet::HandlerConnection>> proactorTls;
+    mynet::Proactor<mynet::Acceptor<mynet::HandlerConnection>> proactorStream;
+    mynet::Proactor<mynet::Acceptor<mynet::HandlerDatagram>> proactorDatagram;
 #endif
 
     // 每次调用都会立刻失败（监听/加载证书），因此不会真的进入事件循环。
@@ -655,7 +629,7 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     [[maybe_unused]] auto r2 = reactorStream.runTcp();
     [[maybe_unused]] auto r3 = reactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
     [[maybe_unused]] auto r3_zero = reactorDatagram.runUdp(datagramHandler);
-    [[maybe_unused]] auto rq = reactorQuic.runQuic("1.2.3.4", 0, datagramHandler);
+    [[maybe_unused]] auto rq = reactorDatagram.runQuic("1.2.3.4", 0, datagramHandler);
 #if defined(MYNET_ENABLE_URING)
     [[maybe_unused]] auto r4 = proactorStream.runTcp("1.2.3.4", 0);
     [[maybe_unused]] auto r5 = proactorStream.runTcp();
@@ -663,14 +637,14 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     [[maybe_unused]] auto r5_udp_zero = proactorDatagram.runUdp(datagramHandler);
 #endif
 
-    [[maybe_unused]] auto r6 = reactorTls.runSsl();
-    [[maybe_unused]] auto r7 = reactorTls.runSsl("missing.crt", "missing.key");
-    [[maybe_unused]] auto r8 = reactorTls.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
+    [[maybe_unused]] auto r6 = reactorStream.runSsl();
+    [[maybe_unused]] auto r7 = reactorStream.runSsl("missing.crt", "missing.key");
+    [[maybe_unused]] auto r8 = reactorStream.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
 
 #if defined(MYNET_ENABLE_URING)
-    [[maybe_unused]] auto r9 = proactorTls.runSsl();
-    [[maybe_unused]] auto r10 = proactorTls.runSsl("missing.crt", "missing.key");
-    [[maybe_unused]] auto r11 = proactorTls.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
+    [[maybe_unused]] auto r9 = proactorStream.runSsl();
+    [[maybe_unused]] auto r10 = proactorStream.runSsl("missing.crt", "missing.key");
+    [[maybe_unused]] auto r11 = proactorStream.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
 #endif
 
     mynet::publishMynetConfig(saved);

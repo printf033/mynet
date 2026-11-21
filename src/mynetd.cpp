@@ -19,8 +19,8 @@
 #include "config/log.hpp"
 #include "config/lua.hpp"
 #include "configHolder.hpp"
+#include "connection.hpp"
 #include "http/http.hpp"
-#include "inboundHandler.hpp"
 #include "socks/socks4.hpp"
 #include "socks/socks5.hpp"
 #include <atomic>
@@ -233,7 +233,7 @@ namespace
     {
         KernelProxyHandler::g_core = &core;
 
-        using Server = EngineType<mynet::AcceptorBase<KernelProxyHandler>>;
+        using Server = EngineType<mynet::Acceptor<KernelProxyHandler>>;
         Server server;
 
         g_stopHandler = [&server]() { server.stop(); };

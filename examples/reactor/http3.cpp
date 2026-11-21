@@ -14,12 +14,12 @@
 //     curl -v --http3 https://127.0.0.1:4433/ -k
 //     curl -v --http3 https://127.0.0.1:4433/echo -d "hello http3" -k
 //
-// 传输层由 Reactor<AcceptorQuic<HandlerHttp3>> 统一驱动，业务逻辑由
+// 传输层由 Reactor<Acceptor<HandlerHttp3>> 统一驱动，业务逻辑由
 // HandlerHttp3::onRequest 解耦处理并分发响应。
 
 namespace
 {
-    mynet::Reactor<mynet::AcceptorQuic<mynet::http::v3::HandlerHttp3<>>> *g_reactor = nullptr;
+    mynet::Reactor<mynet::Acceptor<mynet::http::v3::HandlerHttp3<>>> *g_reactor = nullptr;
 
     void handleSignal(int)
     {
@@ -46,7 +46,7 @@ int main(int argc, char *argv[])
 
     using namespace mynet;
     http::v3::HandlerHttp3 handler;
-    Reactor<AcceptorQuic<http::v3::HandlerHttp3<>>> reactor;
+    Reactor<Acceptor<http::v3::HandlerHttp3<>>> reactor;
     g_reactor = &reactor;
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);

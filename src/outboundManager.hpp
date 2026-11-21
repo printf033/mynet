@@ -14,9 +14,9 @@
 
 #include "address.hpp"
 #include "config/log.hpp"
+#include "connection.hpp"
 #include "dialer.hpp"
 #include "error.hpp"
-#include "outboundHandler.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
@@ -118,7 +118,7 @@ namespace mynet
         Result<OutboundDialResult> dialStreamHelper(std::string_view serverHost, uint16_t serverPort,
                                                     const handler::ProxyAddress &target, Args &&...args)
         {
-            DialerBase<HandlerType> dialer;
+            Dialer<HandlerType> dialer;
             if (options_.fwmark != 0)
             {
                 dialer.setMark(options_.fwmark);

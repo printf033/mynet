@@ -8,9 +8,7 @@
 #include "../address.hpp"
 #include "../cipher.hpp"
 #include "../connection.hpp"
-#include "../inboundHandler.hpp"
 #include "../kdf.hpp"
-#include "../outboundHandler.hpp"
 #include <array>
 #include <cstdint>
 #include <functional>
