@@ -18,7 +18,7 @@
 #include "config/log.hpp"
 #include "error.hpp"
 #include "geo.hpp"
-#include "ruleset/srs.hpp"
+#include "ruleset.hpp"
 #include "sniffer.hpp"
 #include <algorithm>
 #include <arpa/inet.h>

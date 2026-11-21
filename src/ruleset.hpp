@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file ruleset/srs.hpp
+ * @file ruleset.hpp
  * @brief sing-box Rule-Set (.srs) 二进制规则集解析器与匹配引擎。
  *
  * 完整对标并兼容 sing-box SRS 二进制格式 (RFC/sing-box specification):
@@ -16,8 +16,8 @@
  * 4. 零堆分配高性能匹配：提供纳秒级规则判定与路由协同。
  */
 
-#include "../uvarint.hpp"
 #include "error.hpp"
+#include "uvarint.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
