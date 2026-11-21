@@ -1,7 +1,7 @@
 #include "common/endpoint.hpp"
 #include "common/handlers.hpp"
 #include "config/log.hpp"
-#include "datagram.hpp"
+#include "connection.hpp"
 #include "error.hpp"
 #include "proactor.hpp"
 

@@ -116,7 +116,6 @@ TEST(InboundManagerTest, ListenAndAcceptOne)
     ASSERT_TRUE(res.has_value());
     EXPECT_TRUE(inbound.isRunning());
     EXPECT_GE(inbound.listenFd(), 0);
-    EXPECT_EQ(inbound.acceptor().fd, inbound.listenFd());
     EXPECT_GT(inbound.port(), 0);
 
     const uint16_t dynamicPort = inbound.port();

@@ -3,7 +3,6 @@
 #include "configHolder.hpp"
 #include "connection.hpp"
 #include "constraints.hpp"
-#include "datagram.hpp"
 #include "dialer.hpp"
 #include "direct/direct.hpp"
 #include "dns/handler.hpp"
@@ -150,6 +149,9 @@ namespace
     /// 双特化组合：两个并列的独立基类，成员访问均为直接偏移，不经过虚基类。
     struct CombinedHandler : HandlerConnection, HandlerDatagram
     {
+        using HandlerConnection::fd;
+        using HandlerConnection::handle;
+
         void reset() noexcept override
         {
             HandlerConnection::reset();
@@ -503,148 +505,52 @@ TEST(Constraints, DialerAndOutboundConceptsEvaluation)
     static_assert(HandlerConstraint<HandlerOutboundConnectionDns>);
     static_assert(MandatoryMethodConnection<HandlerOutboundConnectionDns>);
     static_assert(HandlerConstraint<HandlerOutboundDatagramDns>);
-    static_assert(MandatoryMethodDatagram<HandlerOutboundDatagramDns>);
 }
 
-TEST(Constraints, EnginesAcceptPureDatagramHandlers)
+TEST(Constraints, AcceptorAndDialerPlaceholderZeroOverhead)
 {
-    // 回归防线：引擎曾声称接受 DerivedFromHandlerDatagram，但内部无条件用
-    // Connection<H> 作为成员类型，导致纯报文处理器通过约束后依然编译失败。
-    // 现在非流式处理器映射到 NoConnection，UDP 路径不再需要流式设施。
-    using PureAcc = AcceptorBase<PureDatagramHandler>;
-    using StreamAcc = AcceptorBase<HandlerConnection>;
+    // 测试 Acceptor 与 Dialer 的占位符在没有上下文时占 0 额外字节 (Zero Overhead)
+    struct CustomAcceptor : Acceptor<EmptyInbound>
+    {
+    };
+    struct CustomDialer : Dialer<EmptyOutbound>
+    {
+    };
+    static_assert(DerivedFromAcceptor<CustomAcceptor>);
+    static_assert(DerivedFromDialer<CustomDialer>);
 
-    static_assert(!MandatoryMethodConnection<PureDatagramHandler>);
-    static_assert(DerivedFromHandlerDatagram<PureDatagramHandler>);
-    static_assert(std::same_as<typename ConnectionSlot<PureDatagramHandler>::Type, NoConnection>);
-    static_assert(std::same_as<typename ConnectionSlot<HandlerConnection>::Type, Connection<HandlerConnection>>);
+    // Reactor 模板实例化与单/多 Acceptor 编译期调度
+    Reactor<CustomAcceptor> singleReactor;
+    Reactor<CustomAcceptor, Acceptor<EmptyInbound>> multiReactor;
 
-    // 引擎仍可两两实例化（这是之前失败的编译点）
-    static_assert(!Reactor<PureAcc>::kStreaming);
-    static_assert(Reactor<StreamAcc>::kStreaming);
-
-    Reactor<PureAcc> reactorUdp;
-    Reactor<StreamAcc> reactorTcp;
-    (void)reactorUdp;
-    (void)reactorTcp;
-
-    static_assert(CanRunUdp<Reactor<PureAcc>, PureDatagramHandler>);
-    static_assert(!CanRunTcp<Reactor<PureAcc>>);
-    static_assert(CanRunTcp<Reactor<StreamAcc>>);
-    static_assert(!CanRunUdp<Reactor<StreamAcc>, HandlerConnection>);
-
-#if defined(MYNET_ENABLE_URING)
-    static_assert(!Proactor<PureAcc>::kStreaming);
-    static_assert(Proactor<StreamAcc>::kStreaming);
-    Proactor<PureAcc> proactorUdp;
-    Proactor<StreamAcc> proactorTcp;
-    (void)proactorUdp;
-    (void)proactorTcp;
-    static_assert(CanRunUdp<Proactor<PureAcc>, PureDatagramHandler>);
-    static_assert(!CanRunTcp<Proactor<PureAcc>>);
-    static_assert(CanRunTcp<Proactor<StreamAcc>>);
-    static_assert(!CanRunUdp<Proactor<StreamAcc>, HandlerConnection>);
-#endif
-
-    EXPECT_FALSE(Reactor<PureAcc>::kStreaming);
-    EXPECT_TRUE(Reactor<StreamAcc>::kStreaming);
+    EXPECT_EQ(singleReactor.connections(), 0u);
+    EXPECT_EQ(multiReactor.connections(), 0u);
 }
-
-// ---------------------------------------------------------------------------
-// 每个公开的 run* 重载都必须**真正可实例化**。
-//
-// 这条约束的存在理由：类模板的成员函数体只在被使用时才实例化，因此
-// `requires { e.runSsl(); }` 这类表达式只能验证签名存在，验证不到函数体。
-// 曾有一个重载把 cfg.reactor 传给要求 ProactorConfig 的参数——签名合法、
-// 概念检查通过，直到用户真的调用才发现编不过。下面的函数体强制实例化
-// 每一个重载，这个编译错误就再也藏不住了（本文件不链接运行它们）。
-// ---------------------------------------------------------------------------
-namespace
-{
-    template <typename Engine, typename Handler>
-    void instantiateEveryRunOverload(Engine &engine, Handler &handler) noexcept
-    {
-        [[maybe_unused]] mynet::Result<> r{};
-        if constexpr (requires { engine.runTcp(); })
-        {
-            r = engine.runTcp();
-        }
-        if constexpr (requires { engine.runTcp("127.0.0.1", 0); })
-        {
-            r = engine.runTcp("127.0.0.1", 0);
-        }
-        if constexpr (requires { engine.runUdp("127.0.0.1", 0, handler); })
-        {
-            r = engine.runUdp("127.0.0.1", 0, handler);
-        }
-        (void)r;
-    }
-
-    template <typename Engine>
-    void instantiateSslRunOverloads(Engine &engine) noexcept
-    {
-        [[maybe_unused]] mynet::Result<> r{};
-        if constexpr (requires { engine.runSsl(); })
-        {
-            r = engine.runSsl();
-        }
-        if constexpr (requires { engine.runSsl("crt", "key"); })
-        {
-            r = engine.runSsl("crt", "key");
-        }
-        if constexpr (requires { engine.runSsl("127.0.0.1", 0, "crt", "key"); })
-        {
-            r = engine.runSsl("127.0.0.1", 0, "crt", "key");
-        }
-        (void)r;
-    }
-} // namespace
 
 TEST(Constraints, EveryRunOverloadIsInstantiable)
 {
-    // 这里真的调用每一个公开重载。它们当然会失败（端口 0 / 证书路径不存在），
-    // 但我们只关心"函数体能否被编译出来"——这正是之前那个 cfg.reactor /
-    // cfg.proactor 笔误唯一能被抓到的地方。requires 表达式抓不到，因为它
-    // 只检查签名；if constexpr(false) 也抓不到，因为未采用的分支不实例化。
-    mynet::HandlerDatagram datagramHandler{};
-
-    // 把监听地址预先改成不可能绑定的字面量：零参重载会读取它并立刻失败，
-    // 于是本测试只做"函数体能否编译"，绝不会真的进入事件循环把测试挂住。
     const mynet::MynetConfig saved = mynet::getMynetConfig();
     mynet::MynetConfig poison = saved;
     poison.server.host = "256.256.256.256";
     poison.server.port = 1;
     mynet::publishMynetConfig(poison);
 
-    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> reactorStream;
-    mynet::Reactor<mynet::Acceptor<mynet::HandlerDatagram>> reactorDatagram;
+    mynet::Reactor<mynet::Acceptor<mynet::EmptyInbound>> reactor;
 
 #if defined(MYNET_ENABLE_URING)
-    mynet::Proactor<mynet::Acceptor<mynet::HandlerConnection>> proactorStream;
-    mynet::Proactor<mynet::Acceptor<mynet::HandlerDatagram>> proactorDatagram;
+    mynet::Proactor<mynet::Acceptor<mynet::EmptyInbound>> proactor;
 #endif
 
-    // 每次调用都会立刻失败（监听/加载证书），因此不会真的进入事件循环。
-    [[maybe_unused]] auto r1 = reactorStream.runTcp("1.2.3.4", 0);
-    [[maybe_unused]] auto r2 = reactorStream.runTcp();
-    [[maybe_unused]] auto r3 = reactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
-    [[maybe_unused]] auto r3_zero = reactorDatagram.runUdp(datagramHandler);
-    [[maybe_unused]] auto rq = reactorDatagram.runQuic("1.2.3.4", 0, datagramHandler);
-#if defined(MYNET_ENABLE_URING)
-    [[maybe_unused]] auto r4 = proactorStream.runTcp("1.2.3.4", 0);
-    [[maybe_unused]] auto r5 = proactorStream.runTcp();
-    [[maybe_unused]] auto r5_udp = proactorDatagram.runUdp("1.2.3.4", 0, datagramHandler);
-    [[maybe_unused]] auto r5_udp_zero = proactorDatagram.runUdp(datagramHandler);
-#endif
-
-    [[maybe_unused]] auto r6 = reactorStream.runSsl();
-    [[maybe_unused]] auto r7 = reactorStream.runSsl("missing.crt", "missing.key");
-    [[maybe_unused]] auto r8 = reactorStream.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
+    [[maybe_unused]] auto r1 = reactor.runTcp("1.2.3.4", 0);
+    [[maybe_unused]] auto r2 = reactor.runTcp();
+    [[maybe_unused]] auto r3 = reactor.runUdp("1.2.3.4", 0);
+    [[maybe_unused]] auto r4 = reactor.runUdp();
 
 #if defined(MYNET_ENABLE_URING)
-    [[maybe_unused]] auto r9 = proactorStream.runSsl();
-    [[maybe_unused]] auto r10 = proactorStream.runSsl("missing.crt", "missing.key");
-    [[maybe_unused]] auto r11 = proactorStream.runSsl("1.2.3.4", 0, "missing.crt", "missing.key");
+    [[maybe_unused]] auto r5 = proactor.runTcp("1.2.3.4", 0);
+    [[maybe_unused]] auto r6 = proactor.runTcp();
+    [[maybe_unused]] auto r7 = proactor.runUdp("1.2.3.4", 0);
+    [[maybe_unused]] auto r8 = proactor.runUdp();
 #endif
 
     mynet::publishMynetConfig(saved);

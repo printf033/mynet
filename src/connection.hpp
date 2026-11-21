@@ -186,23 +186,75 @@ namespace mynet
         friend std::ostream &operator<<(std::ostream &os, const Protocol &p) { return os << p.bytes; }
     };
 
+    struct EmptyProtocol
+    {
+    };
+
+    enum class TransportType : uint8_t
+    {
+        TCP,
+        UDP
+    };
+
+    /**
+     * @brief 统一连接抽象基类
+     *
+     * 无论底层是原生 TCP，还是在 UDP 之上自己封装的可靠连接，皆统一继承自此类。
+     */
+    class ConnectionBase
+    {
+    protected:
+        int fd_{-1};
+        sockaddr_in peerAddr_{};
+        TransportType transport_{TransportType::TCP};
+        std::shared_ptr<const MynetConfig> config_{nullptr};
+
+    public:
+        ConnectionBase() = default;
+        virtual ~ConnectionBase() = default;
+
+        [[nodiscard]] inline int fd() const noexcept { return fd_; }
+        inline void setFd(int fd) noexcept
+        {
+            fd_ = fd;
+            if (fd_ >= 0)
+            {
+                config_ = getMynetConfigShared();
+            }
+        }
+        [[nodiscard]] inline const sockaddr_in &peerAddr() const noexcept { return peerAddr_; }
+        inline void setPeerAddr(const sockaddr_in &addr) noexcept { peerAddr_ = addr; }
+        [[nodiscard]] inline TransportType transport() const noexcept { return transport_; }
+        inline void setTransport(TransportType t) noexcept { transport_ = t; }
+
+        [[nodiscard]] inline bool isTcp() const noexcept { return transport_ == TransportType::TCP; }
+        [[nodiscard]] inline bool isUdp() const noexcept { return transport_ == TransportType::UDP; }
+
+        [[nodiscard]] inline const MynetConfig &config() const noexcept
+        {
+            return config_ ? *config_ : *getMynetConfigShared();
+        }
+
+        [[nodiscard]] inline const std::shared_ptr<const MynetConfig> &configShared() const noexcept { return config_; }
+
+        [[nodiscard]] inline uint32_t configGeneration() const noexcept
+        {
+            return MynetConfigHolder::getInstance().getGeneration();
+        }
+
+        virtual IO_STATUS handleRead() { return IO_STATUS::KEEP; }
+        virtual IO_STATUS handleWrite() { return IO_STATUS::KEEP; }
+        virtual void handle() {}
+        virtual void close() {}
+        virtual void reset() noexcept {}
+    };
+
     /**
      * @brief 偏连接的流式协议处理器基类
      *
-     * 本类是流式传输层次的根：不继承任何处理器基类，独立提供流式会话所需的全部
-     * 传输状态：
-     * - 请求解析缓冲区与零拷贝直写入口（prepareRequestWritable / commitRequest）；
-     * - 响应队列（FIFO，可流水线化）与空闲缓冲复用（recycleSpare）；
-     * - 读信用背压（readCredit / requestOverLimit）与单请求上限；
-     * - 连接关闭语义（closeAfterResponse）与 splice 零拷贝环回开关；
-     * - 与传输无关的生命周期钩子（reset / onMessageComplete / onParseError）。
-     *
-     * 协议处理器（HTTP/1.x、HTTP/2、Echo 等）继承本类并叠加自己的解析状态机；
-     * 双传输处理器（如 HTTP/3）另行同时继承 HandlerDatagram。两者是并列的独立
-     * 基类：成员访问是编译期确定的直接偏移，既不经过虚基类间接寻址，也不需要
-     * 为共享子对象付出构造/销毁与去重记账。
+     * 继承自 ConnectionBase，提供流式会话所需的全部传输状态。
      */
-    class HandlerConnection
+    class HandlerConnection : public ConnectionBase
     {
     public:
         using SPLICE_CONTROL = mynet::SPLICE_CONTROL;
@@ -732,12 +784,15 @@ namespace mynet
      * 在单次读取产生多个响应时零冲突；
      * 4. 完备的背压挂钩：结合 writeHighWaterMark_ 与 readPaused_ 防止内存无界暴涨。
      */
-    template <typename HandlerType>
-        requires MandatoryMethodConnection<HandlerType>
-    class Connection
+    template <typename HandlerType = EmptyProtocol>
+    class Connection : public ConnectionBase
     {
     public:
         using Handler = HandlerType;
+        using Protocol = HandlerType;
+
+        [[nodiscard]] inline Protocol &protocol() noexcept { return handler_; }
+        [[nodiscard]] inline const Protocol &protocol() const noexcept { return handler_; }
 
         enum class CONN_STATE : uint8_t
         {
@@ -2080,10 +2135,288 @@ namespace mynet
         using Type = Connection<H>;
     };
 
+    class HandlerDatagram;
+
+    template <>
+    struct Protocol<HandlerDatagram>
+    {
+        sockaddr_in peer{};
+        std::string bytes{};
+
+        Protocol() noexcept = default;
+        Protocol(const sockaddr_in &p, std::string b) noexcept
+            : peer(p),
+              bytes(std::move(b))
+        {
+        }
+        Protocol(const sockaddr_in &p, const char *buf, size_t n)
+            : peer(p),
+              bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
+        {
+        }
+
+        void clear() noexcept
+        {
+            peer = {};
+            bytes.clear();
+        }
+    };
+
+    using DatagramQueue = ResponseQueueBase<Protocol<HandlerDatagram>>;
+
+    [[nodiscard]] inline std::string datagramPeerText(const sockaddr_in &peer)
+    {
+        char host[INET_ADDRSTRLEN] = {};
+        if (::inet_ntop(AF_INET, &peer.sin_addr, host, sizeof host) == nullptr) [[unlikely]]
+        {
+            return std::string("<unnamed>:") + std::to_string(::ntohs(peer.sin_port));
+        }
+        std::string out;
+        out.reserve(22);
+        out.append(host);
+        out.push_back(':');
+        out.append(std::to_string(::ntohs(peer.sin_port)));
+        return out;
+    }
+
+    class HandlerDatagram : public ConnectionBase
+    {
+    public:
+        using DatagramCallback = std::function<void(const sockaddr_in &peer, const handler::ProxyAddress &target,
+                                                    const char *data, size_t n)>;
+
+        HandlerDatagram() noexcept
+            : HandlerDatagram(getDatagramConfig())
+        {
+            transport_ = TransportType::UDP;
+        }
+
+        explicit HandlerDatagram(const DatagramConfig &config) noexcept
+            : maxDatagramBytes_(config.maxDatagramBytes),
+              maxPendingOutgoing_(config.maxPendingOutgoing)
+        {
+            transport_ = TransportType::UDP;
+            [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
+        }
+
+        explicit HandlerDatagram(const sockaddr_in &peer) noexcept
+            : HandlerDatagram()
+        {
+            transport_ = TransportType::UDP;
+            remotePeer_ = peer;
+        }
+
+        virtual ~HandlerDatagram() noexcept = default;
+
+        HandlerDatagram(const HandlerDatagram &) = delete;
+        HandlerDatagram &operator=(const HandlerDatagram &) = delete;
+        HandlerDatagram(HandlerDatagram &&) = delete;
+        HandlerDatagram &operator=(HandlerDatagram &&) = delete;
+
+        virtual void onDatagram([[maybe_unused]] const sockaddr_in &peer, [[maybe_unused]] const char *data,
+                                [[maybe_unused]] size_t n) noexcept
+        {
+        }
+
+        virtual void reset() noexcept override
+        {
+            const auto &cfg = getDatagramConfig();
+            maxDatagramBytes_ = cfg.maxDatagramBytes;
+            maxPendingOutgoing_ = cfg.maxPendingOutgoing;
+            if (outgoing_.capacity() != maxPendingOutgoing_) [[unlikely]]
+            {
+                [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
+            }
+            else
+            {
+                outgoing_.reset();
+            }
+            droppedOutgoing_ = 0;
+            inboundStage_ = handler::InboundStage::STREAMING;
+            outboundStage_ = handler::OutboundStage::STREAMING;
+            remotePeer_ = {};
+            datagramCallback_ = nullptr;
+        }
+
+        virtual void onMessageComplete() noexcept {}
+        virtual void onParseError([[maybe_unused]] const char *reason) noexcept {}
+
+        inline void sendTo(const sockaddr_in &target, const char *buf, size_t n)
+        {
+            contract_assert(buf != nullptr);
+            if (!outgoing_.emplace(target, buf, n)) [[unlikely]]
+            {
+                ++droppedOutgoing_;
+                LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
+                         outgoing_.size(), n, datagramPeerText(target));
+            }
+        }
+
+        inline void sendTo(const sockaddr_in &target, std::string bytes)
+        {
+            const size_t sz = bytes.size();
+            if (!outgoing_.emplace(target, std::move(bytes))) [[unlikely]]
+            {
+                ++droppedOutgoing_;
+                LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
+                         outgoing_.size(), sz, datagramPeerText(target));
+            }
+        }
+
+        inline void forwardTo(const sockaddr_in &upstream, const char *data, size_t n) { sendTo(upstream, data, n); }
+
+        inline void broadcastTo(const std::vector<sockaddr_in> &targets, const char *buf, size_t n)
+        {
+            for (const auto &t : targets)
+            {
+                sendTo(t, buf, n);
+            }
+        }
+
+        [[nodiscard]] inline bool hasOutgoing() const noexcept { return !outgoing_.empty(); }
+        [[nodiscard]] inline size_t outgoingCount() const noexcept { return outgoing_.size(); }
+        [[nodiscard]] inline const Protocol<HandlerDatagram> &peekOutgoing() const noexcept
+        {
+            return outgoing_.front();
+        }
+
+        [[nodiscard]] inline Protocol<HandlerDatagram> takeOutgoing()
+        {
+            if (outgoing_.empty()) [[unlikely]]
+            {
+                return {};
+            }
+            Protocol<HandlerDatagram> out = std::move(outgoing_.front());
+            outgoing_.pop();
+            return out;
+        }
+
+        inline void setMaxDatagramBytes(size_t n) noexcept { maxDatagramBytes_ = n; }
+        inline void setMaxPendingOutgoing(size_t n) noexcept
+        {
+            contract_assert(n > 0);
+            maxPendingOutgoing_ = n;
+            [[maybe_unused]] auto _ = outgoing_.init(n);
+        }
+        [[nodiscard]] inline size_t maxPendingOutgoing() const noexcept { return maxPendingOutgoing_; }
+
+        [[nodiscard]] inline DatagramQueue &outgoing() noexcept { return outgoing_; }
+        [[nodiscard]] inline const DatagramQueue &outgoing() const noexcept { return outgoing_; }
+        [[nodiscard]] inline size_t maxDatagramBytes() const noexcept { return maxDatagramBytes_; }
+        [[nodiscard]] inline size_t droppedOutgoing() const noexcept { return droppedOutgoing_; }
+
+        void setOnDatagram(DatagramCallback cb) noexcept { datagramCallback_ = std::move(cb); }
+        void setTarget(const handler::ProxyAddress &target) noexcept { targetAddress_ = target; }
+        void setStage(handler::InboundStage st) noexcept { inboundStage_ = st; }
+        void setStage(handler::OutboundStage st) noexcept { outboundStage_ = st; }
+        [[nodiscard]] inline handler::InboundStage inboundStage() const noexcept { return inboundStage_; }
+        [[nodiscard]] inline handler::OutboundStage outboundStage() const noexcept { return outboundStage_; }
+        [[nodiscard]] inline handler::InboundStage stage() const noexcept { return inboundStage_; }
+        [[nodiscard]] virtual bool isEstablished() const noexcept
+        {
+            return inboundStage_ == handler::InboundStage::STREAMING ||
+                   outboundStage_ == handler::OutboundStage::STREAMING;
+        }
+
+    protected:
+        size_t maxDatagramBytes_{1 << 16};
+        size_t maxPendingOutgoing_{1 << 10};
+        DatagramQueue outgoing_{};
+        size_t droppedOutgoing_{0};
+        sockaddr_in remotePeer_{};
+        std::optional<handler::ProxyAddress> targetAddress_{std::nullopt};
+        handler::InboundStage inboundStage_{handler::InboundStage::STREAMING};
+        handler::OutboundStage outboundStage_{handler::OutboundStage::STREAMING};
+        DatagramCallback datagramCallback_{nullptr};
+    };
+
+    template <typename D>
+    concept DerivedFromHandlerDatagram = std::is_base_of_v<HandlerDatagram, D>;
+
+    template <typename D>
+    concept MandatoryMethodDatagram = DerivedFromHandlerDatagram<D> && Resettable<D> &&
+                                      requires(D &d, const sockaddr_in &peer, const char *buf, size_t n,
+                                               std::string bytes, const std::vector<sockaddr_in> &targets) {
+                                          { d.onDatagram(peer, buf, n) } noexcept;
+                                          { d.onMessageComplete() } noexcept;
+                                          { d.onParseError(buf) } noexcept;
+
+                                          d.sendTo(peer, buf, n);
+                                          d.sendTo(peer, std::move(bytes));
+                                          d.forwardTo(peer, buf, n);
+                                          d.broadcastTo(targets, buf, n);
+                                          { d.hasOutgoing() } noexcept -> std::same_as<bool>;
+                                          { d.outgoingCount() } noexcept -> std::same_as<size_t>;
+                                          {
+                                              d.peekOutgoing()
+                                          } noexcept -> std::same_as<const Protocol<HandlerDatagram> &>;
+                                          { d.takeOutgoing() } -> std::same_as<Protocol<HandlerDatagram>>;
+                                          { d.droppedOutgoing() } noexcept -> std::same_as<size_t>;
+
+                                          { d.setMaxDatagramBytes(n) } noexcept;
+                                          { d.maxDatagramBytes() } noexcept -> std::same_as<size_t>;
+                                          { d.setMaxPendingOutgoing(n) } noexcept;
+                                          { d.maxPendingOutgoing() } noexcept -> std::same_as<size_t>;
+                                      };
+
 } // namespace mynet
 
 namespace mynet::handler
 {
+    class HandlerInboundDatagramBase : public mynet::HandlerDatagram
+    {
+    protected:
+        InboundStage stage_{InboundStage::STREAMING};
+
+    public:
+        HandlerInboundDatagramBase() noexcept = default;
+        explicit HandlerInboundDatagramBase(const sockaddr_in &peer) noexcept
+            : HandlerDatagram(peer)
+        {
+        }
+        ~HandlerInboundDatagramBase() noexcept override = default;
+
+        void setStage(InboundStage st) noexcept { stage_ = st; }
+        [[nodiscard]] inline InboundStage inboundStage() const noexcept { return stage_; }
+        [[nodiscard]] inline InboundStage stage() const noexcept { return stage_; }
+        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == InboundStage::STREAMING; }
+
+        void reset() noexcept override
+        {
+            HandlerDatagram::reset();
+            stage_ = InboundStage::STREAMING;
+        }
+
+        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = InboundStage::ERROR; }
+    };
+
+    class HandlerOutboundDatagramBase : public mynet::HandlerDatagram
+    {
+    protected:
+        OutboundStage stage_{OutboundStage::STREAMING};
+
+    public:
+        HandlerOutboundDatagramBase() noexcept = default;
+        explicit HandlerOutboundDatagramBase(const sockaddr_in &peer) noexcept
+            : HandlerDatagram(peer)
+        {
+        }
+        ~HandlerOutboundDatagramBase() noexcept override = default;
+
+        void setStage(OutboundStage st) noexcept { stage_ = st; }
+        [[nodiscard]] inline OutboundStage outboundStage() const noexcept { return stage_; }
+        [[nodiscard]] inline OutboundStage stage() const noexcept { return stage_; }
+        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == OutboundStage::STREAMING; }
+
+        void reset() noexcept override
+        {
+            HandlerDatagram::reset();
+            stage_ = OutboundStage::STREAMING;
+        }
+
+        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = OutboundStage::ERROR; }
+    };
+
     class HandlerInboundConnectionBase : public mynet::HandlerConnection
     {
     protected:

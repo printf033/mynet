@@ -10,7 +10,6 @@
 
 #include "cipher.hpp"
 #include "connection.hpp"
-#include "datagram.hpp"
 #include "dns/cache.hpp"
 #include "ebpf.hpp"
 #include "forwarder.hpp"

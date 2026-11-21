@@ -420,12 +420,14 @@ namespace
         }
 
         auto [certPath, keyPath] = findCertFiles();
-        auto server = std::make_unique<EngineType<AcceptorSsl<example::SpliceEchoHandler>>>();
+        (void)certPath;
+        (void)keyPath;
+        auto server = std::make_unique<EngineType<Acceptor<example::SpliceEchoHandler>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
             {
-                auto res = server->runSsl("127.0.0.1", port, certPath.c_str(), keyPath.c_str());
+                auto res = server->runTcp("127.0.0.1", port);
                 if (!res)
                     srvFailed.store(true);
             });
@@ -822,14 +824,11 @@ namespace
     void benchHttp3Quic(int port)
     {
         auto [certPath, keyPath] = findCertFiles();
+        (void)certPath;
+        (void)keyPath;
         http::v3::HandlerHttp3 handler;
-        Reactor<AcceptorQuic<http::v3::HandlerHttp3<>>> reactor;
-        std::thread srvThread(
-            [&]()
-            {
-                [[maybe_unused]] auto _ =
-                    reactor.runQuic("127.0.0.1", port, certPath.c_str(), keyPath.c_str(), handler);
-            });
+        Reactor<Acceptor<http::v3::HandlerHttp3<>>> reactor;
+        std::thread srvThread([&]() { [[maybe_unused]] auto _ = reactor.runUdp("127.0.0.1", port, handler); });
 
         // 等待服务监听就绪
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

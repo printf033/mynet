@@ -12,11 +12,11 @@
  * 5. 全局注册与一键启停：支持多端口/多协议并发监听、批量拉起 (startAll) 与停止 (stopAll)。
  */
 
-#include "acceptor.hpp"
 #include "address.hpp"
 #include "config/log.hpp"
 #include "connection.hpp"
 #include "error.hpp"
+#include "socket.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cstdint>
@@ -50,7 +50,8 @@ namespace mynet
         std::string type_{};
         std::string host_{"0.0.0.0"};
         uint16_t port_{0};
-        Acceptor<HandlerConnection> acceptor_{};
+        int listenFd_{-1};
+        sockaddr_in addr_{};
         bool running_{false};
         bool enableSniffing_{true};
 
@@ -75,34 +76,34 @@ namespace mynet
         [[nodiscard]] inline const std::string &type() const noexcept { return type_; }
         [[nodiscard]] inline const std::string &host() const noexcept { return host_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return port_; }
-        [[nodiscard]] inline int listenFd() const noexcept { return acceptor_.fd; }
-        [[nodiscard]] inline Acceptor<HandlerConnection> &acceptor() noexcept { return acceptor_; }
-        [[nodiscard]] inline const Acceptor<HandlerConnection> &acceptor() const noexcept { return acceptor_; }
+        [[nodiscard]] inline int listenFd() const noexcept { return listenFd_; }
+        [[nodiscard]] inline const sockaddr_in &addr() const noexcept { return addr_; }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_; }
         [[nodiscard]] inline bool isSniffingEnabled() const noexcept { return enableSniffing_; }
         inline void setSniffingEnabled(bool enable) noexcept { enableSniffing_ = enable; }
 
         /**
-         * @brief 启动非阻塞 TCP 监听 (委托给底层 AcceptorBase 基础设施)
+         * @brief 启动非阻塞 TCP 监听
          */
         virtual Result<> listen(int backlog = 128, bool reuseAddr = true, bool reusePort = true) noexcept
         {
-            if (running_ && acceptor_.fd >= 0)
+            if (running_ && listenFd_ >= 0)
             {
                 return {};
             }
             close();
 
-            auto res = acceptor_.listenTcp(host_.c_str(), port_, backlog, reuseAddr, reusePort);
+            auto res = net::listenTcp(host_.c_str(), port_, addr_, backlog, reuseAddr, reusePort);
             if (!res)
             {
                 LOG_ERROR("Inbound '{}' ({}): listenTcp {}:{} failed", tag_, type_, host_, port_);
-                return res;
+                return std::unexpected(res.error());
             }
+            listenFd_ = *res;
 
             if (port_ == 0)
             {
-                port_ = ntohs(acceptor_.addr.sin_port);
+                port_ = ntohs(addr_.sin_port);
             }
 
             running_ = true;
@@ -110,16 +111,24 @@ namespace mynet
         }
 
         /**
-         * @brief 非阻塞接收一个接入的客户端连接 (委托给底层 AcceptorBase 基础设施)
+         * @brief 非阻塞接收一个接入的客户端连接
          */
-        [[nodiscard]] virtual Result<std::pair<int, sockaddr_in>> acceptOne() noexcept { return acceptor_.accept(); }
+        [[nodiscard]] virtual Result<std::pair<int, sockaddr_in>> acceptOne() noexcept
+        {
+            return net::accept(listenFd_);
+        }
 
         /**
          * @brief 关闭监听套接字
          */
         virtual void close() noexcept
         {
-            acceptor_.reset();
+            if (listenFd_ >= 0)
+            {
+                ::close(listenFd_);
+                listenFd_ = -1;
+            }
+            addr_ = {};
             running_ = false;
         }
 

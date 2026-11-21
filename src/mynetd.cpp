@@ -228,7 +228,7 @@ namespace
                   << "  SIGHUP                  Live reload Lua configuration without service interruption\n\n";
     }
 
-    template <template <typename> class EngineType>
+    template <template <typename...> class EngineType>
     int runServer(mynet::Core &core, const mynet::MynetConfig &cfg, const std::string &engineName)
     {
         KernelProxyHandler::g_core = &core;
@@ -243,7 +243,7 @@ namespace
         // 统一纳管 Core 中全部已启动的 Inbound 节点监听接收器到当前引擎的事件循环中
         for (const auto &inbound : core.inbounds().inbounds())
         {
-            if (inbound->listenFd() >= 0 && inbound->listenFd() != server.acceptor().fd)
+            if (inbound->listenFd() >= 0 && inbound->listenFd() != server.tcpFd())
             {
                 if constexpr (requires { server.addListener(0, {}); })
                 {

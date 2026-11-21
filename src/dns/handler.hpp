@@ -9,7 +9,6 @@
  */
 
 #include "../connection.hpp"
-#include "../datagram.hpp"
 #include "cache.hpp"
 #include "dns.hpp"
 #include <functional>

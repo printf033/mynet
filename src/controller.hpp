@@ -17,9 +17,9 @@
  * 10. 全面支持 HTTP OPTIONS 预检请求与 CORS 跨域通信 (Access-Control-Allow-Origin: *)。
  */
 
-#include "acceptor.hpp"
 #include "config/log.hpp"
 #include "core.hpp"
+#include "socket.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <cstdint>
@@ -45,7 +45,8 @@ namespace mynet
         std::string listenHost_{"127.0.0.1"};
         uint16_t listenPort_{9090};
         std::string secret_{};
-        Acceptor<HandlerConnection> acceptor_{};
+        int listenFd_{-1};
+        sockaddr_in addr_{};
         std::atomic<bool> running_{false};
         std::unique_ptr<std::thread> workerThread_{nullptr};
 
@@ -70,27 +71,26 @@ namespace mynet
         Controller(Controller &&) = delete;
         Controller &operator=(Controller &&) = delete;
 
-        [[nodiscard]] inline int listenFd() const noexcept { return acceptor_.fd; }
-        [[nodiscard]] inline Acceptor<HandlerConnection> &acceptor() noexcept { return acceptor_; }
-        [[nodiscard]] inline const Acceptor<HandlerConnection> &acceptor() const noexcept { return acceptor_; }
+        [[nodiscard]] inline int listenFd() const noexcept { return listenFd_; }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
         [[nodiscard]] inline const std::string &host() const noexcept { return listenHost_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return listenPort_; }
 
         Result<> listen()
         {
-            if (acceptor_.fd >= 0)
+            if (listenFd_ >= 0)
                 return {};
 
-            auto res = acceptor_.listenTcp(listenHost_.c_str(), listenPort_, 128);
+            auto res = net::listenTcp(listenHost_.c_str(), listenPort_, addr_, 128);
             if (!res)
             {
-                return res;
+                return std::unexpected(res.error());
             }
+            listenFd_ = *res;
 
             if (listenPort_ == 0)
             {
-                listenPort_ = ntohs(acceptor_.addr.sin_port);
+                listenPort_ = ntohs(addr_.sin_port);
             }
 
             running_.store(true, std::memory_order_release);
@@ -104,7 +104,12 @@ namespace mynet
                 return;
             }
 
-            acceptor_.reset();
+            if (listenFd_ >= 0)
+            {
+                ::close(listenFd_);
+                listenFd_ = -1;
+            }
+            addr_ = {};
 
             if (workerThread_ != nullptr && workerThread_->joinable())
             {
@@ -125,7 +130,7 @@ namespace mynet
                 {
                     while (running_.load(std::memory_order_relaxed))
                     {
-                        auto accRes = acceptor_.accept();
+                        auto accRes = net::accept(listenFd_);
                         if (!accRes)
                         {
                             if (errno == EAGAIN || errno == EWOULDBLOCK)

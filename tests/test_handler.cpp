@@ -1,7 +1,6 @@
 // HandlerConnection 与 HandlerHttp：协议前端对驱动它的连接所承担的契约——
 // 读取数据的请求缓冲区、消费输出的响应队列，以及介于两者之间的背压信用额度。
 #include "connection.hpp"
-#include "datagram.hpp"
 #include "http/v1/handler.hpp"
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -58,6 +57,9 @@ namespace
     class CombinedEchoHandler : public HandlerConnection, public HandlerDatagram
     {
     public:
+        using HandlerConnection::fd;
+        using HandlerConnection::handle;
+
         void reset() noexcept override
         {
             HandlerConnection::reset();

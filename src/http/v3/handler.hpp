@@ -18,7 +18,6 @@
 #include "../../streamTable.hpp"
 #include "../common.hpp"
 #include "connection.hpp"
-#include "datagram.hpp"
 #include "frame.hpp"
 #include "objectPool.hpp"
 #include "qpack.hpp"
@@ -571,7 +570,7 @@ namespace mynet
                     else
                     {
                         session->bytesSent += frameBytes.size();
-                        sendTo(peer, std::move(frameBytes));
+                        this->sendTo(peer, std::move(frameBytes));
                     }
                     if (slot->handler != nullptr)
                     {
@@ -627,7 +626,7 @@ namespace mynet
                 }
 
                 session.bytesSent += packet.size();
-                sendTo(peer, std::move(packet));
+                this->sendTo(peer, std::move(packet));
             }
 
             void sendQuicReply(const sockaddr_in &peer, const http::v3::ConnectionId &dcid, uint64_t streamId,
@@ -643,12 +642,12 @@ namespace mynet
 
             inline void forwardDatagram(const sockaddr_in &upstream, const char *data, size_t n)
             {
-                forwardTo(upstream, data, n);
+                this->forwardTo(upstream, data, n);
             }
 
             inline void broadcastDatagram(const std::vector<sockaddr_in> &targets, const char *data, size_t n)
             {
-                broadcastTo(targets, data, n);
+                this->broadcastTo(targets, data, n);
             }
 
             QuicSession *getOrCreateSession(const sockaddr_in &peer, const http::v3::ConnectionId &dcid)

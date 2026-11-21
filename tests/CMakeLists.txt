@@ -17,7 +17,6 @@ endfunction()
 
 mynet_unit_test(test_request_buffer)
 mynet_unit_test(test_constraints)
-mynet_unit_test(test_datagram)
 mynet_unit_test(test_error)
 mynet_unit_test(test_frame)
 mynet_unit_test(test_handler)

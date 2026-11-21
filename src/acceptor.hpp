@@ -1,277 +1,136 @@
 #pragma once
 
+/**
+ * @file acceptor.hpp
+ * @brief 协议接收器（Acceptor）基类与握手抽象。
+ *
+ * 职责彻底解耦：
+ * 1. 剥离套接字描述符 (fd) 与地址 (sockaddr)，底层传输套接字交由 Reactor / Proactor 纳管；
+ * 2. 专职负责特定协议的入站握手 (Inbound Handshake)；
+ * 3. 包含特定协议相关的 inbound_ 结构体（模板特化占位，不需要时为 EmptyInbound，配合 [[no_unique_address]] 占 0
+ * 字节）；
+ * 4. 支持首包特征嗅探 match() 与精准握手驱动 handshake()。
+ */
+
 #include "config/log.hpp"
-#include "constraints.hpp"
 #include "error.hpp"
-#include <arpa/inet.h>
 #include <concepts>
-#include <csignal>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <utility>
 
 namespace mynet
 {
 
+    class ConnectionBase;
+
     /**
-     * @brief 监听接收器
-     *
-     * 绑定基础套接字描述符、地址与处理器类型，并提供标准的非阻塞 TCP 与 UDP 监听绑定逻辑。
-     * 处理器只需满足 HandlerConstraint。
+     * @brief 空入站上下文结构（不占任何空间）
      */
-    template <typename HandlerType>
-        requires HandlerConstraint<HandlerType>
-    struct Acceptor
+    struct EmptyInbound
+    {
+    };
+
+    /**
+     * @brief 握手状态
+     */
+    enum class HandshakeStatus : uint8_t
+    {
+        SUCCESS,     ///< 握手成功并产出 Connection 实例
+        IN_PROGRESS, ///< 握手进行中（如异步非阻塞握手）
+        FAILED       ///< 握手失败
+    };
+
+    /**
+     * @brief 接收器纯虚抽象接口
+     */
+    class IAcceptor
     {
     public:
-        int fd = -1;
-        using Handler = HandlerType;
-        sockaddr_in addr{};
+        virtual ~IAcceptor() = default;
+
+        /**
+         * @brief 快速首包特征嗅探（用于单端口多协议混合调度）
+         */
+        [[nodiscard]] virtual bool match(std::span<const uint8_t> initialBytes) const noexcept
+        {
+            (void)initialBytes;
+            return false;
+        }
+
+        /**
+         * @brief 针对新接入的 clientFd 执行协议握手
+         */
+        virtual HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn) = 0;
+
+        /**
+         * @brief 重置握手器状态
+         */
+        virtual void reset() noexcept {}
+    };
+
+    /**
+     * @brief 模板化协议接收器基类
+     *
+     * @tparam InboundContext 协议特有的 inbound_ 结构体。默认为 EmptyInbound。
+     */
+    template <typename InboundContext = EmptyInbound>
+    class Acceptor : public IAcceptor
+    {
+    public:
+        using Inbound = InboundContext;
+        using Handler = InboundContext;
+
+        [[no_unique_address]] Inbound inbound_{};
 
         Acceptor() = default;
-        virtual ~Acceptor() noexcept { reset(); }
+        explicit Acceptor(InboundContext inbound)
+            : inbound_(std::move(inbound))
+        {
+        }
+        ~Acceptor() override = default;
 
         Acceptor(const Acceptor &) = delete;
         Acceptor &operator=(const Acceptor &) = delete;
-
         Acceptor(Acceptor &&other) noexcept
-            : fd(other.fd),
-              addr(other.addr)
+            : inbound_(std::move(other.inbound_))
         {
-            other.fd = -1;
-            other.addr = {};
         }
-
         Acceptor &operator=(Acceptor &&other) noexcept
         {
             if (this != &other)
             {
-                reset();
-                fd = other.fd;
-                addr = other.addr;
-                other.fd = -1;
-                other.addr = {};
+                inbound_ = std::move(other.inbound_);
             }
             return *this;
         }
 
-        inline void reset() noexcept
+        [[nodiscard]] inline Inbound &inbound() noexcept { return inbound_; }
+        [[nodiscard]] inline const Inbound &inbound() const noexcept { return inbound_; }
+
+        HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn) override
         {
-            if (fd != -1)
-            {
-                ::close(fd);
-                fd = -1;
-            }
-            addr = {};
-        }
-
-        inline void attach(int newFd, const sockaddr_in &newAddr = {}) noexcept
-        {
-            reset();
-            fd = newFd;
-            addr = newAddr;
-        }
-
-        [[nodiscard]] inline int release() noexcept
-        {
-            int ret = fd;
-            fd = -1;
-            addr = {};
-            return ret;
-        }
-
-        /**
-         * @brief 非阻塞接收一个接入的客户端连接
-         */
-        [[nodiscard]] Result<std::pair<int, sockaddr_in>> accept() noexcept
-        {
-            if (fd < 0) [[unlikely]]
-            {
-                return std::unexpected(ERR::ACCEPT_FAILED);
-            }
-
-            sockaddr_in clientAddr{};
-            socklen_t len = sizeof(clientAddr);
-            int clientFd = ::accept4(fd, reinterpret_cast<sockaddr *>(&clientAddr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
-            if (clientFd < 0) [[unlikely]]
-            {
-                return std::unexpected(ERR::ACCEPT_FAILED);
-            }
-            return std::make_pair(clientFd, clientAddr);
-        }
-
-        /**
-         * @brief 创建、配置并绑定非阻塞 TCP 监听套接字
-         *
-         * 采用 Linux 原生原子 SOCK_NONBLOCK | SOCK_CLOEXEC 创建标志，省去两次额外 fcntl() 系统调用开销。
-         *
-         * @param ip 目标 IPv4 字符串字面量（契约保证非空）
-         * @param port 目标端口号（契约保证在 [0, 65535] 范围内）
-         * @param backlog 挂起连接队列上限深度
-         * @param reuseAddr 是否开启 SO_REUSEADDR（默认 true）
-         * @param reusePort 是否开启 SO_REUSEPORT（默认 true）
-         * @return Result<> 成功返回 {}，失败返回具体系统调用失败错误枚举
-         */
-        [[nodiscard]] Result<> listenTcp(const char *ip, int port, int backlog, bool reuseAddr = true,
-                                         bool reusePort = true) noexcept
-        {
-            contract_assert(ip != nullptr);
-            contract_assert(port >= 0 && port <= ((1 << 16) - 1));
-            reset();
-            ::signal(SIGPIPE, SIG_IGN);
-
-            addr.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("listenTcp {}:{}: not an IPv4 address literal", ip, port);
-                reset();
-                return std::unexpected(ERR::ADDR_INVALID);
-            }
-            addr.sin_port = ::htons(static_cast<uint16_t>(port));
-
-            fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenTcp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::SOCKET_FAILED);
-            }
-
-            constexpr int opt = 1;
-            if (reuseAddr)
-            {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
-                {
-                    LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
-                    reset();
-                    return std::unexpected(ERR::SETSOCKOPT_FAILED);
-                }
-            }
-            if (reusePort)
-            {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
-                {
-                    LOG_ERROR("listenTcp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
-                    reset();
-                    return std::unexpected(ERR::SETSOCKOPT_FAILED);
-                }
-            }
-            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenTcp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::BIND_FAILED);
-            }
-            if (::listen(fd, backlog) < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenTcp {}:{}: listen(backlog={}) failed: {}", ip, port, backlog, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::LISTEN_FAILED);
-            }
-            if (port == 0)
-            {
-                socklen_t len = sizeof(addr);
-                ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
-            }
-            return {};
-        }
-
-        /**
-         * @brief 创建、配置并绑定非阻塞 UDP 数据报套接字
-         */
-        [[nodiscard]] Result<> listenUdp(const char *ip, int port) noexcept
-        {
-            contract_assert(ip != nullptr);
-            contract_assert(port >= 0 && port <= ((1 << 16) - 1));
-            reset();
-            ::signal(SIGPIPE, SIG_IGN);
-
-            addr.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("listenUdp {}:{}: not an IPv4 address literal", ip, port);
-                reset();
-                return std::unexpected(ERR::ADDR_INVALID);
-            }
-            addr.sin_port = ::htons(static_cast<uint16_t>(port));
-
-            fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenUdp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::SOCKET_FAILED);
-            }
-
-            constexpr int opt = 1;
-            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::SETSOCKOPT_FAILED);
-            }
-            if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::SETSOCKOPT_FAILED);
-            }
-            if (::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenUdp {}:{}: setsockopt(SO_BROADCAST) failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::SETSOCKOPT_FAILED);
-            }
-            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0) [[unlikely]]
-            {
-                LOG_ERROR("listenUdp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::BIND_FAILED);
-            }
-            if (port == 0)
-            {
-                socklen_t len = sizeof(addr);
-                ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
-            }
-            return {};
+            (void)clientFd;
+            outConn = nullptr;
+            return HandshakeStatus::SUCCESS;
         }
     };
 
-    /**
-     * @brief 监听接收器兼容别名
-     */
-    template <typename HandlerType>
-    using AcceptorBase = Acceptor<HandlerType>;
+    template <typename InboundContext = EmptyInbound>
+    using AcceptorBase = Acceptor<InboundContext>;
 
-    /**
-     * @brief 约束从 Acceptor 派生或满足的接收器通道类型
-     */
+    template <typename InboundContext = EmptyInbound>
+    using AcceptorBaseCompat = Acceptor<InboundContext>;
+
     template <typename A>
-    concept DerivedFromAcceptor =
-        requires { typename A::Handler; } && std::derived_from<A, Acceptor<typename A::Handler>>;
+    concept DerivedFromAcceptor = std::derived_from<A, IAcceptor>;
+
+    template <typename A>
+    concept BaseAcceptor = DerivedFromAcceptor<A>;
 
     template <typename A>
     concept DerivedFromAcceptorBase = DerivedFromAcceptor<A>;
-
-    /**
-     * @brief 基础监听接收器通道约束
-     */
-    template <typename A>
-    concept BaseAcceptor = requires { typename A::Handler; } && std::same_as<A, Acceptor<typename A::Handler>>;
-
-    template <typename HandlerType>
-    using AcceptorSsl = Acceptor<HandlerType>;
-
-    template <typename HandlerType>
-    using AcceptorQuic = Acceptor<HandlerType>;
-
-    template <typename A>
-    concept SslAcceptor = DerivedFromAcceptor<A>;
-
-    template <typename A>
-    concept QuicAcceptor = DerivedFromAcceptor<A>;
 
 } // namespace mynet

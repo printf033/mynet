@@ -51,7 +51,7 @@ int main(int argc, char *argv[])
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
-    if (auto res = reactor.runQuic(listen.ip, listen.port(), handler); !res)
+    if (auto res = reactor.runUdp(listen.ip, listen.port(), handler); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

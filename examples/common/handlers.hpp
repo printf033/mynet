@@ -10,7 +10,6 @@
  */
 
 #include "connection.hpp"
-#include "datagram.hpp"
 #include <cstddef>
 
 namespace mynet::example

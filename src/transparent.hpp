@@ -14,7 +14,6 @@
 
 #include "address.hpp"
 #include "connection.hpp"
-#include "datagram.hpp"
 #include "dns/cache.hpp"
 #include "inboundManager.hpp"
 #include "sniffer.hpp"
@@ -370,28 +369,29 @@ namespace mynet
 
         Result<> listen(int backlog = 128, bool reuseAddr = true, bool reusePort = true) noexcept override
         {
-            if (running_ && acceptor_.fd >= 0)
+            if (running_ && listenFd_ >= 0)
             {
                 return {};
             }
             close();
 
-            auto res = acceptor_.listenTcp(host_.c_str(), port_, backlog, reuseAddr, reusePort);
+            auto res = net::listenTcp(host_.c_str(), port_, addr_, backlog, reuseAddr, reusePort);
             if (!res)
             {
-                return res;
+                return std::unexpected(res.error());
             }
+            listenFd_ = *res;
 
             int transparentOpt = 1;
-            if (::setsockopt(acceptor_.fd, SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
+            if (::setsockopt(listenFd_, SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
             {
-                LOG_WARN("InboundTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", acceptor_.fd,
+                LOG_WARN("InboundTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", listenFd_,
                          errnoText(errno));
             }
 
             if (port_ == 0)
             {
-                port_ = ntohs(acceptor_.addr.sin_port);
+                port_ = ntohs(addr_.sin_port);
             }
 
             running_ = true;

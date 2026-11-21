@@ -1,8 +1,21 @@
 #pragma once
 
+/**
+ * @file dialer.hpp
+ * @brief 客户端出站拨号握手器（Dialer）基类与出站抽象。
+ *
+ * 与 Acceptor 严格对称：
+ * 1. 专职负责出站协议握手 (Outbound Handshake)；
+ * 2. 包含特定协议相关的 outbound_ 结构体（模板特化占位，不需要时为 EmptyOutbound，配合 [[no_unique_address]] 占 0
+ * 字节）；
+ * 3. 底层 TCP/UDP 传输建连系统调用托管给 socket.hpp 工具库；
+ * 4. 结合 Linux SO_MARK 策略路由、IP_TRANSPARENT 与粘性 IP 缓存。
+ */
+
+#include "acceptor.hpp"
 #include "config/log.hpp"
-#include "constraints.hpp"
 #include "error.hpp"
+#include "socket.hpp"
 #include "tls/fragmenter.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
@@ -24,6 +37,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifndef IPPROTO_MPTCP
@@ -32,6 +46,15 @@
 
 namespace mynet
 {
+
+    class ConnectionBase;
+
+    /**
+     * @brief 空出站上下文结构（不占任何空间）
+     */
+    struct EmptyOutbound
+    {
+    };
 
     /**
      * @brief 出站节点粘性 IP 缓存器 (借鉴 dae StickyIpDialer)
@@ -104,52 +127,12 @@ namespace mynet
     };
 
     /**
-     * @brief TLS ClientHello 分片绕过中间件 DPI 检查辅助工具 (复用 mynet::tls::TlsFragmenter)
+     * @brief 拨号器纯虚抽象接口
      */
-    struct TlsFragmentHelper
-    {
-        static std::vector<std::vector<uint8_t>> fragmentClientHello(std::span<const uint8_t> clientHello,
-                                                                     size_t minChunk = 50, size_t maxChunk = 100)
-        {
-            if (clientHello.empty())
-                return {};
-            if (auto sni = tls::TlsFragmenter::findSni(clientHello); sni.has_value())
-            {
-                auto splits = tls::TlsFragmenter::computeSplitOffsets(clientHello, *sni);
-                return tls::TlsFragmenter::buildSplitRecords(clientHello, splits);
-            }
-            std::vector<std::vector<uint8_t>> fragments;
-            size_t offset = 0;
-            while (offset < clientHello.size())
-            {
-                size_t remaining = clientHello.size() - offset;
-                size_t chunkSize = std::min(remaining, maxChunk);
-                if (chunkSize < minChunk && remaining >= minChunk)
-                {
-                    chunkSize = minChunk;
-                }
-                fragments.emplace_back(clientHello.subspan(offset, chunkSize).begin(),
-                                       clientHello.subspan(offset, chunkSize).end());
-                offset += chunkSize;
-            }
-            return fragments;
-        }
-    };
-
-    /**
-     * @brief 客户端出站拨号建连基类（与 AcceptorBase 严格对称）
-     *
-     * 负责发起并建立客户端到对端服务器的 TCP / UDP 连接（确立四元组）。
-     * 处理器只需满足 HandlerConstraint。
-     * 后续传输层出站建连器（如 DialerSsl、DialerQuic 等）均直接派生自本类。
-     */
-    template <typename HandlerType>
-        requires HandlerConstraint<HandlerType>
-    struct Dialer
+    class IDialer
     {
     public:
         int fd = -1;
-        using Handler = HandlerType;
         sockaddr_in targetAddr{};
         uint32_t fwmark{0};               ///< Linux SO_MARK 策略路由标记（防环路）
         bool transparent{false};          ///< Linux IP_TRANSPARENT 支持（绑定原始源 IP）
@@ -158,55 +141,35 @@ namespace mynet
         std::string bindInterface{};      ///< SO_BINDTODEVICE 绑定网卡
         std::vector<uint8_t> tcpPrefix{}; ///< TCP 前置注入前缀 (借鉴 sing-box tcp_prefix)
 
-        Dialer() = default;
-        virtual ~Dialer() noexcept { reset(); }
+        virtual ~IDialer() noexcept { reset(); }
 
-        Dialer(const Dialer &) = delete;
-        Dialer &operator=(const Dialer &) = delete;
+        virtual HandshakeStatus handshake(int targetFd, ConnectionBase *&outConn) = 0;
 
-        Dialer(Dialer &&other) noexcept
-            : fd(other.fd),
-              targetAddr(other.targetAddr),
-              fwmark(other.fwmark),
-              transparent(other.transparent),
-              dscp(other.dscp),
-              enableMptcp(other.enableMptcp),
-              bindInterface(std::move(other.bindInterface)),
-              tcpPrefix(std::move(other.tcpPrefix))
+        virtual void reset() noexcept
         {
-            other.fd = -1;
-            other.targetAddr = {};
-            other.fwmark = 0;
-            other.transparent = false;
-            other.dscp = 0;
-            other.enableMptcp = false;
-            other.bindInterface.clear();
-            other.tcpPrefix.clear();
+            if (fd != -1)
+            {
+                ::close(fd);
+                fd = -1;
+            }
+            targetAddr = {};
         }
 
-        Dialer &operator=(Dialer &&other) noexcept
+        inline void attach(int newFd) noexcept
         {
-            if (this != &other)
+            if (fd != -1 && fd != newFd)
             {
-                reset();
-                fd = other.fd;
-                targetAddr = other.targetAddr;
-                fwmark = other.fwmark;
-                transparent = other.transparent;
-                dscp = other.dscp;
-                enableMptcp = other.enableMptcp;
-                bindInterface = std::move(other.bindInterface);
-                tcpPrefix = std::move(other.tcpPrefix);
-                other.fd = -1;
-                other.targetAddr = {};
-                other.fwmark = 0;
-                other.transparent = false;
-                other.dscp = 0;
-                other.enableMptcp = false;
-                other.bindInterface.clear();
-                other.tcpPrefix.clear();
+                ::close(fd);
             }
-            return *this;
+            fd = newFd;
+        }
+
+        [[nodiscard]] inline int release() noexcept
+        {
+            int ret = fd;
+            fd = -1;
+            targetAddr = {};
+            return ret;
         }
 
         inline void setTcpPrefix(std::span<const uint8_t> prefix) noexcept
@@ -215,14 +178,12 @@ namespace mynet
         }
         [[nodiscard]] inline std::span<const uint8_t> getTcpPrefix() const noexcept { return tcpPrefix; }
 
-        /**
-         * @brief 在连接成功建立时排出 TCP 前缀 (若有)
-         */
-        inline bool flushTcpPrefix() noexcept
+        inline bool flushTcpPrefix(int socketFd = -1) noexcept
         {
-            if (fd < 0 || tcpPrefix.empty())
+            int target = socketFd >= 0 ? socketFd : fd;
+            if (target < 0 || tcpPrefix.empty())
                 return true;
-            ssize_t n = ::send(fd, tcpPrefix.data(), tcpPrefix.size(), MSG_NOSIGNAL);
+            ssize_t n = ::send(target, tcpPrefix.data(), tcpPrefix.size(), MSG_NOSIGNAL);
             return n == static_cast<ssize_t>(tcpPrefix.size());
         }
 
@@ -241,73 +202,9 @@ namespace mynet
         inline void setInterface(std::string_view ifname) noexcept { bindInterface = ifname; }
         [[nodiscard]] inline std::string_view getInterface() const noexcept { return bindInterface; }
 
-        inline void reset() noexcept
-        {
-            if (fd != -1)
-            {
-                ::close(fd);
-                fd = -1;
-            }
-            targetAddr = {};
-        }
-
-        inline void attach(int newFd, const sockaddr_in &newAddr = {}) noexcept
-        {
-            reset();
-            fd = newFd;
-            targetAddr = newAddr;
-        }
-
-        [[nodiscard]] inline int release() noexcept
-        {
-            int ret = fd;
-            fd = -1;
-            targetAddr = {};
-            return ret;
-        }
-
-        /**
-         * @brief 检查非阻塞 connect 是否成功完成
-         *
-         * 在收到 Reactor 的可写事件 (EPOLLOUT) 时调用。
-         *
-         * @param socketFd 待检验的套接字描述符
-         * @return 成功返回 {}，对端拒绝或超时返回错误码
-         */
-        [[nodiscard]] static Result<> checkConnectError(int socketFd) noexcept
-        {
-            if (socketFd < 0)
-            {
-                return std::unexpected(ERR::SOCKET_FAILED);
-            }
-            int err = 0;
-            socklen_t len = sizeof(err);
-            if (::getsockopt(socketFd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
-            {
-                return std::unexpected(ERR::SOCKET_FAILED);
-            }
-            if (err != 0)
-            {
-                return std::unexpected(ERR::CONNECT_FAILED);
-            }
-            return {};
-        }
-
-        /**
-         * @brief 创建非阻塞 TCP 套接字并向远端发起异步建连
-         *
-         * @param ip 目标服务端 IPv4 地址字面量
-         * @param port 目标服务端端口号
-         * @param bindInterface 可选的出口网卡绑定（SO_BINDTODEVICE）
-         * @return Result<bool> 成功返回布尔值：
-         *         - true: 连接立即可用（已连上，如本机回环）；
-         *         - false: 连接处于非阻塞握手中（EINPROGRESS），需向 Reactor 挂载 EPOLLOUT 或等待 Proactor CQE；
-         *         - unexpected: 发生系统调用错误。
-         */
-        [[nodiscard]] Result<bool> dialTcp(const char *ip, int port, const char *bindInterface = nullptr) noexcept
+        [[nodiscard]] Result<bool> dialTcp(const char *ip, int port, const char *bindIface = nullptr) noexcept
         {
             contract_assert(ip != nullptr);
-            contract_assert(port >= 0 && port <= ((1 << 16) - 1));
             reset();
             ::signal(SIGPIPE, SIG_IGN);
 
@@ -319,15 +216,11 @@ namespace mynet
                 return std::unexpected(ERR::ADDR_INVALID);
             }
             targetAddr.sin_port = ::htons(static_cast<uint16_t>(port));
-
-            return dialTcp(targetAddr, bindInterface);
+            return dialTcp(targetAddr, bindIface);
         }
 
-        /**
-         * @brief 通过域名或 IP 字符串及端口发起非阻塞 TCP 建连（自动域名解析）
-         */
         [[nodiscard]] Result<bool> dialTcp(std::string_view host, uint16_t port,
-                                           const char *bindInterface = nullptr) noexcept
+                                           const char *bindIface = nullptr) noexcept
         {
             if (host.empty())
             {
@@ -354,13 +247,10 @@ namespace mynet
             target.sin_family = AF_INET;
             target.sin_addr = inAddr;
             target.sin_port = ::htons(port);
-            return dialTcp(target, bindInterface);
+            return dialTcp(target, bindIface);
         }
 
-        /**
-         * @brief 从目标地址结构体发起非阻塞 TCP 建连
-         */
-        [[nodiscard]] Result<bool> dialTcp(const sockaddr_in &target, const char *bindInterface = nullptr) noexcept
+        [[nodiscard]] Result<bool> dialTcp(const sockaddr_in &target, const char *bindIface = nullptr) noexcept
         {
             reset();
             ::signal(SIGPIPE, SIG_IGN);
@@ -383,13 +273,12 @@ namespace mynet
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
 
-            // TCP Keepalive & NODELAY
             constexpr int opt = 1;
             [[maybe_unused]] auto _ = ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
             [[maybe_unused]] auto _keepalive = ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
 
-            const char *iface = (bindInterface != nullptr && bindInterface[0] != '\0')
-                                    ? bindInterface
+            const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
+                                    ? bindIface
                                     : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
             if (iface != nullptr && iface[0] != '\0')
             {
@@ -424,11 +313,11 @@ namespace mynet
             int rc = ::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in));
             if (rc == 0)
             {
-                return true; // 立即完成
+                return true;
             }
             if (errno == EINPROGRESS)
             {
-                return false; // 非阻塞握手中
+                return false;
             }
 
             LOG_ERROR("dialTcp: connect() failed: {}", errnoText(errno));
@@ -436,19 +325,10 @@ namespace mynet
             return std::unexpected(ERR::CONNECT_FAILED);
         }
 
-        /**
-         * @brief 创建非阻塞已连接 UDP 套接字（已关联目标四元组，可用 send/recv 直读）
-         *
-         * @param ip 目标服务端 IPv4 地址字面量
-         * @param port 目标服务端端口号
-         * @param bindInterface 可选的出口网卡绑定（SO_BINDTODEVICE）
-         */
-        [[nodiscard]] Result<> dialUdp(const char *ip, int port, const char *bindInterface = nullptr) noexcept
+        [[nodiscard]] Result<> dialUdp(const char *ip, int port, const char *bindIface = nullptr) noexcept
         {
             contract_assert(ip != nullptr);
-            contract_assert(port >= 0 && port <= ((1 << 16) - 1));
             reset();
-            ::signal(SIGPIPE, SIG_IGN);
 
             targetAddr.sin_family = AF_INET;
             if (::inet_pton(AF_INET, ip, &targetAddr.sin_addr) <= 0) [[unlikely]]
@@ -459,14 +339,44 @@ namespace mynet
             }
             targetAddr.sin_port = ::htons(static_cast<uint16_t>(port));
 
-            return dialUdp(targetAddr, bindInterface);
+            fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            if (fd < 0) [[unlikely]]
+            {
+                LOG_ERROR("dialUdp: socket() failed: {}", errnoText(errno));
+                reset();
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
+
+            const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
+                                    ? bindIface
+                                    : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
+            if (iface != nullptr && iface[0] != '\0')
+            {
+                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialUdp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
+                }
+            }
+
+            if (fwmark > 0)
+            {
+                if (::setsockopt(fd, SOL_SOCKET, SO_MARK, &fwmark, sizeof(fwmark)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialUdp: setsockopt(SO_MARK={}) failed: {}", fwmark, errnoText(errno));
+                }
+            }
+
+            if (::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in)) < 0) [[unlikely]]
+            {
+                LOG_ERROR("dialUdp: connect() failed: {}", errnoText(errno));
+                reset();
+                return std::unexpected(ERR::CONNECT_FAILED);
+            }
+
+            return {};
         }
 
-        /**
-         * @brief 通过域名或 IP 字符串及端口创建非阻塞已连接 UDP 套接字（自动域名解析）
-         */
-        [[nodiscard]] Result<> dialUdp(std::string_view host, uint16_t port,
-                                       const char *bindInterface = nullptr) noexcept
+        [[nodiscard]] Result<> dialUdp(std::string_view host, uint16_t port, const char *bindIface = nullptr) noexcept
         {
             if (host.empty())
             {
@@ -493,19 +403,12 @@ namespace mynet
             target.sin_family = AF_INET;
             target.sin_addr = inAddr;
             target.sin_port = ::htons(port);
-            return dialUdp(target, bindInterface);
+            return dialUdp(target, bindIface);
         }
 
-        /**
-         * @brief 从目标地址结构体创建非阻塞已连接 UDP 套接字
-         *
-         * @param target 目标 sockaddr_in 地址结构
-         * @param bindInterface 可选的出口网卡绑定（SO_BINDTODEVICE）
-         */
-        [[nodiscard]] Result<> dialUdp(const sockaddr_in &target, const char *bindInterface = nullptr) noexcept
+        [[nodiscard]] Result<> dialUdp(const sockaddr_in &target, const char *bindIface = nullptr) noexcept
         {
             reset();
-            ::signal(SIGPIPE, SIG_IGN);
             targetAddr = target;
 
             fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -516,8 +419,8 @@ namespace mynet
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
 
-            const char *iface = (bindInterface != nullptr && bindInterface[0] != '\0')
-                                    ? bindInterface
+            const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
+                                    ? bindIface
                                     : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
             if (iface != nullptr && iface[0] != '\0')
             {
@@ -535,63 +438,99 @@ namespace mynet
                 }
             }
 
-            if (transparent)
-            {
-                constexpr int opt = 1;
-                if (::setsockopt(fd, SOL_IP, IP_TRANSPARENT, &opt, sizeof(opt)) < 0) [[unlikely]]
-                {
-                    LOG_WARN("dialUdp: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
-                }
-            }
-
-            if (dscp > 0)
-            {
-                int tos = static_cast<int>(dscp) << 2;
-                [[maybe_unused]] auto _ = ::setsockopt(fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
-            }
-
             if (::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in)) < 0) [[unlikely]]
             {
                 LOG_ERROR("dialUdp: connect() failed: {}", errnoText(errno));
                 reset();
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
+
             return {};
         }
     };
 
     /**
-     * @brief 出站建连器兼容别名
+     * @brief 模板化客户端出站握手器基类
+     *
+     * @tparam OutboundContext 协议特有的 outbound_ 结构体。默认为 EmptyOutbound。
      */
-    template <typename HandlerType>
-    using DialerBase = Dialer<HandlerType>;
+    template <typename OutboundContext = EmptyOutbound>
+    class Dialer : public IDialer
+    {
+    public:
+        using Outbound = OutboundContext;
+        using Handler = OutboundContext;
 
-    /**
-     * @brief 约束从 Dialer 派生或满足的出站通道类型
-     */
+        [[no_unique_address]] Outbound outbound_{};
+
+        Dialer() = default;
+        explicit Dialer(OutboundContext outbound)
+            : outbound_(std::move(outbound))
+        {
+        }
+        ~Dialer() override = default;
+
+        Dialer(const Dialer &) = delete;
+        Dialer &operator=(const Dialer &) = delete;
+        Dialer(Dialer &&other) noexcept
+            : outbound_(std::move(other.outbound_))
+        {
+            fd = other.fd;
+            targetAddr = other.targetAddr;
+            fwmark = other.fwmark;
+            transparent = other.transparent;
+            dscp = other.dscp;
+            enableMptcp = other.enableMptcp;
+            bindInterface = std::move(other.bindInterface);
+            tcpPrefix = std::move(other.tcpPrefix);
+            other.fd = -1;
+            other.targetAddr = {};
+        }
+        Dialer &operator=(Dialer &&other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                outbound_ = std::move(other.outbound_);
+                fd = other.fd;
+                targetAddr = other.targetAddr;
+                fwmark = other.fwmark;
+                transparent = other.transparent;
+                dscp = other.dscp;
+                enableMptcp = other.enableMptcp;
+                bindInterface = std::move(other.bindInterface);
+                tcpPrefix = std::move(other.tcpPrefix);
+                other.fd = -1;
+                other.targetAddr = {};
+            }
+            return *this;
+        }
+
+        [[nodiscard]] inline Outbound &outbound() noexcept { return outbound_; }
+        [[nodiscard]] inline const Outbound &outbound() const noexcept { return outbound_; }
+
+        HandshakeStatus handshake(int targetFd, ConnectionBase *&outConn) override
+        {
+            (void)targetFd;
+            outConn = nullptr;
+            return HandshakeStatus::SUCCESS;
+        }
+    };
+
+    template <typename OutboundContext = EmptyOutbound>
+    using DialerBase = Dialer<OutboundContext>;
+
+    template <typename OutboundContext = EmptyOutbound>
+    using DialerBaseCompat = Dialer<OutboundContext>;
+
     template <typename D>
-    concept DerivedFromDialer = requires { typename D::Handler; } && std::derived_from<D, Dialer<typename D::Handler>>;
+    concept DerivedFromDialer = std::derived_from<D, IDialer>;
+
+    template <typename D>
+    concept BaseDialer = DerivedFromDialer<D>;
 
     template <typename D>
     concept DerivedFromDialerBase = DerivedFromDialer<D>;
-
-    /**
-     * @brief 基础出站建连器通道约束
-     */
-    template <typename D>
-    concept BaseDialer = requires { typename D::Handler; } && std::same_as<D, Dialer<typename D::Handler>>;
-
-    template <typename HandlerType>
-    using DialerSsl = Dialer<HandlerType>;
-
-    template <typename HandlerType>
-    using DialerQuic = Dialer<HandlerType>;
-
-    template <typename D>
-    concept SslDialer = DerivedFromDialer<D>;
-
-    template <typename D>
-    concept QuicDialer = DerivedFromDialer<D>;
 
     /**
      * @brief 多网卡出站策略 (借鉴 sing-box C.NetworkStrategy)
