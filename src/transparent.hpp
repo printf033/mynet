@@ -369,29 +369,28 @@ namespace mynet
 
         Result<> listen(int backlog = 128, bool reuseAddr = true, bool reusePort = true) noexcept override
         {
-            if (running_ && listenFd_ >= 0)
+            if (running_ && socket_.valid())
             {
                 return {};
             }
             close();
 
-            auto res = net::listenTcp(host_.c_str(), port_, addr_, backlog, reuseAddr, reusePort);
+            auto res = socket_.listenTcp(host_.c_str(), port_, backlog, reuseAddr, reusePort);
             if (!res)
             {
                 return std::unexpected(res.error());
             }
-            listenFd_ = *res;
 
             int transparentOpt = 1;
-            if (::setsockopt(listenFd_, SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
+            if (::setsockopt(socket_.fd, SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
             {
-                LOG_WARN("InboundTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", listenFd_,
+                LOG_WARN("InboundTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", socket_.fd,
                          errnoText(errno));
             }
 
             if (port_ == 0)
             {
-                port_ = ntohs(addr_.sin_port);
+                port_ = ntohs(socket_.addr.sin_port);
             }
 
             running_ = true;

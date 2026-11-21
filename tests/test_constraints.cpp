@@ -519,6 +519,28 @@ TEST(Constraints, AcceptorAndDialerPlaceholderZeroOverhead)
     static_assert(DerivedFromAcceptor<CustomAcceptor>);
     static_assert(DerivedFromDialer<CustomDialer>);
 
+    // 测试 EmptySocket 占 0 额外字节 (Zero Overhead)
+    static_assert(std::is_empty_v<EmptySocket>);
+
+    // 纯 TCP 反应器：UDP 套接字为 EmptySocket，占 0 额外字节
+    using PureTcpReactor = Reactor<Acceptor<HandlerConnection>>;
+    static_assert(PureTcpReactor::kHasTcp);
+    static_assert(!PureTcpReactor::kHasUdp);
+    static_assert(std::is_empty_v<decltype(std::declval<PureTcpReactor>().socket().udp)>);
+
+    // 纯 UDP 反应器：TCP 套接字为 EmptySocket，占 0 额外字节
+    using PureUdpReactor = Reactor<Acceptor<HandlerDatagram>>;
+    static_assert(!PureUdpReactor::kHasTcp);
+    static_assert(PureUdpReactor::kHasUdp);
+    static_assert(std::is_empty_v<decltype(std::declval<PureUdpReactor>().socket().tcp)>);
+
+    // 双协议反应器：TCP 与 UDP 均启用
+    using DualReactor = Reactor<Acceptor<HandlerConnection>, Acceptor<HandlerDatagram>>;
+    static_assert(DualReactor::kHasTcp);
+    static_assert(DualReactor::kHasUdp);
+    static_assert(!std::is_empty_v<decltype(std::declval<DualReactor>().socket().tcp)>);
+    static_assert(!std::is_empty_v<decltype(std::declval<DualReactor>().socket().udp)>);
+
     // Reactor 模板实例化与单/多 Acceptor 编译期调度
     Reactor<CustomAcceptor> singleReactor;
     Reactor<CustomAcceptor, Acceptor<EmptyInbound>> multiReactor;

@@ -240,49 +240,6 @@ namespace
 
         LOG_INFO("I/O Engine active: {}", engineName);
 
-        // 统一纳管 Core 中全部已启动的 Inbound 节点监听接收器到当前引擎的事件循环中
-        for (const auto &inbound : core.inbounds().inbounds())
-        {
-            if (inbound->listenFd() >= 0 && inbound->listenFd() != server.tcpFd())
-            {
-                if constexpr (requires { server.addListener(0, {}); })
-                {
-                    auto addRes =
-                        server.addListener(inbound->listenFd(),
-                                           [&core, inbound](int clientFd, const sockaddr_in &clientAddr)
-                                           {
-                                               (void)clientAddr;
-                                               auto handler = inbound->createHandler();
-                                               if (handler != nullptr)
-                                               {
-                                                   if (mynet::inbound::driveHandshake(clientFd, *handler, 2000))
-                                                   {
-                                                       auto res = core.dispatch(*handler, clientFd, inbound->tag(),
-                                                                                inbound->isSniffingEnabled());
-                                                       if (!res.ok() || res.session == nullptr)
-                                                       {
-                                                           ::close(clientFd);
-                                                       }
-                                                   }
-                                                   else
-                                                   {
-                                                       ::close(clientFd);
-                                                   }
-                                               }
-                                               else
-                                               {
-                                                   ::close(clientFd);
-                                               }
-                                           });
-                    if (!addRes)
-                    {
-                        LOG_WARN("runServer: failed to attach inbound '{}' to engine: {}", inbound->tag(),
-                                 mynet::toString(addRes.error()));
-                    }
-                }
-            }
-        }
-
         // 启动后台流式转发泵送与空闲会话超时排空任务
         std::atomic<bool> pumpRunning{true};
         std::thread pumpThread(

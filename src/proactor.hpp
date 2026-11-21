@@ -21,7 +21,6 @@
 #include "dialer.hpp"
 #include "error.hpp"
 #include "reactor.hpp"
-#include "socket.hpp"
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -48,7 +47,10 @@ namespace mynet
     class Proactor
     {
     public:
-        using AcceptCallback = std::function<void(int clientFd, const sockaddr_in &clientAddr)>;
+        static constexpr size_t kProtocolCount = sizeof...(Protocols);
+        static constexpr bool kHasTcp =
+            (sizeof...(Protocols) == 0) || (ProtocolTransportDetector<Protocols>::is_tcp || ...);
+        static constexpr bool kHasUdp = (ProtocolTransportDetector<Protocols>::is_udp || ...);
 
         Proactor() noexcept = default;
         ~Proactor() noexcept { reset(); }
@@ -61,10 +63,43 @@ namespace mynet
         inline void stop() noexcept { stopSource_.request_stop(); }
         inline void quit() noexcept { stopSource_.request_stop(); }
 
-        [[nodiscard]] inline int tcpFd() const noexcept { return tcpFd_; }
-        [[nodiscard]] inline int udpFd() const noexcept { return udpFd_; }
-        [[nodiscard]] inline const sockaddr_in &tcpAddr() const noexcept { return tcpAddr_; }
-        [[nodiscard]] inline const sockaddr_in &udpAddr() const noexcept { return udpAddr_; }
+        [[nodiscard]] inline int tcpFd() const noexcept
+        {
+            if constexpr (kHasTcp)
+                return socket_.tcp.fd;
+            else
+                return -1;
+        }
+        [[nodiscard]] inline int udpFd() const noexcept
+        {
+            if constexpr (kHasUdp)
+                return socket_.udp.fd;
+            else
+                return -1;
+        }
+        [[nodiscard]] inline const sockaddr_in &tcpAddr() const noexcept
+        {
+            if constexpr (kHasTcp)
+                return socket_.tcp.addr;
+            else
+            {
+                static constexpr sockaddr_in empty{};
+                return empty;
+            }
+        }
+        [[nodiscard]] inline const sockaddr_in &udpAddr() const noexcept
+        {
+            if constexpr (kHasUdp)
+                return socket_.udp.addr;
+            else
+            {
+                static constexpr sockaddr_in empty{};
+                return empty;
+            }
+        }
+
+        [[nodiscard]] inline auto &socket() noexcept { return socket_; }
+        [[nodiscard]] inline const auto &socket() const noexcept { return socket_; }
 
         // ---- 编译期类型安全的 Acceptor 检索接口 ----
         template <typename P>
@@ -118,79 +153,81 @@ namespace mynet
 
         Result<> listenTcp(const char *ip, int port, int backlog = 128, bool reuseAddr = true, bool reusePort = true)
         {
-            if (tcpFd_ >= 0)
+            if constexpr (!kHasTcp)
             {
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
+            else
+            {
+                if (socket_.tcp.valid())
+                {
+                    return {};
+                }
+                auto res = socket_.tcp.listenTcp(ip, port, backlog, reuseAddr, reusePort);
+                if (!res)
+                {
+                    return std::unexpected(res.error());
+                }
                 return {};
             }
-            auto res = net::listenTcp(ip, port, tcpAddr_, backlog, reuseAddr, reusePort);
-            if (!res)
-            {
-                return std::unexpected(res.error());
-            }
-            tcpFd_ = *res;
-            return {};
         }
 
         Result<> listenUdp(const char *ip, int port, bool reuseAddr = true, bool reusePort = true)
         {
-            if (udpFd_ >= 0)
-            {
-                return {};
-            }
-            auto res = net::listenUdp(ip, port, udpAddr_, reuseAddr, reusePort);
-            if (!res)
-            {
-                return std::unexpected(res.error());
-            }
-            udpFd_ = *res;
-            return {};
-        }
-
-        Result<> addListener(int listenFd, AcceptCallback onAccept = nullptr)
-        {
-            if (listenFd < 0)
+            if constexpr (!kHasUdp)
             {
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
-            if (extraListeners_.contains(listenFd))
+            else
             {
+                if (socket_.udp.valid())
+                {
+                    return {};
+                }
+                auto res = socket_.udp.listenUdp(ip, port, reuseAddr, reusePort);
+                if (!res)
+                {
+                    return std::unexpected(res.error());
+                }
                 return {};
             }
-
-            auto listener = std::make_shared<ExtraListener>();
-            listener->fd = listenFd;
-            listener->onAccept = std::move(onAccept);
-            extraListeners_.emplace(listenFd, listener);
-            return {};
-        }
-
-        Result<> removeListener(int listenFd)
-        {
-            auto it = extraListeners_.find(listenFd);
-            if (it == extraListeners_.end())
-            {
-                return {};
-            }
-            extraListeners_.erase(it);
-            return {};
         }
 
         [[nodiscard]] inline size_t listenerCount() const noexcept
         {
-            return (tcpFd_ >= 0 ? 1 : 0) + (udpFd_ >= 0 ? 1 : 0) + extraListeners_.size();
+            size_t count = 0;
+            if constexpr (kHasTcp)
+            {
+                if (socket_.tcp.valid())
+                    ++count;
+            }
+            if constexpr (kHasUdp)
+            {
+                if (socket_.udp.valid())
+                    ++count;
+            }
+            return count;
         }
 
         [[nodiscard]] Result<> runTcp(const char *ip, int port, const ServerConfig &server,
                                       const ProactorConfig &proactor)
         {
-            if (auto err = listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err)
+            if constexpr (!kHasTcp)
             {
-                reset();
-                return err;
+                LOG_ERROR("Proactor::runTcp: this Proactor has no TCP protocols configured");
+                return std::unexpected(ERR::SOCKET_FAILED);
             }
-            Result<> rc = serve(server, proactor);
-            reset();
-            return rc;
+            else
+            {
+                if (auto err = listenTcp(ip, port, server.backlog, server.reuseAddr, server.reusePort); !err)
+                {
+                    reset();
+                    return err;
+                }
+                Result<> rc = serve(server, proactor);
+                reset();
+                return rc;
+            }
         }
 
         [[nodiscard]] Result<> runTcp(const char *ip, int port)
@@ -208,14 +245,22 @@ namespace mynet
         [[nodiscard]] Result<> runUdp(const char *ip, int port, const ServerConfig &server,
                                       const ProactorConfig &proactor)
         {
-            if (auto err = listenUdp(ip, port, server.reuseAddr, server.reusePort); !err)
+            if constexpr (!kHasUdp)
             {
-                reset();
-                return err;
+                LOG_ERROR("Proactor::runUdp: this Proactor has no UDP protocols configured");
+                return std::unexpected(ERR::SOCKET_FAILED);
             }
-            Result<> rc = serve(server, proactor);
-            reset();
-            return rc;
+            else
+            {
+                if (auto err = listenUdp(ip, port, server.reuseAddr, server.reusePort); !err)
+                {
+                    reset();
+                    return err;
+                }
+                Result<> rc = serve(server, proactor);
+                reset();
+                return rc;
+            }
         }
 
         [[nodiscard]] Result<> runUdp(const char *ip, int port)
@@ -260,19 +305,7 @@ namespace mynet
 
         inline void reset() noexcept
         {
-            if (tcpFd_ >= 0)
-            {
-                ::close(tcpFd_);
-                tcpFd_ = -1;
-            }
-            tcpAddr_ = {};
-
-            if (udpFd_ >= 0)
-            {
-                ::close(udpFd_);
-                udpFd_ = -1;
-            }
-            udpAddr_ = {};
+            socket_.reset();
 
             for (auto &[fd, conn] : connections_)
             {
@@ -283,29 +316,17 @@ namespace mynet
                 }
             }
             connections_.clear();
-            extraListeners_.clear();
 
             std::apply([](auto &...acc) { (acc.reset(), ...); }, acceptors_);
             std::apply([](auto &...dia) { (dia.reset(), ...); }, dialers_);
         }
 
     private:
-        struct ExtraListener
-        {
-            int fd{-1};
-            AcceptCallback onAccept{};
-        };
-
-        int tcpFd_{-1};
-        sockaddr_in tcpAddr_{};
-
-        int udpFd_{-1};
-        sockaddr_in udpAddr_{};
+        [[no_unique_address]] TransportSockets<kHasTcp, kHasUdp> socket_{};
 
         std::tuple<typename ProtocolTraits<Protocols>::Acceptor...> acceptors_{};
         std::tuple<typename ProtocolTraits<Protocols>::Dialer...> dialers_{};
         std::unordered_map<int, ConnectionBase *> connections_{};
-        std::unordered_map<int, std::shared_ptr<ExtraListener>> extraListeners_{};
 
         std::stop_source stopSource_{};
     };

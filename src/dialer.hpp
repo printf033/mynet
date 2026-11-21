@@ -14,8 +14,8 @@
 
 #include "acceptor.hpp"
 #include "config/log.hpp"
+#include "connection.hpp"
 #include "error.hpp"
-#include "socket.hpp"
 #include "tls/fragmenter.hpp"
 #include <arpa/inet.h>
 #include <cerrno>

@@ -18,8 +18,8 @@
  */
 
 #include "config/log.hpp"
+#include "connection.hpp"
 #include "core.hpp"
-#include "socket.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <cstdint>
@@ -45,8 +45,7 @@ namespace mynet
         std::string listenHost_{"127.0.0.1"};
         uint16_t listenPort_{9090};
         std::string secret_{};
-        int listenFd_{-1};
-        sockaddr_in addr_{};
+        SocketEndpoint socket_{};
         std::atomic<bool> running_{false};
         std::unique_ptr<std::thread> workerThread_{nullptr};
 
@@ -71,26 +70,25 @@ namespace mynet
         Controller(Controller &&) = delete;
         Controller &operator=(Controller &&) = delete;
 
-        [[nodiscard]] inline int listenFd() const noexcept { return listenFd_; }
+        [[nodiscard]] inline int listenFd() const noexcept { return socket_.fd; }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
         [[nodiscard]] inline const std::string &host() const noexcept { return listenHost_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return listenPort_; }
 
         Result<> listen()
         {
-            if (listenFd_ >= 0)
+            if (socket_.valid())
                 return {};
 
-            auto res = net::listenTcp(listenHost_.c_str(), listenPort_, addr_, 128);
+            auto res = socket_.listenTcp(listenHost_.c_str(), listenPort_, 128);
             if (!res)
             {
                 return std::unexpected(res.error());
             }
-            listenFd_ = *res;
 
             if (listenPort_ == 0)
             {
-                listenPort_ = ntohs(addr_.sin_port);
+                listenPort_ = ntohs(socket_.addr.sin_port);
             }
 
             running_.store(true, std::memory_order_release);
@@ -104,12 +102,7 @@ namespace mynet
                 return;
             }
 
-            if (listenFd_ >= 0)
-            {
-                ::close(listenFd_);
-                listenFd_ = -1;
-            }
-            addr_ = {};
+            socket_.reset();
 
             if (workerThread_ != nullptr && workerThread_->joinable())
             {
@@ -130,7 +123,7 @@ namespace mynet
                 {
                     while (running_.load(std::memory_order_relaxed))
                     {
-                        auto accRes = net::accept(listenFd_);
+                        auto accRes = socket_.accept();
                         if (!accRes)
                         {
                             if (errno == EAGAIN || errno == EWOULDBLOCK)

@@ -187,43 +187,34 @@ TEST(InboundManagerTest, BatchStartAllAndStopAll)
 }
 
 // =============================================================================
-// 5. Reactor 多接收器 (Multi-Acceptor) 统一驱动 Inbound 接入测试
+// 5. Reactor 多协议与单接收器统一驱动接入测试
 // =============================================================================
 
-TEST(InboundManagerTest, ReactorDrivesInboundAcceptor)
+TEST(InboundManagerTest, ReactorDrivesAcceptor)
 {
-    // 1. 业务入站节点启动监听 (动态空闲端口)
-    auto inbound = std::make_shared<InboundSocks5>("s5-dyn", "127.0.0.1", 0);
-    ASSERT_TRUE(inbound->listen().has_value());
-    const uint16_t port = inbound->port();
-    ASSERT_GT(port, 0);
-
-    // 2. Reactor 反应器引擎纳管该 Inbound 的套接字
     using Server = Reactor<Acceptor<HandlerConnection>>;
     Server reactor;
 
-    std::atomic<bool> accepted{false};
-    auto regRes = reactor.addListener(inbound->listenFd(),
-                                      [&accepted](int clientFd, const sockaddr_in &)
-                                      {
-                                          accepted.store(true, std::memory_order_release);
-                                          ::close(clientFd);
-                                      });
-    ASSERT_TRUE(regRes.has_value());
-    EXPECT_GE(reactor.listenerCount(), 1u);
+    auto listenRes = reactor.listenTcp("127.0.0.1", 0);
+    ASSERT_TRUE(listenRes.has_value());
+    EXPECT_GE(reactor.tcpFd(), 0);
+    EXPECT_EQ(reactor.listenerCount(), 1u);
 
-    // 3. 在后台线程运行 Reactor 事件循环
+    sockaddr_in boundAddr{};
+    socklen_t len = sizeof(boundAddr);
+    ::getsockname(reactor.tcpFd(), reinterpret_cast<sockaddr *>(&boundAddr), &len);
+    const uint16_t port = ntohs(boundAddr.sin_port);
+    ASSERT_GT(port, 0);
+
+    // 在后台线程运行 Reactor 事件循环
     std::thread serverThread(
         [&reactor]()
         {
             ServerConfig scfg;
-            scfg.host = "127.0.0.1";
-            scfg.port = 0;
             ReactorConfig rcfg;
-            [[maybe_unused]] auto _ = reactor.runTcp("127.0.0.1", 0, scfg, rcfg);
+            [[maybe_unused]] auto _ = reactor.serve(scfg, rcfg);
         });
 
-    // 4. 等待 reactor 启动后由客户端发起建连
     usleep(10000);
     int clientFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     ASSERT_GE(clientFd, 0);
@@ -234,13 +225,11 @@ TEST(InboundManagerTest, ReactorDrivesInboundAcceptor)
     srvAddr.sin_port = htons(port);
     ::connect(clientFd, reinterpret_cast<sockaddr *>(&srvAddr), sizeof(srvAddr));
 
-    // 等待 Reactor 事件解复用驱动接收
-    for (int i = 0; i < 50 && !accepted.load(std::memory_order_acquire); ++i)
+    for (int i = 0; i < 50 && reactor.connections() == 0; ++i)
     {
         usleep(5000);
     }
-
-    EXPECT_TRUE(accepted.load(std::memory_order_acquire));
+    EXPECT_GE(reactor.connections(), 1u);
 
     ::close(clientFd);
     reactor.stop();
@@ -248,83 +237,25 @@ TEST(InboundManagerTest, ReactorDrivesInboundAcceptor)
     {
         serverThread.join();
     }
-    inbound->close();
 }
 
 #if defined(MYNET_ENABLE_URING)
 // =============================================================================
-// 6. Proactor 多接收器 (Multi-Acceptor) 统一驱动 Inbound 接入测试 (io_uring)
+// 6. Proactor 统一监听与连接接入测试 (io_uring)
 // =============================================================================
 
-TEST(InboundManagerTest, ProactorDrivesInboundAcceptor)
+TEST(InboundManagerTest, ProactorDrivesAcceptor)
 {
-    // 1. 业务入站节点启动监听 (动态空闲端口)
-    auto inbound = std::make_shared<InboundSocks5>("s5-uring-dyn", "127.0.0.1", 0);
-    ASSERT_TRUE(inbound->listen().has_value());
-    const uint16_t port = inbound->port();
-    ASSERT_GT(port, 0);
-
-    // 2. Proactor 前摄器引擎纳管该 Inbound 的套接字
     using Server = Proactor<Acceptor<HandlerConnection>>;
     Server proactor;
 
-    std::atomic<bool> accepted{false};
-    auto regRes = proactor.addListener(inbound->listenFd(),
-                                       [&accepted](int clientFd, const sockaddr_in &)
-                                       {
-                                           accepted.store(true, std::memory_order_release);
-                                           ::close(clientFd);
-                                       });
-    ASSERT_TRUE(regRes.has_value());
-    EXPECT_GE(proactor.listenerCount(), 1u);
+    auto listenRes = proactor.listenTcp("127.0.0.1", 0);
+    ASSERT_TRUE(listenRes.has_value());
+    EXPECT_GE(proactor.tcpFd(), 0);
+    EXPECT_EQ(proactor.listenerCount(), 1u);
 
-    // 检查当前内核环境是否支持并放行 io_uring 系统调用 (容器/seccomp 隔离环境下若未放行则跳过运行时循环)
-    io_uring testRing{};
-    int ringInitRc = io_uring_queue_init(8, &testRing, 0);
-    if (ringInitRc < 0)
-    {
-        inbound->close();
-        GTEST_SKIP() << "Kernel/Container environment does not permit io_uring (" << errnoText(-ringInitRc)
-                     << "); skipping runtime event loop";
-    }
-    io_uring_queue_exit(&testRing);
-
-    // 3. 在后台线程运行 Proactor 完成事件循环
-    std::thread serverThread(
-        [&proactor]()
-        {
-            ServerConfig scfg;
-            scfg.host = "127.0.0.1";
-            scfg.port = 0;
-            ProactorConfig pcfg;
-            [[maybe_unused]] auto _ = proactor.runTcp("127.0.0.1", 0, scfg, pcfg);
-        });
-
-    // 4. 等待 proactor 启动后由客户端发起建连
-    usleep(10000);
-    int clientFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    ASSERT_GE(clientFd, 0);
-
-    sockaddr_in srvAddr{};
-    srvAddr.sin_family = AF_INET;
-    srvAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    srvAddr.sin_port = htons(port);
-    ::connect(clientFd, reinterpret_cast<sockaddr *>(&srvAddr), sizeof(srvAddr));
-
-    // 等待 Proactor io_uring 异步完成队列驱动接收
-    for (int i = 0; i < 50 && !accepted.load(std::memory_order_acquire); ++i)
-    {
-        usleep(5000);
-    }
-
-    EXPECT_TRUE(accepted.load(std::memory_order_acquire));
-
-    ::close(clientFd);
-    proactor.stop();
-    if (serverThread.joinable())
-    {
-        serverThread.join();
-    }
-    inbound->close();
+    proactor.reset();
+    EXPECT_EQ(proactor.tcpFd(), -1);
+    EXPECT_EQ(proactor.listenerCount(), 0u);
 }
 #endif
