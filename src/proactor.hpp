@@ -48,11 +48,38 @@ namespace mynet
     {
     public:
         static constexpr size_t kProtocolCount = sizeof...(Protocols);
-        static constexpr bool kHasTcp =
-            (sizeof...(Protocols) == 0) || (ProtocolTransportDetector<Protocols>::is_tcp || ...);
-        static constexpr bool kHasUdp = (ProtocolTransportDetector<Protocols>::is_udp || ...);
+        static constexpr size_t kListenerCount = countUniqueListeners<Protocols...>();
+        static constexpr auto kListenerConfigs = getUniqueListeners<Protocols...>();
 
-        Proactor() noexcept = default;
+        static constexpr bool kHasTcp = []() consteval
+        {
+            for (const auto &c : kListenerConfigs)
+            {
+                if (c.transport == TransportType::TCP)
+                    return true;
+            }
+            return false;
+        }();
+
+        static constexpr bool kHasUdp = []() consteval
+        {
+            for (const auto &c : kListenerConfigs)
+            {
+                if (c.transport == TransportType::UDP)
+                    return true;
+            }
+            return false;
+        }();
+
+        Proactor()
+        {
+            for (size_t i = 0; i < kListenerCount; ++i)
+            {
+                listeners_[i].transport = kListenerConfigs[i].transport;
+                listeners_[i].configuredPort = kListenerConfigs[i].defaultPort;
+                listeners_[i].token = static_cast<int>(i);
+            }
+        }
         ~Proactor() noexcept { reset(); }
 
         Proactor(const Proactor &) = delete;
@@ -65,41 +92,72 @@ namespace mynet
 
         [[nodiscard]] inline int tcpFd() const noexcept
         {
-            if constexpr (kHasTcp)
-                return socket_.tcp.fd;
-            else
-                return -1;
+            for (const auto &l : listeners_)
+            {
+                if (l.isTcp() && l.valid())
+                    return l.fd();
+            }
+            return -1;
         }
         [[nodiscard]] inline int udpFd() const noexcept
         {
-            if constexpr (kHasUdp)
-                return socket_.udp.fd;
-            else
-                return -1;
+            for (const auto &l : listeners_)
+            {
+                if (l.isUdp() && l.valid())
+                    return l.fd();
+            }
+            return -1;
         }
         [[nodiscard]] inline const sockaddr_in &tcpAddr() const noexcept
         {
-            if constexpr (kHasTcp)
-                return socket_.tcp.addr;
-            else
+            for (const auto &l : listeners_)
             {
-                static constexpr sockaddr_in empty{};
-                return empty;
+                if (l.isTcp() && l.valid())
+                    return l.addr();
             }
+            static constexpr sockaddr_in empty{};
+            return empty;
         }
         [[nodiscard]] inline const sockaddr_in &udpAddr() const noexcept
         {
-            if constexpr (kHasUdp)
-                return socket_.udp.addr;
-            else
+            for (const auto &l : listeners_)
             {
-                static constexpr sockaddr_in empty{};
-                return empty;
+                if (l.isUdp() && l.valid())
+                    return l.addr();
             }
+            static constexpr sockaddr_in empty{};
+            return empty;
         }
 
-        [[nodiscard]] inline auto &socket() noexcept { return socket_; }
-        [[nodiscard]] inline const auto &socket() const noexcept { return socket_; }
+        template <size_t I = 0>
+        [[nodiscard]] inline Listener &listener() noexcept
+        {
+            static_assert(I < kListenerCount, "Listener index out of bounds");
+            return listeners_[I];
+        }
+
+        template <size_t I = 0>
+        [[nodiscard]] inline const Listener &listener() const noexcept
+        {
+            static_assert(I < kListenerCount, "Listener index out of bounds");
+            return listeners_[I];
+        }
+
+        [[nodiscard]] inline auto &listeners() noexcept { return listeners_; }
+        [[nodiscard]] inline const auto &listeners() const noexcept { return listeners_; }
+
+        [[nodiscard]] inline size_t listenerCount() const noexcept
+        {
+            size_t count = 0;
+            for (const auto &l : listeners_)
+            {
+                if (l.valid())
+                    ++count;
+            }
+            return count;
+        }
+
+        [[nodiscard]] constexpr size_t listenerCapacity() const noexcept { return kListenerCount; }
 
         // ---- 编译期类型安全的 Acceptor 检索接口 ----
         template <typename P>
@@ -159,16 +217,23 @@ namespace mynet
             }
             else
             {
-                if (socket_.tcp.valid())
+                for (size_t i = 0; i < kListenerCount; ++i)
                 {
-                    return {};
+                    if (listeners_[i].isTcp())
+                    {
+                        if (listeners_[i].valid())
+                        {
+                            return {};
+                        }
+                        auto res = listeners_[i].listen(ip, port, backlog, reuseAddr, reusePort);
+                        if (!res)
+                        {
+                            return std::unexpected(res.error());
+                        }
+                        return {};
+                    }
                 }
-                auto res = socket_.tcp.listenTcp(ip, port, backlog, reuseAddr, reusePort);
-                if (!res)
-                {
-                    return std::unexpected(res.error());
-                }
-                return {};
+                return std::unexpected(ERR::SOCKET_FAILED);
             }
         }
 
@@ -180,33 +245,40 @@ namespace mynet
             }
             else
             {
-                if (socket_.udp.valid())
+                for (size_t i = 0; i < kListenerCount; ++i)
                 {
-                    return {};
+                    if (listeners_[i].isUdp())
+                    {
+                        if (listeners_[i].valid())
+                        {
+                            return {};
+                        }
+                        auto res = listeners_[i].listen(ip, port, 128, reuseAddr, reusePort);
+                        if (!res)
+                        {
+                            return std::unexpected(res.error());
+                        }
+                        return {};
+                    }
                 }
-                auto res = socket_.udp.listenUdp(ip, port, reuseAddr, reusePort);
-                if (!res)
-                {
-                    return std::unexpected(res.error());
-                }
-                return {};
+                return std::unexpected(ERR::SOCKET_FAILED);
             }
         }
 
-        [[nodiscard]] inline size_t listenerCount() const noexcept
+        template <size_t I>
+        Result<> listen(const char *ip, int port = 0, int backlog = 128, bool reuseAddr = true, bool reusePort = true)
         {
-            size_t count = 0;
-            if constexpr (kHasTcp)
+            static_assert(I < kListenerCount, "Listener index out of bounds");
+            if (listeners_[I].valid())
             {
-                if (socket_.tcp.valid())
-                    ++count;
+                return {};
             }
-            if constexpr (kHasUdp)
+            auto res = listeners_[I].listen(ip, port, backlog, reuseAddr, reusePort);
+            if (!res)
             {
-                if (socket_.udp.valid())
-                    ++count;
+                return std::unexpected(res.error());
             }
-            return count;
+            return {};
         }
 
         [[nodiscard]] Result<> runTcp(const char *ip, int port, const ServerConfig &server,
@@ -305,7 +377,10 @@ namespace mynet
 
         inline void reset() noexcept
         {
-            socket_.reset();
+            for (auto &l : listeners_)
+            {
+                l.reset();
+            }
 
             for (auto &[fd, conn] : connections_)
             {
@@ -322,7 +397,7 @@ namespace mynet
         }
 
     private:
-        [[no_unique_address]] TransportSockets<kHasTcp, kHasUdp> socket_{};
+        std::array<Listener, kListenerCount> listeners_{};
 
         std::tuple<typename ProtocolTraits<Protocols>::Acceptor...> acceptors_{};
         std::tuple<typename ProtocolTraits<Protocols>::Dialer...> dialers_{};

@@ -402,6 +402,58 @@ namespace mynet
     };
 
     /**
+     * @brief 协议监听端点封装（抽象单一端口监听器，支持 TCP 或 UDP 传输）
+     */
+    struct Listener
+    {
+        SocketEndpoint socket{};
+        TransportType transport{TransportType::TCP};
+        uint16_t configuredPort{0};
+        int token{0};
+
+        [[nodiscard]] constexpr bool isTcp() const noexcept { return transport == TransportType::TCP; }
+        [[nodiscard]] constexpr bool isUdp() const noexcept { return transport == TransportType::UDP; }
+
+        [[nodiscard]] constexpr bool valid() const noexcept { return socket.valid(); }
+        [[nodiscard]] constexpr int fd() const noexcept { return socket.fd; }
+        [[nodiscard]] constexpr const sockaddr_in &addr() const noexcept { return socket.addr; }
+
+        inline void reset() noexcept { socket.reset(); }
+
+        [[nodiscard]] inline Result<int> listen(const char *ip, int port = 0, int backlog = 128, bool reuseAddr = true,
+                                                bool reusePort = true) noexcept
+        {
+            if (port == 0 && configuredPort != 0)
+            {
+                port = configuredPort;
+            }
+            if (isTcp())
+            {
+                return socket.listenTcp(ip, port, backlog, reuseAddr, reusePort);
+            }
+            else
+            {
+                return socket.listenUdp(ip, port, reuseAddr, reusePort);
+            }
+        }
+    };
+
+    /**
+     * @brief 编译期监听器规格配置（用于去重与端口推导）
+     */
+    struct ListenerConfig
+    {
+        TransportType transport{TransportType::TCP};
+        uint16_t defaultPort{0};
+        size_t tag{0};
+
+        constexpr bool operator==(const ListenerConfig &other) const noexcept
+        {
+            return transport == other.transport && defaultPort == other.defaultPort && tag == other.tag;
+        }
+    };
+
+    /**
      * @brief 编译期空传输套接字端点（0 字节占位）
      */
     struct EmptySocket

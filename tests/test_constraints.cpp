@@ -44,6 +44,36 @@ namespace
     {
     };
 
+    struct SniffProtoA
+    {
+        static constexpr TransportType transport = TransportType::TCP;
+        static constexpr uint16_t default_port = 443;
+    };
+
+    struct SniffProtoB
+    {
+        static constexpr TransportType transport = TransportType::TCP;
+        static constexpr uint16_t default_port = 443;
+    };
+
+    struct ProtoHttp
+    {
+        static constexpr TransportType transport = TransportType::TCP;
+        static constexpr uint16_t default_port = 80;
+    };
+
+    struct ProtoHttps
+    {
+        static constexpr TransportType transport = TransportType::TCP;
+        static constexpr uint16_t default_port = 443;
+    };
+
+    struct ProtoDns
+    {
+        static constexpr TransportType transport = TransportType::UDP;
+        static constexpr uint16_t default_port = 53;
+    };
+
     /// 正例：派生自 HandlerConnection，只重写 handle() 表达业务定制。
     struct FakeHandler : public HandlerConnection
     {
@@ -519,34 +549,45 @@ TEST(Constraints, AcceptorAndDialerPlaceholderZeroOverhead)
     static_assert(DerivedFromAcceptor<CustomAcceptor>);
     static_assert(DerivedFromDialer<CustomDialer>);
 
-    // 测试 EmptySocket 占 0 额外字节 (Zero Overhead)
-    static_assert(std::is_empty_v<EmptySocket>);
-
-    // 纯 TCP 反应器：UDP 套接字为 EmptySocket，占 0 额外字节
+    // 纯 TCP 反应器：自动推导推算出 1 个 TCP 监听器
     using PureTcpReactor = Reactor<Acceptor<HandlerConnection>>;
+    static_assert(PureTcpReactor::kListenerCount == 1);
     static_assert(PureTcpReactor::kHasTcp);
     static_assert(!PureTcpReactor::kHasUdp);
-    static_assert(std::is_empty_v<decltype(std::declval<PureTcpReactor>().socket().udp)>);
 
-    // 纯 UDP 反应器：TCP 套接字为 EmptySocket，占 0 额外字节
+    // 纯 UDP 反应器：自动推导推算出 1 个 UDP 监听器
     using PureUdpReactor = Reactor<Acceptor<HandlerDatagram>>;
+    static_assert(PureUdpReactor::kListenerCount == 1);
     static_assert(!PureUdpReactor::kHasTcp);
     static_assert(PureUdpReactor::kHasUdp);
-    static_assert(std::is_empty_v<decltype(std::declval<PureUdpReactor>().socket().tcp)>);
 
-    // 双协议反应器：TCP 与 UDP 均启用
+    // 双传输反应器：自动推导推算出 2 个监听器 (1 个 TCP + 1 个 UDP)
     using DualReactor = Reactor<Acceptor<HandlerConnection>, Acceptor<HandlerDatagram>>;
+    static_assert(DualReactor::kListenerCount == 2);
     static_assert(DualReactor::kHasTcp);
     static_assert(DualReactor::kHasUdp);
-    static_assert(!std::is_empty_v<decltype(std::declval<DualReactor>().socket().tcp)>);
-    static_assert(!std::is_empty_v<decltype(std::declval<DualReactor>().socket().udp)>);
 
-    // Reactor 模板实例化与单/多 Acceptor 编译期调度
+    // 多协议共享端口嗅探场景：2 个 Acceptor 共享 443 端口 -> 自动推导合并为 1 个 Listener (<= Acceptor 数量)
+    using SniffReactor = Reactor<Acceptor<SniffProtoA>, Acceptor<SniffProtoB>>;
+    static_assert(SniffReactor::kProtocolCount == 2);
+    static_assert(SniffReactor::kListenerCount == 1); // 2 Acceptors -> 1 Listener!
+
+    // 多协议不同端口场景：HTTP(80) + HTTPS(443) + DNS(53) -> 自动推导分配 3 个 Listener
+    using MultiPortReactor = Reactor<Acceptor<ProtoHttp>, Acceptor<ProtoHttps>, Acceptor<ProtoDns>>;
+    static_assert(MultiPortReactor::kProtocolCount == 3);
+    static_assert(MultiPortReactor::kListenerCount == 3);
+    static_assert(MultiPortReactor::kListenerConfigs[0].defaultPort == 80);
+    static_assert(MultiPortReactor::kListenerConfigs[1].defaultPort == 443);
+    static_assert(MultiPortReactor::kListenerConfigs[2].defaultPort == 53);
+
+    // 实例运行与容量检查
     Reactor<CustomAcceptor> singleReactor;
     Reactor<CustomAcceptor, Acceptor<EmptyInbound>> multiReactor;
 
     EXPECT_EQ(singleReactor.connections(), 0u);
     EXPECT_EQ(multiReactor.connections(), 0u);
+    EXPECT_GE(singleReactor.listenerCapacity(), 1u);
+    EXPECT_EQ(singleReactor.listenerCount(), 0u);
 }
 
 TEST(Constraints, EveryRunOverloadIsInstantiable)

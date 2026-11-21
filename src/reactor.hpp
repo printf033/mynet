@@ -132,6 +132,219 @@ namespace mynet
             is_empty_inbound || isConnectionType || checkTcpMember<T>(0) || checkTcpMember<Acc>(0) || !is_udp;
     };
 
+    template <typename Acc, typename T>
+    struct InboundExtractor
+    {
+    private:
+        template <typename U>
+        static auto check(int) -> typename U::Inbound;
+        template <typename U>
+        static auto check(...) -> void;
+
+        using InbAcc = decltype(check<Acc>(0));
+        using InbT = decltype(check<T>(0));
+
+    public:
+        using type =
+            std::conditional_t<!std::is_void_v<InbAcc>, InbAcc, std::conditional_t<!std::is_void_v<InbT>, InbT, T>>;
+    };
+
+    /**
+     * @brief 编译期从单一协议萃取 ListenerConfig
+     */
+    template <typename T>
+    consteval ListenerConfig extractListenerConfig()
+    {
+        using Acc = typename ProtocolTraits<T>::Acceptor;
+        using Inb = typename InboundExtractor<Acc, T>::type;
+
+        TransportType trans = TransportType::TCP;
+        if constexpr (requires {
+                          { T::transport } -> std::convertible_to<TransportType>;
+                      })
+        {
+            trans = static_cast<TransportType>(T::transport);
+        }
+        else if constexpr (requires {
+                               { Acc::transport } -> std::convertible_to<TransportType>;
+                           })
+        {
+            trans = static_cast<TransportType>(Acc::transport);
+        }
+        else if constexpr (requires {
+                               { Inb::transport } -> std::convertible_to<TransportType>;
+                           })
+        {
+            trans = static_cast<TransportType>(Inb::transport);
+        }
+        else
+        {
+            trans = ProtocolTransportDetector<T>::is_udp ? TransportType::UDP : TransportType::TCP;
+        }
+
+        uint16_t port = 0;
+        if constexpr (requires {
+                          { T::default_port } -> std::convertible_to<uint16_t>;
+                      })
+        {
+            port = static_cast<uint16_t>(T::default_port);
+        }
+        else if constexpr (requires {
+                               { T::port } -> std::convertible_to<uint16_t>;
+                           })
+        {
+            port = static_cast<uint16_t>(T::port);
+        }
+        else if constexpr (requires {
+                               { Acc::default_port } -> std::convertible_to<uint16_t>;
+                           })
+        {
+            port = static_cast<uint16_t>(Acc::default_port);
+        }
+        else if constexpr (requires {
+                               { Acc::port } -> std::convertible_to<uint16_t>;
+                           })
+        {
+            port = static_cast<uint16_t>(Acc::port);
+        }
+        else if constexpr (requires {
+                               { Inb::default_port } -> std::convertible_to<uint16_t>;
+                           })
+        {
+            port = static_cast<uint16_t>(Inb::default_port);
+        }
+        else if constexpr (requires {
+                               { Inb::port } -> std::convertible_to<uint16_t>;
+                           })
+        {
+            port = static_cast<uint16_t>(Inb::port);
+        }
+
+        size_t tag = 0;
+        if constexpr (requires {
+                          { T::listener_tag } -> std::convertible_to<size_t>;
+                      })
+        {
+            tag = static_cast<size_t>(T::listener_tag);
+        }
+        else if constexpr (requires {
+                               { Acc::listener_tag } -> std::convertible_to<size_t>;
+                           })
+        {
+            tag = static_cast<size_t>(Acc::listener_tag);
+        }
+        else if constexpr (requires {
+                               { Inb::listener_tag } -> std::convertible_to<size_t>;
+                           })
+        {
+            tag = static_cast<size_t>(Inb::listener_tag);
+        }
+
+        return ListenerConfig{trans, port, tag};
+    }
+
+    /**
+     * @brief 编译期精准计算唯一定义的监听器数量 K (K <= N)
+     */
+    template <typename... Protocols>
+    consteval size_t countUniqueListeners()
+    {
+        constexpr size_t N = sizeof...(Protocols);
+        if constexpr (N == 0)
+        {
+            return 1;
+        }
+        else
+        {
+            constexpr std::array<ListenerConfig, N> raw = {extractListenerConfig<Protocols>()...};
+            size_t count = 0;
+            for (size_t i = 0; i < N; ++i)
+            {
+                bool exists = false;
+                for (size_t j = 0; j < i; ++j)
+                {
+                    if (raw[j] == raw[i])
+                    {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists)
+                {
+                    ++count;
+                }
+            }
+            return count == 0 ? 1 : count;
+        }
+    }
+
+    /**
+     * @brief 编译期生成唯一定义的监听器规格列表 std::array<ListenerConfig, K>
+     */
+    template <typename... Protocols>
+    consteval auto getUniqueListeners()
+    {
+        constexpr size_t K = countUniqueListeners<Protocols...>();
+        constexpr size_t N = sizeof...(Protocols);
+        std::array<ListenerConfig, K> result{};
+        if constexpr (N == 0)
+        {
+            result[0] = ListenerConfig{TransportType::TCP, 0, 0};
+            return result;
+        }
+        else
+        {
+            constexpr std::array<ListenerConfig, N> raw = {extractListenerConfig<Protocols>()...};
+            size_t idx = 0;
+            for (size_t i = 0; i < N; ++i)
+            {
+                bool exists = false;
+                for (size_t j = 0; j < i; ++j)
+                {
+                    if (raw[j] == raw[i])
+                    {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists)
+                {
+                    result[idx++] = raw[i];
+                }
+            }
+            return result;
+        }
+    }
+
+    /**
+     * @brief 编译期查询指定协议索引所绑定的 Listener 下标 (0 <= idx < K)
+     */
+    template <size_t ProtocolIdx, typename... Protocols>
+    consteval size_t getListenerIndexForProtocol()
+    {
+        constexpr size_t K = countUniqueListeners<Protocols...>();
+        constexpr auto uniqueConfigs = getUniqueListeners<Protocols...>();
+        constexpr size_t N = sizeof...(Protocols);
+        if constexpr (N == 0)
+        {
+            return 0;
+        }
+        else
+        {
+            constexpr std::array<ListenerConfig, N> raw = {extractListenerConfig<Protocols>()...};
+            static_assert(ProtocolIdx < N, "ProtocolIdx out of range");
+            constexpr ListenerConfig target = raw[ProtocolIdx];
+            for (size_t k = 0; k < K; ++k)
+            {
+                if (uniqueConfigs[k] == target)
+                {
+                    return k;
+                }
+            }
+            return 0;
+        }
+    }
+
     /**
      * @brief 基于 epoll 与 eventfd 的高性能事件循环核心
      */
@@ -482,11 +695,38 @@ namespace mynet
     {
     public:
         static constexpr size_t kProtocolCount = sizeof...(Protocols);
-        static constexpr bool kHasTcp =
-            (sizeof...(Protocols) == 0) || (ProtocolTransportDetector<Protocols>::is_tcp || ...);
-        static constexpr bool kHasUdp = (ProtocolTransportDetector<Protocols>::is_udp || ...);
+        static constexpr size_t kListenerCount = countUniqueListeners<Protocols...>();
+        static constexpr auto kListenerConfigs = getUniqueListeners<Protocols...>();
 
-        Reactor() = default;
+        static constexpr bool kHasTcp = []() consteval
+        {
+            for (const auto &c : kListenerConfigs)
+            {
+                if (c.transport == TransportType::TCP)
+                    return true;
+            }
+            return false;
+        }();
+
+        static constexpr bool kHasUdp = []() consteval
+        {
+            for (const auto &c : kListenerConfigs)
+            {
+                if (c.transport == TransportType::UDP)
+                    return true;
+            }
+            return false;
+        }();
+
+        Reactor()
+        {
+            for (size_t i = 0; i < kListenerCount; ++i)
+            {
+                listeners_[i].transport = kListenerConfigs[i].transport;
+                listeners_[i].configuredPort = kListenerConfigs[i].defaultPort;
+                listeners_[i].token = static_cast<int>(i);
+            }
+        }
         ~Reactor() noexcept { reset(); }
 
         Reactor(const Reactor &) = delete;
@@ -500,41 +740,72 @@ namespace mynet
 
         [[nodiscard]] inline int tcpFd() const noexcept
         {
-            if constexpr (kHasTcp)
-                return socket_.tcp.fd;
-            else
-                return -1;
+            for (const auto &l : listeners_)
+            {
+                if (l.isTcp() && l.valid())
+                    return l.fd();
+            }
+            return -1;
         }
         [[nodiscard]] inline int udpFd() const noexcept
         {
-            if constexpr (kHasUdp)
-                return socket_.udp.fd;
-            else
-                return -1;
+            for (const auto &l : listeners_)
+            {
+                if (l.isUdp() && l.valid())
+                    return l.fd();
+            }
+            return -1;
         }
         [[nodiscard]] inline const sockaddr_in &tcpAddr() const noexcept
         {
-            if constexpr (kHasTcp)
-                return socket_.tcp.addr;
-            else
+            for (const auto &l : listeners_)
             {
-                static constexpr sockaddr_in empty{};
-                return empty;
+                if (l.isTcp() && l.valid())
+                    return l.addr();
             }
+            static constexpr sockaddr_in empty{};
+            return empty;
         }
         [[nodiscard]] inline const sockaddr_in &udpAddr() const noexcept
         {
-            if constexpr (kHasUdp)
-                return socket_.udp.addr;
-            else
+            for (const auto &l : listeners_)
             {
-                static constexpr sockaddr_in empty{};
-                return empty;
+                if (l.isUdp() && l.valid())
+                    return l.addr();
             }
+            static constexpr sockaddr_in empty{};
+            return empty;
         }
 
-        [[nodiscard]] inline auto &socket() noexcept { return socket_; }
-        [[nodiscard]] inline const auto &socket() const noexcept { return socket_; }
+        template <size_t I = 0>
+        [[nodiscard]] inline Listener &listener() noexcept
+        {
+            static_assert(I < kListenerCount, "Listener index out of bounds");
+            return listeners_[I];
+        }
+
+        template <size_t I = 0>
+        [[nodiscard]] inline const Listener &listener() const noexcept
+        {
+            static_assert(I < kListenerCount, "Listener index out of bounds");
+            return listeners_[I];
+        }
+
+        [[nodiscard]] inline auto &listeners() noexcept { return listeners_; }
+        [[nodiscard]] inline const auto &listeners() const noexcept { return listeners_; }
+
+        [[nodiscard]] inline size_t listenerCount() const noexcept
+        {
+            size_t count = 0;
+            for (const auto &l : listeners_)
+            {
+                if (l.valid())
+                    ++count;
+            }
+            return count;
+        }
+
+        [[nodiscard]] constexpr size_t listenerCapacity() const noexcept { return kListenerCount; }
 
         // ---- 编译期类型安全的 Acceptor 检索接口 ----
         template <typename P>
@@ -596,24 +867,32 @@ namespace mynet
             }
             else
             {
-                if (socket_.tcp.valid())
+                for (size_t i = 0; i < kListenerCount; ++i)
                 {
-                    return {};
-                }
-                auto res = socket_.tcp.listenTcp(ip, port, backlog, reuseAddr, reusePort);
-                if (!res)
-                {
-                    return std::unexpected(res.error());
-                }
-                if (loop_.running())
-                {
-                    if (auto addRes = loop_.addFd(socket_.tcp.fd, EPOLLIN | EPOLLET, &tcpFdToken_); !addRes)
+                    if (listeners_[i].isTcp())
                     {
-                        socket_.tcp.reset();
-                        return addRes;
+                        if (listeners_[i].valid())
+                        {
+                            return {};
+                        }
+                        auto res = listeners_[i].listen(ip, port, backlog, reuseAddr, reusePort);
+                        if (!res)
+                        {
+                            return std::unexpected(res.error());
+                        }
+                        if (loop_.running())
+                        {
+                            if (auto addRes = loop_.addFd(listeners_[i].fd(), EPOLLIN | EPOLLET, &listeners_[i]);
+                                !addRes)
+                            {
+                                listeners_[i].reset();
+                                return addRes;
+                            }
+                        }
+                        return {};
                     }
                 }
-                return {};
+                return std::unexpected(ERR::SOCKET_FAILED);
             }
         }
 
@@ -625,41 +904,57 @@ namespace mynet
             }
             else
             {
-                if (socket_.udp.valid())
+                for (size_t i = 0; i < kListenerCount; ++i)
                 {
-                    return {};
-                }
-                auto res = socket_.udp.listenUdp(ip, port, reuseAddr, reusePort);
-                if (!res)
-                {
-                    return std::unexpected(res.error());
-                }
-                if (loop_.running())
-                {
-                    if (auto addRes = loop_.addFd(socket_.udp.fd, EPOLLIN | EPOLLET, &udpFdToken_); !addRes)
+                    if (listeners_[i].isUdp())
                     {
-                        socket_.udp.reset();
-                        return addRes;
+                        if (listeners_[i].valid())
+                        {
+                            return {};
+                        }
+                        auto res = listeners_[i].listen(ip, port, 128, reuseAddr, reusePort);
+                        if (!res)
+                        {
+                            return std::unexpected(res.error());
+                        }
+                        if (loop_.running())
+                        {
+                            if (auto addRes = loop_.addFd(listeners_[i].fd(), EPOLLIN | EPOLLET, &listeners_[i]);
+                                !addRes)
+                            {
+                                listeners_[i].reset();
+                                return addRes;
+                            }
+                        }
+                        return {};
                     }
                 }
-                return {};
+                return std::unexpected(ERR::SOCKET_FAILED);
             }
         }
 
-        [[nodiscard]] inline size_t listenerCount() const noexcept
+        template <size_t I>
+        Result<> listen(const char *ip, int port = 0, int backlog = 128, bool reuseAddr = true, bool reusePort = true)
         {
-            size_t count = 0;
-            if constexpr (kHasTcp)
+            static_assert(I < kListenerCount, "Listener index out of bounds");
+            if (listeners_[I].valid())
             {
-                if (socket_.tcp.valid())
-                    ++count;
+                return {};
             }
-            if constexpr (kHasUdp)
+            auto res = listeners_[I].listen(ip, port, backlog, reuseAddr, reusePort);
+            if (!res)
             {
-                if (socket_.udp.valid())
-                    ++count;
+                return std::unexpected(res.error());
             }
-            return count;
+            if (loop_.running())
+            {
+                if (auto addRes = loop_.addFd(listeners_[I].fd(), EPOLLIN | EPOLLET, &listeners_[I]); !addRes)
+                {
+                    listeners_[I].reset();
+                    return addRes;
+                }
+            }
+            return {};
         }
 
         // ---- 运行核心服务 (Run Overloads) ----
@@ -764,25 +1059,14 @@ namespace mynet
             loop_.setEventCapacity(static_cast<size_t>(reactor.maxEvents));
             loop_.setEventCallback([this](uint32_t events, void *ptr) { onEvent(events, ptr); });
 
-            if constexpr (kHasTcp)
+            for (size_t i = 0; i < kListenerCount; ++i)
             {
-                if (socket_.tcp.valid())
+                if (listeners_[i].valid())
                 {
-                    if (auto res = loop_.addFd(socket_.tcp.fd, EPOLLIN | EPOLLET, &tcpFdToken_); !res) [[unlikely]]
+                    if (auto res = loop_.addFd(listeners_[i].fd(), EPOLLIN | EPOLLET, &listeners_[i]); !res)
+                        [[unlikely]]
                     {
-                        LOG_ERROR("Reactor::serve: adding tcp listener fd {} failed", socket_.tcp.fd);
-                        return res;
-                    }
-                }
-            }
-
-            if constexpr (kHasUdp)
-            {
-                if (socket_.udp.valid())
-                {
-                    if (auto res = loop_.addFd(socket_.udp.fd, EPOLLIN | EPOLLET, &udpFdToken_); !res) [[unlikely]]
-                    {
-                        LOG_ERROR("Reactor::serve: adding udp listener fd {} failed", socket_.udp.fd);
+                        LOG_ERROR("Reactor::serve: adding listener fd {} failed", listeners_[i].fd());
                         return res;
                     }
                 }
@@ -831,21 +1115,14 @@ namespace mynet
                 idleTimerId_ = 0;
             }
 
-            if constexpr (kHasTcp)
+            for (auto &l : listeners_)
             {
-                if (socket_.tcp.valid())
+                if (l.valid())
                 {
-                    [[maybe_unused]] auto _ = loop_.delFd(socket_.tcp.fd);
+                    [[maybe_unused]] auto _ = loop_.delFd(l.fd());
+                    l.reset();
                 }
             }
-            if constexpr (kHasUdp)
-            {
-                if (socket_.udp.valid())
-                {
-                    [[maybe_unused]] auto _ = loop_.delFd(socket_.udp.fd);
-                }
-            }
-            socket_.reset();
 
             for (auto &[fd, conn] : connections_)
             {
@@ -871,67 +1148,54 @@ namespace mynet
                 return;
             }
 
-            if constexpr (kHasTcp)
+            auto *lptr = static_cast<Listener *>(ptr);
+            if (lptr >= listeners_.data() && lptr < listeners_.data() + kListenerCount)
             {
-                if (ptr == &tcpFdToken_)
+                size_t listenerIdx = static_cast<size_t>(lptr - listeners_.data());
+                if (events & EPOLLIN)
                 {
-                    if (events & EPOLLIN)
+                    if (lptr->isTcp())
                     {
-                        acceptAllTcp();
+                        acceptAllTcp(*lptr, listenerIdx);
                     }
-                    return;
-                }
-            }
-
-            if constexpr (kHasUdp)
-            {
-                if (ptr == &udpFdToken_)
-                {
-                    if (events & EPOLLIN)
+                    else
                     {
-                        drainUdp();
+                        drainUdp(*lptr, listenerIdx);
                     }
-                    return;
                 }
+                return;
             }
 
             auto *conn = static_cast<ConnectionBase *>(ptr);
             onConnection(conn, events);
         }
 
-        inline void acceptAllTcp()
+        inline void acceptAllTcp(Listener &listener, size_t listenerIdx)
         {
-            if constexpr (!kHasTcp)
+            while (true)
             {
-                return;
-            }
-            else
-            {
-                while (true)
+                sockaddr_in clientAddr{};
+                socklen_t len = sizeof(clientAddr);
+                int clientFd = ::accept4(listener.fd(), reinterpret_cast<sockaddr *>(&clientAddr), &len,
+                                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+                if (clientFd < 0)
                 {
-                    sockaddr_in clientAddr{};
-                    socklen_t len = sizeof(clientAddr);
-                    int clientFd = ::accept4(socket_.tcp.fd, reinterpret_cast<sockaddr *>(&clientAddr), &len,
-                                             SOCK_NONBLOCK | SOCK_CLOEXEC);
-                    if (clientFd < 0)
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
                     {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        {
-                            break;
-                        }
-                        if (errno == EINTR)
-                        {
-                            continue;
-                        }
                         break;
                     }
-
-                    dispatchClient(clientFd, clientAddr);
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    break;
                 }
+
+                dispatchClient(clientFd, clientAddr, listenerIdx);
             }
         }
 
-        inline void dispatchClient(int clientFd, const sockaddr_in &clientAddr)
+        inline void dispatchClient(int clientFd, const sockaddr_in &clientAddr, size_t listenerIdx)
         {
             ConnectionBase *conn = nullptr;
 
@@ -940,64 +1204,9 @@ namespace mynet
                 ::close(clientFd);
                 return;
             }
-            else if constexpr (sizeof...(Protocols) == 1)
-            {
-                // 单协议编译期直通：0 嗅探，0 分支开销
-                auto status = std::get<0>(acceptors_).handshake(clientFd, conn);
-                if (status == HandshakeStatus::FAILED)
-                {
-                    ::close(clientFd);
-                    return;
-                }
-                if (conn == nullptr)
-                {
-                    using FirstProto = std::tuple_element_t<0, std::tuple<Protocols...>>;
-                    if constexpr (std::derived_from<FirstProto, ConnectionBase> && !std::is_abstract_v<FirstProto> &&
-                                  std::default_initializable<FirstProto>)
-                    {
-                        conn = new FirstProto();
-                    }
-                    else if constexpr (requires { typename FirstProto::Handler; })
-                    {
-                        using H = typename FirstProto::Handler;
-                        if constexpr (std::derived_from<H, ConnectionBase> && !std::is_abstract_v<H> &&
-                                      std::default_initializable<H>)
-                        {
-                            conn = new H();
-                        }
-                        else
-                        {
-                            conn = new HandlerConnection();
-                        }
-                    }
-                    else
-                    {
-                        conn = new HandlerConnection();
-                    }
-                }
-            }
             else
             {
-                // 多协议首包特征极速嗅探（纳秒级）
-                uint8_t peekBuf[16]{};
-                ssize_t n = ::recv(clientFd, peekBuf, sizeof(peekBuf), MSG_PEEK);
-                std::span<const uint8_t> bytes(peekBuf, n > 0 ? static_cast<size_t>(n) : 0);
-
-                IAcceptor *matched = nullptr;
-                std::apply([&](auto &...acc) { ((acc.match(bytes) ? (matched = &acc, true) : false) || ...); },
-                           acceptors_);
-
-                if (matched == nullptr)
-                {
-                    matched = &std::get<0>(acceptors_);
-                }
-
-                auto status = matched->handshake(clientFd, conn);
-                if (status == HandshakeStatus::FAILED)
-                {
-                    ::close(clientFd);
-                    return;
-                }
+                dispatchClientToAcceptors(clientFd, conn, listenerIdx);
                 if (conn == nullptr)
                 {
                     conn = new HandlerConnection();
@@ -1015,45 +1224,96 @@ namespace mynet
             }
         }
 
-        inline void drainUdp()
+        inline void dispatchClientToAcceptors(int clientFd, ConnectionBase *&conn, size_t listenerIdx)
         {
-            if constexpr (!kHasUdp)
+            [&]<size_t... Is>(std::index_sequence<Is...>)
             {
-                return;
-            }
-            else
-            {
-                // UDP 数据报统一摄入处理
-                uint8_t buf[65536];
-                while (true)
-                {
-                    sockaddr_in peer{};
-                    socklen_t len = sizeof(peer);
-                    ssize_t n =
-                        ::recvfrom(socket_.udp.fd, buf, sizeof(buf), 0, reinterpret_cast<sockaddr *>(&peer), &len);
-                    if (n < 0)
-                    {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK)
-                            break;
-                        if (errno == EINTR)
-                            continue;
-                        break;
-                    }
+                constexpr auto listenerIndices =
+                    std::array<size_t, sizeof...(Protocols)>{getListenerIndexForProtocol<Is, Protocols...>()...};
 
-                    // 分发给首个支持 UDP 或匹配的 Acceptor
-                    if constexpr (sizeof...(Protocols) > 0)
+                size_t matchedCount = 0;
+                for (size_t i = 0; i < sizeof...(Protocols); ++i)
+                {
+                    if (listenerIndices[i] == listenerIdx)
+                        ++matchedCount;
+                }
+
+                if (matchedCount == 1)
+                {
+                    ((listenerIndices[Is] == listenerIdx ? (std::get<Is>(acceptors_).handshake(clientFd, conn), true)
+                                                         : false) ||
+                     ...);
+                }
+                else if (matchedCount > 1)
+                {
+                    uint8_t peekBuf[16]{};
+                    ssize_t n = ::recv(clientFd, peekBuf, sizeof(peekBuf), MSG_PEEK);
+                    std::span<const uint8_t> bytes(peekBuf, n > 0 ? static_cast<size_t>(n) : 0);
+
+                    IAcceptor *matched = nullptr;
+                    (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors_).match(bytes))
+                          ? (matched = &std::get<Is>(acceptors_), true)
+                          : false) ||
+                     ...);
+
+                    if (matched != nullptr)
                     {
-                        ConnectionBase *conn = nullptr;
-                        std::span<const uint8_t> bytes(buf, static_cast<size_t>(n));
+                        matched->handshake(clientFd, conn);
+                    }
+                    else
+                    {
+                        ((listenerIndices[Is] == listenerIdx
+                              ? (std::get<Is>(acceptors_).handshake(clientFd, conn), true)
+                              : false) ||
+                         ...);
+                    }
+                }
+            }(std::make_index_sequence<sizeof...(Protocols)>{});
+        }
+
+        inline void drainUdp(Listener &listener, size_t listenerIdx)
+        {
+            uint8_t buf[65536];
+            while (true)
+            {
+                sockaddr_in peer{};
+                socklen_t len = sizeof(peer);
+                ssize_t n = ::recvfrom(listener.fd(), buf, sizeof(buf), 0, reinterpret_cast<sockaddr *>(&peer), &len);
+                if (n < 0)
+                {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        break;
+                    if (errno == EINTR)
+                        continue;
+                    break;
+                }
+
+                if constexpr (sizeof...(Protocols) > 0)
+                {
+                    ConnectionBase *conn = nullptr;
+                    std::span<const uint8_t> bytes(buf, static_cast<size_t>(n));
+
+                    [&]<size_t... Is>(std::index_sequence<Is...>)
+                    {
+                        constexpr auto listenerIndices = std::array<size_t, sizeof...(Protocols)>{
+                            getListenerIndexForProtocol<Is, Protocols...>()...};
                         IAcceptor *matched = nullptr;
-                        std::apply([&](auto &...acc) { ((acc.match(bytes) ? (matched = &acc, true) : false) || ...); },
-                                   acceptors_);
+                        (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors_).match(bytes))
+                              ? (matched = &std::get<Is>(acceptors_), true)
+                              : false) ||
+                         ...);
+
                         if (matched == nullptr)
                         {
-                            matched = &std::get<0>(acceptors_);
+                            ((listenerIndices[Is] == listenerIdx ? (matched = &std::get<Is>(acceptors_), true)
+                                                                 : false) ||
+                             ...);
                         }
-                        matched->handshake(socket_.udp.fd, conn);
-                    }
+                        if (matched != nullptr)
+                        {
+                            matched->handshake(listener.fd(), conn);
+                        }
+                    }(std::make_index_sequence<sizeof...(Protocols)>{});
                 }
             }
         }
@@ -1111,9 +1371,7 @@ namespace mynet
             // 空闲连接清理
         }
 
-        [[no_unique_address]] TransportSockets<kHasTcp, kHasUdp> socket_{};
-        int tcpFdToken_{0};
-        int udpFdToken_{1};
+        std::array<Listener, kListenerCount> listeners_{};
 
         std::tuple<typename ProtocolTraits<Protocols>::Acceptor...> acceptors_{};
         std::tuple<typename ProtocolTraits<Protocols>::Dialer...> dialers_{};
