@@ -8,7 +8,7 @@
  * 3. Trojan (Mynet Outbound -> Sing-box Inbound / Sing-box Outbound -> Mynet Inbound)
  * 4. VLESS (Mynet Outbound -> Sing-box Inbound / Sing-box Outbound -> Mynet Inbound)
  * 5. Shadowsocks (Mynet Outbound -> Sing-box Inbound / Sing-box Outbound -> Mynet Inbound)
- * 6. Mixed (Sing-box SOCKS5/HTTP Outbound -> Mynet InboundMixed)
+ * 6. Mux (Sing-box SOCKS5/HTTP Outbound -> Mynet InboundMux)
  */
 
 #include "../src/address.hpp"
@@ -1140,6 +1140,222 @@ TEST(SingBoxInteropTest, SingBoxOutboundShadowsocksToMynetInbound)
 
     EXPECT_TRUE(handshakeOk.load());
     EXPECT_EQ(resolvedPort, 8080);
+
+    ::close(client);
+}
+
+TEST(SingBoxInteropTest, SingBoxOutboundSocksToMynetMuxInbound)
+{
+    ASSERT_FALSE(findSingBoxBinary().empty()) << "sing-box binary not found";
+
+    EchoServer echo("ECHO_MUX_SOCKS5:");
+    ASSERT_TRUE(echo.isRunning());
+
+    InboundMux mynetIn("m-mux-in", "127.0.0.1", 0);
+    ASSERT_TRUE(mynetIn.listen().has_value());
+    uint16_t mynetPort = mynetIn.port();
+
+    // Sing-box 配置 SOCKS5 出站指向 Mynet InboundMux
+    std::string sbConfig = R"({
+      "log": {"level": "warn"},
+      "route": {"auto_detect_interface": false},
+      "inbounds": [{"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 14014}],
+      "outbounds": [{"type": "socks", "tag": "socks-out", "server": "127.0.0.1", "server_port": )" +
+                           std::to_string(mynetPort) + R"(, "version": "5"}]
+    })";
+
+    SingBoxRunner sb(sbConfig);
+    ASSERT_TRUE(sb.isRunning());
+
+    std::thread mynetWorker(
+        [&]()
+        {
+            auto acc = mynetIn.acceptOne();
+            int retries = 0;
+            while (!acc && retries < 20)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                acc = mynetIn.acceptOne();
+                retries++;
+            }
+            if (!acc)
+                return;
+            int clientFd = acc->first;
+
+            HandlerInboundMux h;
+            if (!inbound::driveHandshake(clientFd, h, 2000))
+            {
+                ::close(clientFd);
+                return;
+            }
+
+            int echoFd = dialTcpClient("127.0.0.1", echo.port());
+            if (echoFd >= 0)
+            {
+                if (h.requestBytes() > 0)
+                {
+                    [[maybe_unused]] auto _ = ::send(echoFd, h.requestBegin(), h.requestBytes(), MSG_NOSIGNAL);
+                    h.requestConsume(h.requestBytes());
+                }
+                pollfd pfds[2] = {{clientFd, POLLIN, 0}, {echoFd, POLLIN, 0}};
+                for (int i = 0; i < 50; ++i)
+                {
+                    int prc = ::poll(pfds, 2, 100);
+                    if (prc <= 0)
+                        continue;
+                    if (pfds[0].revents & POLLIN)
+                    {
+                        char buf[1024];
+                        ssize_t n = ::read(clientFd, buf, sizeof(buf));
+                        if (n <= 0)
+                            break;
+                        [[maybe_unused]] auto _ = ::send(echoFd, buf, n, MSG_NOSIGNAL);
+                    }
+                    if (pfds[1].revents & POLLIN)
+                    {
+                        char buf[1024];
+                        ssize_t n = ::read(echoFd, buf, sizeof(buf));
+                        if (n <= 0)
+                            break;
+                        [[maybe_unused]] auto _ = ::send(clientFd, buf, n, MSG_NOSIGNAL);
+                    }
+                }
+                ::close(echoFd);
+            }
+            ::close(clientFd);
+        });
+
+    int client = dialTcpClient("127.0.0.1", 14014);
+    ASSERT_GE(client, 0);
+    ThreadJoiner joiner(mynetWorker);
+
+    char greeting[] = {0x05, 0x01, 0x00};
+    [[maybe_unused]] auto _ = ::send(client, greeting, 3, MSG_NOSIGNAL);
+    char gResp[2];
+    ASSERT_EQ(readFull(client, gResp, 2), 2);
+
+    uint16_t eport = echo.port();
+    std::vector<uint8_t> connReq = {
+        0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, static_cast<uint8_t>(eport >> 8), static_cast<uint8_t>(eport & 0xFF)};
+    [[maybe_unused]] auto _c = ::send(client, connReq.data(), connReq.size(), MSG_NOSIGNAL);
+    char cResp[10];
+    ASSERT_EQ(readFull(client, cResp, 10), 10);
+
+    std::string msg = "HELLO_MUX_SOCKS5";
+    [[maybe_unused]] auto _m = ::send(client, msg.data(), msg.size(), MSG_NOSIGNAL);
+
+    char echoBuf[512];
+    int n = readSome(client, echoBuf, sizeof(echoBuf));
+    ASSERT_GT(n, 0);
+    EXPECT_EQ(std::string(echoBuf, n), "ECHO_MUX_SOCKS5:HELLO_MUX_SOCKS5");
+
+    ::close(client);
+}
+
+TEST(SingBoxInteropTest, SingBoxOutboundHttpToMynetMuxInbound)
+{
+    ASSERT_FALSE(findSingBoxBinary().empty()) << "sing-box binary not found";
+
+    EchoServer echo("ECHO_MUX_HTTP:");
+    ASSERT_TRUE(echo.isRunning());
+
+    InboundMux mynetIn("m-mux-in2", "127.0.0.1", 0);
+    ASSERT_TRUE(mynetIn.listen().has_value());
+    uint16_t mynetPort = mynetIn.port();
+
+    // Sing-box 配置 HTTP 出站指向 Mynet InboundMux
+    std::string sbConfig = R"({
+      "log": {"level": "warn"},
+      "route": {"auto_detect_interface": false},
+      "inbounds": [{"type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 14015}],
+      "outbounds": [{"type": "http", "tag": "http-out", "server": "127.0.0.1", "server_port": )" +
+                           std::to_string(mynetPort) + R"(}]
+    })";
+
+    SingBoxRunner sb(sbConfig);
+    ASSERT_TRUE(sb.isRunning());
+
+    std::thread mynetWorker(
+        [&]()
+        {
+            auto acc = mynetIn.acceptOne();
+            int retries = 0;
+            while (!acc && retries < 20)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                acc = mynetIn.acceptOne();
+                retries++;
+            }
+            if (!acc)
+                return;
+            int clientFd = acc->first;
+
+            HandlerInboundMux h;
+            if (!inbound::driveHandshake(clientFd, h, 2000))
+            {
+                ::close(clientFd);
+                return;
+            }
+
+            int echoFd = dialTcpClient("127.0.0.1", echo.port());
+            if (echoFd >= 0)
+            {
+                if (h.requestBytes() > 0)
+                {
+                    [[maybe_unused]] auto _ = ::send(echoFd, h.requestBegin(), h.requestBytes(), MSG_NOSIGNAL);
+                    h.requestConsume(h.requestBytes());
+                }
+                pollfd pfds[2] = {{clientFd, POLLIN, 0}, {echoFd, POLLIN, 0}};
+                for (int i = 0; i < 50; ++i)
+                {
+                    int prc = ::poll(pfds, 2, 100);
+                    if (prc <= 0)
+                        continue;
+                    if (pfds[0].revents & POLLIN)
+                    {
+                        char buf[1024];
+                        ssize_t n = ::read(clientFd, buf, sizeof(buf));
+                        if (n <= 0)
+                            break;
+                        [[maybe_unused]] auto _ = ::send(echoFd, buf, n, MSG_NOSIGNAL);
+                    }
+                    if (pfds[1].revents & POLLIN)
+                    {
+                        char buf[1024];
+                        ssize_t n = ::read(echoFd, buf, sizeof(buf));
+                        if (n <= 0)
+                            break;
+                        [[maybe_unused]] auto _ = ::send(clientFd, buf, n, MSG_NOSIGNAL);
+                    }
+                }
+                ::close(echoFd);
+            }
+            ::close(clientFd);
+        });
+
+    int client = dialTcpClient("127.0.0.1", 14015);
+    ASSERT_GE(client, 0);
+    ThreadJoiner joiner(mynetWorker);
+
+    char greeting[] = {0x05, 0x01, 0x00};
+    [[maybe_unused]] auto _ = ::send(client, greeting, 3, MSG_NOSIGNAL);
+    char gResp[2];
+    ASSERT_EQ(readFull(client, gResp, 2), 2);
+
+    uint16_t eport = echo.port();
+    std::vector<uint8_t> connReq = {
+        0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, static_cast<uint8_t>(eport >> 8), static_cast<uint8_t>(eport & 0xFF)};
+    [[maybe_unused]] auto _c = ::send(client, connReq.data(), connReq.size(), MSG_NOSIGNAL);
+    char cResp[10];
+    ASSERT_EQ(readFull(client, cResp, 10), 10);
+
+    std::string msg = "HELLO_MUX_HTTP";
+    [[maybe_unused]] auto _m = ::send(client, msg.data(), msg.size(), MSG_NOSIGNAL);
+
+    char echoBuf[512];
+    int n = readSome(client, echoBuf, sizeof(echoBuf));
+    ASSERT_GT(n, 0);
+    EXPECT_EQ(std::string(echoBuf, n), "ECHO_MUX_HTTP:HELLO_MUX_HTTP");
 
     ::close(client);
 }

@@ -124,7 +124,12 @@ namespace mynet
             // 装配入站节点
             for (const auto &inCfg : cfg.inbounds)
             {
-                if (inCfg.protocol == "socks5")
+                if (inCfg.protocol == "mux" || inCfg.protocol == "mixed")
+                {
+                    inboundManager_->registerInbound(std::make_shared<InboundMux>(
+                        inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));
+                }
+                else if (inCfg.protocol == "socks5")
                 {
                     inboundManager_->registerInbound(std::make_shared<InboundSocks5>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing));

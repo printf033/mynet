@@ -10,6 +10,7 @@
 #include "http/http.hpp"
 #include "hysteria2/hysteria2.hpp"
 #include "inbound.hpp"
+#include "inboundMux.hpp"
 #include "kdf.hpp"
 #include "outbound.hpp"
 #include "shadowsocks/shadowsocks.hpp"
@@ -43,6 +44,9 @@ static_assert(MandatoryMethodConnection<HandlerInboundSocks>,
 static_assert(HandlerConstraint<HandlerInboundHttpProxy>, "HandlerInboundHttpProxy must satisfy HandlerConstraint");
 static_assert(MandatoryMethodConnection<HandlerInboundHttpProxy>,
               "HandlerInboundHttpProxy must satisfy MandatoryMethodConnection");
+
+static_assert(HandlerConstraint<HandlerInboundMux>, "HandlerInboundMux must satisfy HandlerConstraint");
+static_assert(MandatoryMethodConnection<HandlerInboundMux>, "HandlerInboundMux must satisfy MandatoryMethodConnection");
 
 static_assert(HandlerConstraint<HandlerInboundTrojan>, "HandlerInboundTrojan must satisfy HandlerConstraint");
 static_assert(MandatoryMethodConnection<HandlerInboundTrojan>,
@@ -1056,4 +1060,73 @@ TEST(HandlerTransparentTest, DatagramTProxyPacketHandling)
 
     tproxy.onDatagramWithDst(clientPeer, origDst, reinterpret_cast<const char *>(dnsQuery.data()), dnsQuery.size());
     EXPECT_TRUE(packetReceived);
+}
+
+TEST(HandlerMuxTest, MultiplexSocksAndHttp)
+{
+    // 测试 1: SOCKS5 协商自适应
+    {
+        HandlerInboundMux mux;
+        EXPECT_EQ(mux.stage(), InboundStage::HANDSHAKE);
+
+        // 客户端发送 SOCKS5 握手问候 (VER=5, NMETHODS=1, METHOD=0)
+        char greeting[] = {0x05, 0x01, 0x00};
+        [[maybe_unused]] auto _ = mux.appendRequest(greeting, sizeof(greeting));
+        mux.handle();
+
+        EXPECT_EQ(mux.activeProtocol(), "socks5");
+        EXPECT_TRUE(mux.hasResponse());
+        std::string resp = mux.takeResponse();
+        ASSERT_EQ(resp.size(), 2u);
+        EXPECT_EQ(static_cast<uint8_t>(resp[0]), 0x05);
+        EXPECT_EQ(static_cast<uint8_t>(resp[1]), 0x00);
+
+        // 客户端发送 SOCKS5 CONNECT 请求: 1.2.3.4:80
+        char connectReq[] = {0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0x00, 80};
+        [[maybe_unused]] auto _2 = mux.appendRequest(connectReq, sizeof(connectReq));
+        mux.handle();
+
+        EXPECT_TRUE(mux.isEstablished());
+        EXPECT_EQ(mux.stage(), InboundStage::STREAMING);
+        ASSERT_TRUE(mux.targetAddress().has_value());
+        EXPECT_EQ(mux.targetAddress()->host, "1.2.3.4");
+        EXPECT_EQ(mux.targetAddress()->port, 80);
+    }
+
+    // 测试 2: HTTP CONNECT 代理协商自适应
+    {
+        HandlerInboundMux mux;
+        std::string httpReq = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+        [[maybe_unused]] auto _ = mux.appendRequest(httpReq.data(), httpReq.size());
+        mux.handle();
+
+        EXPECT_EQ(mux.activeProtocol(), "http");
+        EXPECT_TRUE(mux.isEstablished());
+        EXPECT_EQ(mux.stage(), InboundStage::STREAMING);
+        ASSERT_TRUE(mux.targetAddress().has_value());
+        EXPECT_EQ(mux.targetAddress()->host, "example.com");
+        EXPECT_EQ(mux.targetAddress()->port, 443);
+    }
+
+    // 测试 3: 自定义探针扩展
+    {
+        HandlerInboundMux mux;
+        bool customMatched = false;
+        mux.registerProbe(
+            InboundProbeMatcher{.name = "custom_magic",
+                                .probe = [](std::span<const uint8_t> data) { return !data.empty() && data[0] == 0xAA; },
+                                .factory =
+                                    [&]()
+                                {
+                                    customMatched = true;
+                                    return std::make_unique<HandlerInboundDirect>();
+                                }});
+
+        char magic[] = {static_cast<char>(0xAA), 0x01, 0x02};
+        [[maybe_unused]] auto _ = mux.appendRequest(magic, sizeof(magic));
+        mux.handle();
+
+        EXPECT_TRUE(customMatched);
+        EXPECT_EQ(mux.activeProtocol(), "custom_magic");
+    }
 }
