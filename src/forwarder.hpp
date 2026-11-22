@@ -1169,15 +1169,11 @@ namespace mynet
         }
 
         /**
-         * @brief 桥接两个底层流式连接对象 (Connection<InHandler> 与 Connection<OutHandler>)
+         * @brief 桥接两个底层流式连接对象 (ConnectionBase &inboundConn 与 ConnectionBase &outboundConn)
          *
          * 自动检查双端是否启用 SSL，自动提取套接字描述符并装配零拷贝 splice 或用户态泵送。
          */
-        template <typename InHandler, typename OutHandler>
-            requires std::derived_from<InHandler, handler::HandlerInboundConnectionBase> &&
-                     std::derived_from<OutHandler, handler::HandlerOutboundConnectionBase>
-        std::shared_ptr<ForwarderStreamSession> bridge(Connection<InHandler> &inboundConn,
-                                                       Connection<OutHandler> &outboundConn,
+        std::shared_ptr<ForwarderStreamSession> bridge(ConnectionBase &inboundConn, ConnectionBase &outboundConn,
                                                        std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
@@ -1186,8 +1182,12 @@ namespace mynet
             session->setSockmapFd(sockmapFd_);
 
             const bool userSsl = (inboundConn.ssl() != nullptr || outboundConn.ssl() != nullptr);
-            [[maybe_unused]] auto preFlushed = session->attach(inboundConn.handler(), outboundConn.handler(),
-                                                               inboundConn.fd(), outboundConn.fd(), userSsl);
+            auto *inHandler = static_cast<handler::HandlerInboundConnectionBase *>(inboundConn.handler());
+            auto *outHandler = static_cast<handler::HandlerOutboundConnectionBase *>(outboundConn.handler());
+            contract_assert(inHandler != nullptr && outHandler != nullptr);
+
+            [[maybe_unused]] auto preFlushed =
+                session->attach(*inHandler, *outHandler, inboundConn.fd(), outboundConn.fd(), userSsl);
             if (session->stats().bytesUp > 0)
             {
                 totalBytesUp_.fetch_add(session->stats().bytesUp, std::memory_order_relaxed);
@@ -1200,12 +1200,12 @@ namespace mynet
             }
 
             // 若预摄入数据冲刷到了出站连接响应队列，驱动一次连接层 pump
-            if (outboundConn.handler().hasResponse())
+            if (outHandler->hasResponse())
             {
                 outboundConn.pump();
                 outboundConn.setWantWrite(outboundConn.hasPendingWrite());
             }
-            if (inboundConn.handler().hasResponse())
+            if (inHandler->hasResponse())
             {
                 inboundConn.pump();
                 inboundConn.setWantWrite(inboundConn.hasPendingWrite());

@@ -84,7 +84,7 @@ namespace mynet
      * @class HandlerHttp2
      * @brief HTTP/2 协议处理器：将单一字节流解复用为多个独立逻辑交互流。
      *
-     * 实现 HandlerConnection 契约概念，可直接作为 Connection<HandlerHttp2<H>> 的协议处理器。
+     * 实现 HandlerConnection 契约概念，可直接作为连接的协议处理器。
      * 负责分帧解码、流控窗口管理、流生命周期跟踪与响应数据序列化。
      *
      * 与 HandlerHttp（HTTP/1.x）、HandlerHttp3（HTTP/3）命名对齐。

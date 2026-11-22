@@ -448,7 +448,7 @@ TEST(ConfigLua, RcuGracefulDrainKeepsOldConfigAliveUntilSessionReleases)
 
 TEST(ConfigLua, ConnectionPinsConfigurationGenerationAcrossLifecycle)
 {
-    mynet::Connection<mynet::HandlerConnection> conn;
+    mynet::ConnectionBase conn;
     EXPECT_EQ(conn.fd(), -1);
 
     // 模拟建连，setFd 自动绑定当前代际并持久持有 RCU 智能指针
@@ -1273,7 +1273,7 @@ TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
     cfg.server.tcpQuickAck = true;
     mynet::publishMynetConfig(cfg);
     {
-        mynet::Connection<mynet::HandlerConnection> conn;
+        mynet::ConnectionBase conn;
         conn.setFd(serverFd);
         EXPECT_EQ(readFlag(), 1) << "tcpQuickAck = true must call setsockopt(TCP_QUICKACK)";
         conn.setFd(-1);
@@ -1284,7 +1284,7 @@ TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
     cfg.server.tcpQuickAck = false;
     mynet::publishMynetConfig(cfg);
     {
-        mynet::Connection<mynet::HandlerConnection> conn;
+        mynet::ConnectionBase conn;
         conn.setFd(serverFd);
         EXPECT_EQ(readFlag(), 0) << "tcpQuickAck = false must leave the socket untouched";
         conn.setFd(-1);

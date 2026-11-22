@@ -216,7 +216,9 @@ TEST(SniCertificateManager, HotReloadReplacesExistingContext)
 
 TEST(ConnectionTls, TracksKtlsOffloadStateAndSpliceStatus)
 {
-    Connection<SpliceTestHandler> conn;
+    ConnectionBase conn;
+    SpliceTestHandler handler;
+    conn.setHandler(&handler);
     EXPECT_FALSE(conn.ktlsRxActive());
     EXPECT_FALSE(conn.ktlsTxActive());
     EXPECT_EQ(conn.ssl(), nullptr);
@@ -225,6 +227,6 @@ TEST(ConnectionTls, TracksKtlsOffloadStateAndSpliceStatus)
     EXPECT_FALSE(conn.isSpliceEnabled());
 
     // 开启 splice target
-    conn.handler().setSpliceTarget(3);
+    handler.setSpliceTarget(3);
     EXPECT_TRUE(conn.isSpliceEnabled());
 }

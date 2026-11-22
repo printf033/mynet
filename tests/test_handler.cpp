@@ -420,7 +420,9 @@ TEST(Connection, SpliceZeroCopyEcho)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<SpliceEchoHandler> conn;
+    ConnectionBase conn;
+    SpliceEchoHandler handler;
+    conn.setHandler(&handler);
     conn.setFd(sp[1]);
     EXPECT_TRUE(conn.isSpliceEnabled());
 
@@ -433,8 +435,8 @@ TEST(Connection, SpliceZeroCopyEcho)
     EXPECT_EQ(status, IO_STATUS::KEEP);
 
     // 零拷贝核心断言：数据未进入用户态请求缓冲区
-    EXPECT_EQ(conn.handler().requestBytes(), 0u);
-    EXPECT_FALSE(conn.handler().hasResponse());
+    EXPECT_EQ(handler.requestBytes(), 0u);
+    EXPECT_FALSE(handler.hasResponse());
 
     // 从对端套接字读出回显数据
     char buf[128] = {};
@@ -453,9 +455,11 @@ TEST(Connection, SpliceDisabledFallback)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<SpliceEchoHandler> conn;
+    ConnectionBase conn;
+    SpliceEchoHandler handler;
+    conn.setHandler(&handler);
     conn.setFd(sp[1]);
-    conn.handler().disableSplice();
+    handler.disableSplice();
     EXPECT_FALSE(conn.isSpliceEnabled());
 
     const std::string msg = "user_space_fallback_payload";
@@ -486,9 +490,11 @@ TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<HandlerConnection> conn;
+    ConnectionBase conn;
+    HandlerBase handler;
+    conn.setHandler(&handler);
     conn.setFd(sp[1]);
-    conn.handler().disableSplice();
+    conn.disableSplice();
 
     // 把发送端塞满，模拟对端零窗口。socketpair 保持非阻塞，
     // 写到 EAGAIN/EWOULDBLOCK 即说明内核缓冲已满，绝不能阻塞。
@@ -507,7 +513,7 @@ TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
     const std::string bigRequest(1 << 20, 'a');
     for (int i = 0; i < 64; ++i)
     {
-        ASSERT_TRUE(conn.handler().pushResponse(bigRequest));
+        ASSERT_TRUE(handler.pushResponse(bigRequest));
         conn.pump();
         if (conn.closeAfterWrite())
         {
@@ -546,13 +552,15 @@ TEST(Connection, CommitSentRestoresReadPause)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<HandlerConnection> conn;
+    ConnectionBase conn;
+    HandlerBase handler;
+    conn.setHandler(&handler);
     conn.setFd(sp[1]);
-    conn.handler().disableSplice();
+    conn.disableSplice();
 
     const std::string bigRequest(3u << 20, 'a');
-    ASSERT_TRUE(conn.handler().pushResponse(bigRequest));
-    ASSERT_TRUE(conn.handler().pushResponse(bigRequest));
+    ASSERT_TRUE(handler.pushResponse(bigRequest));
+    ASSERT_TRUE(handler.pushResponse(bigRequest));
     conn.pump();
     // 高水位 4MiB < 积压 6MiB：collectResponses 尾部应触发读暂停
     EXPECT_FALSE(conn.wantRead());
@@ -670,12 +678,14 @@ TEST(Connection, SpliceDecoupledProxyForward)
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, clientSp), 0);
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, proxySp), 0);
 
-    Connection<SpliceEchoHandler> conn;
+    ConnectionBase conn;
+    SpliceEchoHandler handler;
+    conn.setHandler(&handler);
     conn.setFd(clientSp[1]);
     // 将零拷贝目标重定向至上游代理套接字
-    conn.handler().setSpliceTarget(proxySp[1]);
+    handler.setSpliceTarget(proxySp[1]);
     EXPECT_TRUE(conn.isSpliceEnabled());
-    EXPECT_EQ(conn.handler().spliceTarget(), proxySp[1]);
+    EXPECT_EQ(handler.spliceTarget(), proxySp[1]);
 
     const std::string proxyPayload = "splice_proxy_upstream_payload";
     ssize_t wn = ::write(clientSp[0], proxyPayload.data(), proxyPayload.size());
@@ -686,8 +696,8 @@ TEST(Connection, SpliceDecoupledProxyForward)
     EXPECT_EQ(status, IO_STATUS::KEEP);
 
     // 零拷贝断言：无用户态内存堆积
-    EXPECT_EQ(conn.handler().requestBytes(), 0u);
-    EXPECT_FALSE(conn.handler().hasResponse());
+    EXPECT_EQ(handler.requestBytes(), 0u);
+    EXPECT_FALSE(handler.hasResponse());
 
     // 验证 clientSp[0] 没有收到 echo 回显（不是 echo）
     char echoBuf[32] = {};
@@ -710,7 +720,9 @@ TEST(Connection, SpliceToAndSpliceFromApis)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    Connection<SpliceEchoHandler> conn;
+    ConnectionBase conn;
+    SpliceEchoHandler handler;
+    conn.setHandler(&handler);
     conn.setFd(sp[1]);
 
     int pipe1[2];

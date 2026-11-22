@@ -164,8 +164,13 @@ TEST(ForwarderTest, ConnectionObjectBridge)
 {
     Forwarder forwarder;
 
-    Connection<HandlerInboundDirect> inConn;
-    Connection<HandlerOutboundDirect> outConn;
+    ConnectionBase inConn;
+    HandlerInboundDirect inHandler;
+    inConn.setHandler(&inHandler);
+
+    ConnectionBase outConn;
+    HandlerOutboundDirect outHandler;
+    outConn.setHandler(&outHandler);
 
     int sp[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
@@ -175,10 +180,10 @@ TEST(ForwarderTest, ConnectionObjectBridge)
     auto session = forwarder.bridge(inConn, outConn);
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
-    EXPECT_TRUE(inConn.handler().isSpliceForwardActive());
-    EXPECT_EQ(inConn.handler().spliceTarget(), sp[1]);
-    EXPECT_TRUE(outConn.handler().isSpliceForwardActive());
-    EXPECT_EQ(outConn.handler().spliceTarget(), sp[0]);
+    EXPECT_TRUE(inHandler.isSpliceForwardActive());
+    EXPECT_EQ(inHandler.spliceTarget(), sp[1]);
+    EXPECT_TRUE(outHandler.isSpliceForwardActive());
+    EXPECT_EQ(outHandler.spliceTarget(), sp[0]);
 
     inConn.reset();
     outConn.reset();

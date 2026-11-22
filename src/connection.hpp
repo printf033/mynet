@@ -222,10 +222,6 @@ namespace mynet
 
     using DatagramQueue = ResponseQueueBase<Protocol<HandlerBase>>;
 
-    struct EmptyProtocol
-    {
-    };
-
     /**
      * @brief 统一连接抽象基类（流式传输基类）
      *
@@ -1662,7 +1658,7 @@ namespace mynet
     /**
      * @brief 流式会话处理器的必需方法集合
      *
-     * 名字直指含义：这是 Connection<H> 及流式处理架构下对派生处理器的全量契约清单，
+     * 名字直指含义：这是 ConnectionBase 及流式处理架构下对派生处理器的全量契约清单，
      * 逐项校验所有成员函数的签名与 noexcept 规范，防止派生类用 = delete 或不兼容签名破坏契约。
      */
     template <typename H>
@@ -1732,122 +1728,14 @@ namespace mynet
         FAILED = 2
     };
 
-    namespace detail
-    {
-        template <typename T1, typename T2>
-        struct ConnectionTypes
-        {
-            using Protocol = T1;
-            using Handler = T2;
-        };
-
-        template <typename T1>
-        struct ConnectionTypes<T1, void>
-        {
-            static constexpr bool isHandler = std::derived_from<T1, HandlerBase>;
-            using Protocol = std::conditional_t<isHandler, EmptyProtocol, T1>;
-            using Handler = std::conditional_t<isHandler, T1, HandlerBase>;
-        };
-
-        template <>
-        struct ConnectionTypes<EmptyProtocol, void>
-        {
-            using Protocol = EmptyProtocol;
-            using Handler = HandlerBase;
-        };
-    } // namespace detail
-
     /**
-     * @brief 活跃网络连接核心数据与传输聚合体
+     * @brief 统一连接抽象基类别名
      *
-     * 架构核心支柱：
-     * 1. 纯净流式抽象：继承 ConnectionBase，复用统一连接底层传输缓冲、零拷贝 splice、读写缓冲背压与事件调度；
-     * 2. 彻底剥离握手：入站 TLS 握手等专职逻辑彻底下沉至 AcceptorBase 体系，Connection 不包含 OpenSSL 握手函数；
-     * 3. 编译期协议上下文占位：[[no_unique_address]] ProtocolContext protocol_{}，空协议类型占 0 字节；
-     * 4. 业务解耦：handler_ 作为成员变量承载具体协议业务，未设置时为空指针（nullptr）；
-     * 5. 无害抽象层：当 handler_ 为空时，Connection 表现为一个通用的无害纯流式连接，不强求业务处理器。
+     * 保持与传输中立代码的兼容性。特定协议的连接派生类应在各个协议目录下自行实现
+     * （如 ConnectionHttp、ConnectionSocks、ConnectionDirect 等）。
      */
-    template <typename ProtoOrHandler = EmptyProtocol, typename MaybeHandler = void>
-    class Connection : public ConnectionBase
-    {
-    public:
-        using Types = detail::ConnectionTypes<ProtoOrHandler, MaybeHandler>;
-        using ProtocolContext = typename Types::Protocol;
-        using Handler = typename Types::Handler;
-        using Protocol = ProtocolContext;
+    using Connection = ConnectionBase;
 
-        Connection() noexcept = default;
-        ~Connection() noexcept override { reset(); }
-
-        Connection(const Connection &) = delete;
-        Connection &operator=(const Connection &) = delete;
-        Connection(Connection &&) noexcept = default;
-        Connection &operator=(Connection &&) noexcept = default;
-
-        inline void setFd(int fd) noexcept override
-        {
-            ConnectionBase::setFd(fd);
-            if (fd_ >= 0)
-            {
-                applyQuickAck();
-                handler().onConnect(fd_);
-            }
-        }
-
-        // ---- 协议上下文与业务处理器挂钩 (Protocol & Handler Slots) ----
-
-        [[nodiscard]] inline ProtocolContext &protocol() noexcept { return protocol_; }
-        [[nodiscard]] inline const ProtocolContext &protocol() const noexcept { return protocol_; }
-
-        using ConnectionBase::setHandler;
-        inline void setHandler(Handler *h) noexcept
-        {
-            handler_ = h;
-            ConnectionBase::setHandler(h);
-        }
-        [[nodiscard]] inline bool hasHandler() const noexcept { return handler_ != nullptr; }
-
-        [[nodiscard]] inline Handler &handler() noexcept
-        {
-            if (handler_ == nullptr)
-            {
-                if (!defaultHandler_.has_value())
-                {
-                    defaultHandler_.emplace();
-                }
-                setHandler(&(*defaultHandler_));
-            }
-            return *static_cast<Handler *>(handler_);
-        }
-
-        [[nodiscard]] inline const Handler &handler() const noexcept
-        {
-            if (handler_ == nullptr)
-            {
-                auto *nonConst = const_cast<Connection *>(this);
-                if (!nonConst->defaultHandler_.has_value())
-                {
-                    nonConst->defaultHandler_.emplace();
-                }
-                nonConst->setHandler(&(*nonConst->defaultHandler_));
-            }
-            return *static_cast<const Handler *>(handler_);
-        }
-
-        inline void reset() noexcept override
-        {
-            ConnectionBase::reset();
-            if (defaultHandler_.has_value())
-            {
-                defaultHandler_->reset();
-            }
-            defaultHandler_.reset();
-        }
-
-    private:
-        [[no_unique_address]] ProtocolContext protocol_{};
-        std::optional<Handler> defaultHandler_{};
-    };
     /**
      * @brief 非流式处理器使用的占位会话对象
      *
@@ -1863,11 +1751,7 @@ namespace mynet
     /**
      * @brief 会话对象槽位的编译期选择器
      *
-     * 满足 MandatoryMethodConnection 的处理器映射到 Connection<H>；否则映射到 NoConnection。
-     *
-     * 为什么不用 std::conditional_t：`Connection<H>` 是受约束模板，一旦在类作用域
-     * 里形成一个违约束的 template-id（即使是未选中的分支）就是硬错误。偏特化的
-     * 匹配发生在约束求解阶段，不满足时直接退回主模板，因此不会触及 Connection。
+     * 满足 MandatoryMethodConnection 的处理器映射到 ConnectionBase；否则映射到 NoConnection。
      */
     template <typename H>
     struct ConnectionSlot
@@ -1878,7 +1762,7 @@ namespace mynet
     template <MandatoryMethodConnection H>
     struct ConnectionSlot<H>
     {
-        using Type = Connection<H>;
+        using Type = ConnectionBase;
     };
 
     template <typename D>

@@ -65,7 +65,7 @@ namespace mynet
         template <typename U>
         static auto checkConnection(int) -> typename U::Connection;
         template <typename U>
-        static auto checkConnection(...) -> Connection<EmptyProtocol>;
+        static auto checkConnection(...) -> ConnectionBase;
 
     public:
         using Acceptor = decltype(checkAcceptor<T>(0));
@@ -1204,7 +1204,7 @@ namespace mynet
                 dispatchClientToAcceptors(clientFd, conn, listenerIdx);
                 if (conn == nullptr)
                 {
-                    conn = new Connection<>();
+                    conn = new ConnectionBase();
                 }
             }
 
