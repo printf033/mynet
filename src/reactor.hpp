@@ -18,6 +18,7 @@
 #include "connection.hpp"
 #include "dialer.hpp"
 #include "error.hpp"
+#include "listener.hpp"
 #include "timer.hpp"
 #include <atomic>
 #include <cerrno>

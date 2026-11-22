@@ -20,6 +20,7 @@
 #include "connection.hpp"
 #include "dialer.hpp"
 #include "error.hpp"
+#include "listener.hpp"
 #include "reactor.hpp"
 #include <bit>
 #include <cerrno>
