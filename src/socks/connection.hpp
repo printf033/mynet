@@ -9,9 +9,11 @@ namespace mynet::socks
      *
      * 继承自统一的 ConnectionBase，在连接层管理 Socks 代理会话流式传输与状态。
      */
-    class SocksConnection : public ConnectionBase
+    class ConnectionSocks : public ConnectionBase
     {
     public:
         using ConnectionBase::ConnectionBase;
     };
+
+    using SocksConnection = ConnectionSocks;
 } // namespace mynet::socks

@@ -9,9 +9,11 @@ namespace mynet::trojan
      *
      * 继承自统一的 ConnectionBase，在连接层管理 Trojan 代理会话流式传输与状态。
      */
-    class TrojanConnection : public ConnectionBase
+    class ConnectionTrojan : public ConnectionBase
     {
     public:
         using ConnectionBase::ConnectionBase;
     };
+
+    using TrojanConnection = ConnectionTrojan;
 } // namespace mynet::trojan
