@@ -5,32 +5,101 @@
 #include <cstddef>
 #include <expected>
 #include <limits>
+#include <netinet/in.h>
 #include <new>
+#include <ostream>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace mynet
 {
-    class HandlerBase;
-    using Handler = HandlerBase;
-    using HandlerConnection = HandlerBase;
-    using HandlerDatagram = HandlerBase;
+    /**
+     * @brief 数据报/响应外发数据包结构
+     *
+     * 兼具流式字节载荷 (std::string bytes) 与数据报对端地址 (sockaddr_in peer)。
+     * 提供与 std::string / std::string_view 的隐式转换与兼容接口，
+     * 保证流式会话与无连接数据报会话零适配成本无缝复用。
+     */
+    struct DatagramPacket
+    {
+        sockaddr_in peer{};
+        std::string bytes{};
+
+        DatagramPacket() noexcept = default;
+        DatagramPacket(std::string s) noexcept
+            : bytes(std::move(s))
+        {
+        }
+        DatagramPacket(std::string_view sv)
+            : bytes(sv)
+        {
+        }
+        DatagramPacket(const char *buf, size_t n)
+            : bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
+        {
+        }
+        DatagramPacket(const char *s)
+            : bytes(s != nullptr ? s : "")
+        {
+        }
+        DatagramPacket(const sockaddr_in &p, std::string b) noexcept
+            : peer(p),
+              bytes(std::move(b))
+        {
+        }
+        DatagramPacket(const sockaddr_in &p, const char *buf, size_t n)
+            : peer(p),
+              bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
+        {
+        }
+
+        void clear() noexcept
+        {
+            peer = {};
+            bytes.clear();
+        }
+        [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
+        [[nodiscard]] size_t size() const noexcept { return bytes.size(); }
+        [[nodiscard]] size_t capacity() const noexcept { return bytes.capacity(); }
+        [[nodiscard]] const char *data() const noexcept { return bytes.data(); }
+
+        operator std::string &() & noexcept { return bytes; }
+        operator const std::string &() const & noexcept { return bytes; }
+        operator std::string() && noexcept { return std::move(bytes); }
+        operator std::string_view() const noexcept { return bytes; }
+
+        DatagramPacket &operator=(std::string s) noexcept
+        {
+            bytes = std::move(s);
+            return *this;
+        }
+
+        DatagramPacket &operator=(std::string_view sv)
+        {
+            bytes.assign(sv);
+            return *this;
+        }
+
+        bool operator==(const DatagramPacket &other) const noexcept { return bytes == other.bytes; }
+        bool operator==(std::string_view sv) const noexcept { return bytes == sv; }
+        bool operator==(const char *s) const noexcept { return bytes == s; }
+
+        friend std::ostream &operator<<(std::ostream &os, const DatagramPacket &p) { return os << p.bytes; }
+    };
 
     /**
      * @brief 定容零异常通用 FIFO 响应队列模板
      *
-     * 队列自身是纯粹通用的定容环形队列，通过单一模板参数 Proto 适配不同协议的小型参数包：
-     * - 面向连接的流式会话（默认 Proto = Protocol<HandlerBase>）：存储包含 std::string 的参数包；
-     * - 面向无连接的数据报会话（Proto = Protocol<HandlerBase>）：存储包含 sockaddr_in peer 与 std::string
-     * 的参数包。
-     *
+     * 队列自身是纯粹通用的定容环形队列，默认以 DatagramPacket 作为存储槽位：
      * 队列在 init(capacity) 时一次性分配内存，后续 push/pop 均无任何堆分配，
      * 弹出与重置时调用槽位的 clear() 复用已分配容量。
      */
-    template <typename Proto = Protocol<HandlerBase>>
+    template <typename ItemType = DatagramPacket>
     class ResponseQueueBase
     {
     public:
-        using Item = Proto;
+        using Item = ItemType;
 
         ResponseQueueBase() noexcept = default;
 
@@ -240,6 +309,6 @@ namespace mynet
     /**
      * @brief 默认流式单连接响应队列别名
      */
-    using ResponseQueue = ResponseQueueBase<Protocol<HandlerConnection>>;
+    using ResponseQueue = ResponseQueueBase<DatagramPacket>;
 
 } // namespace mynet

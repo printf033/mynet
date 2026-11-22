@@ -205,7 +205,7 @@ namespace
 
     struct DeletedTakeOutgoingHandler : HandlerDatagram
     {
-        Protocol<HandlerDatagram> takeOutgoing() = delete;
+        DatagramPacket takeOutgoing() = delete;
     };
 
     /// 反例：方法全齐、可重置，但未派生 HandlerDatagram。
@@ -223,12 +223,12 @@ namespace
 
         bool hasOutgoing() noexcept { return false; }
         size_t outgoingCount() noexcept { return 0; }
-        const Protocol<HandlerDatagram> &peekOutgoing() noexcept
+        const DatagramPacket &peekOutgoing() noexcept
         {
-            static Protocol<HandlerDatagram> p;
+            static DatagramPacket p;
             return p;
         }
-        Protocol<HandlerDatagram> takeOutgoing() { return {}; }
+        DatagramPacket takeOutgoing() { return {}; }
         size_t droppedOutgoing() noexcept { return 0; }
 
         void setMaxDatagramBytes(size_t) noexcept {}

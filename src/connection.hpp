@@ -140,87 +140,9 @@ namespace mynet
     } // namespace handler
 
     /**
-     * @brief 流式连接协议外发参数包特化
-     *
-     * 包含待外发字节载荷 std::string bytes。提供与 std::string 互相隐式转换与兼容接口，
-     * 保证上层零适配成本无缝复用。
+     * @brief 数据报外发队列别名
      */
-    /**
-     * @brief 纯业务协议外发参数包特化 (Protocol<HandlerBase>)
-     *
-     * 兼具流式字节载荷 (std::string bytes) 与数据报对端地址 (sockaddr_in peer)。
-     * 提供与 std::string / std::string_view 的隐式转换与兼容接口，
-     * 保证流式会话与无连接数据报会话零适配成本无缝复用。
-     */
-    template <>
-    struct Protocol<HandlerBase>
-    {
-        sockaddr_in peer{};
-        std::string bytes{};
-
-        Protocol() noexcept = default;
-        Protocol(std::string s) noexcept
-            : bytes(std::move(s))
-        {
-        }
-        Protocol(std::string_view sv)
-            : bytes(sv)
-        {
-        }
-        Protocol(const char *buf, size_t n)
-            : bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
-        {
-        }
-        Protocol(const char *s)
-            : bytes(s != nullptr ? s : "")
-        {
-        }
-        Protocol(const sockaddr_in &p, std::string b) noexcept
-            : peer(p),
-              bytes(std::move(b))
-        {
-        }
-        Protocol(const sockaddr_in &p, const char *buf, size_t n)
-            : peer(p),
-              bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
-        {
-        }
-
-        void clear() noexcept
-        {
-            peer = {};
-            bytes.clear();
-        }
-        [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
-        [[nodiscard]] size_t size() const noexcept { return bytes.size(); }
-        [[nodiscard]] size_t capacity() const noexcept { return bytes.capacity(); }
-        [[nodiscard]] const char *data() const noexcept { return bytes.data(); }
-
-        operator std::string &() & noexcept { return bytes; }
-        operator const std::string &() const & noexcept { return bytes; }
-        operator std::string() && noexcept { return std::move(bytes); }
-        operator std::string_view() const noexcept { return bytes; }
-
-        Protocol &operator=(std::string s) noexcept
-        {
-            bytes = std::move(s);
-            return *this;
-        }
-
-        Protocol &operator=(std::string_view sv)
-        {
-            bytes.assign(sv);
-            return *this;
-        }
-
-        bool operator==(const Protocol &other) const noexcept { return bytes == other.bytes; }
-        bool operator==(std::string_view sv) const noexcept { return bytes == sv; }
-        bool operator==(const char *s) const noexcept { return bytes == s; }
-
-        friend std::ostream &operator<<(std::ostream &os, const Protocol &p) { return os << p.bytes; }
-    };
-
-    using DatagramQueue = ResponseQueueBase<Protocol<HandlerBase>>;
+    using DatagramQueue = ResponseQueueBase<DatagramPacket>;
 
     /**
      * @brief 统一连接抽象基类（流式传输基类）
@@ -942,15 +864,15 @@ namespace mynet
 
         [[nodiscard]] inline bool hasOutgoing() const noexcept { return !outgoing_.empty(); }
         [[nodiscard]] inline size_t outgoingCount() const noexcept { return outgoing_.size(); }
-        [[nodiscard]] inline const Protocol<HandlerBase> &peekOutgoing() const noexcept { return outgoing_.front(); }
+        [[nodiscard]] inline const DatagramPacket &peekOutgoing() const noexcept { return outgoing_.front(); }
 
-        [[nodiscard]] inline Protocol<HandlerBase> takeOutgoing()
+        [[nodiscard]] inline DatagramPacket takeOutgoing()
         {
             if (outgoing_.empty()) [[unlikely]]
             {
                 return {};
             }
-            Protocol<HandlerBase> out = std::move(outgoing_.front());
+            DatagramPacket out = std::move(outgoing_.front());
             outgoing_.pop();
             return out;
         }
@@ -1779,10 +1701,8 @@ namespace mynet
                                           d.broadcastTo(targets, buf, n);
                                           { d.hasOutgoing() } noexcept -> std::same_as<bool>;
                                           { d.outgoingCount() } noexcept -> std::same_as<size_t>;
-                                          {
-                                              d.peekOutgoing()
-                                          } noexcept -> std::same_as<const Protocol<HandlerDatagram> &>;
-                                          { d.takeOutgoing() } -> std::same_as<Protocol<HandlerDatagram>>;
+                                          { d.peekOutgoing() } noexcept -> std::same_as<const DatagramPacket &>;
+                                          { d.takeOutgoing() } -> std::same_as<DatagramPacket>;
                                           { d.droppedOutgoing() } noexcept -> std::same_as<size_t>;
 
                                           { d.setMaxDatagramBytes(n) } noexcept;
