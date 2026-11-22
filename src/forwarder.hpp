@@ -263,6 +263,8 @@ namespace mynet
 
         handler::HandlerInboundConnectionBase *inbound_{nullptr};
         handler::HandlerOutboundConnectionBase *outbound_{nullptr};
+        std::unique_ptr<handler::HandlerInboundConnectionBase> ownedInbound_{nullptr};
+        std::unique_ptr<handler::HandlerOutboundConnectionBase> ownedOutbound_{nullptr};
         int inboundFd_{-1};
         int outboundFd_{-1};
         int sockmapFd_{-1};
@@ -311,6 +313,16 @@ namespace mynet
         inline void setInboundFd(int fd) noexcept { inboundFd_ = fd; }
         inline void setOutboundFd(int fd) noexcept { outboundFd_ = fd; }
         inline void setSockmapFd(int fd) noexcept { sockmapFd_ = fd; }
+        inline void setOwnedInbound(std::unique_ptr<handler::HandlerInboundConnectionBase> in) noexcept
+        {
+            ownedInbound_ = std::move(in);
+            inbound_ = ownedInbound_.get();
+        }
+        inline void setOwnedOutbound(std::unique_ptr<handler::HandlerOutboundConnectionBase> out) noexcept
+        {
+            ownedOutbound_ = std::move(out);
+            outbound_ = ownedOutbound_.get();
+        }
 
         [[nodiscard]] inline bool isEstablished() const noexcept
         {

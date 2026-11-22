@@ -650,6 +650,7 @@ namespace mynet
             session->setInboundFd((inFd >= 0) ? inFd : inbound.fd());
             session->setOutboundFd(dialRes->fd);
             session->setTarget(result.target);
+            session->setOwnedOutbound(std::move(dialRes->handler));
 
             // 统一阶梯自适应：自动协商 Sockmap -> Splice -> Buffer Pump
             session->activateAdaptiveMode();

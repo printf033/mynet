@@ -191,32 +191,98 @@ namespace mynet
     {
     };
 
+    class HandlerConnection;
+
     /**
-     * @brief 统一连接抽象基类
+     * @brief 统一连接抽象基类（流式传输基类）
      *
      * 无论底层是原生 TCP，还是在 UDP 之上自己封装的可靠连接，皆统一继承自此类。
+     * 融合了连接的底层传输状态（fd、地址、配置）、请求缓冲区、响应队列、
+     * 零拷贝 splice 管道，并提供流式读写与背压驱动的方法占位与实现。
+     * 连接内部可挂载业务 Handler（handler_ 为空时作为纯净无害的流式连接）。
      */
     class ConnectionBase
     {
+    public:
+        using SPLICE_CONTROL = mynet::SPLICE_CONTROL;
+        static constexpr bool kEnableSplice = true;
+
+        enum class CONN_STATE : uint8_t
+        {
+            OPEN = 0,
+            CLOSING = 1,
+            CLOSED = 2
+        };
+
     protected:
         int fd_{-1};
         sockaddr_in peerAddr_{};
         TransportType transport_{TransportType::TCP};
         std::shared_ptr<const MynetConfig> config_{nullptr};
 
-    public:
-        ConnectionBase() = default;
-        virtual ~ConnectionBase() = default;
+        // 业务处理器挂载（纯业务 Handler 在连接之上、之内）
+        HandlerConnection *handler_{nullptr};
 
-        [[nodiscard]] inline int fd() const noexcept { return fd_; }
-        inline void setFd(int fd) noexcept
+        // 连接流式状态
+        CONN_STATE state_{CONN_STATE::OPEN};
+        uint32_t events_{0};
+        bool wantWrite_{false};
+        bool readPaused_{false};
+        bool closeAfterWrite_{false};
+        bool peerGone_{false};
+        uint64_t timerId_{0};
+        std::chrono::steady_clock::time_point lastActive_{std::chrono::steady_clock::now()};
+
+        // 流式请求缓冲区
+        RequestBuffer requestBuffer_{};
+        size_t maxRequestBytes_{getConnectionConfig().maxRequestBytes};
+
+        // 流式响应队列与写出缓冲
+        ResponseQueue responseQueue_{};
+        std::string spare_{};
+        bool closeAfterResponse_{false};
+        std::deque<std::string> writeQueue_{};
+        size_t writeQueueSize_{0};
+        size_t writeOffset_{0};
+        size_t pendingBytes_{0};
+        size_t writeHighWaterMark_{getConnectionConfig().writeHighWaterMark};
+        size_t writeLowWaterMark_{16 * 1024 * 1024};
+
+        // 零拷贝 splice 管道
+        int pipeFd_[2]{-1, -1};
+        size_t pipePending_{0};
+        SPLICE_CONTROL spliceControl_{SPLICE_CONTROL::DISABLED};
+        int spliceTargetFd_{-1};
+
+    public:
+        ConnectionBase() noexcept
+            : ConnectionBase(getConnectionConfig())
         {
-            fd_ = fd;
-            if (fd_ >= 0)
-            {
-                config_ = getMynetConfigShared();
-            }
         }
+
+        explicit ConnectionBase(size_t responseCapacity) noexcept
+        {
+            [[maybe_unused]] auto _ = responseQueue_.init(responseCapacity);
+        }
+
+        explicit ConnectionBase(const ConnectionConfig &config) noexcept
+            : maxRequestBytes_(config.maxRequestBytes),
+              writeHighWaterMark_(config.writeHighWaterMark)
+        {
+            requestBuffer_.setHighWaterMark(config.readHighWaterMark);
+            [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
+        }
+
+        virtual ~ConnectionBase() noexcept { ConnectionBase::reset(); }
+
+        ConnectionBase(const ConnectionBase &) = delete;
+        ConnectionBase &operator=(const ConnectionBase &) = delete;
+        ConnectionBase(ConnectionBase &&) noexcept = default;
+        ConnectionBase &operator=(ConnectionBase &&) noexcept = default;
+
+        // ---- 基础属性 ----
+        [[nodiscard]] inline int fd() const noexcept { return fd_; }
+        virtual void setFd(int fd) noexcept;
         [[nodiscard]] inline const sockaddr_in &peerAddr() const noexcept { return peerAddr_; }
         inline void setPeerAddr(const sockaddr_in &addr) noexcept { peerAddr_ = addr; }
         [[nodiscard]] inline TransportType transport() const noexcept { return transport_; }
@@ -229,44 +295,318 @@ namespace mynet
         {
             return config_ ? *config_ : *getMynetConfigShared();
         }
-
         [[nodiscard]] inline const std::shared_ptr<const MynetConfig> &configShared() const noexcept { return config_; }
-
         [[nodiscard]] inline uint32_t configGeneration() const noexcept
         {
             return MynetConfigHolder::getInstance().getGeneration();
         }
 
-        virtual IO_STATUS handleRead() { return IO_STATUS::KEEP; }
-        virtual IO_STATUS handleWrite() { return IO_STATUS::KEEP; }
-        virtual void handle() {}
-        virtual void close() {}
-        virtual void reset() noexcept {}
+        // ---- Handler 挂载 ----
+        virtual void setHandler(HandlerConnection *h) noexcept;
+        [[nodiscard]] inline bool hasHandler() const noexcept { return handler_ != nullptr; }
+        [[nodiscard]] inline HandlerConnection *handler() noexcept { return handler_; }
+        [[nodiscard]] inline const HandlerConnection *handler() const noexcept { return handler_; }
+
+        // ---- 请求缓冲方法占位与实现 ----
+        [[nodiscard]] inline Result<> appendRequest(const char *buf, ssize_t rn) noexcept
+        {
+            if (buf != nullptr && rn > 0) [[likely]]
+            {
+                return requestBuffer_.append(buf, static_cast<size_t>(rn));
+            }
+            return {};
+        }
+        [[nodiscard]] inline Result<> appendRequest(std::string_view sv) noexcept
+        {
+            return appendRequest(sv.data(), static_cast<ssize_t>(sv.size()));
+        }
+        [[nodiscard]] inline std::expected<char *, ERR>
+        prepareRequestWritable(size_t minBytes = getConnectionConfig().readChunkSize) noexcept
+        {
+            if (auto res = requestBuffer_.ensureWritable(minBytes); !res) [[unlikely]]
+            {
+                return std::unexpected(res.error());
+            }
+            return requestBuffer_.writableBegin();
+        }
+        [[nodiscard]] inline char *requestWritableBegin() noexcept { return requestBuffer_.writableBegin(); }
+        [[nodiscard]] inline size_t requestWritableBytes() const noexcept { return requestBuffer_.writableBytes(); }
+        inline void commitRequest(size_t n) noexcept { requestBuffer_.commitWritten(n); }
+        [[nodiscard]] inline bool requestOverLimit() const noexcept
+        {
+            return requestBuffer_.readableBytes() > maxRequestBytes_;
+        }
+        [[nodiscard]] inline size_t requestBytes() const noexcept { return requestBuffer_.readableBytes(); }
+        [[nodiscard]] inline const char *requestBegin() const noexcept { return requestBuffer_.readableBegin(); }
+        inline void requestConsume(size_t n) noexcept { requestBuffer_.retrieve(n); }
+        inline void requestClear() noexcept { requestBuffer_.reset(); }
+        [[nodiscard]] inline size_t readCredit() const noexcept
+        {
+            const size_t used = requestBuffer_.readableBytes();
+            return used >= maxRequestBytes_ ? 0 : maxRequestBytes_ - used;
+        }
+        inline void setMaxRequestBytes(size_t n) noexcept { maxRequestBytes_ = n; }
+        [[nodiscard]] inline size_t maxRequestBytes() const noexcept { return maxRequestBytes_; }
+
+        // ---- 响应队列方法占位与实现 ----
+        [[nodiscard]] inline bool hasResponse() const noexcept { return !responseQueue_.empty(); }
+        [[nodiscard]] inline size_t responseCount() const noexcept { return responseQueue_.size(); }
+        [[nodiscard]] inline size_t responseCapacity() const noexcept { return responseQueue_.capacity(); }
+        [[nodiscard]] inline std::string takeResponse()
+        {
+            if (responseQueue_.empty()) [[unlikely]]
+            {
+                return std::string();
+            }
+            std::string out = std::move(responseQueue_.front());
+            if (spare_.capacity() > 0)
+            {
+                responseQueue_.front() = std::move(spare_);
+            }
+            responseQueue_.pop();
+            return out;
+        }
+        inline void recycleSpare(std::string &&s) noexcept
+        {
+            if (s.capacity() > spare_.capacity())
+            {
+                s.clear();
+                spare_ = std::move(s);
+            }
+        }
+        [[nodiscard]] inline Result<> pushResponse(std::string &&s) noexcept
+        {
+            return responseQueue_.push(std::move(s));
+        }
+        [[nodiscard]] inline Result<> pushResponse(const std::string &s) noexcept
+        {
+            return pushResponse(std::string_view(s));
+        }
+        [[nodiscard]] inline Result<> pushResponse(std::string_view sv) noexcept
+        {
+            if (sv.data() == nullptr || sv.empty())
+            {
+                return {};
+            }
+            return responseQueue_.emplace(sv);
+        }
+        [[nodiscard]] inline Result<> pushResponse(const char *s) noexcept
+        {
+            if (s == nullptr) [[unlikely]]
+            {
+                return {};
+            }
+            return pushResponse(std::string_view(s));
+        }
+        [[nodiscard]] inline Result<> reserveResponses(size_t capacity) noexcept
+        {
+            return responseQueue_.init(capacity);
+        }
+        [[nodiscard]] inline bool closeAfterResponse() const noexcept { return closeAfterResponse_; }
+        inline void setCloseAfterResponse(bool v) noexcept { closeAfterResponse_ = v; }
+
+        // ---- 零拷贝管道控制 (Zero-Copy Splice Routing) ----
+        inline void setSpliceTarget(int targetFd) noexcept
+        {
+            spliceTargetFd_ = targetFd;
+            spliceControl_ = (targetFd >= 0) ? SPLICE_CONTROL::ACTIVE : SPLICE_CONTROL::DISABLED;
+        }
+        inline void setSpliceControl(SPLICE_CONTROL ctrl) noexcept
+        {
+            spliceControl_ = ctrl;
+            if (ctrl == SPLICE_CONTROL::DISABLED || ctrl == SPLICE_CONTROL::CLOSED)
+            {
+                spliceTargetFd_ = -1;
+            }
+        }
+        inline void setSpliceTarget(SPLICE_CONTROL ctrl) noexcept { setSpliceControl(ctrl); }
+        [[nodiscard]] inline SPLICE_CONTROL spliceControl() const noexcept { return spliceControl_; }
+        [[nodiscard]] inline int spliceTarget() const noexcept { return spliceTargetFd_; }
+        [[nodiscard]] inline bool isSpliceActive() const noexcept
+        {
+            return spliceControl_ == SPLICE_CONTROL::ACTIVE && spliceTargetFd_ >= 0;
+        }
+        inline void pauseSplice() noexcept
+        {
+            if (spliceControl_ == SPLICE_CONTROL::ACTIVE)
+            {
+                spliceControl_ = SPLICE_CONTROL::PAUSED;
+            }
+        }
+        inline void resumeSplice() noexcept
+        {
+            if (spliceControl_ == SPLICE_CONTROL::PAUSED)
+            {
+                spliceControl_ = (spliceTargetFd_ >= 0) ? SPLICE_CONTROL::ACTIVE : SPLICE_CONTROL::DISABLED;
+            }
+        }
+        inline void drainSplice() noexcept
+        {
+            if (spliceControl_ == SPLICE_CONTROL::ACTIVE)
+            {
+                spliceControl_ = SPLICE_CONTROL::DRAINING;
+            }
+        }
+        inline void disableSplice() noexcept
+        {
+            spliceControl_ = SPLICE_CONTROL::DISABLED;
+            spliceTargetFd_ = -1;
+        }
+        [[nodiscard]] inline bool spliceEnabled() const noexcept { return isSpliceActive(); }
+        [[nodiscard]] inline bool isSpliceEnabled() const noexcept;
+
+        // ---- 零拷贝传输实现 ----
+        [[nodiscard]] inline bool ensurePipe() noexcept;
+        [[nodiscard]] inline std::expected<size_t, IO_END>
+        spliceTo(int targetFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept;
+        [[nodiscard]] inline std::expected<size_t, IO_END>
+        spliceFrom(int sourceFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept;
+        inline IO_STATUS handleSplice() noexcept;
+
+        // ---- 连接状态与事件状态查询 ----
+        [[nodiscard]] inline CONN_STATE state() const noexcept { return state_; }
+        [[nodiscard]] inline uint32_t events() const noexcept { return events_; }
+        inline void setEvents(uint32_t events) noexcept { events_ = events; }
+        [[nodiscard]] inline bool wantRead() const noexcept { return !readPaused_ && state_ == CONN_STATE::OPEN; }
+        [[nodiscard]] inline bool wantWrite() const noexcept { return wantWrite_ || hasPendingWrite(); }
+        inline void setWantWrite(bool v) noexcept { wantWrite_ = v; }
+        [[nodiscard]] inline bool hasPendingWrite() const noexcept;
+        [[nodiscard]] inline size_t pendingBytes() const noexcept { return pendingBytes_ + pipePending_; }
+        [[nodiscard]] inline size_t pendingSize() const noexcept { return pendingBytes_ + pipePending_; }
+        [[nodiscard]] inline size_t pipePending() const noexcept { return pipePending_; }
+        [[nodiscard]] inline size_t writeHighWaterMark() const noexcept { return writeHighWaterMark_; }
+        inline void setWriteHighWaterMark(size_t n) noexcept { writeHighWaterMark_ = n; }
+        [[nodiscard]] inline bool closeAfterWrite() const noexcept { return closeAfterWrite_; }
+        inline void setCloseAfterWrite(bool v) noexcept { closeAfterWrite_ = v; }
+        [[nodiscard]] inline uint64_t timerId() const noexcept { return timerId_; }
+        inline void setTimerId(uint64_t id) noexcept { timerId_ = id; }
+        [[nodiscard]] inline std::chrono::steady_clock::time_point lastActive() const noexcept { return lastActive_; }
+        inline void touch() noexcept { lastActive_ = std::chrono::steady_clock::now(); }
+
+        [[nodiscard]] constexpr void *ssl() const noexcept { return nullptr; }
+        [[nodiscard]] constexpr bool ktlsRxActive() const noexcept { return false; }
+        [[nodiscard]] constexpr bool ktlsTxActive() const noexcept { return false; }
+
+        inline void pump() noexcept;
+        inline bool commitSent(size_t n) noexcept;
+
+        virtual void handle();
+        virtual IO_STATUS handleWrite();
+        virtual IO_STATUS handleRead();
+        virtual void close();
+        virtual void reset() noexcept;
+
+        inline void applyQuickAck() noexcept
+        {
+            if (isTcp() && config().server.tcpQuickAck && fd_ >= 0)
+            {
+                int val = 1;
+                ::setsockopt(fd_, IPPROTO_TCP, TCP_QUICKACK, &val, sizeof(val));
+            }
+        }
     };
 
     /**
-     * @brief 偏连接的流式协议处理器基类
+     * @brief 纯业务流式协议处理器基类
      *
-     * 继承自 ConnectionBase，提供流式会话所需的全部传输状态。
+     * 架构核心解耦：彻底剥离传输层继承（无底层网络套接字/peerAddr/TransportType），
+     * 专注承载协议解析、状态机流转与业务钩子。
+     * 处于连接（ConnectionBase）之上、之内，通过成员指针指向宿主连接。
      */
-    class HandlerConnection : public ConnectionBase
+    class HandlerConnection
     {
     public:
         using SPLICE_CONTROL = mynet::SPLICE_CONTROL;
-
-        /// 是否允许该处理器使用 Linux splice(2) 内核零拷贝（派生类按协议特性开启）
         static constexpr bool kEnableSplice = true;
-
         using RequestCallback = std::function<void(uint8_t cmd, const handler::ProxyAddress &target)>;
 
-        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
-        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
-        inline void disableSpliceForward() noexcept { disableSplice(); }
-        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
+    protected:
+        ConnectionBase *connection_{nullptr};
+        int fd_{-1};
+        handler::InboundStage inboundStage_{handler::InboundStage::HANDSHAKE};
+        handler::OutboundStage outboundStage_{handler::OutboundStage::INITIAL};
+        std::optional<handler::ProxyAddress> targetAddress_{std::nullopt};
+        handler::ProxyAddress target_{};
+        uint8_t command_{0};
+        RequestCallback requestCallback_{nullptr};
 
-        // ---- 代理与状态机公共接口 (Proxy & State Machine Hooks) ----
+        // 业务层缓冲与队列（承载业务帧与响应，并在独立实例化时作为完备回退）
+        RequestBuffer requestBuffer_{};
+        ResponseQueue responseQueue_{};
+        std::string spare_{};
+        size_t maxRequestBytes_{getConnectionConfig().maxRequestBytes};
+        bool closeAfterResponse_{false};
+        SPLICE_CONTROL spliceControl_{SPLICE_CONTROL::DISABLED};
+        int spliceTargetFd_{-1};
+
+    public:
+        HandlerConnection() noexcept
+            : HandlerConnection(getConnectionConfig())
+        {
+        }
+
+        explicit HandlerConnection(size_t responseCapacity) noexcept
+        {
+            [[maybe_unused]] auto _ = responseQueue_.init(responseCapacity);
+        }
+
+        explicit HandlerConnection(const ConnectionConfig &config) noexcept
+            : maxRequestBytes_(config.maxRequestBytes)
+        {
+            requestBuffer_.setHighWaterMark(config.readHighWaterMark);
+            [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
+        }
+
+        explicit HandlerConnection(const handler::ProxyAddress &target) noexcept
+            : HandlerConnection()
+        {
+            targetAddress_ = target;
+            target_ = target;
+        }
+
+        virtual ~HandlerConnection() noexcept = default;
+
+        HandlerConnection(const HandlerConnection &) = delete;
+        HandlerConnection &operator=(const HandlerConnection &) = delete;
+        HandlerConnection(HandlerConnection &&) = delete;
+        HandlerConnection &operator=(HandlerConnection &&) = delete;
+
+        // ---- 连接关联与挂钩 (Connection Linkage) ----
+        inline void setConnection(ConnectionBase *c) noexcept { connection_ = c; }
+        [[nodiscard]] inline ConnectionBase *connection() const noexcept { return connection_; }
+
+        // ---- 业务生命周期与钩子 ----
         virtual void handle() {}
+        virtual void onConnect(int fd) noexcept { fd_ = fd; }
+        virtual void onUpgrade() noexcept {}
+        virtual void onMessageComplete() noexcept {}
+        virtual void onParseError([[maybe_unused]] const char *reason) noexcept
+        {
+            inboundStage_ = handler::InboundStage::ERROR;
+            outboundStage_ = handler::OutboundStage::ERROR;
+        }
 
+        virtual void reset() noexcept
+        {
+            requestBuffer_.reset();
+            requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
+            responseQueue_.reset();
+            spare_.clear();
+            closeAfterResponse_ = false;
+            spliceControl_ = SPLICE_CONTROL::DISABLED;
+            spliceTargetFd_ = -1;
+            maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
+            fd_ = -1;
+            inboundStage_ = handler::InboundStage::HANDSHAKE;
+            outboundStage_ = handler::OutboundStage::INITIAL;
+            targetAddress_.reset();
+            target_ = {};
+            command_ = 0;
+            requestCallback_ = nullptr;
+            connection_ = nullptr;
+        }
+
+        // ---- 代理业务状态机 ----
         void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
         void setTarget(const handler::ProxyAddress &target) noexcept
         {
@@ -298,92 +638,9 @@ namespace mynet
             }
             return target_;
         }
+        [[nodiscard]] inline int fd() const noexcept { return connection_ ? connection_->fd() : fd_; }
 
-        /**
-         * @brief 默认构造函数（使用全局 ConnectionConfig 设定的默认响应队列容量与参数）
-         */
-        HandlerConnection() noexcept
-            : HandlerConnection(getConnectionConfig())
-        {
-        }
-
-        /**
-         * @brief 显式指定响应队列槽位容量构造
-         *
-         * @param responseCapacity 响应队列槽位容量（开箱即可用，支持后续按需 reserveResponses 调整）
-         */
-        explicit HandlerConnection(size_t responseCapacity) noexcept
-        {
-            [[maybe_unused]] auto _ =
-                responseQueue_.init(responseCapacity); // 槽位分配失败降级为容量 0 拒收，不折损零异常构造
-        }
-
-        /**
-         * @brief 显式传入完整连接配置构造
-         */
-        explicit HandlerConnection(const ConnectionConfig &config) noexcept
-            : maxRequestBytes_(config.maxRequestBytes)
-        {
-            requestBuffer_.setHighWaterMark(config.readHighWaterMark);
-            [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
-        }
-
-        /**
-         * @brief 显式传入目标地址构造（出站代理协议使用）
-         */
-        explicit HandlerConnection(const handler::ProxyAddress &target) noexcept
-            : HandlerConnection()
-        {
-            targetAddress_ = target;
-            target_ = target;
-        }
-
-        virtual ~HandlerConnection() noexcept = default;
-
-        HandlerConnection(const HandlerConnection &) =
-            delete; // a connection handler holds parser state bound to one connection
-        HandlerConnection &operator=(const HandlerConnection &) =
-            delete; // a connection handler holds parser state bound to one connection
-        HandlerConnection(HandlerConnection &&) =
-            delete; // a connection handler holds parser state bound to one connection
-        HandlerConnection &
-        operator=(HandlerConnection &&) = delete; // a connection handler holds parser state bound to one connection
-
-        /**
-         * @brief 重置处理器状态（派生类重置专属解析器后应调用本实现）
-         */
-        virtual void reset() noexcept
-        {
-            requestBuffer_.reset();
-            requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
-            responseQueue_.reset();
-            spare_.clear();
-            closeAfterResponse_ = false;
-            spliceControl_ = SPLICE_CONTROL::DISABLED;
-            spliceTargetFd_ = -1;
-            maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
-            fd_ = -1;
-            inboundStage_ = handler::InboundStage::HANDSHAKE;
-            outboundStage_ = handler::OutboundStage::INITIAL;
-            targetAddress_.reset();
-            target_ = {};
-            command_ = 0;
-            requestCallback_ = nullptr;
-        }
-
-        // ---- 读取侧控制 (Read Side) ----
-
-        /**
-         * @brief 追加一段对端请求字节到解析缓冲（零异常，失败显式错误码）
-         *
-         * RequestBuffer::append() 为 nothrow 接口：堆扩容失败以 ERR::BUF_ALLOC_FAILED
-         * 交付，缓冲区保持原样，调用方据此可安全丢弃本次读到的字节（对端重传
-         * 或连接关闭兜底）。
-         *
-         * @param buf 对端字节首地址（允许为 nullptr，此时为无操作）
-         * @param rn 本次读取的字节数（须非负）
-         * @return 成功 {}；解析缓冲扩容失败 std::unexpected(ERR::BUF_ALLOC_FAILED)
-         */
+        // ---- 业务缓冲区与响应队列操作 ----
         [[nodiscard]] inline Result<> appendRequest(const char *buf, ssize_t rn) noexcept
         {
             if (buf != nullptr && rn > 0) [[likely]]
@@ -392,21 +649,10 @@ namespace mynet
             }
             return {};
         }
-
-        /**
-         * @brief 追加一段视图请求字节到解析缓冲（视图适配重载）
-         */
         [[nodiscard]] inline Result<> appendRequest(std::string_view sv) noexcept
         {
             return appendRequest(sv.data(), static_cast<ssize_t>(sv.size()));
         }
-
-        /**
-         * @brief 确保请求解析缓冲区至少拥有 minBytes 的可直写连续空间（零拷贝直接读取）
-         *
-         * @param minBytes 期望的最小写窗口字节数（默认由全局 ConnectionConfig 提供）
-         * @return 成功返回可直写的内存首地址指针；扩容失败返回错误码
-         */
         [[nodiscard]] inline std::expected<char *, ERR>
         prepareRequestWritable(size_t minBytes = getConnectionConfig().readChunkSize) noexcept
         {
@@ -416,68 +662,29 @@ namespace mynet
             }
             return requestBuffer_.writableBegin();
         }
-
-        /**
-         * @brief 当前请求缓冲区可直接写入的连续窗口首地址
-         */
         [[nodiscard]] inline char *requestWritableBegin() noexcept { return requestBuffer_.writableBegin(); }
-
-        /**
-         * @brief 当前请求缓冲区可直接写入的连续窗口大小
-         */
         [[nodiscard]] inline size_t requestWritableBytes() const noexcept { return requestBuffer_.writableBytes(); }
-
-        /**
-         * @brief 提交直写到请求解析缓冲区的实际字节数
-         *
-         * @param n 实际写入字节数（不得超过 requestWritableBytes()）
-         */
         inline void commitRequest(size_t n) noexcept { requestBuffer_.commitWritten(n); }
-
         [[nodiscard]] inline bool requestOverLimit() const noexcept
         {
             return requestBuffer_.readableBytes() > maxRequestBytes_;
         }
-
         [[nodiscard]] inline size_t requestBytes() const noexcept { return requestBuffer_.readableBytes(); }
-
         [[nodiscard]] inline const char *requestBegin() const noexcept { return requestBuffer_.readableBegin(); }
-
         inline void requestConsume(size_t n) noexcept { requestBuffer_.retrieve(n); }
-
         inline void requestClear() noexcept { requestBuffer_.reset(); }
-
-        /**
-         * @brief 剩余信用窗口（为 0 时事件循环将暂停接收读取，实施背压保护）
-         */
         [[nodiscard]] inline size_t readCredit() const noexcept
         {
             const size_t used = requestBuffer_.readableBytes();
             return used >= maxRequestBytes_ ? 0 : maxRequestBytes_ - used;
         }
-
         inline void setMaxRequestBytes(size_t n) noexcept { maxRequestBytes_ = n; }
         [[nodiscard]] inline size_t maxRequestBytes() const noexcept { return maxRequestBytes_; }
 
-        // ---- 发送响应侧控制 (Write Side) ----
-
         [[nodiscard]] inline bool hasResponse() const noexcept { return !responseQueue_.empty(); }
-
-        /**
-         * @brief 处理器是否因出站背压而暂缓了解码、且凭当前状态仍能继续推进
-         *
-         * 连接层在响应队列被搬运之后据此重新驱动 handle()。默认 false：只有
-         * 会主动分轮解码的处理器（如 HandlerHttp2）才需要覆写。
-         */
         [[nodiscard]] inline bool needsHandle() const noexcept { return false; }
-
         [[nodiscard]] inline size_t responseCount() const noexcept { return responseQueue_.size(); }
-
-        /**
-         * @brief 响应队列的槽位容量（用于在压满前施加背压，避免 mux 帧被丢弃）
-         */
         [[nodiscard]] inline size_t responseCapacity() const noexcept { return responseQueue_.capacity(); }
-
         [[nodiscard]] inline std::string takeResponse()
         {
             if (responseQueue_.empty()) [[unlikely]]
@@ -492,10 +699,6 @@ namespace mynet
             responseQueue_.pop();
             return out;
         }
-
-        /**
-         * @brief 回收已发送完毕的空闲响应缓冲区（零堆重分配复用）
-         */
         inline void recycleSpare(std::string &&s) noexcept
         {
             if (s.capacity() > spare_.capacity())
@@ -504,26 +707,14 @@ namespace mynet
                 spare_ = std::move(s);
             }
         }
-
-        /**
-         * @brief 推入一条完整响应（移动语义）
-         */
         [[nodiscard]] inline Result<> pushResponse(std::string &&s) noexcept
         {
             return responseQueue_.push(std::move(s));
         }
-
-        /**
-         * @brief 推入一条完整响应（左值引用，转为视图原地复用槽位容量）
-         */
         [[nodiscard]] inline Result<> pushResponse(const std::string &s) noexcept
         {
             return pushResponse(std::string_view(s));
         }
-
-        /**
-         * @brief 推入一段视图响应（零拷贝适配 string_view 与连续字节）
-         */
         [[nodiscard]] inline Result<> pushResponse(std::string_view sv) noexcept
         {
             if (sv.data() == nullptr || sv.empty())
@@ -532,10 +723,6 @@ namespace mynet
             }
             return responseQueue_.emplace(sv);
         }
-
-        /**
-         * @brief 推入以空终止的字符串字面量（重载消歧义，内部转为 string_view）
-         */
         [[nodiscard]] inline Result<> pushResponse(const char *s) noexcept
         {
             if (s == nullptr) [[unlikely]]
@@ -544,42 +731,23 @@ namespace mynet
             }
             return pushResponse(std::string_view(s));
         }
-
-        /**
-         * @brief 预分配响应队列槽位（连接建立时调用一次）
-         *
-         * @param capacity 槽位数量（允许流水线化的最大响应条数）
-         * @return 成功 {}；槽位分配失败 std::unexpected(ERR::POOL_ALLOC_FAILED)
-         */
         [[nodiscard]] inline Result<> reserveResponses(size_t capacity) noexcept
         {
             return responseQueue_.init(capacity);
         }
-
-        // ---- 生命周期管理 (Lifecycle) ----
-
         [[nodiscard]] inline bool closeAfterResponse() const noexcept { return closeAfterResponse_; }
-
         inline void setCloseAfterResponse(bool v) noexcept { closeAfterResponse_ = v; }
 
-        // ---- 零拷贝管道控制 (Zero-Copy Splice Routing) ----
-
-        /**
-         * @brief 设置零拷贝数据转发的目标描述符
-         *
-         * 解耦核心：不再写死当前套接字。
-         * - targetFd >= 0: 转发至目标描述符，自动将状态切换为 ACTIVE；
-         * - targetFd < 0: 关闭零拷贝，回到 DISABLED。
-         */
+        // ---- 零拷贝转发控制 ----
         inline void setSpliceTarget(int targetFd) noexcept
         {
             spliceTargetFd_ = targetFd;
             spliceControl_ = (targetFd >= 0) ? SPLICE_CONTROL::ACTIVE : SPLICE_CONTROL::DISABLED;
+            if (connection_)
+            {
+                connection_->setSpliceTarget(targetFd);
+            }
         }
-
-        /**
-         * @brief 设置零拷贝管道控制状态
-         */
         inline void setSpliceControl(SPLICE_CONTROL ctrl) noexcept
         {
             spliceControl_ = ctrl;
@@ -587,104 +755,739 @@ namespace mynet
             {
                 spliceTargetFd_ = -1;
             }
+            if (connection_)
+            {
+                connection_->setSpliceControl(ctrl);
+            }
         }
-
-        /**
-         * @brief 设置零拷贝目标控制状态（重定向至 setSpliceControl）
-         */
         inline void setSpliceTarget(SPLICE_CONTROL ctrl) noexcept { setSpliceControl(ctrl); }
-
         [[nodiscard]] inline SPLICE_CONTROL spliceControl() const noexcept { return spliceControl_; }
         [[nodiscard]] inline int spliceTarget() const noexcept { return spliceTargetFd_; }
         [[nodiscard]] inline bool isSpliceActive() const noexcept
         {
             return spliceControl_ == SPLICE_CONTROL::ACTIVE && spliceTargetFd_ >= 0;
         }
-
-        /// 挂起 / 暂停零拷贝直通
         inline void pauseSplice() noexcept
         {
             if (spliceControl_ == SPLICE_CONTROL::ACTIVE)
             {
                 spliceControl_ = SPLICE_CONTROL::PAUSED;
             }
+            if (connection_)
+            {
+                connection_->pauseSplice();
+            }
         }
-
-        /// 恢复零拷贝直通
         inline void resumeSplice() noexcept
         {
             if (spliceControl_ == SPLICE_CONTROL::PAUSED)
             {
                 spliceControl_ = (spliceTargetFd_ >= 0) ? SPLICE_CONTROL::ACTIVE : SPLICE_CONTROL::DISABLED;
             }
+            if (connection_)
+            {
+                connection_->resumeSplice();
+            }
         }
-
-        /// 排空零拷贝管道残留数据
         inline void drainSplice() noexcept
         {
             if (spliceControl_ == SPLICE_CONTROL::ACTIVE)
             {
                 spliceControl_ = SPLICE_CONTROL::DRAINING;
             }
+            if (connection_)
+            {
+                connection_->drainSplice();
+            }
         }
-
-        /// 禁用零拷贝
         inline void disableSplice() noexcept
         {
             spliceControl_ = SPLICE_CONTROL::DISABLED;
             spliceTargetFd_ = -1;
+            if (connection_)
+            {
+                connection_->disableSplice();
+            }
         }
-
         [[nodiscard]] inline bool spliceEnabled() const noexcept { return isSpliceActive(); }
+        inline void enableSpliceForward(int targetFd) noexcept { setSpliceTarget(targetFd); }
+        inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
+        inline void disableSpliceForward() noexcept { disableSplice(); }
+        [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
+    };
 
-        /**
-         * @brief 连接就绪与描述符分配钩子
-         *
-         * 在连接成功建立并绑定底层 fd 后由 Connection 层回调。
-         *
-         * @param fd 连接关联的底层套接字文件描述符
-         */
-        virtual void onConnect(int fd) noexcept { fd_ = fd; }
+    // ---- ConnectionBase 对 HandlerConnection 的交互实现 ----
 
-        [[nodiscard]] inline int fd() const noexcept { return fd_; }
-
-        /**
-         * @brief 协议升级钩子（如 HTTP/1.1 Upgrade，连接语义由此移交上层）
-         */
-        virtual void onUpgrade() noexcept {}
-
-        /**
-         * @brief 一条协议消息处理完成（流式消息）
-         */
-        virtual void onMessageComplete() noexcept {}
-
-        /**
-         * @brief 协议解析失败
-         *
-         * @param reason 人类可读的失败原因，允许为空指针
-         */
-        virtual void onParseError([[maybe_unused]] const char *reason) noexcept
+    inline void ConnectionBase::setFd(int fd) noexcept
+    {
+        fd_ = fd;
+        if (fd_ >= 0)
         {
-            inboundStage_ = handler::InboundStage::ERROR;
-            outboundStage_ = handler::OutboundStage::ERROR;
+            config_ = getMynetConfigShared();
+            applyQuickAck();
+            if (handler_ != nullptr)
+            {
+                handler_->onConnect(fd_);
+            }
+        }
+    }
+
+    inline void ConnectionBase::setHandler(HandlerConnection *h) noexcept
+    {
+        handler_ = h;
+        if (h != nullptr)
+        {
+            h->setConnection(this);
+            if (fd_ >= 0)
+            {
+                h->onConnect(fd_);
+            }
+        }
+    }
+
+    inline bool ConnectionBase::isSpliceEnabled() const noexcept
+    {
+        if (handler_ != nullptr)
+        {
+            return handler_->isSpliceActive();
+        }
+        return isSpliceActive();
+    }
+
+    inline bool ConnectionBase::hasPendingWrite() const noexcept
+    {
+        if (pendingBytes_ > 0 || pipePending_ > 0)
+        {
+            return true;
+        }
+        if (hasResponse())
+        {
+            return true;
+        }
+        if (handler_ != nullptr && handler_->hasResponse())
+        {
+            return true;
+        }
+        return false;
+    }
+
+    inline bool ConnectionBase::ensurePipe() noexcept
+    {
+        if (pipeFd_[0] >= 0) [[likely]]
+        {
+            return true;
+        }
+        if (::pipe2(pipeFd_, O_NONBLOCK | O_CLOEXEC) < 0) [[unlikely]]
+        {
+            LOG_WARN("ConnectionBase::ensurePipe: fd {}: pipe2 failed: {}", fd_, errnoText(errno));
+            pipeFd_[0] = -1;
+            pipeFd_[1] = -1;
+            return false;
+        }
+        return true;
+    }
+
+    inline std::expected<size_t, IO_END> ConnectionBase::spliceTo(int targetFd, size_t maxBytes) noexcept
+    {
+        if (targetFd < 0 || fd_ < 0) [[unlikely]]
+        {
+            return std::unexpected(IO_END::FATAL);
+        }
+        if (!ensurePipe()) [[unlikely]]
+        {
+            return std::unexpected(IO_END::FATAL);
         }
 
-    protected:
-        RequestBuffer requestBuffer_;
-        ResponseQueue responseQueue_;
-        std::string spare_{};
-        size_t maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
-        bool closeAfterResponse_ = false;
-        SPLICE_CONTROL spliceControl_ = SPLICE_CONTROL::DISABLED;
-        int spliceTargetFd_ = -1;
-        int fd_ = -1;
-        handler::InboundStage inboundStage_{handler::InboundStage::HANDSHAKE};
-        handler::OutboundStage outboundStage_{handler::OutboundStage::INITIAL};
-        std::optional<handler::ProxyAddress> targetAddress_{std::nullopt};
-        handler::ProxyAddress target_{};
-        uint8_t command_{0};
-        RequestCallback requestCallback_{nullptr};
-    };
+        while (pipePending_ > 0)
+        {
+            const ssize_t sOut =
+                ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sOut > 0) [[likely]]
+            {
+                pipePending_ -= static_cast<size_t>(sOut);
+                continue;
+            }
+            if (sOut < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    return std::unexpected(IO_END::WOULDBLOCK);
+                return std::unexpected(IO_END::FATAL);
+            }
+            break;
+        }
+        if (pipePending_ > 0)
+        {
+            return std::unexpected(IO_END::WOULDBLOCK);
+        }
+
+        const ssize_t sIn = ::splice(fd_, nullptr, pipeFd_[1], nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+        if (sIn <= 0)
+        {
+            if (sIn == 0)
+                return std::unexpected(IO_END::EOF_REACHED);
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return std::unexpected(IO_END::WOULDBLOCK);
+            if (errno == EINTR)
+                return 0;
+            return std::unexpected(IO_END::FATAL);
+        }
+
+        pipePending_ += static_cast<size_t>(sIn);
+        size_t totalWritten = 0;
+
+        while (pipePending_ > 0)
+        {
+            const ssize_t sOut =
+                ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sOut > 0) [[likely]]
+            {
+                pipePending_ -= static_cast<size_t>(sOut);
+                totalWritten += static_cast<size_t>(sOut);
+                continue;
+            }
+            if (sOut < 0 && errno == EINTR)
+                continue;
+            break;
+        }
+
+        return totalWritten;
+    }
+
+    inline std::expected<size_t, IO_END> ConnectionBase::spliceFrom(int sourceFd, size_t maxBytes) noexcept
+    {
+        if (sourceFd < 0 || fd_ < 0) [[unlikely]]
+        {
+            return std::unexpected(IO_END::FATAL);
+        }
+        if (!ensurePipe()) [[unlikely]]
+        {
+            return std::unexpected(IO_END::FATAL);
+        }
+
+        while (pipePending_ > 0)
+        {
+            const ssize_t sOut =
+                ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sOut > 0) [[likely]]
+            {
+                pipePending_ -= static_cast<size_t>(sOut);
+                continue;
+            }
+            if (sOut < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    return std::unexpected(IO_END::WOULDBLOCK);
+                return std::unexpected(IO_END::FATAL);
+            }
+            break;
+        }
+        if (pipePending_ > 0)
+        {
+            return std::unexpected(IO_END::WOULDBLOCK);
+        }
+
+        const ssize_t sIn =
+            ::splice(sourceFd, nullptr, pipeFd_[1], nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+        if (sIn <= 0)
+        {
+            if (sIn == 0)
+                return std::unexpected(IO_END::EOF_REACHED);
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                return std::unexpected(IO_END::WOULDBLOCK);
+            if (errno == EINTR)
+                return 0;
+            return std::unexpected(IO_END::FATAL);
+        }
+
+        pipePending_ += static_cast<size_t>(sIn);
+        size_t totalWritten = 0;
+
+        while (pipePending_ > 0)
+        {
+            const ssize_t sOut =
+                ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sOut > 0) [[likely]]
+            {
+                pipePending_ -= static_cast<size_t>(sOut);
+                totalWritten += static_cast<size_t>(sOut);
+                continue;
+            }
+            if (sOut < 0 && errno == EINTR)
+                continue;
+            break;
+        }
+
+        return totalWritten;
+    }
+
+    inline IO_STATUS ConnectionBase::handleSplice() noexcept
+    {
+        int targetFd = spliceTarget();
+        SPLICE_CONTROL ctrl = spliceControl();
+        if (handler_ != nullptr && handler_->spliceTarget() >= 0)
+        {
+            targetFd = handler_->spliceTarget();
+            ctrl = handler_->spliceControl();
+        }
+
+        if (targetFd < 0 || ctrl == SPLICE_CONTROL::PAUSED || ctrl == SPLICE_CONTROL::CLOSED)
+        {
+            return IO_STATUS::KEEP;
+        }
+
+        const size_t spliceChunk = getConnectionConfig().spliceChunkSize;
+
+        while (pipePending_ > 0)
+        {
+            const ssize_t sOut =
+                ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sOut > 0) [[likely]]
+            {
+                pipePending_ -= static_cast<size_t>(sOut);
+                continue;
+            }
+            if (sOut < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    wantWrite_ = true;
+                    readPaused_ = true;
+                    return IO_STATUS::KEEP;
+                }
+                peerGone_ = true;
+                return IO_STATUS::CLOSE;
+            }
+            break;
+        }
+
+        if (pipePending_ > 0)
+        {
+            wantWrite_ = true;
+            readPaused_ = true;
+            return IO_STATUS::KEEP;
+        }
+
+        if (ctrl == SPLICE_CONTROL::DRAINING)
+        {
+            setSpliceControl(SPLICE_CONTROL::CLOSED);
+            if (handler_ != nullptr)
+            {
+                handler_->setSpliceControl(SPLICE_CONTROL::CLOSED);
+            }
+            return IO_STATUS::KEEP;
+        }
+
+        while (!readPaused_)
+        {
+            const ssize_t sIn =
+                ::splice(fd_, nullptr, pipeFd_[1], nullptr, spliceChunk, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (sIn > 0) [[likely]]
+            {
+                touch();
+                pipePending_ += static_cast<size_t>(sIn);
+
+                while (pipePending_ > 0)
+                {
+                    const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
+                                                  SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                    if (sOut > 0) [[likely]]
+                    {
+                        pipePending_ -= static_cast<size_t>(sOut);
+                        continue;
+                    }
+                    if (sOut < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            wantWrite_ = true;
+                            readPaused_ = true;
+                            return IO_STATUS::KEEP;
+                        }
+                        if (errno == EINTR)
+                            continue;
+                        peerGone_ = true;
+                        return IO_STATUS::CLOSE;
+                    }
+                    break;
+                }
+                continue;
+            }
+
+            if (sIn == 0)
+            {
+                peerGone_ = true;
+                return IO_STATUS::CLOSE;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                break;
+            }
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            peerGone_ = true;
+            return IO_STATUS::CLOSE;
+        }
+
+        return IO_STATUS::KEEP;
+    }
+
+    inline void ConnectionBase::pump() noexcept
+    {
+        const size_t hardCap = writeHighWaterMark_ * getConnectionConfig().writeHardCapFactor;
+        if (handler_ != nullptr)
+        {
+            while (handler_->hasResponse())
+            {
+                if (pendingBytes_ >= hardCap) [[unlikely]]
+                {
+                    LOG_WARN("Connection: fd {}: write backlog {} exceeds hard cap, closing after flush", fd_,
+                             pendingBytes_);
+                    closeAfterWrite_ = true;
+                    break;
+                }
+                std::string resp = handler_->takeResponse();
+                if (!resp.empty())
+                {
+                    pendingBytes_ += resp.size();
+                    writeQueue_.push_back(std::move(resp));
+                }
+                if (pendingBytes_ > writeHighWaterMark_)
+                {
+                    readPaused_ = true;
+                }
+            }
+            if (handler_->closeAfterResponse())
+            {
+                closeAfterWrite_ = true;
+            }
+        }
+        while (hasResponse())
+        {
+            if (pendingBytes_ >= hardCap) [[unlikely]]
+            {
+                LOG_WARN("Connection: fd {}: write backlog {} exceeds hard cap, closing after flush", fd_,
+                         pendingBytes_);
+                closeAfterWrite_ = true;
+                break;
+            }
+            std::string resp = takeResponse();
+            if (!resp.empty())
+            {
+                pendingBytes_ += resp.size();
+                writeQueue_.push_back(std::move(resp));
+            }
+            if (pendingBytes_ > writeHighWaterMark_)
+            {
+                readPaused_ = true;
+            }
+        }
+        if (closeAfterResponse_)
+        {
+            closeAfterWrite_ = true;
+        }
+    }
+
+    inline bool ConnectionBase::commitSent(size_t n) noexcept
+    {
+        size_t toConsume = n;
+        while (toConsume > 0 && !writeQueue_.empty())
+        {
+            auto &front = writeQueue_.front();
+            const size_t rem = front.size() - writeOffset_;
+            if (toConsume >= rem)
+            {
+                toConsume -= rem;
+                pendingBytes_ -= rem;
+                writeOffset_ = 0;
+                if (handler_ != nullptr)
+                {
+                    handler_->recycleSpare(std::move(front));
+                }
+                else
+                {
+                    recycleSpare(std::move(front));
+                }
+                writeQueue_.pop_front();
+            }
+            else
+            {
+                writeOffset_ += toConsume;
+                pendingBytes_ -= toConsume;
+                toConsume = 0;
+            }
+        }
+        if (readPaused_ && pendingBytes_ <= writeHighWaterMark_)
+        {
+            if (handler_ == nullptr || handler_->readCredit() > 0)
+            {
+                readPaused_ = false;
+            }
+        }
+        return true;
+    }
+
+    inline void ConnectionBase::handle()
+    {
+        if (handler_ != nullptr)
+        {
+            handler_->handle();
+        }
+    }
+
+    inline IO_STATUS ConnectionBase::handleWrite()
+    {
+        if (fd_ < 0)
+        {
+            return IO_STATUS::CLOSE;
+        }
+
+        pump();
+
+        if (pipePending_ > 0)
+        {
+            int targetFd = spliceTarget();
+            if (handler_ != nullptr && handler_->spliceTarget() >= 0)
+            {
+                targetFd = handler_->spliceTarget();
+            }
+            if (targetFd >= 0)
+            {
+                const ssize_t sOut =
+                    ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sOut > 0)
+                {
+                    pipePending_ -= static_cast<size_t>(sOut);
+                    if (pipePending_ == 0)
+                    {
+                        readPaused_ = false;
+                        wantWrite_ = false;
+                    }
+                }
+            }
+        }
+
+        while (!writeQueue_.empty())
+        {
+            auto &front = writeQueue_.front();
+            const char *buf = front.data() + writeOffset_;
+            const size_t len = front.size() - writeOffset_;
+
+            const ssize_t sn = ::send(fd_, buf, len, MSG_NOSIGNAL);
+            if (sn > 0)
+            {
+                touch();
+                commitSent(static_cast<size_t>(sn));
+                continue;
+            }
+            if (sn < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    wantWrite_ = true;
+                    return IO_STATUS::KEEP;
+                }
+                peerGone_ = true;
+                return IO_STATUS::CLOSE;
+            }
+            break;
+        }
+
+        if (writeQueue_.empty())
+        {
+            wantWrite_ = false;
+            if (closeAfterWrite_ || peerGone_)
+            {
+                return IO_STATUS::CLOSE;
+            }
+        }
+        return IO_STATUS::KEEP;
+    }
+
+    inline IO_STATUS ConnectionBase::handleRead()
+    {
+        if (fd_ < 0)
+        {
+            return IO_STATUS::CLOSE;
+        }
+
+        if (isSpliceEnabled())
+        {
+            if (ensurePipe())
+            {
+                applyQuickAck();
+                return handleSplice();
+            }
+        }
+
+        // 无 handler 时：无害流式抽象层，执行纯流式非阻塞读取到局部临时缓冲
+        if (handler_ == nullptr)
+        {
+            char buf[4096];
+            const ssize_t rn = ::recv(fd_, buf, sizeof(buf), 0);
+            if (rn > 0)
+            {
+                touch();
+                return IO_STATUS::KEEP;
+            }
+            if (rn == 0)
+            {
+                peerGone_ = true;
+                return IO_STATUS::CLOSE;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            {
+                return IO_STATUS::KEEP;
+            }
+            peerGone_ = true;
+            return IO_STATUS::CLOSE;
+        }
+
+        // 挂载具体业务 handler 时：流式数据直入 handler 请求缓冲并驱动业务处理
+        while (!readPaused_)
+        {
+            const size_t credit = handler_->readCredit();
+            if (credit == 0) [[unlikely]]
+            {
+                readPaused_ = true;
+                break;
+            }
+
+            const size_t want = std::min(getConnectionConfig().readChunkSize, credit);
+            auto prepRes = handler_->prepareRequestWritable(want);
+            if (!prepRes) [[unlikely]]
+            {
+                LOG_ERROR("Connection: prepareRequestWritable failed, fd {} closing", fd_);
+                peerGone_ = true;
+                return IO_STATUS::CLOSE;
+            }
+
+            char *target = *prepRes;
+            const size_t maxLen = std::min(handler_->requestWritableBytes(), credit);
+
+            const ssize_t rn = ::recv(fd_, target, maxLen, 0);
+            if (rn > 0)
+            {
+                applyQuickAck();
+                handler_->commitRequest(static_cast<size_t>(rn));
+                touch();
+                if (handler_->requestOverLimit()) [[unlikely]]
+                {
+                    handler_->onParseError("request exceeds the read limit");
+                    pump();
+                    closeAfterWrite_ = true;
+                    readPaused_ = true;
+                    return IO_STATUS::KEEP;
+                }
+                handler_->handle();
+                pump();
+                if (closeAfterWrite_)
+                {
+                    break;
+                }
+                continue;
+            }
+
+            if (rn == 0)
+            {
+                peerGone_ = true;
+                closeAfterWrite_ = true;
+                if (pendingBytes_ > 0)
+                {
+                    return IO_STATUS::KEEP;
+                }
+                return IO_STATUS::CLOSE;
+            }
+
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                break;
+            }
+            peerGone_ = true;
+            return IO_STATUS::CLOSE;
+        }
+
+        pump();
+        if (handler_->closeAfterResponse() || closeAfterResponse_)
+        {
+            closeAfterWrite_ = true;
+        }
+        if (pendingBytes_ > writeHighWaterMark_)
+        {
+            readPaused_ = true;
+        }
+        if (peerGone_ && pendingBytes_ == 0)
+        {
+            return IO_STATUS::CLOSE;
+        }
+        return IO_STATUS::KEEP;
+    }
+
+    inline void ConnectionBase::close()
+    {
+        state_ = CONN_STATE::CLOSED;
+        if (fd_ != -1)
+        {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    inline void ConnectionBase::reset() noexcept
+    {
+        if (fd_ != -1)
+        {
+            ::close(fd_);
+            fd_ = -1;
+        }
+        if (pipeFd_[0] != -1)
+        {
+            ::close(pipeFd_[0]);
+            pipeFd_[0] = -1;
+        }
+        if (pipeFd_[1] != -1)
+        {
+            ::close(pipeFd_[1]);
+            pipeFd_[1] = -1;
+        }
+        pipePending_ = 0;
+        peerAddr_ = {};
+        requestBuffer_.reset();
+        requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
+        responseQueue_.reset();
+        spare_.clear();
+        writeQueue_.clear();
+        writeOffset_ = 0;
+        pendingBytes_ = 0;
+        state_ = CONN_STATE::OPEN;
+        readPaused_ = false;
+        wantWrite_ = false;
+        closeAfterWrite_ = false;
+        closeAfterResponse_ = false;
+        peerGone_ = false;
+        timerId_ = 0;
+        lastActive_ = std::chrono::steady_clock::now();
+        config_.reset();
+        writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
+        spliceControl_ = SPLICE_CONTROL::DISABLED;
+        spliceTargetFd_ = -1;
+        maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
+        handler_ = nullptr;
+    }
 
     /**
      * @brief 偏连接的流式处理器派生约束
@@ -798,7 +1601,7 @@ namespace mynet
      * @brief 活跃网络连接核心数据与传输聚合体
      *
      * 架构核心支柱：
-     * 1. 纯净流式抽象：本类专职负责底层流式连接（TCP/流套接字）的数据传输、零拷贝 splice、读写缓冲背压与事件调度；
+     * 1. 纯净流式抽象：继承 ConnectionBase，复用统一连接底层传输缓冲、零拷贝 splice、读写缓冲背压与事件调度；
      * 2. 彻底剥离握手：入站 TLS 握手等专职逻辑彻底下沉至 AcceptorBase 体系，Connection 不包含 OpenSSL 握手函数；
      * 3. 编译期协议上下文占位：[[no_unique_address]] ProtocolContext protocol_{}，空协议类型占 0 字节；
      * 4. 业务解耦：handler_ 作为成员变量承载具体协议业务，未设置时为空指针（nullptr）；
@@ -813,13 +1616,6 @@ namespace mynet
         using Handler = typename Types::Handler;
         using Protocol = ProtocolContext;
 
-        enum class CONN_STATE : uint8_t
-        {
-            OPEN = 0,
-            CLOSING = 1,
-            CLOSED = 2
-        };
-
         Connection() noexcept = default;
         ~Connection() noexcept override { reset(); }
 
@@ -828,7 +1624,7 @@ namespace mynet
         Connection(Connection &&) noexcept = default;
         Connection &operator=(Connection &&) noexcept = default;
 
-        inline void setFd(int fd) noexcept
+        inline void setFd(int fd) noexcept override
         {
             ConnectionBase::setFd(fd);
             if (fd_ >= 0)
@@ -843,7 +1639,12 @@ namespace mynet
         [[nodiscard]] inline ProtocolContext &protocol() noexcept { return protocol_; }
         [[nodiscard]] inline const ProtocolContext &protocol() const noexcept { return protocol_; }
 
-        inline void setHandler(Handler *h) noexcept { handler_ = h; }
+        using ConnectionBase::setHandler;
+        inline void setHandler(Handler *h) noexcept
+        {
+            handler_ = h;
+            ConnectionBase::setHandler(h);
+        }
         [[nodiscard]] inline bool hasHandler() const noexcept { return handler_ != nullptr; }
 
         [[nodiscard]] inline Handler &handler() noexcept
@@ -854,9 +1655,9 @@ namespace mynet
                 {
                     defaultHandler_.emplace();
                 }
-                handler_ = &(*defaultHandler_);
+                setHandler(&(*defaultHandler_));
             }
-            return *handler_;
+            return *static_cast<Handler *>(handler_);
         }
 
         [[nodiscard]] inline const Handler &handler() const noexcept
@@ -868,694 +1669,25 @@ namespace mynet
                 {
                     nonConst->defaultHandler_.emplace();
                 }
-                nonConst->handler_ = &(*nonConst->defaultHandler_);
+                nonConst->setHandler(&(*nonConst->defaultHandler_));
             }
-            return *handler_;
-        }
-
-        // ---- 连接基础属性与状态查询 ----
-
-        [[nodiscard]] inline CONN_STATE state() const noexcept { return state_; }
-        [[nodiscard]] inline uint32_t events() const noexcept { return events_; }
-        inline void setEvents(uint32_t events) noexcept { events_ = events; }
-
-        [[nodiscard]] inline bool wantRead() const noexcept { return !readPaused_ && state_ == CONN_STATE::OPEN; }
-        [[nodiscard]] inline bool wantWrite() const noexcept { return wantWrite_ || hasPendingWrite(); }
-        inline void setWantWrite(bool v) noexcept { wantWrite_ = v; }
-
-        [[nodiscard]] inline bool hasPendingWrite() const noexcept
-        {
-            if (pendingBytes_ > 0 || pipePending_ > 0)
-            {
-                return true;
-            }
-            if (handler_ != nullptr && handler_->hasResponse())
-            {
-                return true;
-            }
-            return false;
-        }
-
-        [[nodiscard]] inline size_t pendingBytes() const noexcept { return pendingBytes_ + pipePending_; }
-        [[nodiscard]] inline size_t pendingSize() const noexcept { return pendingBytes_ + pipePending_; }
-        [[nodiscard]] inline size_t pipePending() const noexcept { return pipePending_; }
-
-        [[nodiscard]] inline size_t writeHighWaterMark() const noexcept { return writeHighWaterMark_; }
-        inline void setWriteHighWaterMark(size_t n) noexcept { writeHighWaterMark_ = n; }
-
-        [[nodiscard]] inline bool closeAfterWrite() const noexcept { return closeAfterWrite_; }
-        inline void setCloseAfterWrite(bool v) noexcept { closeAfterWrite_ = v; }
-
-        [[nodiscard]] inline uint64_t timerId() const noexcept { return timerId_; }
-        inline void setTimerId(uint64_t id) noexcept { timerId_ = id; }
-
-        [[nodiscard]] inline std::chrono::steady_clock::time_point lastActive() const noexcept { return lastActive_; }
-        inline void touch() noexcept { lastActive_ = std::chrono::steady_clock::now(); }
-
-        // TLS 兼容存根（TLS 由 Acceptor 处理，Connection 层为纯流式传输，故恒返回空/假）
-        [[nodiscard]] constexpr void *ssl() const noexcept { return nullptr; }
-        [[nodiscard]] constexpr bool ktlsRxActive() const noexcept { return false; }
-        [[nodiscard]] constexpr bool ktlsTxActive() const noexcept { return false; }
-
-        // ---- 零拷贝管道控制 (Zero-Copy Splice Routing) ----
-
-        [[nodiscard]] inline bool isSpliceEnabled() const noexcept
-        {
-            if (handler_ != nullptr)
-            {
-                return Handler::kEnableSplice && handler_->isSpliceActive();
-            }
-            return false;
-        }
-
-        [[nodiscard]] inline bool ensurePipe() noexcept
-        {
-            if (pipeFd_[0] >= 0) [[likely]]
-            {
-                return true;
-            }
-            if (::pipe2(pipeFd_, O_NONBLOCK | O_CLOEXEC) < 0) [[unlikely]]
-            {
-                LOG_WARN("Connection::ensurePipe: fd {}: pipe2 failed: {}", fd_, errnoText(errno));
-                pipeFd_[0] = -1;
-                pipeFd_[1] = -1;
-                return false;
-            }
-            return true;
-        }
-
-        [[nodiscard]] inline std::expected<size_t, IO_END>
-        spliceTo(int targetFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
-        {
-            if (targetFd < 0 || fd_ < 0) [[unlikely]]
-            {
-                return std::unexpected(IO_END::FATAL);
-            }
-            if (!ensurePipe()) [[unlikely]]
-            {
-                return std::unexpected(IO_END::FATAL);
-            }
-
-            while (pipePending_ > 0)
-            {
-                const ssize_t sOut =
-                    ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sOut > 0) [[likely]]
-                {
-                    pipePending_ -= static_cast<size_t>(sOut);
-                    continue;
-                }
-                if (sOut < 0)
-                {
-                    if (errno == EINTR)
-                        continue;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        return std::unexpected(IO_END::WOULDBLOCK);
-                    return std::unexpected(IO_END::FATAL);
-                }
-                break;
-            }
-            if (pipePending_ > 0)
-            {
-                return std::unexpected(IO_END::WOULDBLOCK);
-            }
-
-            const ssize_t sIn =
-                ::splice(fd_, nullptr, pipeFd_[1], nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-            if (sIn <= 0)
-            {
-                if (sIn == 0)
-                    return std::unexpected(IO_END::EOF_REACHED);
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    return std::unexpected(IO_END::WOULDBLOCK);
-                if (errno == EINTR)
-                    return 0;
-                return std::unexpected(IO_END::FATAL);
-            }
-
-            pipePending_ += static_cast<size_t>(sIn);
-            size_t totalWritten = 0;
-
-            while (pipePending_ > 0)
-            {
-                const ssize_t sOut =
-                    ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sOut > 0) [[likely]]
-                {
-                    pipePending_ -= static_cast<size_t>(sOut);
-                    totalWritten += static_cast<size_t>(sOut);
-                    continue;
-                }
-                if (sOut < 0 && errno == EINTR)
-                    continue;
-                break;
-            }
-
-            return totalWritten;
-        }
-
-        [[nodiscard]] inline std::expected<size_t, IO_END>
-        spliceFrom(int sourceFd, size_t maxBytes = getConnectionConfig().spliceChunkSize) noexcept
-        {
-            if (sourceFd < 0 || fd_ < 0) [[unlikely]]
-            {
-                return std::unexpected(IO_END::FATAL);
-            }
-            if (!ensurePipe()) [[unlikely]]
-            {
-                return std::unexpected(IO_END::FATAL);
-            }
-
-            while (pipePending_ > 0)
-            {
-                const ssize_t sOut =
-                    ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sOut > 0) [[likely]]
-                {
-                    pipePending_ -= static_cast<size_t>(sOut);
-                    continue;
-                }
-                if (sOut < 0)
-                {
-                    if (errno == EINTR)
-                        continue;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        return std::unexpected(IO_END::WOULDBLOCK);
-                    return std::unexpected(IO_END::FATAL);
-                }
-                break;
-            }
-            if (pipePending_ > 0)
-            {
-                return std::unexpected(IO_END::WOULDBLOCK);
-            }
-
-            const ssize_t sIn =
-                ::splice(sourceFd, nullptr, pipeFd_[1], nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-            if (sIn <= 0)
-            {
-                if (sIn == 0)
-                    return std::unexpected(IO_END::EOF_REACHED);
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    return std::unexpected(IO_END::WOULDBLOCK);
-                if (errno == EINTR)
-                    return 0;
-                return std::unexpected(IO_END::FATAL);
-            }
-
-            pipePending_ += static_cast<size_t>(sIn);
-            size_t totalWritten = 0;
-
-            while (pipePending_ > 0)
-            {
-                const ssize_t sOut =
-                    ::splice(pipeFd_[0], nullptr, fd_, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sOut > 0) [[likely]]
-                {
-                    pipePending_ -= static_cast<size_t>(sOut);
-                    totalWritten += static_cast<size_t>(sOut);
-                    continue;
-                }
-                if (sOut < 0 && errno == EINTR)
-                    continue;
-                break;
-            }
-
-            return totalWritten;
-        }
-
-        inline IO_STATUS handleSplice() noexcept
-        {
-            if (handler_ == nullptr)
-            {
-                return IO_STATUS::KEEP;
-            }
-
-            const int targetFd = handler_->spliceTarget();
-            const SPLICE_CONTROL ctrl = handler_->spliceControl();
-
-            if (targetFd < 0 || ctrl == SPLICE_CONTROL::PAUSED || ctrl == SPLICE_CONTROL::CLOSED)
-            {
-                return IO_STATUS::KEEP;
-            }
-
-            const size_t spliceChunk = getConnectionConfig().spliceChunkSize;
-
-            while (pipePending_ > 0)
-            {
-                const ssize_t sOut =
-                    ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sOut > 0) [[likely]]
-                {
-                    pipePending_ -= static_cast<size_t>(sOut);
-                    continue;
-                }
-                if (sOut < 0)
-                {
-                    if (errno == EINTR)
-                        continue;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    {
-                        wantWrite_ = true;
-                        readPaused_ = true;
-                        return IO_STATUS::KEEP;
-                    }
-                    peerGone_ = true;
-                    return IO_STATUS::CLOSE;
-                }
-                break;
-            }
-
-            if (pipePending_ > 0)
-            {
-                wantWrite_ = true;
-                readPaused_ = true;
-                return IO_STATUS::KEEP;
-            }
-
-            if (ctrl == SPLICE_CONTROL::DRAINING)
-            {
-                handler_->setSpliceControl(SPLICE_CONTROL::CLOSED);
-                return IO_STATUS::KEEP;
-            }
-
-            while (!readPaused_)
-            {
-                const ssize_t sIn =
-                    ::splice(fd_, nullptr, pipeFd_[1], nullptr, spliceChunk, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sIn > 0) [[likely]]
-                {
-                    touch();
-                    pipePending_ += static_cast<size_t>(sIn);
-
-                    while (pipePending_ > 0)
-                    {
-                        const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
-                                                      SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                        if (sOut > 0) [[likely]]
-                        {
-                            pipePending_ -= static_cast<size_t>(sOut);
-                            continue;
-                        }
-                        if (sOut < 0)
-                        {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                            {
-                                wantWrite_ = true;
-                                readPaused_ = true;
-                                return IO_STATUS::KEEP;
-                            }
-                            if (errno == EINTR)
-                                continue;
-                            peerGone_ = true;
-                            return IO_STATUS::CLOSE;
-                        }
-                        break;
-                    }
-                    continue;
-                }
-
-                if (sIn == 0)
-                {
-                    peerGone_ = true;
-                    return IO_STATUS::CLOSE;
-                }
-
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                {
-                    break;
-                }
-                if (errno == EINTR)
-                {
-                    continue;
-                }
-                peerGone_ = true;
-                return IO_STATUS::CLOSE;
-            }
-
-            return IO_STATUS::KEEP;
-        }
-
-        // ---- 写入与响应缓冲泵送 (Write Path & Response Queue) ----
-
-        inline void pump() noexcept
-        {
-            if (handler_ == nullptr)
-            {
-                return;
-            }
-            const size_t hardCap = writeHighWaterMark_ * getConnectionConfig().writeHardCapFactor;
-            while (handler_->hasResponse())
-            {
-                if (pendingBytes_ >= hardCap) [[unlikely]]
-                {
-                    LOG_WARN("Connection: fd {}: write backlog {} exceeds hard cap, closing after flush", fd_,
-                             pendingBytes_);
-                    closeAfterWrite_ = true;
-                    break;
-                }
-                std::string resp = handler_->takeResponse();
-                if (!resp.empty())
-                {
-                    pendingBytes_ += resp.size();
-                    writeQueue_.push_back(std::move(resp));
-                }
-                if (pendingBytes_ > writeHighWaterMark_)
-                {
-                    readPaused_ = true;
-                }
-            }
-            if (handler_->closeAfterResponse())
-            {
-                closeAfterWrite_ = true;
-            }
-        }
-
-        inline bool commitSent(size_t n) noexcept
-        {
-            size_t toConsume = n;
-            while (toConsume > 0 && !writeQueue_.empty())
-            {
-                auto &front = writeQueue_.front();
-                const size_t rem = front.size() - writeOffset_;
-                if (toConsume >= rem)
-                {
-                    toConsume -= rem;
-                    pendingBytes_ -= rem;
-                    writeOffset_ = 0;
-                    if (handler_ != nullptr)
-                    {
-                        if constexpr (requires { handler_->recycleSpare(std::move(front)); })
-                        {
-                            handler_->recycleSpare(std::move(front));
-                        }
-                    }
-                    writeQueue_.pop_front();
-                }
-                else
-                {
-                    writeOffset_ += toConsume;
-                    pendingBytes_ -= toConsume;
-                    toConsume = 0;
-                }
-            }
-            if (readPaused_ && pendingBytes_ <= writeHighWaterMark_)
-            {
-                if (handler_ == nullptr || handler_->readCredit() > 0)
-                {
-                    readPaused_ = false;
-                }
-            }
-            return true;
-        }
-
-        // ---- 事件循环虚接口驱动 (Event Loop Drives) ----
-
-        void handle() override
-        {
-            if (handler_ != nullptr)
-            {
-                handler_->handle();
-            }
-        }
-
-        inline IO_STATUS handleWrite() override
-        {
-            if (fd_ < 0)
-            {
-                return IO_STATUS::CLOSE;
-            }
-
-            pump();
-
-            if (pipePending_ > 0 && handler_ != nullptr)
-            {
-                const int targetFd = handler_->spliceTarget();
-                if (targetFd >= 0)
-                {
-                    const ssize_t sOut = ::splice(pipeFd_[0], nullptr, targetFd, nullptr, pipePending_,
-                                                  SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                    if (sOut > 0)
-                    {
-                        pipePending_ -= static_cast<size_t>(sOut);
-                        if (pipePending_ == 0)
-                        {
-                            readPaused_ = false;
-                            wantWrite_ = false;
-                        }
-                    }
-                }
-            }
-
-            while (!writeQueue_.empty())
-            {
-                auto &front = writeQueue_.front();
-                const char *buf = front.data() + writeOffset_;
-                const size_t len = front.size() - writeOffset_;
-
-                const ssize_t sn = ::send(fd_, buf, len, MSG_NOSIGNAL);
-                if (sn > 0)
-                {
-                    touch();
-                    commitSent(static_cast<size_t>(sn));
-                    continue;
-                }
-                if (sn < 0)
-                {
-                    if (errno == EINTR)
-                        continue;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    {
-                        wantWrite_ = true;
-                        return IO_STATUS::KEEP;
-                    }
-                    peerGone_ = true;
-                    return IO_STATUS::CLOSE;
-                }
-                break;
-            }
-
-            if (writeQueue_.empty())
-            {
-                wantWrite_ = false;
-                if (closeAfterWrite_ || peerGone_)
-                {
-                    return IO_STATUS::CLOSE;
-                }
-            }
-            return IO_STATUS::KEEP;
-        }
-
-        inline IO_STATUS handleRead() override
-        {
-            if (fd_ < 0)
-            {
-                return IO_STATUS::CLOSE;
-            }
-
-            if (isSpliceEnabled())
-            {
-                if (ensurePipe())
-                {
-                    applyQuickAck();
-                    return handleSplice();
-                }
-            }
-
-            // 无 handler 时：无害流式抽象层，执行纯流式非阻塞读取到局部临时缓冲
-            if (handler_ == nullptr)
-            {
-                char buf[4096];
-                const ssize_t rn = ::recv(fd_, buf, sizeof(buf), 0);
-                if (rn > 0)
-                {
-                    touch();
-                    return IO_STATUS::KEEP;
-                }
-                if (rn == 0)
-                {
-                    peerGone_ = true;
-                    return IO_STATUS::CLOSE;
-                }
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                {
-                    return IO_STATUS::KEEP;
-                }
-                if (errno == EINTR)
-                {
-                    return IO_STATUS::KEEP;
-                }
-                peerGone_ = true;
-                return IO_STATUS::CLOSE;
-            }
-
-            // 挂载具体业务 handler 时：流式数据直入 handler 请求缓冲并驱动业务处理
-            while (!readPaused_)
-            {
-                const size_t credit = handler_->readCredit();
-                if (credit == 0) [[unlikely]]
-                {
-                    readPaused_ = true;
-                    break;
-                }
-
-                const size_t want = std::min(getConnectionConfig().readChunkSize, credit);
-                auto prepRes = handler_->prepareRequestWritable(want);
-                if (!prepRes) [[unlikely]]
-                {
-                    LOG_ERROR("Connection: prepareRequestWritable failed, fd {} closing", fd_);
-                    peerGone_ = true;
-                    return IO_STATUS::CLOSE;
-                }
-
-                char *target = *prepRes;
-                const size_t maxLen = std::min(handler_->requestWritableBytes(), credit);
-
-                const ssize_t rn = ::recv(fd_, target, maxLen, 0);
-                if (rn > 0)
-                {
-                    applyQuickAck();
-                    handler_->commitRequest(static_cast<size_t>(rn));
-                    touch();
-                    if (handler_->requestOverLimit()) [[unlikely]]
-                    {
-                        handler_->onParseError("request exceeds the read limit");
-                        pump();
-                        closeAfterWrite_ = true;
-                        readPaused_ = true;
-                        return IO_STATUS::KEEP;
-                    }
-                    handler_->handle();
-                    pump();
-                    if (closeAfterWrite_)
-                    {
-                        break;
-                    }
-                    continue;
-                }
-
-                if (rn == 0)
-                {
-                    peerGone_ = true;
-                    closeAfterWrite_ = true;
-                    if (pendingBytes_ > 0)
-                    {
-                        return IO_STATUS::KEEP;
-                    }
-                    return IO_STATUS::CLOSE;
-                }
-
-                if (errno == EINTR)
-                {
-                    continue;
-                }
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                {
-                    break;
-                }
-                peerGone_ = true;
-                return IO_STATUS::CLOSE;
-            }
-
-            pump();
-            if (handler_->closeAfterResponse())
-            {
-                closeAfterWrite_ = true;
-            }
-            if (pendingBytes_ > writeHighWaterMark_)
-            {
-                readPaused_ = true;
-            }
-            if (peerGone_ && pendingBytes_ == 0)
-            {
-                return IO_STATUS::CLOSE;
-            }
-            return IO_STATUS::KEEP;
-        }
-
-        inline void close() override
-        {
-            state_ = CONN_STATE::CLOSED;
-            if (fd_ != -1)
-            {
-                ::close(fd_);
-                fd_ = -1;
-            }
+            return *static_cast<const Handler *>(handler_);
         }
 
         inline void reset() noexcept override
         {
-            if (fd_ != -1)
-            {
-                ::close(fd_);
-                fd_ = -1;
-            }
-            if (pipeFd_[0] != -1)
-            {
-                ::close(pipeFd_[0]);
-                pipeFd_[0] = -1;
-            }
-            if (pipeFd_[1] != -1)
-            {
-                ::close(pipeFd_[1]);
-                pipeFd_[1] = -1;
-            }
-            pipePending_ = 0;
-            peerAddr_ = {};
-            writeQueue_.clear();
-            writeOffset_ = 0;
-            pendingBytes_ = 0;
-            state_ = CONN_STATE::OPEN;
-            readPaused_ = false;
-            wantWrite_ = false;
-            closeAfterWrite_ = false;
-            peerGone_ = false;
-            timerId_ = 0;
-            lastActive_ = std::chrono::steady_clock::now();
-            config_.reset();
-            writeHighWaterMark_ = getConnectionConfig().writeHighWaterMark;
+            ConnectionBase::reset();
             if (defaultHandler_.has_value())
             {
                 defaultHandler_->reset();
             }
-            handler_ = nullptr;
             defaultHandler_.reset();
         }
 
     private:
-        inline void applyQuickAck() noexcept
-        {
-            if (isTcp() && config().server.tcpQuickAck && fd_ >= 0)
-            {
-                int val = 1;
-                ::setsockopt(fd_, IPPROTO_TCP, TCP_QUICKACK, &val, sizeof(val));
-            }
-        }
-
         [[no_unique_address]] ProtocolContext protocol_{};
-        Handler *handler_{nullptr};
         std::optional<Handler> defaultHandler_{};
-
-        CONN_STATE state_{CONN_STATE::OPEN};
-        uint32_t events_{0};
-        bool wantWrite_{false};
-        bool readPaused_{false};
-        bool closeAfterWrite_{false};
-        bool peerGone_{false};
-        uint64_t timerId_{0};
-        std::chrono::steady_clock::time_point lastActive_{std::chrono::steady_clock::now()};
-
-        int pipeFd_[2]{-1, -1};
-        size_t pipePending_{0};
-
-        std::deque<std::string> writeQueue_{};
-        size_t writeQueueSize_{0};
-        size_t writeOffset_{0};
-        size_t pendingBytes_{0};
-        size_t writeHighWaterMark_{getConnectionConfig().writeHighWaterMark};
-        size_t writeLowWaterMark_{16 * 1024 * 1024};
     };
-
     /**
      * @brief 非流式处理器使用的占位会话对象
      *
@@ -1633,7 +1765,7 @@ namespace mynet
         return out;
     }
 
-    class HandlerDatagram : public ConnectionBase
+    class HandlerDatagram
     {
     public:
         using DatagramCallback = std::function<void(const sockaddr_in &peer, const handler::ProxyAddress &target,
@@ -1642,21 +1774,18 @@ namespace mynet
         HandlerDatagram() noexcept
             : HandlerDatagram(getDatagramConfig())
         {
-            transport_ = TransportType::UDP;
         }
 
         explicit HandlerDatagram(const DatagramConfig &config) noexcept
             : maxDatagramBytes_(config.maxDatagramBytes),
               maxPendingOutgoing_(config.maxPendingOutgoing)
         {
-            transport_ = TransportType::UDP;
             [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
         }
 
         explicit HandlerDatagram(const sockaddr_in &peer) noexcept
             : HandlerDatagram()
         {
-            transport_ = TransportType::UDP;
             remotePeer_ = peer;
         }
 
@@ -1672,7 +1801,7 @@ namespace mynet
         {
         }
 
-        virtual void reset() noexcept override
+        virtual void reset() noexcept
         {
             const auto &cfg = getDatagramConfig();
             maxDatagramBytes_ = cfg.maxDatagramBytes;

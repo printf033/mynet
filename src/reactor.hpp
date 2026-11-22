@@ -1210,7 +1210,7 @@ namespace mynet
                 dispatchClientToAcceptors(clientFd, conn, listenerIdx);
                 if (conn == nullptr)
                 {
-                    conn = new HandlerConnection();
+                    conn = new Connection<>();
                 }
             }
 
