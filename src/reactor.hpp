@@ -117,20 +117,14 @@ namespace mynet
             return false;
         }
 
-        static constexpr bool isDatagramType =
-            std::is_base_of_v<HandlerDatagram, T> || (!std::is_void_v<Inb> && std::is_base_of_v<HandlerDatagram, Inb>);
-
-        static constexpr bool isConnectionType = std::is_base_of_v<HandlerConnection, T> ||
-                                                 (!std::is_void_v<Inb> && std::is_base_of_v<HandlerConnection, Inb>);
-
     public:
         static constexpr bool is_empty_inbound =
             std::is_same_v<T, EmptyInbound> || (!std::is_void_v<Inb> && std::is_same_v<Inb, EmptyInbound>);
 
-        static constexpr bool is_udp =
-            is_empty_inbound || isDatagramType || checkUdpMember<T>(0) || checkUdpMember<Acc>(0);
-        static constexpr bool is_tcp =
-            is_empty_inbound || isConnectionType || checkTcpMember<T>(0) || checkTcpMember<Acc>(0) || !is_udp;
+        static constexpr bool is_udp = is_empty_inbound || checkUdpMember<T>(0) || checkUdpMember<Acc>(0) ||
+                                       (!std::is_void_v<Inb> && checkUdpMember<Inb>(0));
+        static constexpr bool is_tcp = is_empty_inbound || checkTcpMember<T>(0) || checkTcpMember<Acc>(0) ||
+                                       (!std::is_void_v<Inb> && checkTcpMember<Inb>(0)) || !is_udp;
     };
 
     template <typename Acc, typename T>

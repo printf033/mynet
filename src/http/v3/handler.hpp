@@ -237,6 +237,7 @@ namespace mynet
         class HandlerHttp3 : public HandlerDatagram
         {
         public:
+            static constexpr TransportType transport = TransportType::UDP;
             using Stream = StreamHandler;
             using StreamSlotType = http::v3::StreamSlot<StreamHandler>;
             using StreamTableType = http::v3::StreamTable<StreamSlotType>;

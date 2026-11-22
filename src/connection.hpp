@@ -128,13 +128,16 @@ namespace mynet
 
     class HandlerBase;
     using Handler = HandlerBase;
-    class HandlerConnection;
-    class HandlerDatagram;
+    using HandlerConnection = HandlerBase;
+    using HandlerDatagram = HandlerBase;
 
     namespace handler
     {
         using HandlerBase = mynet::HandlerBase;
-    }
+        using Handler = mynet::HandlerBase;
+        using HandlerConnection = mynet::HandlerBase;
+        using HandlerDatagram = mynet::HandlerBase;
+    } // namespace handler
 
     /**
      * @brief 流式连接协议外发参数包特化
@@ -142,9 +145,17 @@ namespace mynet
      * 包含待外发字节载荷 std::string bytes。提供与 std::string 互相隐式转换与兼容接口，
      * 保证上层零适配成本无缝复用。
      */
+    /**
+     * @brief 纯业务协议外发参数包特化 (Protocol<HandlerBase>)
+     *
+     * 兼具流式字节载荷 (std::string bytes) 与数据报对端地址 (sockaddr_in peer)。
+     * 提供与 std::string / std::string_view 的隐式转换与兼容接口，
+     * 保证流式会话与无连接数据报会话零适配成本无缝复用。
+     */
     template <>
-    struct Protocol<HandlerConnection>
+    struct Protocol<HandlerBase>
     {
+        sockaddr_in peer{};
         std::string bytes{};
 
         Protocol() noexcept = default;
@@ -157,15 +168,29 @@ namespace mynet
         {
         }
         Protocol(const char *buf, size_t n)
-            : bytes(buf, n)
+            : bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
         {
         }
         Protocol(const char *s)
             : bytes(s != nullptr ? s : "")
         {
         }
+        Protocol(const sockaddr_in &p, std::string b) noexcept
+            : peer(p),
+              bytes(std::move(b))
+        {
+        }
+        Protocol(const sockaddr_in &p, const char *buf, size_t n)
+            : peer(p),
+              bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
+        {
+        }
 
-        void clear() noexcept { bytes.clear(); }
+        void clear() noexcept
+        {
+            peer = {};
+            bytes.clear();
+        }
         [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
         [[nodiscard]] size_t size() const noexcept { return bytes.size(); }
         [[nodiscard]] size_t capacity() const noexcept { return bytes.capacity(); }
@@ -195,11 +220,11 @@ namespace mynet
         friend std::ostream &operator<<(std::ostream &os, const Protocol &p) { return os << p.bytes; }
     };
 
+    using DatagramQueue = ResponseQueueBase<Protocol<HandlerBase>>;
+
     struct EmptyProtocol
     {
     };
-
-    class HandlerConnection;
 
     /**
      * @brief 统一连接抽象基类（流式传输基类）
@@ -229,7 +254,7 @@ namespace mynet
         std::shared_ptr<const MynetConfig> config_{nullptr};
 
         // 业务处理器挂载（纯业务 Handler 在连接之上、之内）
-        HandlerConnection *handler_{nullptr};
+        HandlerBase *handler_{nullptr};
 
         // 连接流式状态
         CONN_STATE state_{CONN_STATE::OPEN};
@@ -312,8 +337,8 @@ namespace mynet
         // ---- Handler 挂载 ----
         virtual void setHandler(HandlerConnection *h) noexcept;
         [[nodiscard]] inline bool hasHandler() const noexcept { return handler_ != nullptr; }
-        [[nodiscard]] inline HandlerConnection *handler() noexcept { return handler_; }
-        [[nodiscard]] inline const HandlerConnection *handler() const noexcept { return handler_; }
+        [[nodiscard]] inline HandlerBase *handler() noexcept { return handler_; }
+        [[nodiscard]] inline const HandlerBase *handler() const noexcept { return handler_; }
 
         // ---- 请求缓冲方法占位与实现 ----
         [[nodiscard]] inline Result<> appendRequest(const char *buf, ssize_t rn) noexcept
@@ -515,12 +540,12 @@ namespace mynet
     };
 
     /**
-     * @brief 纯业务协议处理器基类 (HandlerBase)
+     * @brief 统一纯业务协议处理器基类 (HandlerBase)
      *
      * 架构核心支柱：
      * 1. 彻底与传输层无关：不包含任何底层 socket/fd/网络传输状态；
-     * 2. 统一流式与数据报：无论是 TCP 流连接还是 UDP 数据报，业务状态机统一收敛为单一根基类；
-     * 3. 在连接之上、之内：挂载于 ConnectionBase 或 DatagramSession，通过 connection_ 回溯宿主连接；
+     * 2. 彻底合并流式与数据报：统一收敛单一根基类，无分化、无二义性，同时提供流式帧解析与数据报发送缓冲；
+     * 3. 在连接之上、之内：挂载于 ConnectionBase 或会话对象中，通过 connection_ 回溯宿主连接；
      * 4. 纯业务状态机：包含 stages、targetAddress、command、回调以及业务生命周期钩子。
      */
     class HandlerBase
@@ -533,8 +558,11 @@ namespace mynet
                                                     const char *data, size_t n)>;
 
     protected:
+        // 连接关联与套接字描述符
         ConnectionBase *connection_{nullptr};
         int fd_{-1};
+
+        // 业务状态机
         handler::InboundStage inboundStage_{handler::InboundStage::HANDSHAKE};
         handler::OutboundStage outboundStage_{handler::OutboundStage::INITIAL};
         std::optional<handler::ProxyAddress> targetAddress_{std::nullopt};
@@ -544,16 +572,62 @@ namespace mynet
         DatagramCallback datagramCallback_{nullptr};
         sockaddr_in remotePeer_{};
 
+        // 业务层缓冲与队列（流式帧解析、响应队列与零拷贝管道）
+        RequestBuffer requestBuffer_{};
+        ResponseQueue responseQueue_{};
+        std::string spare_{};
+        size_t maxRequestBytes_{getConnectionConfig().maxRequestBytes};
+        bool closeAfterResponse_{false};
+        SPLICE_CONTROL spliceControl_{SPLICE_CONTROL::DISABLED};
+        int spliceTargetFd_{-1};
+
+        // 业务层数据报发送队列与丢弃统计
+        size_t maxDatagramBytes_{1 << 16};
+        size_t maxPendingOutgoing_{1 << 10};
+        DatagramQueue outgoing_{};
+        size_t droppedOutgoing_{0};
+
     public:
-        HandlerBase() noexcept = default;
+        HandlerBase() noexcept
+            : HandlerBase(getConnectionConfig())
+        {
+        }
+
+        explicit HandlerBase(size_t responseCapacity) noexcept
+        {
+            [[maybe_unused]] auto _ = responseQueue_.init(responseCapacity);
+            [[maybe_unused]] auto _2 = outgoing_.init(maxPendingOutgoing_);
+        }
+
+        explicit HandlerBase(const ConnectionConfig &config) noexcept
+            : maxRequestBytes_(config.maxRequestBytes)
+        {
+            requestBuffer_.setHighWaterMark(config.readHighWaterMark);
+            [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
+            [[maybe_unused]] auto _2 = outgoing_.init(maxPendingOutgoing_);
+        }
+
+        explicit HandlerBase(const DatagramConfig &config) noexcept
+            : maxDatagramBytes_(config.maxDatagramBytes),
+              maxPendingOutgoing_(config.maxPendingOutgoing)
+        {
+            requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
+            [[maybe_unused]] auto _ = responseQueue_.init(getConnectionConfig().responseCapacity);
+            [[maybe_unused]] auto _2 = outgoing_.init(maxPendingOutgoing_);
+        }
 
         explicit HandlerBase(const handler::ProxyAddress &target) noexcept
+            : HandlerBase()
         {
             targetAddress_ = target;
             target_ = target;
         }
 
-        explicit HandlerBase(const sockaddr_in &peer) noexcept { remotePeer_ = peer; }
+        explicit HandlerBase(const sockaddr_in &peer) noexcept
+            : HandlerBase()
+        {
+            remotePeer_ = peer;
+        }
 
         virtual ~HandlerBase() noexcept = default;
 
@@ -565,9 +639,12 @@ namespace mynet
         // ---- 连接关联与挂钩 (Connection Linkage) ----
         inline void setConnection(ConnectionBase *c) noexcept { connection_ = c; }
         [[nodiscard]] inline ConnectionBase *connection() const noexcept { return connection_; }
+        [[nodiscard]] inline int fd() const noexcept { return connection_ ? connection_->fd() : fd_; }
 
         // ---- 业务生命周期与钩子 ----
         virtual void handle() {}
+        virtual void onConnect(int fd) noexcept { fd_ = fd; }
+        virtual void onUpgrade() noexcept {}
         virtual void onMessageComplete() noexcept {}
         virtual void onParseError([[maybe_unused]] const char *reason) noexcept
         {
@@ -582,6 +659,7 @@ namespace mynet
         virtual void reset() noexcept
         {
             fd_ = -1;
+            connection_ = nullptr;
             inboundStage_ = handler::InboundStage::HANDSHAKE;
             outboundStage_ = handler::OutboundStage::INITIAL;
             targetAddress_.reset();
@@ -590,7 +668,28 @@ namespace mynet
             requestCallback_ = nullptr;
             datagramCallback_ = nullptr;
             remotePeer_ = {};
-            connection_ = nullptr;
+
+            requestBuffer_.reset();
+            requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
+            responseQueue_.reset();
+            spare_.clear();
+            closeAfterResponse_ = false;
+            spliceControl_ = SPLICE_CONTROL::DISABLED;
+            spliceTargetFd_ = -1;
+            maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
+
+            const auto &cfg = getDatagramConfig();
+            maxDatagramBytes_ = cfg.maxDatagramBytes;
+            maxPendingOutgoing_ = cfg.maxPendingOutgoing;
+            if (outgoing_.capacity() != maxPendingOutgoing_) [[unlikely]]
+            {
+                [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
+            }
+            else
+            {
+                outgoing_.reset();
+            }
+            droppedOutgoing_ = 0;
         }
 
         // ---- 代理业务状态机 ----
@@ -625,87 +724,6 @@ namespace mynet
                 return *targetAddress_;
             }
             return target_;
-        }
-        [[nodiscard]] inline int fd() const noexcept { return connection_ ? connection_->fd() : fd_; }
-    };
-
-    template <typename H>
-    concept DerivedFromHandlerBase = std::derived_from<H, HandlerBase>;
-
-    /**
-     * @brief 纯业务流式协议处理器基类
-     *
-     * 继承自统一的 HandlerBase，提供流式会话所需的解析缓冲与零拷贝控制。
-     */
-    class HandlerConnection : public HandlerBase
-    {
-    public:
-        using SPLICE_CONTROL = mynet::SPLICE_CONTROL;
-        static constexpr bool kEnableSplice = true;
-        using RequestCallback = HandlerBase::RequestCallback;
-
-    protected:
-        // 业务层缓冲与队列（承载业务帧与响应，并在独立实例化时作为完备回退）
-        RequestBuffer requestBuffer_{};
-        ResponseQueue responseQueue_{};
-        std::string spare_{};
-        size_t maxRequestBytes_{getConnectionConfig().maxRequestBytes};
-        bool closeAfterResponse_{false};
-        SPLICE_CONTROL spliceControl_{SPLICE_CONTROL::DISABLED};
-        int spliceTargetFd_{-1};
-
-    public:
-        HandlerConnection() noexcept
-            : HandlerConnection(getConnectionConfig())
-        {
-        }
-
-        explicit HandlerConnection(size_t responseCapacity) noexcept
-            : HandlerBase()
-        {
-            [[maybe_unused]] auto _ = responseQueue_.init(responseCapacity);
-        }
-
-        explicit HandlerConnection(const ConnectionConfig &config) noexcept
-            : HandlerBase(),
-              maxRequestBytes_(config.maxRequestBytes)
-        {
-            requestBuffer_.setHighWaterMark(config.readHighWaterMark);
-            [[maybe_unused]] auto _ = responseQueue_.init(config.responseCapacity);
-        }
-
-        explicit HandlerConnection(const handler::ProxyAddress &target) noexcept
-            : HandlerBase(target),
-              maxRequestBytes_(getConnectionConfig().maxRequestBytes)
-        {
-            requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
-            [[maybe_unused]] auto _ = responseQueue_.init(getConnectionConfig().responseCapacity);
-        }
-
-        virtual ~HandlerConnection() noexcept override = default;
-
-        HandlerConnection(const HandlerConnection &) = delete;
-        HandlerConnection &operator=(const HandlerConnection &) = delete;
-        HandlerConnection(HandlerConnection &&) = delete;
-        HandlerConnection &operator=(HandlerConnection &&) = delete;
-
-        // ---- 流式生命周期与连接钩子 ----
-        virtual void handle() override {}
-        virtual void onConnect(int fd) noexcept { fd_ = fd; }
-        virtual void onUpgrade() noexcept {}
-        [[nodiscard]] inline int fd() const noexcept { return HandlerBase::fd(); }
-
-        virtual void reset() noexcept override
-        {
-            HandlerBase::reset();
-            requestBuffer_.reset();
-            requestBuffer_.setHighWaterMark(getConnectionConfig().readHighWaterMark);
-            responseQueue_.reset();
-            spare_.clear();
-            closeAfterResponse_ = false;
-            spliceControl_ = SPLICE_CONTROL::DISABLED;
-            spliceTargetFd_ = -1;
-            maxRequestBytes_ = getConnectionConfig().maxRequestBytes;
         }
 
         // ---- 业务缓冲区与响应队列操作 ----
@@ -750,19 +768,27 @@ namespace mynet
         [[nodiscard]] inline size_t maxRequestBytes() const noexcept { return maxRequestBytes_; }
 
         [[nodiscard]] inline bool hasResponse() const noexcept { return !responseQueue_.empty(); }
-        [[nodiscard]] inline bool needsHandle() const noexcept { return false; }
         [[nodiscard]] inline size_t responseCount() const noexcept { return responseQueue_.size(); }
         [[nodiscard]] inline size_t responseCapacity() const noexcept { return responseQueue_.capacity(); }
+        [[nodiscard]] inline size_t responseBytes() const noexcept
+        {
+            size_t total = 0;
+            for (size_t i = 0; i < responseQueue_.size(); ++i)
+            {
+                total += responseQueue_[i].bytes.size();
+            }
+            return total;
+        }
         [[nodiscard]] inline std::string takeResponse()
         {
             if (responseQueue_.empty()) [[unlikely]]
             {
-                return std::string();
+                return {};
             }
-            std::string out = std::move(responseQueue_.front());
+            std::string out = std::move(responseQueue_.front().bytes);
             if (spare_.capacity() > 0)
             {
-                responseQueue_.front() = std::move(spare_);
+                responseQueue_.front().bytes = std::move(spare_);
             }
             responseQueue_.pop();
             return out;
@@ -805,30 +831,32 @@ namespace mynet
         }
         [[nodiscard]] inline bool closeAfterResponse() const noexcept { return closeAfterResponse_; }
         inline void setCloseAfterResponse(bool v) noexcept { closeAfterResponse_ = v; }
+        [[nodiscard]] inline ResponseQueue &responseQueue() noexcept { return responseQueue_; }
+        [[nodiscard]] inline const ResponseQueue &responseQueue() const noexcept { return responseQueue_; }
+        inline void clearResponses() noexcept { responseQueue_.reset(); }
 
-        // ---- 零拷贝转发控制 ----
+        // ---- 零拷贝管道控制 (Zero-Copy Splice Routing) ----
         inline void setSpliceTarget(int targetFd) noexcept
         {
             spliceTargetFd_ = targetFd;
             spliceControl_ = (targetFd >= 0) ? SPLICE_CONTROL::ACTIVE : SPLICE_CONTROL::DISABLED;
-            if (connection_)
+        }
+        inline void setSpliceTarget(SPLICE_CONTROL ctrl) noexcept
+        {
+            spliceControl_ = ctrl;
+            if (ctrl == SPLICE_CONTROL::DISABLED)
             {
-                connection_->setSpliceTarget(targetFd);
+                spliceTargetFd_ = -1;
             }
         }
         inline void setSpliceControl(SPLICE_CONTROL ctrl) noexcept
         {
             spliceControl_ = ctrl;
-            if (ctrl == SPLICE_CONTROL::DISABLED || ctrl == SPLICE_CONTROL::CLOSED)
+            if (ctrl == SPLICE_CONTROL::DISABLED)
             {
                 spliceTargetFd_ = -1;
             }
-            if (connection_)
-            {
-                connection_->setSpliceControl(ctrl);
-            }
         }
-        inline void setSpliceTarget(SPLICE_CONTROL ctrl) noexcept { setSpliceControl(ctrl); }
         [[nodiscard]] inline SPLICE_CONTROL spliceControl() const noexcept { return spliceControl_; }
         [[nodiscard]] inline int spliceTarget() const noexcept { return spliceTargetFd_; }
         [[nodiscard]] inline bool isSpliceActive() const noexcept
@@ -882,7 +910,81 @@ namespace mynet
         inline void enableSpliceForward(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
         inline void disableSpliceForward() noexcept { disableSplice(); }
         [[nodiscard]] inline bool isSpliceForwardActive() const noexcept { return isSpliceActive(); }
+
+        // ---- 数据报发送操作 ----
+        inline void sendTo(const sockaddr_in &target, const char *buf, size_t n)
+        {
+            contract_assert(buf != nullptr);
+            if (!outgoing_.emplace(target, buf, n)) [[unlikely]]
+            {
+                ++droppedOutgoing_;
+                LOG_WARN("HandlerBase: outgoing queue full ({} pending), dropping a {} byte packet for {}",
+                         outgoing_.size(), n, datagramPeerText(target));
+            }
+        }
+
+        inline void sendTo(const sockaddr_in &target, std::string bytes)
+        {
+            const size_t sz = bytes.size();
+            if (!outgoing_.emplace(target, std::move(bytes))) [[unlikely]]
+            {
+                ++droppedOutgoing_;
+                LOG_WARN("HandlerBase: outgoing queue full ({} pending), dropping a {} byte packet for {}",
+                         outgoing_.size(), sz, datagramPeerText(target));
+            }
+        }
+
+        inline void forwardTo(const sockaddr_in &upstream, const char *data, size_t n) { sendTo(upstream, data, n); }
+
+        inline void broadcastTo(const std::vector<sockaddr_in> &targets, const char *buf, size_t n)
+        {
+            for (const auto &t : targets)
+            {
+                sendTo(t, buf, n);
+            }
+        }
+
+        [[nodiscard]] inline bool hasOutgoing() const noexcept { return !outgoing_.empty(); }
+        [[nodiscard]] inline size_t outgoingCount() const noexcept { return outgoing_.size(); }
+        [[nodiscard]] inline const Protocol<HandlerBase> &peekOutgoing() const noexcept { return outgoing_.front(); }
+
+        [[nodiscard]] inline Protocol<HandlerBase> takeOutgoing()
+        {
+            if (outgoing_.empty()) [[unlikely]]
+            {
+                return {};
+            }
+            Protocol<HandlerBase> out = std::move(outgoing_.front());
+            outgoing_.pop();
+            return out;
+        }
+
+        inline void setMaxDatagramBytes(size_t n) noexcept { maxDatagramBytes_ = n; }
+        inline void setMaxPendingOutgoing(size_t n) noexcept
+        {
+            contract_assert(n > 0);
+            maxPendingOutgoing_ = n;
+            [[maybe_unused]] auto _ = outgoing_.init(n);
+        }
+        [[nodiscard]] inline size_t maxPendingOutgoing() const noexcept { return maxPendingOutgoing_; }
+
+        [[nodiscard]] inline DatagramQueue &outgoing() noexcept { return outgoing_; }
+        [[nodiscard]] inline const DatagramQueue &outgoing() const noexcept { return outgoing_; }
+        [[nodiscard]] inline size_t maxDatagramBytes() const noexcept { return maxDatagramBytes_; }
+        [[nodiscard]] inline size_t droppedOutgoing() const noexcept { return droppedOutgoing_; }
     };
+
+    template <typename H>
+    concept DerivedFromHandlerBase = std::derived_from<H, HandlerBase>;
+
+    template <typename H>
+    concept DerivedFromHandler = DerivedFromHandlerBase<H>;
+
+    template <typename H>
+    concept DerivedFromHandlerConnection = DerivedFromHandlerBase<H>;
+
+    template <typename D>
+    concept DerivedFromHandlerDatagram = DerivedFromHandlerBase<D>;
 
     // ---- ConnectionBase 对 HandlerConnection 的交互实现 ----
 
@@ -900,7 +1002,7 @@ namespace mynet
         }
     }
 
-    inline void ConnectionBase::setHandler(HandlerConnection *h) noexcept
+    inline void ConnectionBase::setHandler(HandlerBase *h) noexcept
     {
         handler_ = h;
         if (h != nullptr)
@@ -1558,16 +1660,6 @@ namespace mynet
     }
 
     /**
-     * @brief 偏连接的流式处理器派生约束
-     *
-     * 要求派生自 HandlerConnection，而非仅仅方法上凑齐同名成员。
-     * 这条约束才是连接层真正依赖的不变量：请求缓冲区、响应队列、读信用与
-     * 关闭语义必须来自同一个已在构造时定容的基类子对象。
-     */
-    template <typename H>
-    concept DerivedFromHandlerConnection = std::derived_from<H, HandlerConnection>;
-
-    /**
      * @brief 流式会话处理器的必需方法集合
      *
      * 名字直指含义：这是 Connection<H> 及流式处理架构下对派生处理器的全量契约清单，
@@ -1652,16 +1744,16 @@ namespace mynet
         template <typename T1>
         struct ConnectionTypes<T1, void>
         {
-            static constexpr bool isHandler = std::derived_from<T1, HandlerConnection>;
+            static constexpr bool isHandler = std::derived_from<T1, HandlerBase>;
             using Protocol = std::conditional_t<isHandler, EmptyProtocol, T1>;
-            using Handler = std::conditional_t<isHandler, T1, HandlerConnection>;
+            using Handler = std::conditional_t<isHandler, T1, HandlerBase>;
         };
 
         template <>
         struct ConnectionTypes<EmptyProtocol, void>
         {
             using Protocol = EmptyProtocol;
-            using Handler = HandlerConnection;
+            using Handler = HandlerBase;
         };
     } // namespace detail
 
@@ -1789,189 +1881,6 @@ namespace mynet
         using Type = Connection<H>;
     };
 
-    class HandlerDatagram;
-
-    template <>
-    struct Protocol<HandlerDatagram>
-    {
-        sockaddr_in peer{};
-        std::string bytes{};
-
-        Protocol() noexcept = default;
-        Protocol(const sockaddr_in &p, std::string b) noexcept
-            : peer(p),
-              bytes(std::move(b))
-        {
-        }
-        Protocol(const sockaddr_in &p, const char *buf, size_t n)
-            : peer(p),
-              bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
-        {
-        }
-
-        void clear() noexcept
-        {
-            peer = {};
-            bytes.clear();
-        }
-    };
-
-    using DatagramQueue = ResponseQueueBase<Protocol<HandlerDatagram>>;
-
-    [[nodiscard]] inline std::string datagramPeerText(const sockaddr_in &peer)
-    {
-        char host[INET_ADDRSTRLEN] = {};
-        if (::inet_ntop(AF_INET, &peer.sin_addr, host, sizeof host) == nullptr) [[unlikely]]
-        {
-            return std::string("<unnamed>:") + std::to_string(::ntohs(peer.sin_port));
-        }
-        std::string out;
-        out.reserve(22);
-        out.append(host);
-        out.push_back(':');
-        out.append(std::to_string(::ntohs(peer.sin_port)));
-        return out;
-    }
-
-    /**
-     * @brief 纯业务数据报协议处理器基类
-     *
-     * 继承自统一的 HandlerBase，提供数据报排队与发送控制。
-     */
-    class HandlerDatagram : public HandlerBase
-    {
-    public:
-        using DatagramCallback = HandlerBase::DatagramCallback;
-
-        HandlerDatagram() noexcept
-            : HandlerDatagram(getDatagramConfig())
-        {
-        }
-
-        explicit HandlerDatagram(const DatagramConfig &config) noexcept
-            : HandlerBase(),
-              maxDatagramBytes_(config.maxDatagramBytes),
-              maxPendingOutgoing_(config.maxPendingOutgoing)
-        {
-            [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
-        }
-
-        explicit HandlerDatagram(const sockaddr_in &peer) noexcept
-            : HandlerBase(peer),
-              maxDatagramBytes_(getDatagramConfig().maxDatagramBytes),
-              maxPendingOutgoing_(getDatagramConfig().maxPendingOutgoing)
-        {
-            [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
-        }
-
-        virtual ~HandlerDatagram() noexcept override = default;
-
-        HandlerDatagram(const HandlerDatagram &) = delete;
-        HandlerDatagram &operator=(const HandlerDatagram &) = delete;
-        HandlerDatagram(HandlerDatagram &&) = delete;
-        HandlerDatagram &operator=(HandlerDatagram &&) = delete;
-
-        virtual void onDatagram([[maybe_unused]] const sockaddr_in &peer, [[maybe_unused]] const char *data,
-                                [[maybe_unused]] size_t n) noexcept override
-        {
-        }
-
-        virtual void reset() noexcept override
-        {
-            HandlerBase::reset();
-            const auto &cfg = getDatagramConfig();
-            maxDatagramBytes_ = cfg.maxDatagramBytes;
-            maxPendingOutgoing_ = cfg.maxPendingOutgoing;
-            if (outgoing_.capacity() != maxPendingOutgoing_) [[unlikely]]
-            {
-                [[maybe_unused]] auto _ = outgoing_.init(maxPendingOutgoing_);
-            }
-            else
-            {
-                outgoing_.reset();
-            }
-            droppedOutgoing_ = 0;
-            inboundStage_ = handler::InboundStage::STREAMING;
-            outboundStage_ = handler::OutboundStage::STREAMING;
-        }
-
-        virtual void onMessageComplete() noexcept override {}
-        virtual void onParseError([[maybe_unused]] const char *reason) noexcept override {}
-
-        inline void sendTo(const sockaddr_in &target, const char *buf, size_t n)
-        {
-            contract_assert(buf != nullptr);
-            if (!outgoing_.emplace(target, buf, n)) [[unlikely]]
-            {
-                ++droppedOutgoing_;
-                LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
-                         outgoing_.size(), n, datagramPeerText(target));
-            }
-        }
-
-        inline void sendTo(const sockaddr_in &target, std::string bytes)
-        {
-            const size_t sz = bytes.size();
-            if (!outgoing_.emplace(target, std::move(bytes))) [[unlikely]]
-            {
-                ++droppedOutgoing_;
-                LOG_WARN("HandlerDatagram: outgoing queue full ({} pending), dropping a {} byte packet for {}",
-                         outgoing_.size(), sz, datagramPeerText(target));
-            }
-        }
-
-        inline void forwardTo(const sockaddr_in &upstream, const char *data, size_t n) { sendTo(upstream, data, n); }
-
-        inline void broadcastTo(const std::vector<sockaddr_in> &targets, const char *buf, size_t n)
-        {
-            for (const auto &t : targets)
-            {
-                sendTo(t, buf, n);
-            }
-        }
-
-        [[nodiscard]] inline bool hasOutgoing() const noexcept { return !outgoing_.empty(); }
-        [[nodiscard]] inline size_t outgoingCount() const noexcept { return outgoing_.size(); }
-        [[nodiscard]] inline const Protocol<HandlerDatagram> &peekOutgoing() const noexcept
-        {
-            return outgoing_.front();
-        }
-
-        [[nodiscard]] inline Protocol<HandlerDatagram> takeOutgoing()
-        {
-            if (outgoing_.empty()) [[unlikely]]
-            {
-                return {};
-            }
-            Protocol<HandlerDatagram> out = std::move(outgoing_.front());
-            outgoing_.pop();
-            return out;
-        }
-
-        inline void setMaxDatagramBytes(size_t n) noexcept { maxDatagramBytes_ = n; }
-        inline void setMaxPendingOutgoing(size_t n) noexcept
-        {
-            contract_assert(n > 0);
-            maxPendingOutgoing_ = n;
-            [[maybe_unused]] auto _ = outgoing_.init(n);
-        }
-        [[nodiscard]] inline size_t maxPendingOutgoing() const noexcept { return maxPendingOutgoing_; }
-
-        [[nodiscard]] inline DatagramQueue &outgoing() noexcept { return outgoing_; }
-        [[nodiscard]] inline const DatagramQueue &outgoing() const noexcept { return outgoing_; }
-        [[nodiscard]] inline size_t maxDatagramBytes() const noexcept { return maxDatagramBytes_; }
-        [[nodiscard]] inline size_t droppedOutgoing() const noexcept { return droppedOutgoing_; }
-
-    protected:
-        size_t maxDatagramBytes_{1 << 16};
-        size_t maxPendingOutgoing_{1 << 10};
-        DatagramQueue outgoing_{};
-        size_t droppedOutgoing_{0};
-    };
-
-    template <typename D>
-    concept DerivedFromHandlerDatagram = std::is_base_of_v<HandlerDatagram, D>;
-
     template <typename D>
     concept MandatoryMethodDatagram = DerivedFromHandlerDatagram<D> && Resettable<D> &&
                                       requires(D &d, const sockaddr_in &peer, const char *buf, size_t n,
@@ -2002,7 +1911,7 @@ namespace mynet
 
 namespace mynet::handler
 {
-    class HandlerInboundDatagramBase : public mynet::HandlerDatagram
+    class HandlerInboundDatagramBase : public mynet::HandlerBase
     {
     protected:
         InboundStage stage_{InboundStage::STREAMING};
@@ -2022,14 +1931,14 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerDatagram::reset();
+            HandlerBase::reset();
             stage_ = InboundStage::STREAMING;
         }
 
         void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = InboundStage::ERROR; }
     };
 
-    class HandlerOutboundDatagramBase : public mynet::HandlerDatagram
+    class HandlerOutboundDatagramBase : public mynet::HandlerBase
     {
     protected:
         OutboundStage stage_{OutboundStage::STREAMING};
@@ -2049,14 +1958,14 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerDatagram::reset();
+            HandlerBase::reset();
             stage_ = OutboundStage::STREAMING;
         }
 
         void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = OutboundStage::ERROR; }
     };
 
-    class HandlerInboundBase : public mynet::HandlerConnection
+    class HandlerInboundBase : public mynet::HandlerBase
     {
     protected:
         InboundStage stage_{InboundStage::HANDSHAKE};
@@ -2077,14 +1986,14 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
+            HandlerBase::reset();
             stage_ = InboundStage::HANDSHAKE;
         }
 
         void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = InboundStage::ERROR; }
     };
 
-    class HandlerOutboundBase : public mynet::HandlerConnection
+    class HandlerOutboundBase : public mynet::HandlerBase
     {
     protected:
         OutboundStage stage_{OutboundStage::INITIAL};
@@ -2095,7 +2004,7 @@ namespace mynet::handler
 
         HandlerOutboundBase() noexcept = default;
         explicit HandlerOutboundBase(const handler::ProxyAddress &target) noexcept
-            : HandlerConnection(target)
+            : HandlerBase(target)
         {
         }
         ~HandlerOutboundBase() noexcept override = default;
@@ -2107,7 +2016,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerConnection::reset();
+            HandlerBase::reset();
             stage_ = OutboundStage::INITIAL;
         }
 

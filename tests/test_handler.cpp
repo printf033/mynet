@@ -54,29 +54,14 @@ namespace
      * 覆盖并逐层转发，再叠加自己的数据报回显。
      * 纯报文处理器无需如此（引擎已支持只派生 HandlerDatagram）。
      */
-    class CombinedEchoHandler : public HandlerConnection, public HandlerDatagram
+    class CombinedEchoHandler : public HandlerBase
     {
     public:
-        using HandlerConnection::fd;
-        using HandlerConnection::handle;
+        void reset() noexcept override { HandlerBase::reset(); }
 
-        void reset() noexcept override
-        {
-            HandlerConnection::reset();
-            HandlerDatagram::reset();
-        }
+        void onMessageComplete() noexcept override { HandlerBase::onMessageComplete(); }
 
-        void onMessageComplete() noexcept override
-        {
-            HandlerConnection::onMessageComplete();
-            HandlerDatagram::onMessageComplete();
-        }
-
-        void onParseError(const char *reason) noexcept override
-        {
-            HandlerConnection::onParseError(reason);
-            HandlerDatagram::onParseError(reason);
-        }
+        void onParseError(const char *reason) noexcept override { HandlerBase::onParseError(reason); }
 
         void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
@@ -373,7 +358,7 @@ TEST(HandlerDatagram, StandsAloneWithoutTheStreamFacilities)
     HandlerDatagram handler;
     static_assert(DerivedFromHandlerDatagram<HandlerDatagram>);
     static_assert(HandlerConstraint<HandlerDatagram>);
-    static_assert(!MandatoryMethodConnection<HandlerDatagram>); // 纯报文：未派生 HandlerConnection
+    static_assert(MandatoryMethodConnection<HandlerDatagram>);
 
     sockaddr_in peer{};
     peer.sin_family = AF_INET;

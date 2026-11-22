@@ -10,20 +10,23 @@
 
 namespace mynet
 {
-    class HandlerConnection;
+    class HandlerBase;
+    using Handler = HandlerBase;
+    using HandlerConnection = HandlerBase;
+    using HandlerDatagram = HandlerBase;
 
     /**
      * @brief 定容零异常通用 FIFO 响应队列模板
      *
      * 队列自身是纯粹通用的定容环形队列，通过单一模板参数 Proto 适配不同协议的小型参数包：
-     * - 面向连接的流式会话（默认 Proto = Protocol<HandlerConnection>）：存储包含 std::string 的参数包；
-     * - 面向无连接的数据报会话（Proto = Protocol<HandlerDatagram>）：存储包含 sockaddr_in peer 与 std::string
+     * - 面向连接的流式会话（默认 Proto = Protocol<HandlerBase>）：存储包含 std::string 的参数包；
+     * - 面向无连接的数据报会话（Proto = Protocol<HandlerBase>）：存储包含 sockaddr_in peer 与 std::string
      * 的参数包。
      *
      * 队列在 init(capacity) 时一次性分配内存，后续 push/pop 均无任何堆分配，
      * 弹出与重置时调用槽位的 clear() 复用已分配容量。
      */
-    template <typename Proto = Protocol<HandlerConnection>>
+    template <typename Proto = Protocol<HandlerBase>>
     class ResponseQueueBase
     {
     public:
@@ -156,6 +159,23 @@ namespace mynet
         {
             contract_assert(size_ > 0);
             return slots_[head_];
+        }
+
+        /**
+         * @brief 随机访问队列中的参数包（下标 0 表示队头）
+         */
+        [[nodiscard]] inline Item &operator[](size_t index) noexcept
+        {
+            contract_assert(index < size_);
+            const size_t pos = (head_ + index >= capacity_) ? (head_ + index - capacity_) : (head_ + index);
+            return slots_[pos];
+        }
+
+        [[nodiscard]] inline const Item &operator[](size_t index) const noexcept
+        {
+            contract_assert(index < size_);
+            const size_t pos = (head_ + index >= capacity_) ? (head_ + index - capacity_) : (head_ + index);
+            return slots_[pos];
         }
 
         /**

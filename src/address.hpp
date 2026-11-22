@@ -626,4 +626,26 @@ namespace mynet::handler
 namespace mynet
 {
     using MacAddress = handler::MacAddress;
+    using ProxyAddress = handler::ProxyAddress;
+
+    /**
+     * @brief 格式化 IPv4 对端套接字地址文本 ("192.0.2.7:5353")
+     *
+     * @param peer 对端 sockaddr_in 地址结构
+     * @return std::string 人类可读地址字符串
+     */
+    [[nodiscard]] inline std::string datagramPeerText(const sockaddr_in &peer)
+    {
+        char host[INET_ADDRSTRLEN] = {};
+        if (::inet_ntop(AF_INET, &peer.sin_addr, host, sizeof host) == nullptr) [[unlikely]]
+        {
+            return std::string("<unnamed>:") + std::to_string(::ntohs(peer.sin_port));
+        }
+        return std::string(host) + ":" + std::to_string(::ntohs(peer.sin_port));
+    }
 } // namespace mynet
+
+namespace mynet::handler
+{
+    using mynet::datagramPeerText;
+} // namespace mynet::handler

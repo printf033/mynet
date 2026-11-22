@@ -28,6 +28,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <getopt.h>
 #include <iostream>

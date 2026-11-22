@@ -242,15 +242,10 @@ TEST(HandlerHttp3, ConceptConformance)
     static_assert(HandlerConstraint<HandlerHttp3<>>);
     static_assert(DerivedFromHandlerDatagram<HandlerHttp3<>>);
     static_assert(Resettable<HandlerHttp3<>>);
-    static_assert(!DerivedFromHandlerConnection<HandlerHttp3<>>);
-    static_assert(!MandatoryMethodConnection<HandlerHttp3<>>);
-
     EXPECT_TRUE(MandatoryMethodDatagram<HandlerHttp3<>>);
     EXPECT_TRUE(HandlerConstraint<HandlerHttp3<>>);
     EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerHttp3<>>);
     EXPECT_TRUE(Resettable<HandlerHttp3<>>);
-    EXPECT_FALSE(DerivedFromHandlerConnection<HandlerHttp3<>>);
-    EXPECT_FALSE(MandatoryMethodConnection<HandlerHttp3<>>);
 }
 
 TEST(HandlerHttp3, ProcessStreamFramesGeneratesResponse)

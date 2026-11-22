@@ -55,6 +55,8 @@ namespace mynet::example
     class UdpEchoHandler : public HandlerDatagram
     {
     public:
+        static constexpr TransportType transport = TransportType::UDP;
+
         void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
             if (data != nullptr && n > 0)

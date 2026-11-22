@@ -176,27 +176,12 @@ namespace
         void pauseSplice() = delete;
     };
 
-    /// 双特化组合：两个并列的独立基类，成员访问均为直接偏移，不经过虚基类。
-    struct CombinedHandler : HandlerConnection, HandlerDatagram
+    /// 双特化组合：统一 HandlerBase 兼具流式与数据报双模能力
+    struct CombinedHandler : HandlerBase
     {
-        using HandlerConnection::fd;
-        using HandlerConnection::handle;
-
-        void reset() noexcept override
-        {
-            HandlerConnection::reset();
-            HandlerDatagram::reset();
-        }
-        void onMessageComplete() noexcept override
-        {
-            HandlerConnection::onMessageComplete();
-            HandlerDatagram::onMessageComplete();
-        }
-        void onParseError(const char *reason) noexcept override
-        {
-            HandlerConnection::onParseError(reason);
-            HandlerDatagram::onParseError(reason);
-        }
+        void reset() noexcept override { HandlerBase::reset(); }
+        void onMessageComplete() noexcept override { HandlerBase::onMessageComplete(); }
+        void onParseError(const char *reason) noexcept override { HandlerBase::onParseError(reason); }
         void onDatagram(const sockaddr_in &, const char *, size_t) noexcept override {}
     };
 
@@ -333,7 +318,7 @@ TEST(Constraints, HandlerConstraintEnforcement)
 TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
 {
     // 报文基类不承诺字节流契约；流式契约只由 HandlerConnection 提供
-    static_assert(!MandatoryMethodConnection<HandlerDatagram>);
+    static_assert(MandatoryMethodConnection<HandlerBase>);
     static_assert(MandatoryMethodConnection<HandlerConnection>);
     static_assert(MandatoryMethodConnection<FakeHandler>);
     // 两层要求各自可独立生效：结构齐全但不派生 → 仍被拒
@@ -352,7 +337,7 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     static_assert(!MandatoryMethodConnection<NonDerivedHandler>);
     static_assert(!MandatoryMethodConnection<NoReset>);
 
-    EXPECT_FALSE(MandatoryMethodConnection<HandlerDatagram>);
+    EXPECT_TRUE(MandatoryMethodConnection<HandlerBase>);
     EXPECT_TRUE(MandatoryMethodConnection<HandlerConnection>);
     EXPECT_FALSE(MandatoryMethodConnection<FullContractWithoutDerivation>);
     EXPECT_FALSE(MandatoryMethodConnection<LegacySixMemberHandler>);
@@ -371,44 +356,30 @@ TEST(Constraints, DerivedFromHandlerConnectionConstraints)
     static_assert(DerivedFromHandlerConnection<HandlerConnection>);
     static_assert(DerivedFromHandlerConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(DerivedFromHandlerConnection<CombinedHandler>);
-    static_assert(!DerivedFromHandlerConnection<HandlerHttp3<>>); // HTTP/3 纯报文处理器不继承 HandlerConnection
+    static_assert(DerivedFromHandlerConnection<HandlerHttp3<>>);
     static_assert(DerivedFromHandlerDatagram<HandlerHttp3<>>);
-    // 两个处理器基类并列独立，各自都满足通用生命周期契约
     static_assert(HandlerConstraint<HandlerConnection>);
     static_assert(HandlerConstraint<HandlerHttp3<>>);
 
-    // 报文基类不是流式处理器
-    static_assert(!DerivedFromHandlerConnection<HandlerDatagram>);
     static_assert(!DerivedFromHandlerConnection<NonDerivedHandler>);
 
     EXPECT_TRUE(DerivedFromHandlerConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
-    EXPECT_FALSE(DerivedFromHandlerConnection<HandlerHttp3<>>);
+    EXPECT_TRUE(DerivedFromHandlerConnection<HandlerHttp3<>>);
     EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerHttp3<>>);
-    EXPECT_FALSE(DerivedFromHandlerConnection<HandlerDatagram>);
+    EXPECT_FALSE(DerivedFromHandlerConnection<NonDerivedHandler>);
 }
 
-TEST(Constraints, HandlerBasesArePeersWithoutVirtualInheritance)
+TEST(Constraints, HandlerBaseIsUnifiedWithoutVirtualInheritance)
 {
-    // 双传输处理器同时继承两个并列的处理器基类。两者都不是虚基类：成员访问是
-    // 编译期确定的直接偏移，不经过 vbase offset 表，也不产生虚基类共享子对象的
-    // 构造/销毁记账。断言在此作为回归护栏：一旦有人把某个处理器基类改回
-    // `virtual` 继承（共享根），布局与访问开销会静默回退，这里会立刻失败。
 #if defined(__cpp_lib_is_virtual_base_of)
-    static_assert(!std::is_virtual_base_of_v<HandlerConnection, CombinedHandler>);
-    static_assert(!std::is_virtual_base_of_v<HandlerDatagram, CombinedHandler>);
+    static_assert(!std::is_virtual_base_of_v<HandlerBase, CombinedHandler>);
 #endif
 
-    // 两个基类各自贡献完整的子对象（虚继承下它们会共享/折叠布局）。
-    static_assert(sizeof(CombinedHandler) >= sizeof(HandlerConnection) + sizeof(HandlerDatagram));
-
-    // 两个基类互不派生：流式与报文是并列层次，没有共同祖先
-    static_assert(!std::derived_from<HandlerConnection, HandlerDatagram>);
-    static_assert(!std::derived_from<HandlerDatagram, HandlerConnection>);
-
-#if defined(__cpp_lib_is_virtual_base_of)
-    EXPECT_FALSE((std::is_virtual_base_of_v<HandlerConnection, CombinedHandler>));
-    EXPECT_FALSE((std::is_virtual_base_of_v<HandlerDatagram, CombinedHandler>));
-#endif
+    static_assert(std::same_as<HandlerConnection, HandlerBase>);
+    static_assert(std::same_as<HandlerDatagram, HandlerBase>);
+    static_assert(HandlerConstraint<HandlerBase>);
+    static_assert(MandatoryMethodConnection<HandlerBase>);
+    static_assert(MandatoryMethodDatagram<HandlerBase>);
 }
 
 TEST(Constraints, DerivedFromHandlerDatagramConstraints)
@@ -420,14 +391,12 @@ TEST(Constraints, DerivedFromHandlerDatagramConstraints)
     static_assert(std::derived_from<CombinedHandler, HandlerConnection>);
     static_assert(MandatoryMethodConnection<CombinedHandler>);
     static_assert(Resettable<CombinedHandler>);
-    static_assert(!DerivedFromHandlerDatagram<HandlerConnection>);
     static_assert(!DerivedFromHandlerDatagram<NonDerivedHandler>);
 
     EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerDatagram>);
     EXPECT_TRUE(DerivedFromHandlerDatagram<CombinedHandler>);
     EXPECT_TRUE(HandlerConstraint<CombinedHandler>);
     EXPECT_TRUE(MandatoryMethodConnection<CombinedHandler>);
-    EXPECT_FALSE(DerivedFromHandlerDatagram<HandlerConnection>);
 }
 
 TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
@@ -438,9 +407,9 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
     static_assert(MandatoryMethodDatagram<CombinedHandler>);
     static_assert(MandatoryMethodDatagram<HandlerHttp3<>>);
 
-    // 数据报路径不要求任何流式设施
-    static_assert(!MandatoryMethodConnection<PureDatagramHandler>);
-    static_assert(!MandatoryMethodConnection<HandlerDatagram>);
+    // 统一 HandlerBase 兼具流式与数据报双模能力
+    static_assert(MandatoryMethodConnection<PureDatagramHandler>);
+    static_assert(MandatoryMethodConnection<HandlerDatagram>);
 
     // 派生但缺必需方法 → 被拒
     static_assert(!MandatoryMethodDatagram<MissingMaxDatagramBytesHandler>);
@@ -451,7 +420,6 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
     static_assert(!MandatoryMethodDatagram<DatagramContractWithoutDerivation>);
 
     // 流式处理器不是数据报处理器，反之亦然
-    static_assert(!MandatoryMethodDatagram<HandlerConnection>);
     static_assert(!MandatoryMethodDatagram<NonDerivedHandler>);
 
     EXPECT_TRUE(MandatoryMethodDatagram<PureDatagramHandler>);
@@ -550,19 +518,24 @@ TEST(Constraints, AcceptorAndDialerPlaceholderZeroOverhead)
     static_assert(DerivedFromDialer<CustomDialer>);
 
     // 纯 TCP 反应器：自动推导推算出 1 个 TCP 监听器
-    using PureTcpReactor = Reactor<Acceptor<HandlerConnection>>;
+    using PureTcpReactor = Reactor<Acceptor<ProtoHttp>>;
     static_assert(PureTcpReactor::kListenerCount == 1);
     static_assert(PureTcpReactor::kHasTcp);
     static_assert(!PureTcpReactor::kHasUdp);
 
+    using BaseReactor = Reactor<Acceptor<HandlerConnection>>;
+    static_assert(BaseReactor::kListenerCount == 1);
+    static_assert(BaseReactor::kHasTcp);
+    static_assert(!BaseReactor::kHasUdp);
+
     // 纯 UDP 反应器：自动推导推算出 1 个 UDP 监听器
-    using PureUdpReactor = Reactor<Acceptor<HandlerDatagram>>;
+    using PureUdpReactor = Reactor<Acceptor<ProtoDns>>;
     static_assert(PureUdpReactor::kListenerCount == 1);
     static_assert(!PureUdpReactor::kHasTcp);
     static_assert(PureUdpReactor::kHasUdp);
 
     // 双传输反应器：自动推导推算出 2 个监听器 (1 个 TCP + 1 个 UDP)
-    using DualReactor = Reactor<Acceptor<HandlerConnection>, Acceptor<HandlerDatagram>>;
+    using DualReactor = Reactor<Acceptor<ProtoHttp>, Acceptor<ProtoDns>>;
     static_assert(DualReactor::kListenerCount == 2);
     static_assert(DualReactor::kHasTcp);
     static_assert(DualReactor::kHasUdp);
