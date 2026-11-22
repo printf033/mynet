@@ -17,6 +17,8 @@
 #include <concepts>
 #include <cstdint>
 #include <memory>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -69,6 +71,59 @@ namespace mynet
          * @brief 重置握手器状态
          */
         virtual void reset() noexcept {}
+
+        /**
+         * @brief 启动入站 TLS 握手绑定（握手由 Acceptor 专职负责）
+         */
+        static inline Result<SSL *> startTls(int clientFd, SSL_CTX *ctx) noexcept
+        {
+            if (ctx == nullptr) [[unlikely]]
+            {
+                LOG_ERROR("Acceptor::startTls: no SSL_CTX (fd {})", clientFd);
+                return std::unexpected(ERR::SSL_CTX_FAILED);
+            }
+            SSL *ssl = SSL_new(ctx);
+            if (ssl == nullptr) [[unlikely]]
+            {
+                LOG_ERROR("Acceptor::startTls: SSL_new() failed on fd {}", clientFd);
+                return std::unexpected(ERR::SSL_NEW_FAILED);
+            }
+#ifdef MYNET_HAVE_KTLS
+            SSL_set_options(ssl, SSL_OP_ENABLE_KTLS);
+#endif
+            if (SSL_set_fd(ssl, clientFd) != 1) [[unlikely]]
+            {
+                LOG_ERROR("Acceptor::startTls: SSL_set_fd failed on fd {}", clientFd);
+                SSL_free(ssl);
+                return std::unexpected(ERR::SSL_SET_FD_FAILED);
+            }
+            SSL_set_accept_state(ssl);
+            return ssl;
+        }
+
+        static inline Result<SSL *> startTLS(int clientFd, SSL_CTX *ctx) noexcept { return startTls(clientFd, ctx); }
+
+        /**
+         * @brief 驱动非阻塞 TLS 握手演进
+         */
+        static inline HandshakeStatus doTlsHandshake(SSL *ssl) noexcept
+        {
+            if (ssl == nullptr) [[likely]]
+            {
+                return HandshakeStatus::SUCCESS;
+            }
+            const int r = SSL_accept(ssl);
+            if (r == 1)
+            {
+                return HandshakeStatus::SUCCESS;
+            }
+            const int err = SSL_get_error(ssl, r);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+            {
+                return HandshakeStatus::IN_PROGRESS;
+            }
+            return HandshakeStatus::FAILED;
+        }
     };
 
     /**
@@ -109,6 +164,18 @@ namespace mynet
 
         [[nodiscard]] inline Inbound &inbound() noexcept { return inbound_; }
         [[nodiscard]] inline const Inbound &inbound() const noexcept { return inbound_; }
+
+        inline Result<SSL *> startTls(int clientFd, SSL_CTX *ctx) noexcept
+        {
+            return IAcceptor::startTls(clientFd, ctx);
+        }
+
+        inline Result<SSL *> startTLS(int clientFd, SSL_CTX *ctx) noexcept
+        {
+            return IAcceptor::startTls(clientFd, ctx);
+        }
+
+        inline HandshakeStatus doTlsHandshake(SSL *ssl) noexcept { return IAcceptor::doTlsHandshake(ssl); }
 
         HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn) override
         {
