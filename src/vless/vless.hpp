@@ -93,7 +93,7 @@ namespace mynet::handler
 
         void handle() override
         {
-            if (stage_ == InboundStage::HANDSHAKE)
+            if (inboundStage() == InboundStage::HANDSHAKE)
             {
                 if (!processHeader())
                 {
@@ -126,7 +126,7 @@ namespace mynet::handler
             if (data[0] != vless::kVersion)
             {
                 onParseError("VLESS: Unsupported version");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -172,7 +172,7 @@ namespace mynet::handler
             if (!authOk)
             {
                 onParseError("VLESS: Unauthorized UUID");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -203,7 +203,7 @@ namespace mynet::handler
                 sendReply();
             }
 
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)
@@ -279,7 +279,7 @@ namespace mynet::handler
                 sendVlessHeader();
             }
 
-            if (stage_ == OutboundStage::CONNECTING)
+            if (outboundStage() == OutboundStage::CONNECTING)
             {
                 // 等待服务端 2 字节握手回执 [0x00, 0x00]
                 if (requestBytes() >= 2)
@@ -294,7 +294,7 @@ namespace mynet::handler
                     if (requestBytes() >= static_cast<size_t>(2 + addonLen))
                     {
                         requestConsume(2 + addonLen);
-                        stage_ = OutboundStage::STREAMING;
+                        setStage(OutboundStage::STREAMING);
                     }
                 }
             }
@@ -351,7 +351,7 @@ namespace mynet::handler
             [[maybe_unused]] auto _ =
                 pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));
             headerSent_ = true;
-            stage_ = OutboundStage::CONNECTING;
+            setStage(OutboundStage::CONNECTING);
         }
     };
 

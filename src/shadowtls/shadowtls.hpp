@@ -98,7 +98,7 @@ namespace mynet::handler
         {
             (void)reason;
             shadowTlsStage_ = ShadowTlsStage::ERROR;
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         void handle()
@@ -129,7 +129,7 @@ namespace mynet::handler
                 clientAuthenticated_ = false;
                 targetAddress_ = fallbackTarget_;
                 shadowTlsStage_ = ShadowTlsStage::STREAMING;
-                stage_ = InboundStage::STREAMING;
+                setStage(InboundStage::STREAMING);
                 onMessageComplete();
                 if (requestCallback_)
                 {
@@ -151,7 +151,7 @@ namespace mynet::handler
                 clientAuthenticated_ = false;
                 targetAddress_ = fallbackTarget_;
                 shadowTlsStage_ = ShadowTlsStage::STREAMING;
-                stage_ = InboundStage::STREAMING;
+                setStage(InboundStage::STREAMING);
                 onMessageComplete();
                 if (requestCallback_)
                 {
@@ -241,7 +241,7 @@ namespace mynet::handler
             }
 
             shadowTlsStage_ = ShadowTlsStage::STREAMING;
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (shadowTlsCallback_)

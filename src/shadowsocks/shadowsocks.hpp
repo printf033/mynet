@@ -128,7 +128,7 @@ namespace mynet::handler
         {
             (void)reason;
             ssStage_ = ShadowsocksStage::ERROR;
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         void handle()
@@ -242,7 +242,7 @@ namespace mynet::handler
                 targetResolved_ = true;
                 requestConsume(consumed);
                 ssStage_ = ShadowsocksStage::STREAMING;
-                stage_ = InboundStage::STREAMING;
+                setStage(InboundStage::STREAMING);
                 onMessageComplete();
 
                 if (requestCallback_)
@@ -270,7 +270,7 @@ namespace mynet::handler
             {
                 onParseError("Shadowsocks: HKDF subkey derivation failed");
                 ssStage_ = ShadowsocksStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -301,7 +301,7 @@ namespace mynet::handler
             {
                 onParseError("Shadowsocks: Decrypt chunk length failed");
                 ssStage_ = ShadowsocksStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -311,7 +311,7 @@ namespace mynet::handler
             {
                 onParseError("Shadowsocks: Invalid decrypted chunk length");
                 ssStage_ = ShadowsocksStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -322,7 +322,7 @@ namespace mynet::handler
             {
                 onParseError("Shadowsocks: Chunk length exceeds 0x3FFF");
                 ssStage_ = ShadowsocksStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -352,7 +352,7 @@ namespace mynet::handler
             {
                 onParseError("Shadowsocks: Decrypt chunk payload failed");
                 ssStage_ = ShadowsocksStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -368,7 +368,7 @@ namespace mynet::handler
                 {
                     onParseError("Shadowsocks: Failed to decode initial destination address");
                     ssStage_ = ShadowsocksStage::ERROR;
-                    stage_ = InboundStage::ERROR;
+                    setStage(InboundStage::ERROR);
                     setCloseAfterResponse(true);
                     return false;
                 }
@@ -376,7 +376,7 @@ namespace mynet::handler
                 targetAddress_ = std::move(target);
                 targetResolved_ = true;
                 ssStage_ = ShadowsocksStage::STREAMING;
-                stage_ = InboundStage::STREAMING;
+                setStage(InboundStage::STREAMING);
                 onMessageComplete();
 
                 if (plainPayload.size() > addrConsumed)
@@ -532,7 +532,7 @@ namespace mynet::handler
             packet.append(reinterpret_cast<const char *>(payloadTag.data()), payloadTag.size());
 
             [[maybe_unused]] auto _ = pushResponse(packet);
-            stage_ = OutboundStage::STREAMING;
+            setStage(OutboundStage::STREAMING);
         }
     };
 

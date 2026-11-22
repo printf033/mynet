@@ -261,10 +261,10 @@ namespace mynet
         ForwarderConfig config_{};
         ForwarderStats stats_{};
 
-        handler::HandlerInboundConnectionBase *inbound_{nullptr};
-        handler::HandlerOutboundConnectionBase *outbound_{nullptr};
-        std::unique_ptr<handler::HandlerInboundConnectionBase> ownedInbound_{nullptr};
-        std::unique_ptr<handler::HandlerOutboundConnectionBase> ownedOutbound_{nullptr};
+        HandlerBase *inbound_{nullptr};
+        HandlerBase *outbound_{nullptr};
+        std::unique_ptr<HandlerBase> ownedInbound_{nullptr};
+        std::unique_ptr<HandlerBase> ownedOutbound_{nullptr};
         int inboundFd_{-1};
         int outboundFd_{-1};
         int sockmapFd_{-1};
@@ -305,20 +305,20 @@ namespace mynet
         [[nodiscard]] inline int inboundFd() const noexcept { return inboundFd_; }
         [[nodiscard]] inline int outboundFd() const noexcept { return outboundFd_; }
         [[nodiscard]] inline int sockmapFd() const noexcept { return sockmapFd_; }
-        [[nodiscard]] inline handler::HandlerInboundConnectionBase *inbound() noexcept { return inbound_; }
-        [[nodiscard]] inline handler::HandlerOutboundConnectionBase *outbound() noexcept { return outbound_; }
+        [[nodiscard]] inline HandlerBase *inbound() noexcept { return inbound_; }
+        [[nodiscard]] inline HandlerBase *outbound() noexcept { return outbound_; }
         [[nodiscard]] inline const handler::ProxyAddress &target() const noexcept { return target_; }
 
         inline void setTarget(const handler::ProxyAddress &target) noexcept { target_ = target; }
         inline void setInboundFd(int fd) noexcept { inboundFd_ = fd; }
         inline void setOutboundFd(int fd) noexcept { outboundFd_ = fd; }
         inline void setSockmapFd(int fd) noexcept { sockmapFd_ = fd; }
-        inline void setOwnedInbound(std::unique_ptr<handler::HandlerInboundConnectionBase> in) noexcept
+        inline void setOwnedInbound(std::unique_ptr<HandlerBase> in) noexcept
         {
             ownedInbound_ = std::move(in);
             inbound_ = ownedInbound_.get();
         }
-        inline void setOwnedOutbound(std::unique_ptr<handler::HandlerOutboundConnectionBase> out) noexcept
+        inline void setOwnedOutbound(std::unique_ptr<HandlerBase> out) noexcept
         {
             ownedOutbound_ = std::move(out);
             outbound_ = ownedOutbound_.get();
@@ -358,8 +358,7 @@ namespace mynet
          * @param userSslActive 是否存在用户态 SSL（若为 true 则禁止 splice 强制走用户态缓冲）
          * @return size_t 桥接初始化阶段预排空摄入的残余字节数
          */
-        size_t attach(handler::HandlerInboundConnectionBase &in, handler::HandlerOutboundConnectionBase &out,
-                      int inFd = -1, int outFd = -1, bool userSslActive = false)
+        size_t attach(HandlerBase &in, HandlerBase &out, int inFd = -1, int outFd = -1, bool userSslActive = false)
         {
             inbound_ = &in;
             outbound_ = &out;
@@ -1140,8 +1139,7 @@ namespace mynet
          * @param cfg 显式转发配置覆盖（可选）
          * @return std::shared_ptr<ForwarderStreamSession> 转发会话句柄
          */
-        std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnectionBase &inbound,
-                                                       handler::HandlerOutboundConnectionBase &outbound,
+        std::shared_ptr<ForwarderStreamSession> bridge(HandlerBase &inbound, HandlerBase &outbound,
                                                        std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
@@ -1182,8 +1180,8 @@ namespace mynet
             session->setSockmapFd(sockmapFd_);
 
             const bool userSsl = (inboundConn.ssl() != nullptr || outboundConn.ssl() != nullptr);
-            auto *inHandler = static_cast<handler::HandlerInboundConnectionBase *>(inboundConn.handler());
-            auto *outHandler = static_cast<handler::HandlerOutboundConnectionBase *>(outboundConn.handler());
+            auto *inHandler = inboundConn.handler();
+            auto *outHandler = outboundConn.handler();
             contract_assert(inHandler != nullptr && outHandler != nullptr);
 
             [[maybe_unused]] auto preFlushed =
@@ -1438,8 +1436,8 @@ namespace mynet
         /**
          * @brief 将上游响应的数据报封装并回传给客户端
          */
-        [[nodiscard]] Result<size_t> forwardDatagramToClient(handler::HandlerInboundDatagramBase &inbound,
-                                                             const sockaddr_in &client, std::string_view payload,
+        [[nodiscard]] Result<size_t> forwardDatagramToClient(HandlerBase &inbound, const sockaddr_in &client,
+                                                             std::string_view payload,
                                                              ForwarderDatagramSession *session = nullptr) noexcept
         {
             if (payload.empty())

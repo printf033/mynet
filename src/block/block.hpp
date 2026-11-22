@@ -24,7 +24,7 @@ namespace mynet::handler
         HandlerInboundBlock() noexcept
         {
             setCloseAfterResponse(true);
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         ~HandlerInboundBlock() noexcept override = default;
@@ -38,7 +38,7 @@ namespace mynet::handler
         {
             HandlerInboundConnectionBase::reset();
             setCloseAfterResponse(true);
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         void handle() override
@@ -62,14 +62,14 @@ namespace mynet::handler
         HandlerOutboundBlock() noexcept
         {
             setCloseAfterResponse(true);
-            stage_ = OutboundStage::ERROR;
+            setStage(OutboundStage::ERROR);
         }
 
         void reset() noexcept override
         {
             HandlerOutboundConnectionBase::reset();
             setCloseAfterResponse(true);
-            stage_ = OutboundStage::ERROR;
+            setStage(OutboundStage::ERROR);
         }
 
         void handle() override

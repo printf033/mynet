@@ -468,8 +468,7 @@ namespace mynet
         /**
          * @brief 直接桥接入站与出站协议处理器并纳入数据面流中继
          */
-        inline std::shared_ptr<ForwarderStreamSession> bridge(handler::HandlerInboundConnectionBase &inbound,
-                                                              handler::HandlerOutboundConnectionBase &outbound,
+        inline std::shared_ptr<ForwarderStreamSession> bridge(HandlerBase &inbound, HandlerBase &outbound,
                                                               std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             if (forwarder_ != nullptr)
@@ -569,8 +568,8 @@ namespace mynet
          * @param enableSniffing 是否开启首包域名嗅探
          * @return CoreDispatchResult 调度决断与转发会话结果
          */
-        CoreDispatchResult dispatch(handler::HandlerInboundConnectionBase &inbound, int inFd = -1,
-                                    std::string_view inboundTag = "", bool enableSniffing = true)
+        CoreDispatchResult dispatch(HandlerBase &inbound, int inFd = -1, std::string_view inboundTag = "",
+                                    bool enableSniffing = true)
         {
             CoreDispatchResult result;
 
@@ -638,7 +637,7 @@ namespace mynet
             }
 
             // 若命中拦截黑洞 (Block)
-            if (dialRes->handler->stage() == handler::OutboundStage::ERROR)
+            if (dialRes->handler->outboundStage() == handler::OutboundStage::ERROR)
             {
                 result.status = CoreDispatchStatus::BLOCKED;
                 inbound.setCloseAfterResponse(true);

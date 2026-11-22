@@ -61,7 +61,7 @@ namespace mynet::handler
 
         void handle() override
         {
-            if (stage_ == InboundStage::HANDSHAKE)
+            if (inboundStage() == InboundStage::HANDSHAKE)
             {
                 if (!processAuth())
                 {
@@ -110,7 +110,7 @@ namespace mynet::handler
             {
                 sendReply(hysteria2::kStatusAuthFailed);
                 onParseError("Hysteria2: Authentication failed");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -137,7 +137,7 @@ namespace mynet::handler
                 sendReply(hysteria2::kStatusOk);
             }
 
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)
@@ -182,7 +182,7 @@ namespace mynet::handler
                 sendHandshakeHeader();
             }
 
-            if (stage_ == OutboundStage::CONNECTING)
+            if (outboundStage() == OutboundStage::CONNECTING)
             {
                 if (requestBytes() >= 1)
                 {
@@ -193,7 +193,7 @@ namespace mynet::handler
                         return;
                     }
                     requestConsume(1);
-                    stage_ = OutboundStage::STREAMING;
+                    setStage(OutboundStage::STREAMING);
                 }
             }
         }
@@ -215,7 +215,7 @@ namespace mynet::handler
             [[maybe_unused]] auto _ =
                 pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));
             headerSent_ = true;
-            stage_ = OutboundStage::CONNECTING;
+            setStage(OutboundStage::CONNECTING);
         }
     };
 

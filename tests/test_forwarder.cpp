@@ -214,7 +214,7 @@ TEST(ForwarderTest, DatagramForwardingAndSweep)
     EXPECT_EQ(forwarder.activeDatagramSessions(), 1u);
 
     // 模拟数据报回复回写给客户端
-    HandlerInboundDatagramBase inbound;
+    HandlerBase inbound;
     const std::string dnsResp = "DNS_PACKET_RESPONSE_PAYLOAD";
     auto res = forwarder.forwardDatagramToClient(inbound, client, dnsResp, session.get());
     ASSERT_TRUE(res.has_value());

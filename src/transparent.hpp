@@ -95,7 +95,7 @@ namespace mynet::handler
         {
             (void)reason;
             transparentStage_ = TransparentStage::ERROR;
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         void handle() override
@@ -132,7 +132,7 @@ namespace mynet::handler
             {
                 onParseError("Redirect: SO_ORIGINAL_DST not found on socket");
                 transparentStage_ = TransparentStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return;
             }
@@ -142,7 +142,7 @@ namespace mynet::handler
                 // 若禁用嗅探，尝试反查 DNS 逆向缓存后直接就绪
                 tryFallbackReverseDns();
                 transparentStage_ = TransparentStage::STREAMING;
-                stage_ = InboundStage::STREAMING;
+                setStage(InboundStage::STREAMING);
                 command_ = 0x01;
                 onMessageComplete();
                 if (requestCallback_)
@@ -154,7 +154,7 @@ namespace mynet::handler
 
             // 进入嗅探状态，等待首包负载到达
             transparentStage_ = TransparentStage::SNIFFING;
-            stage_ = InboundStage::HANDSHAKE;
+            setStage(InboundStage::HANDSHAKE);
         }
 
         void sniffPayload()
@@ -162,7 +162,7 @@ namespace mynet::handler
             const size_t avail = requestBytes();
             if (avail == 0)
             {
-                stage_ = InboundStage::HANDSHAKE;
+                setStage(InboundStage::HANDSHAKE);
                 return;
             }
 
@@ -198,7 +198,7 @@ namespace mynet::handler
             }
             else
             {
-                stage_ = InboundStage::HANDSHAKE;
+                setStage(InboundStage::HANDSHAKE);
             }
         }
 
@@ -217,7 +217,7 @@ namespace mynet::handler
         void transitionToStreaming()
         {
             transparentStage_ = TransparentStage::STREAMING;
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             command_ = 0x01;
             onMessageComplete();
 
@@ -397,7 +397,7 @@ namespace mynet
             return {};
         }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundTProxy>();
         }
@@ -481,7 +481,7 @@ namespace mynet
             InboundBase::close();
         }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundTProxy>();
         }

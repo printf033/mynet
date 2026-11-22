@@ -242,10 +242,10 @@ namespace mynet::handler
                 [[maybe_unused]] auto _ =
                     pushResponse(std::string_view(reinterpret_cast<const char *>(frame.data()), frame.size()));
                 querySent_ = true;
-                stage_ = OutboundStage::CONNECTING;
+                setStage(OutboundStage::CONNECTING);
             }
 
-            if (stage_ == OutboundStage::CONNECTING && requestBytes() >= 2)
+            if (outboundStage() == OutboundStage::CONNECTING && requestBytes() >= 2)
             {
                 const auto *raw = reinterpret_cast<const uint8_t *>(requestBegin());
                 const uint16_t msgLen = (static_cast<uint16_t>(raw[0]) << 8) | raw[1];
@@ -259,7 +259,7 @@ namespace mynet::handler
                         dns::DnsReverseCache::instance().insertFromDnsMessage(*resp);
                         responseMessage_ = std::move(resp);
                         requestConsume(2 + msgLen);
-                        stage_ = OutboundStage::STREAMING;
+                        setStage(OutboundStage::STREAMING);
                     }
                     else
                     {

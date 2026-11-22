@@ -1645,118 +1645,28 @@ namespace mynet
 
 namespace mynet::handler
 {
-    class HandlerInboundDatagramBase : public mynet::HandlerBase
-    {
-    protected:
-        InboundStage stage_{InboundStage::STREAMING};
-
-    public:
-        HandlerInboundDatagramBase() noexcept = default;
-        explicit HandlerInboundDatagramBase(const sockaddr_in &peer) noexcept
-            : HandlerDatagram(peer)
-        {
-        }
-        ~HandlerInboundDatagramBase() noexcept override = default;
-
-        void setStage(InboundStage st) noexcept { stage_ = st; }
-        [[nodiscard]] inline InboundStage inboundStage() const noexcept { return stage_; }
-        [[nodiscard]] inline InboundStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == InboundStage::STREAMING; }
-
-        void reset() noexcept override
-        {
-            HandlerBase::reset();
-            stage_ = InboundStage::STREAMING;
-        }
-
-        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = InboundStage::ERROR; }
-    };
-
-    class HandlerOutboundDatagramBase : public mynet::HandlerBase
-    {
-    protected:
-        OutboundStage stage_{OutboundStage::STREAMING};
-
-    public:
-        HandlerOutboundDatagramBase() noexcept = default;
-        explicit HandlerOutboundDatagramBase(const sockaddr_in &peer) noexcept
-            : HandlerDatagram(peer)
-        {
-        }
-        ~HandlerOutboundDatagramBase() noexcept override = default;
-
-        void setStage(OutboundStage st) noexcept { stage_ = st; }
-        [[nodiscard]] inline OutboundStage outboundStage() const noexcept { return stage_; }
-        [[nodiscard]] inline OutboundStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == OutboundStage::STREAMING; }
-
-        void reset() noexcept override
-        {
-            HandlerBase::reset();
-            stage_ = OutboundStage::STREAMING;
-        }
-
-        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = OutboundStage::ERROR; }
-    };
-
+    /**
+     * @brief 入站协议处理器适配层（轻量无状态转译，单一根基类 HandlerBase）
+     */
     class HandlerInboundBase : public mynet::HandlerBase
     {
-    protected:
-        InboundStage stage_{InboundStage::HANDSHAKE};
-
     public:
-        using HandlerInboundConnectionBase = HandlerInboundBase;
-        using HandlerInbound = HandlerInboundBase;
-        using RequestCallback = HandlerBase::RequestCallback;
-        using DatagramCallback = HandlerBase::DatagramCallback;
-
-        HandlerInboundBase() noexcept = default;
-        ~HandlerInboundBase() noexcept override = default;
-
-        void setStage(InboundStage st) noexcept { stage_ = st; }
-        [[nodiscard]] inline InboundStage inboundStage() const noexcept { return stage_; }
-        [[nodiscard]] inline InboundStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == InboundStage::STREAMING; }
-
-        void reset() noexcept override
-        {
-            HandlerBase::reset();
-            stage_ = InboundStage::HANDSHAKE;
-        }
-
-        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = InboundStage::ERROR; }
+        using HandlerBase::HandlerBase;
+        [[nodiscard]] inline InboundStage stage() const noexcept { return inboundStage(); }
     };
 
+    /**
+     * @brief 出站协议处理器适配层（轻量无状态转译，单一根基类 HandlerBase）
+     */
     class HandlerOutboundBase : public mynet::HandlerBase
     {
-    protected:
-        OutboundStage stage_{OutboundStage::INITIAL};
-
     public:
-        using HandlerOutboundConnectionBase = HandlerOutboundBase;
-        using HandlerOutbound = HandlerOutboundBase;
-
-        HandlerOutboundBase() noexcept = default;
-        explicit HandlerOutboundBase(const handler::ProxyAddress &target) noexcept
-            : HandlerBase(target)
-        {
-        }
-        ~HandlerOutboundBase() noexcept override = default;
-
-        void setStage(OutboundStage st) noexcept { stage_ = st; }
-        [[nodiscard]] inline OutboundStage outboundStage() const noexcept { return stage_; }
-        [[nodiscard]] inline OutboundStage stage() const noexcept { return stage_; }
-        [[nodiscard]] bool isEstablished() const noexcept override { return stage_ == OutboundStage::STREAMING; }
-
-        void reset() noexcept override
-        {
-            HandlerBase::reset();
-            stage_ = OutboundStage::INITIAL;
-        }
-
-        void onParseError([[maybe_unused]] const char *reason) noexcept override { stage_ = OutboundStage::ERROR; }
+        using HandlerBase::HandlerBase;
+        [[nodiscard]] inline OutboundStage stage() const noexcept { return outboundStage(); }
     };
 
+    using HandlerInboundDatagramBase = HandlerInboundBase;
+    using HandlerOutboundDatagramBase = HandlerOutboundBase;
     using HandlerInboundConnectionBase = HandlerInboundBase;
     using HandlerOutboundConnectionBase = HandlerOutboundBase;
     using HandlerInbound = HandlerInboundBase;
@@ -1765,10 +1675,12 @@ namespace mynet::handler
 
 namespace mynet
 {
-    using HandlerInboundConnectionBase = handler::HandlerInboundBase;
-    using HandlerOutboundConnectionBase = handler::HandlerOutboundBase;
     using HandlerInboundBase = handler::HandlerInboundBase;
     using HandlerOutboundBase = handler::HandlerOutboundBase;
-    using HandlerInbound = handler::HandlerInboundBase;
-    using HandlerOutbound = handler::HandlerOutboundBase;
+    using HandlerInboundDatagramBase = handler::HandlerInboundDatagramBase;
+    using HandlerOutboundDatagramBase = handler::HandlerOutboundDatagramBase;
+    using HandlerInboundConnectionBase = handler::HandlerInboundConnectionBase;
+    using HandlerOutboundConnectionBase = handler::HandlerOutboundConnectionBase;
+    using HandlerInbound = handler::HandlerInbound;
+    using HandlerOutbound = handler::HandlerOutbound;
 } // namespace mynet

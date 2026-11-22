@@ -80,7 +80,7 @@ namespace mynet::handler
         {
             (void)reason;
             httpStage_ = HttpProxyStage::ERROR;
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         void handle()
@@ -124,7 +124,7 @@ namespace mynet::handler
             {
                 onParseError("HTTP Proxy: Invalid request line");
                 httpStage_ = HttpProxyStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -135,7 +135,7 @@ namespace mynet::handler
             {
                 onParseError("HTTP Proxy: Invalid request line format");
                 httpStage_ = HttpProxyStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -155,7 +155,7 @@ namespace mynet::handler
                                                                       "Connection: close\r\n\r\n";
                     [[maybe_unused]] auto _ = pushResponse(kAuthRequired);
                     httpStage_ = HttpProxyStage::ERROR;
-                    stage_ = InboundStage::ERROR;
+                    setStage(InboundStage::ERROR);
                     setCloseAfterResponse(true);
                     requestConsume(totalHeaderSize);
                     return false;
@@ -174,7 +174,7 @@ namespace mynet::handler
                 {
                     onParseError("HTTP Proxy: Invalid CONNECT target address");
                     httpStage_ = HttpProxyStage::ERROR;
-                    stage_ = InboundStage::ERROR;
+                    setStage(InboundStage::ERROR);
                     setCloseAfterResponse(true);
                     return false;
                 }
@@ -188,7 +188,7 @@ namespace mynet::handler
                 [[maybe_unused]] auto _ = pushResponse(kEstablished);
 
                 httpStage_ = HttpProxyStage::STREAMING;
-                stage_ = InboundStage::STREAMING;
+                setStage(InboundStage::STREAMING);
                 onMessageComplete();
 
                 if (requestCallback_)
@@ -214,14 +214,14 @@ namespace mynet::handler
                 {
                     onParseError("HTTP Proxy: Missing target host in plain proxy request");
                     httpStage_ = HttpProxyStage::ERROR;
-                    stage_ = InboundStage::ERROR;
+                    setStage(InboundStage::ERROR);
                     setCloseAfterResponse(true);
                     return false;
                 }
                 targetAddress_ = std::move(addr);
 
                 httpStage_ = HttpProxyStage::STREAMING;
-                stage_ = InboundStage::STREAMING;
+                setStage(InboundStage::STREAMING);
                 onMessageComplete();
 
                 if (requestCallback_)
@@ -426,7 +426,7 @@ namespace mynet::handler
                 req.append("\r\n");
                 [[maybe_unused]] auto _ = pushResponse(std::move(req));
                 step_ = Step::RECV_CONNECT;
-                stage_ = OutboundStage::CONNECTING;
+                setStage(OutboundStage::CONNECTING);
                 break;
             }
             case Step::RECV_CONNECT:
@@ -451,7 +451,7 @@ namespace mynet::handler
                 }
                 requestConsume(headerEnd + 4);
                 step_ = Step::DONE;
-                stage_ = OutboundStage::STREAMING;
+                setStage(OutboundStage::STREAMING);
                 break;
             }
             case Step::DONE:

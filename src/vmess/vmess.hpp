@@ -105,7 +105,7 @@ namespace mynet::handler
         {
             (void)reason;
             vmessStage_ = VmessStage::ERROR;
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         void handle()
@@ -155,7 +155,7 @@ namespace mynet::handler
             {
                 onParseError("VMess: Invalid AuthID");
                 vmessStage_ = VmessStage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -216,7 +216,7 @@ namespace mynet::handler
             }
 
             vmessStage_ = VmessStage::STREAMING;
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)
@@ -321,7 +321,7 @@ namespace mynet::handler
             [[maybe_unused]] auto _ =
                 pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));
             headerSent_ = true;
-            stage_ = OutboundStage::STREAMING;
+            setStage(OutboundStage::STREAMING);
         }
     };
 

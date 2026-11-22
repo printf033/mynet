@@ -73,7 +73,7 @@ namespace mynet::handler
 
         void handle() override
         {
-            if (stage_ == InboundStage::HANDSHAKE)
+            if (inboundStage() == InboundStage::HANDSHAKE)
             {
                 if (!processHeader())
                 {
@@ -100,7 +100,7 @@ namespace mynet::handler
             if (data[trojan::kKeyLength] != '\r' || data[trojan::kKeyLength + 1] != '\n')
             {
                 onParseError("Trojan: Missing CRLF after auth key");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -125,7 +125,7 @@ namespace mynet::handler
             if (!authOk)
             {
                 onParseError("Trojan: Unauthorized user hex key");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -152,7 +152,7 @@ namespace mynet::handler
             if (data[afterAddr] != '\r' || data[afterAddr + 1] != '\n')
             {
                 onParseError("Trojan: Missing CRLF after target address");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -162,7 +162,7 @@ namespace mynet::handler
             targetAddress_ = std::move(target);
             requestConsume(totalHeaderSize);
 
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)
@@ -238,7 +238,7 @@ namespace mynet::handler
 
             [[maybe_unused]] auto _ = pushResponse(std::move(header));
             headerSent_ = true;
-            stage_ = OutboundStage::STREAMING;
+            setStage(OutboundStage::STREAMING);
         }
     };
 

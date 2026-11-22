@@ -31,7 +31,7 @@ namespace mynet
         [[nodiscard]] inline const std::string &username() const noexcept { return username_; }
         [[nodiscard]] inline const std::string &password() const noexcept { return password_; }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
         {
             auto h = std::make_unique<handler::HandlerInboundSocks5>();
             if (!username_.empty() || !password_.empty())

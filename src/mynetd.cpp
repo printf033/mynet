@@ -40,7 +40,7 @@
 namespace
 {
 
-    class KernelProxyHandler : public mynet::handler::HandlerInboundConnectionBase
+    class KernelProxyHandler : public mynet::HandlerBase
     {
     public:
         inline static mynet::Core *g_core = nullptr;
@@ -89,7 +89,7 @@ namespace
 
             if (activeHandler_->isEstablished())
             {
-                stage_ = mynet::handler::InboundStage::STREAMING;
+                setStage(mynet::handler::InboundStage::STREAMING);
                 targetAddress_ = activeHandler_->targetAddress();
                 command_ = activeHandler_->command();
 
@@ -115,7 +115,7 @@ namespace
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            mynet::HandlerBase::reset();
             activeHandler_ = nullptr;
             s4_.reset();
             s5_.reset();
@@ -135,7 +135,7 @@ namespace
                     (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'));
         }
 
-        void syncToChild(mynet::handler::HandlerInboundConnectionBase &child)
+        void syncToChild(mynet::HandlerBase &child)
         {
             const size_t avail = requestBytes();
             if (avail > child.requestBytes())
@@ -146,7 +146,7 @@ namespace
             }
         }
 
-        void syncFromChild(mynet::handler::HandlerInboundConnectionBase &child)
+        void syncFromChild(mynet::HandlerBase &child)
         {
             const size_t childAvail = child.requestBytes();
             if (requestBytes() > childAvail)
@@ -172,7 +172,7 @@ namespace
         }
 
         bool dispatched_{false};
-        mynet::handler::HandlerInboundConnectionBase *activeHandler_{nullptr};
+        mynet::HandlerBase *activeHandler_{nullptr};
         mynet::handler::HandlerInboundSocks4 s4_{};
         mynet::handler::HandlerInboundSocks5 s5_{};
         mynet::handler::HandlerInboundHttpProxy http_{};

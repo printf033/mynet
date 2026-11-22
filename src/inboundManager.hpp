@@ -124,7 +124,7 @@ namespace mynet
         /**
          * @brief 为新接入的连接创建对应的协议状态机处理器
          */
-        [[nodiscard]] virtual std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() = 0;
+        [[nodiscard]] virtual std::unique_ptr<HandlerBase> createHandler() = 0;
     };
 
 } // namespace mynet
@@ -145,7 +145,7 @@ namespace mynet::inbound
     /**
      * @brief 驱动新接入的客户端套接字完成入站协议握手与目标地址解析
      */
-    inline bool driveHandshake(int clientFd, handler::HandlerInboundConnectionBase &handler, int timeoutMs = 2000)
+    inline bool driveHandshake(int clientFd, HandlerBase &handler, int timeoutMs = 2000)
     {
         while (!handler.isEstablished() && handler.inboundStage() != handler::InboundStage::ERROR)
         {

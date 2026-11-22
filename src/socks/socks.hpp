@@ -126,7 +126,7 @@ namespace mynet::handler
                 syncFromChild(s4_);
                 if (s4_.isEstablished())
                 {
-                    stage_ = InboundStage::STREAMING;
+                    setStage(InboundStage::STREAMING);
                     targetAddress_ = s4_.targetAddress();
                     command_ = s4_.command();
                 }
@@ -138,7 +138,7 @@ namespace mynet::handler
                 syncFromChild(s5_);
                 if (s5_.isEstablished())
                 {
-                    stage_ = InboundStage::STREAMING;
+                    setStage(InboundStage::STREAMING);
                     targetAddress_ = s5_.targetAddress();
                     command_ = s5_.command();
                 }

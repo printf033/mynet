@@ -68,7 +68,7 @@ namespace mynet::handler
 
         void handle() override
         {
-            if (stage_ == InboundStage::HANDSHAKE)
+            if (inboundStage() == InboundStage::HANDSHAKE)
             {
                 if (!processHeader())
                 {
@@ -112,7 +112,7 @@ namespace mynet::handler
             {
                 sendReply(tuic::kRepAuthFailure);
                 onParseError("TUIC: Unauthorized UUID");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -138,7 +138,7 @@ namespace mynet::handler
                 sendReply(tuic::kRepSuccess);
             }
 
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)

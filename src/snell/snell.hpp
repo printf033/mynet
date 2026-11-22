@@ -56,7 +56,7 @@ namespace mynet::handler
 
         void handle() override
         {
-            if (stage_ == InboundStage::HANDSHAKE)
+            if (inboundStage() == InboundStage::HANDSHAKE)
             {
                 if (!processHeader())
                 {
@@ -82,7 +82,7 @@ namespace mynet::handler
             if (ver != version_ && version_ != 0)
             {
                 onParseError("Snell: Version mismatch");
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -108,7 +108,7 @@ namespace mynet::handler
             targetAddress_ = std::move(target);
             requestConsume(totalHeaderSize);
 
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)

@@ -95,7 +95,7 @@ namespace mynet::handler
         {
             (void)reason;
             socks4Stage_ = Socks4Stage::ERROR;
-            stage_ = InboundStage::ERROR;
+            setStage(InboundStage::ERROR);
         }
 
         void handle()
@@ -139,7 +139,7 @@ namespace mynet::handler
             {
                 onParseError("SOCKS4: Invalid version");
                 socks4Stage_ = Socks4Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -187,7 +187,7 @@ namespace mynet::handler
             {
                 sendReply(socks4::kRepRejected);
                 socks4Stage_ = Socks4Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 requestConsume(totalExpected);
                 return false;
@@ -211,7 +211,7 @@ namespace mynet::handler
             {
                 sendReply(socks4::kRepRejected);
                 socks4Stage_ = Socks4Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -222,7 +222,7 @@ namespace mynet::handler
             }
 
             socks4Stage_ = Socks4Stage::STREAMING;
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)

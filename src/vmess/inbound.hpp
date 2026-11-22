@@ -30,7 +30,7 @@ namespace mynet
 
         [[nodiscard]] std::string_view uuid() const noexcept { return uuid_; }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
         {
             auto h = std::make_unique<handler::HandlerInboundVmess>(uuid_);
             return h;

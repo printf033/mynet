@@ -52,7 +52,7 @@ TEST(OutboundManagerTest, OutboundBlockBehavior)
 
     // 状态机应标记为已关闭/错误
     EXPECT_TRUE(res->handler->closeAfterResponse());
-    EXPECT_EQ(res->handler->stage(), OutboundStage::ERROR);
+    EXPECT_EQ(res->handler->outboundStage(), OutboundStage::ERROR);
 }
 
 // =============================================================================
@@ -88,7 +88,7 @@ TEST(OutboundManagerTest, OutboundDirectLocalhost)
     EXPECT_GE(res->fd, 0);
     EXPECT_EQ(res->outboundTag, "direct");
     ASSERT_NE(res->handler, nullptr);
-    EXPECT_EQ(res->handler->stage(), OutboundStage::STREAMING);
+    EXPECT_EQ(res->handler->outboundStage(), OutboundStage::STREAMING);
 
     // 接受并验证服务端收到连接
     sockaddr_in peer{};

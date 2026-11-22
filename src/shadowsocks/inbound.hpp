@@ -31,7 +31,7 @@ namespace mynet
         [[nodiscard]] inline const std::string &method() const noexcept { return method_; }
         [[nodiscard]] inline const std::string &password() const noexcept { return password_; }
 
-        [[nodiscard]] std::unique_ptr<handler::HandlerInboundConnectionBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundShadowsocks>(method_, password_);
         }

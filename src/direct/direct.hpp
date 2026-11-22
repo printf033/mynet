@@ -28,12 +28,12 @@ namespace mynet::handler
         bool triggered_{false};
 
     public:
-        HandlerInboundDirect() noexcept { stage_ = InboundStage::STREAMING; }
+        HandlerInboundDirect() noexcept { setStage(InboundStage::STREAMING); }
 
         explicit HandlerInboundDirect(const ProxyAddress &target) noexcept
         {
             targetAddress_ = target;
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
         }
 
         ~HandlerInboundDirect() noexcept override = default;
@@ -51,7 +51,7 @@ namespace mynet::handler
         void reset() noexcept override
         {
             HandlerInboundConnectionBase::reset();
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             triggered_ = false;
         }
 
@@ -81,18 +81,18 @@ namespace mynet::handler
     class HandlerOutboundDirect : public HandlerOutboundConnectionBase
     {
     public:
-        HandlerOutboundDirect() noexcept { stage_ = OutboundStage::STREAMING; }
+        HandlerOutboundDirect() noexcept { setStage(OutboundStage::STREAMING); }
 
         explicit HandlerOutboundDirect(const ProxyAddress &target) noexcept
             : HandlerOutboundConnectionBase(target)
         {
-            stage_ = OutboundStage::STREAMING;
+            setStage(OutboundStage::STREAMING);
         }
 
         void reset() noexcept override
         {
             HandlerOutboundConnectionBase::reset();
-            stage_ = OutboundStage::STREAMING;
+            setStage(OutboundStage::STREAMING);
         }
 
         void handle() override {}

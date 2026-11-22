@@ -192,7 +192,7 @@ namespace mynet::handler
             {
                 onParseError("SOCKS5: Unsupported version");
                 socks5Stage_ = Socks5Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -234,7 +234,7 @@ namespace mynet::handler
                 {
                     chosen = socks5::kMethodNoAcceptable;
                     socks5Stage_ = Socks5Stage::ERROR;
-                    stage_ = InboundStage::ERROR;
+                    setStage(InboundStage::ERROR);
                     setCloseAfterResponse(true);
                 }
             }
@@ -249,7 +249,7 @@ namespace mynet::handler
                 {
                     chosen = socks5::kMethodNoAcceptable;
                     socks5Stage_ = Socks5Stage::ERROR;
-                    stage_ = InboundStage::ERROR;
+                    setStage(InboundStage::ERROR);
                     setCloseAfterResponse(true);
                 }
             }
@@ -280,7 +280,7 @@ namespace mynet::handler
             {
                 onParseError("SOCKS5 Auth: Invalid subnegotiation version");
                 socks5Stage_ = Socks5Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -321,7 +321,7 @@ namespace mynet::handler
             else
             {
                 socks5Stage_ = Socks5Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -344,7 +344,7 @@ namespace mynet::handler
             {
                 onParseError("SOCKS5: Invalid request version");
                 socks5Stage_ = Socks5Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -369,7 +369,7 @@ namespace mynet::handler
             {
                 sendReply(socks5::kRepCommandNotSupported);
                 socks5Stage_ = Socks5Stage::ERROR;
-                stage_ = InboundStage::ERROR;
+                setStage(InboundStage::ERROR);
                 setCloseAfterResponse(true);
                 return false;
             }
@@ -380,7 +380,7 @@ namespace mynet::handler
             }
 
             socks5Stage_ = Socks5Stage::STREAMING;
-            stage_ = InboundStage::STREAMING;
+            setStage(InboundStage::STREAMING);
             onMessageComplete();
 
             if (requestCallback_)
@@ -431,7 +431,7 @@ namespace mynet::handler
                 static constexpr char kGreeting[] = {0x05, 0x01, 0x00};
                 [[maybe_unused]] auto _ = pushResponse(std::string_view(kGreeting, 3));
                 step_ = Step::RECV_GREETING;
-                stage_ = OutboundStage::CONNECTING;
+                setStage(OutboundStage::CONNECTING);
                 break;
             }
             case Step::RECV_GREETING:
@@ -480,7 +480,7 @@ namespace mynet::handler
                 }
                 requestConsume(3 + consumed);
                 step_ = Step::DONE;
-                stage_ = OutboundStage::STREAMING;
+                setStage(OutboundStage::STREAMING);
                 break;
             }
             case Step::DONE:

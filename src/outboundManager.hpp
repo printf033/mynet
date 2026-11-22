@@ -56,11 +56,11 @@ namespace mynet
      */
     struct OutboundDialResult
     {
-        int fd{-1};                                                               ///< 拨号成功的套接字描述符
-        std::unique_ptr<handler::HandlerOutboundConnectionBase> handler{nullptr}; ///< 对应的出站协议状态机处理器
-        std::string outboundTag{};                                                ///< 命中的出站标签
-        std::string targetEndpoint{};                                             ///< 目标端点字符串表示
-        bool immediateConnected{false};                                           ///< 连接是否立即可用（已非阻塞连上）
+        int fd{-1};                                    ///< 拨号成功的套接字描述符
+        std::unique_ptr<HandlerBase> handler{nullptr}; ///< 对应的出站协议状态机处理器
+        std::string outboundTag{};                     ///< 命中的出站标签
+        std::string targetEndpoint{};                  ///< 目标端点字符串表示
+        bool immediateConnected{false};                ///< 连接是否立即可用（已非阻塞连上）
 
         [[nodiscard]] inline bool ok() const noexcept { return handler != nullptr; }
     };
