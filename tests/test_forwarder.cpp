@@ -180,9 +180,9 @@ TEST(ForwarderTest, ConnectionObjectBridge)
     auto session = forwarder.bridge(inConn, outConn);
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
-    EXPECT_TRUE(inHandler.isSpliceForwardActive());
+    EXPECT_TRUE(inHandler.isSpliceActive());
     EXPECT_EQ(inHandler.spliceTarget(), sp[1]);
-    EXPECT_TRUE(outHandler.isSpliceForwardActive());
+    EXPECT_TRUE(outHandler.isSpliceActive());
     EXPECT_EQ(outHandler.spliceTarget(), sp[0]);
 
     inConn.reset();

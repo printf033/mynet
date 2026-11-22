@@ -470,7 +470,7 @@ namespace mynet::handler
         {
             handshakeSent_ = true;
             std::vector<uint8_t> encodedTarget;
-            target_.encodeSocks5(encodedTarget);
+            target().encodeSocks5(encodedTarget);
             if (encodedTarget.empty())
             {
                 onParseError("HandlerOutboundShadowsocks: Failed to encode target address");

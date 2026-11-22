@@ -581,7 +581,7 @@ namespace mynet
                 result.status = CoreDispatchStatus::NO_TARGET;
                 return result;
             }
-            result.target = inbound.targetAddress().value_or(inbound.target());
+            result.target = inbound.target();
 
             // 1.1 FakeIP 虚拟地址反解：若目标地址为 198.18.0.0/15 FakeIP，秒级还原原始域名
             if (result.target.type == handler::AddressType::IPV4 &&

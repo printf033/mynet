@@ -516,11 +516,11 @@ namespace mynet
             activeMode_ = ForwardMode::KERNEL_SOCKMAP;
             if (inbound_ != nullptr)
             {
-                inbound_->enableSpliceForward(outboundFd_);
+                inbound_->setSpliceTarget(outboundFd_);
             }
             if (outbound_ != nullptr)
             {
-                outbound_->enableSpliceForward(inboundFd_);
+                outbound_->setSpliceTarget(inboundFd_);
             }
             return true;
 #else
@@ -637,11 +637,11 @@ namespace mynet
             activeMode_ = ForwardMode::ZERO_COPY_SPLICE;
             if (inbound_ != nullptr && outboundFd_ >= 0)
             {
-                inbound_->enableSpliceForward(outboundFd_);
+                inbound_->setSpliceTarget(outboundFd_);
             }
             if (outbound_ != nullptr && inboundFd_ >= 0)
             {
-                outbound_->enableSpliceForward(inboundFd_);
+                outbound_->setSpliceTarget(inboundFd_);
             }
             ensurePipes();
         }
@@ -654,11 +654,11 @@ namespace mynet
             activeMode_ = ForwardMode::BUFFER_PUMP;
             if (inbound_ != nullptr)
             {
-                inbound_->disableSpliceForward();
+                inbound_->disableSplice();
             }
             if (outbound_ != nullptr)
             {
-                outbound_->disableSpliceForward();
+                outbound_->disableSplice();
             }
         }
 
@@ -819,7 +819,7 @@ namespace mynet
 
             if (inbound_ != nullptr)
             {
-                inbound_->disableSpliceForward();
+                inbound_->disableSplice();
                 if (force)
                 {
                     inbound_->setCloseAfterResponse(true);
@@ -827,7 +827,7 @@ namespace mynet
             }
             if (outbound_ != nullptr)
             {
-                outbound_->disableSpliceForward();
+                outbound_->disableSplice();
                 if (force)
                 {
                     outbound_->setCloseAfterResponse(true);

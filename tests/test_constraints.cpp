@@ -124,7 +124,6 @@ namespace
         void resumeSplice() noexcept {}
         void drainSplice() noexcept {}
         void disableSplice() noexcept {}
-        bool spliceEnabled() noexcept { return false; }
         int fd() noexcept { return -1; }
     };
 

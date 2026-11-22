@@ -103,7 +103,7 @@ namespace mynet
              * @param targetFd 目标上游套接字或落盘文件描述符
              */
             inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
-            inline void enableSpliceTunnel(SPLICE_CONTROL ctrl) noexcept { setSpliceTarget(ctrl); }
+            inline void enableSpliceTunnel(SPLICE_CONTROL ctrl) noexcept { setSpliceControl(ctrl); }
             inline void disableSpliceTunnel() noexcept { disableSplice(); }
             [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
 

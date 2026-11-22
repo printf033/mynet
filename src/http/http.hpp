@@ -411,7 +411,7 @@ namespace mynet::handler
             case Step::SEND_CONNECT:
             {
                 std::string req;
-                std::string endpoint = target_.toString();
+                std::string endpoint = target().toString();
                 req.reserve(128 + endpoint.size() * 2);
                 req.append("CONNECT ").append(endpoint).append(" HTTP/1.1\r\n");
                 req.append("Host: ").append(endpoint).append("\r\n");

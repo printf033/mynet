@@ -102,7 +102,7 @@ namespace
                         session_ = res.session;
                         if (session_->outboundFd() >= 0)
                         {
-                            enableSpliceForward(session_->outboundFd());
+                            setSpliceTarget(session_->outboundFd());
                         }
                     }
                     else

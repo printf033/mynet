@@ -230,7 +230,7 @@ namespace mynet::handler
 
             // 3. SOCKS5 目标网络地址
             std::vector<uint8_t> encodedAddr;
-            target_.encodeSocks5(encodedAddr);
+            target().encodeSocks5(encodedAddr);
             header.append(reinterpret_cast<const char *>(encodedAddr.data()), encodedAddr.size());
 
             // 4. 结尾 CRLF

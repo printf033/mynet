@@ -210,7 +210,7 @@ namespace mynet::handler
 
             header.push_back(hysteria2::kCmdTcp);
 
-            target_.encodeSocks5(header);
+            target().encodeSocks5(header);
 
             [[maybe_unused]] auto _ =
                 pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));

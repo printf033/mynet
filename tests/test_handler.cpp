@@ -526,11 +526,11 @@ TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
 
     // 队列中至多 8MiB（硬顶前已入队的部分），全部消费后队列为空。
     // 注意：硬顶 break 发生在 takeResponse 之前，handler 里残留一条未取走的
-    // 响应，hasPendingWrite() 因此恒真 —— 只能按 pendingSize() 逐条排水。
+    // 响应，hasPendingWrite() 因此恒真 —— 只能按 pendingBytes() 逐条排水。
     size_t sent = 0;
     while (conn.hasPendingWrite())
     {
-        const size_t n = conn.pendingSize();
+        const size_t n = conn.pendingBytes();
         if (n == 0)
         {
             break; // 写队列已空，剩余的是 handler 内不再取出的残留响应
@@ -892,34 +892,4 @@ TEST(HandlerHttp, StreamingBodyPassThroughZeroCopy)
     EXPECT_EQ(handler.chunks.size(), 2u);
     EXPECT_EQ(handler.chunks[1], "67890");
     EXPECT_TRUE(handler.body().empty());
-}
-
-// =============================================================================
-// TCP 路由策略与出站传输解耦绑定测试 (机制 72: TcpFlowBinding)
-// =============================================================================
-
-TEST(HandlerConnection, TcpFlowBindingDecoupling)
-{
-    TcpFlowBinding binding;
-    EXPECT_FALSE(binding.isFrozen());
-
-    // 1. 策略决断装配
-    binding.route.policyEpoch = 1;
-    binding.route.outboundGroup = "proxy_us";
-    binding.route.fwmark = 0x200;
-    binding.route.must = true;
-    binding.route.matchedRule = "domain(suffix: google.com) -> proxy_us";
-
-    // 2. 物理传输装配
-    binding.egress.dialerTag = "node_us_east_1";
-    binding.egress.remoteEndpoint = "192.0.2.1:443";
-    binding.egress.sniffedSni = "www.google.com";
-    binding.egress.isDirect = false;
-
-    // 3. 冻结已有长连接状态 (绑定全局 FlowId)
-    binding.freeze(10086);
-    EXPECT_TRUE(binding.isFrozen());
-    EXPECT_EQ(binding.flowId, 10086u);
-    EXPECT_EQ(binding.route.outboundGroup, "proxy_us");
-    EXPECT_EQ(binding.egress.dialerTag, "node_us_east_1");
 }

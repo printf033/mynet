@@ -450,7 +450,7 @@ namespace mynet::handler
 
                 // 发送 CONNECT 请求
                 std::vector<uint8_t> req = {0x05, 0x01, 0x00};
-                target_.encodeSocks5(req);
+                target().encodeSocks5(req);
                 [[maybe_unused]] auto _ =
                     pushResponse(std::string_view(reinterpret_cast<const char *>(req.data()), req.size()));
 
