@@ -12,6 +12,7 @@
  * 5. 全局注册与一键启停：支持多端口/多协议并发监听、批量拉起 (startAll) 与停止 (stopAll)。
  */
 
+#include "acceptor.hpp"
 #include "address.hpp"
 #include "config/log.hpp"
 #include "connection.hpp"
@@ -42,7 +43,7 @@ namespace mynet
      * 业务入站端点元数据描述符与协议状态机工厂 (Endpoint & Protocol Factory)。
      * 底层套接字生命周期与非阻塞 accept 严格托管给基础传输设施 AcceptorBase。
      */
-    class InboundBase
+    class InboundBase : public IAcceptor
     {
     protected:
         std::string tag_{};
@@ -125,6 +126,11 @@ namespace mynet
          * @brief 为新接入的连接创建对应的协议状态机处理器
          */
         [[nodiscard]] virtual std::unique_ptr<HandlerBase> createHandler() = 0;
+
+        /**
+         * @brief 针对新接入的 clientFd 执行协议握手
+         */
+        HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn) override;
     };
 
 } // namespace mynet
@@ -178,6 +184,23 @@ namespace mynet::inbound
 
 namespace mynet
 {
+    inline HandshakeStatus InboundBase::handshake(int clientFd, ConnectionBase *&outConn)
+    {
+        auto h = createHandler();
+        if (!h)
+        {
+            return HandshakeStatus::FAILED;
+        }
+        if (!inbound::driveHandshake(clientFd, *h))
+        {
+            return HandshakeStatus::FAILED;
+        }
+        auto *conn = new ConnectionBase();
+        conn->setFd(clientFd);
+        conn->setHandler(h.release());
+        outConn = conn;
+        return HandshakeStatus::SUCCESS;
+    }
 
     /**
      * @brief 统一入站管理器 (Inbound Manager)

@@ -22,7 +22,8 @@ namespace mynet
         std::string uuid_{};
 
     public:
-        InboundVmess(std::string tag, std::string host, uint16_t port, std::string uuid, bool enableSniffing = true)
+        InboundVmess(std::string tag = "vmess", std::string host = "0.0.0.0", uint16_t port = 443,
+                     std::string uuid = "", bool enableSniffing = true)
             : InboundBase(std::move(tag), "vmess", std::move(host), port, enableSniffing),
               uuid_(std::move(uuid))
         {
@@ -36,5 +37,7 @@ namespace mynet
             return h;
         }
     };
+
+    using AcceptorVmess = InboundVmess;
 
 } // namespace mynet

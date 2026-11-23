@@ -38,4 +38,6 @@ namespace mynet
         }
     };
 
+    using DialerBlock = OutboundBlock;
+
 } // namespace mynet

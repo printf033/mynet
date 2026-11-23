@@ -15,9 +15,16 @@ namespace mynet
     class InboundDirect : public InboundBase
     {
     public:
-        InboundDirect(std::string tag, std::string host, uint16_t port, bool enableSniffing = true)
+        InboundDirect(std::string tag = "direct", std::string host = "0.0.0.0", uint16_t port = 0,
+                      bool enableSniffing = true)
             : InboundBase(std::move(tag), "direct", std::move(host), port, enableSniffing)
         {
+        }
+
+        [[nodiscard]] bool match(std::span<const uint8_t> initialBytes) const noexcept override
+        {
+            (void)initialBytes;
+            return true;
         }
 
         [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
@@ -25,5 +32,7 @@ namespace mynet
             return std::make_unique<handler::HandlerInboundDirect>();
         }
     };
+
+    using AcceptorDirect = InboundDirect;
 
 } // namespace mynet

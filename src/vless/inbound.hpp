@@ -20,7 +20,8 @@ namespace mynet
         std::array<uint8_t, 16> uuid_{};
 
     public:
-        InboundVless(std::string tag, std::string host, uint16_t port, std::string uuidStr, bool enableSniffing = true)
+        InboundVless(std::string tag = "vless", std::string host = "0.0.0.0", uint16_t port = 443,
+                     std::string uuidStr = "", bool enableSniffing = true)
             : InboundBase(std::move(tag), "vless", std::move(host), port, enableSniffing),
               uuidStr_(std::move(uuidStr))
         {
@@ -28,6 +29,12 @@ namespace mynet
             {
                 uuid_ = *u;
             }
+        }
+
+        [[nodiscard]] bool match(std::span<const uint8_t> initialBytes) const noexcept override
+        {
+            // VLESS 首包第一个字节为协议版本 (0x00)
+            return !initialBytes.empty() && initialBytes[0] == 0x00;
         }
 
         [[nodiscard]] inline std::string_view uuid() const noexcept { return uuidStr_; }
@@ -38,5 +45,7 @@ namespace mynet
             return std::make_unique<handler::HandlerInboundVless>(uuid_);
         }
     };
+
+    using AcceptorVless = InboundVless;
 
 } // namespace mynet

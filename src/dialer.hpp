@@ -5,11 +5,10 @@
  * @brief 客户端出站拨号握手器（Dialer）基类与出站抽象。
  *
  * 与 Acceptor 严格对称：
- * 1. 专职负责出站协议握手 (Outbound Handshake)；
- * 2. 包含特定协议相关的 outbound_ 结构体（模板特化占位，不需要时为 EmptyOutbound，配合 [[no_unique_address]] 占 0
- * 字节）；
- * 3. 底层 TCP/UDP 传输建连系统调用托管给 socket.hpp 工具库；
- * 4. 结合 Linux SO_MARK 策略路由、IP_TRANSPARENT 与粘性 IP 缓存。
+ * 1. 纯虚/基类，无模板参数，零连接级可变成员（移除 fd、targetAddr 等会话级可变状态）；
+ * 2. 专职负责出站建连、多网卡赛马、路由标记 (SO_MARK) 与出站协议握手；
+ * 3. 各协议自身继承并实现定制出站握手协议；
+ * 4. 握手成功后交付装配好对应 Handler 的 ConnectionBase 实例或出站结果结构体。
  */
 
 #include "acceptor.hpp"
@@ -127,100 +126,179 @@ namespace mynet
     };
 
     /**
-     * @brief 拨号器纯虚抽象接口
+     * @brief 统一出站拨号选项策略 (Dialer Options)
+     */
+    struct DialerOptions
+    {
+        uint32_t fwmark{0};                      ///< Linux SO_MARK 策略路由打标（防止回环死锁）
+        std::string bindInterface{};             ///< SO_BINDTODEVICE 绑定出口网卡 (例如 eth0, wan1)
+        std::string bindAddress{};               ///< 绑定本地特定出口 IP 地址
+        bool tcpFastOpen{false};                 ///< 是否启用 TCP Fast Open (MSG_FASTOPEN)
+        bool transparent{false};                 ///< Linux IP_TRANSPARENT 支持（绑定原始源 IP）
+        uint8_t dscp{0};                         ///< DSCP 服务质量标记 (借鉴 dae dscp)
+        bool enableMptcp{false};                 ///< 是否启用 Multipath TCP (MPTCP)
+        std::vector<uint8_t> tcpPrefix{};        ///< TCP 前置注入前缀 (借鉴 sing-box tcp_prefix)
+        std::chrono::milliseconds timeout{5000}; ///< 拨号超时
+    };
+
+    /**
+     * @brief TCP 拨号建连结果（解耦套接字描述符与握手状态）
+     */
+    struct DialTcpResult
+    {
+        int fd{-1};                     ///< 新建套接字描述符
+        bool immediateConnected{false}; ///< 是否立即连通（如本地回环），false 表示处于 EINPROGRESS 异步握手中
+
+        [[nodiscard]] inline explicit operator bool() const noexcept { return immediateConnected; }
+        [[nodiscard]] inline bool ok() const noexcept { return fd >= 0; }
+    };
+
+    /**
+     * @brief 拨号器纯虚抽象基类（零连接级可变成员）
      */
     class IDialer
     {
+    protected:
+        DialerOptions options_{};
+
     public:
-        int fd = -1;
-        sockaddr_in targetAddr{};
-        uint32_t fwmark{0};               ///< Linux SO_MARK 策略路由标记（防环路）
-        bool transparent{false};          ///< Linux IP_TRANSPARENT 支持（绑定原始源 IP）
-        uint8_t dscp{0};                  ///< DSCP 服务质量标记 (借鉴 dae dscp)
-        bool enableMptcp{false};          ///< 是否启用 Multipath TCP (MPTCP)
-        std::string bindInterface{};      ///< SO_BINDTODEVICE 绑定网卡
-        std::vector<uint8_t> tcpPrefix{}; ///< TCP 前置注入前缀 (借鉴 sing-box tcp_prefix)
-
-        virtual ~IDialer() noexcept { reset(); }
-
-        virtual HandshakeStatus handshake(int targetFd, ConnectionBase *&outConn) = 0;
-
-        virtual void reset() noexcept
+        IDialer() = default;
+        explicit IDialer(DialerOptions options)
+            : options_(std::move(options))
         {
-            if (fd != -1)
-            {
-                ::close(fd);
-                fd = -1;
-            }
-            targetAddr = {};
         }
+        virtual ~IDialer() = default;
 
-        inline void attach(int newFd) noexcept
-        {
-            if (fd != -1 && fd != newFd)
-            {
-                ::close(fd);
-            }
-            fd = newFd;
-        }
+        IDialer(const IDialer &) = default;
+        IDialer &operator=(const IDialer &) = default;
+        IDialer(IDialer &&) noexcept = default;
+        IDialer &operator=(IDialer &&) noexcept = default;
 
-        [[nodiscard]] inline int release() noexcept
-        {
-            int ret = fd;
-            fd = -1;
-            targetAddr = {};
-            return ret;
-        }
+        [[nodiscard]] inline const DialerOptions &options() const noexcept { return options_; }
+        inline void setOptions(DialerOptions options) noexcept { options_ = std::move(options); }
 
         inline void setTcpPrefix(std::span<const uint8_t> prefix) noexcept
         {
-            tcpPrefix.assign(prefix.begin(), prefix.end());
+            options_.tcpPrefix.assign(prefix.begin(), prefix.end());
         }
-        [[nodiscard]] inline std::span<const uint8_t> getTcpPrefix() const noexcept { return tcpPrefix; }
+        [[nodiscard]] inline std::span<const uint8_t> getTcpPrefix() const noexcept { return options_.tcpPrefix; }
 
-        inline bool flushTcpPrefix(int socketFd = -1) noexcept
+        static inline bool flushTcpPrefix(int socketFd, std::span<const uint8_t> prefix) noexcept
         {
-            int target = socketFd >= 0 ? socketFd : fd;
-            if (target < 0 || tcpPrefix.empty())
+            if (socketFd < 0 || prefix.empty())
                 return true;
-            ssize_t n = ::send(target, tcpPrefix.data(), tcpPrefix.size(), MSG_NOSIGNAL);
-            return n == static_cast<ssize_t>(tcpPrefix.size());
+            ssize_t n = ::send(socketFd, prefix.data(), prefix.size(), MSG_NOSIGNAL);
+            return n == static_cast<ssize_t>(prefix.size());
         }
 
-        inline void setMark(uint32_t mark) noexcept { fwmark = mark; }
-        [[nodiscard]] inline uint32_t mark() const noexcept { return fwmark; }
-
-        inline void setTransparent(bool enable) noexcept { transparent = enable; }
-        [[nodiscard]] inline bool isTransparent() const noexcept { return transparent; }
-
-        inline void setDscp(uint8_t val) noexcept { dscp = val; }
-        [[nodiscard]] inline uint8_t getDscp() const noexcept { return dscp; }
-
-        inline void setMptcp(bool enable) noexcept { enableMptcp = enable; }
-        [[nodiscard]] inline bool isMptcp() const noexcept { return enableMptcp; }
-
-        inline void setInterface(std::string_view ifname) noexcept { bindInterface = ifname; }
-        [[nodiscard]] inline std::string_view getInterface() const noexcept { return bindInterface; }
-
-        [[nodiscard]] Result<bool> dialTcp(const char *ip, int port, const char *bindIface = nullptr) noexcept
+        inline bool flushTcpPrefix(int socketFd = -1) const noexcept
         {
-            contract_assert(ip != nullptr);
-            reset();
+            if (socketFd < 0)
+                return true;
+            return flushTcpPrefix(socketFd, options_.tcpPrefix);
+        }
+
+        inline void setMark(uint32_t mark) noexcept { options_.fwmark = mark; }
+        [[nodiscard]] inline uint32_t mark() const noexcept { return options_.fwmark; }
+
+        inline void setTransparent(bool enable) noexcept { options_.transparent = enable; }
+        [[nodiscard]] inline bool isTransparent() const noexcept { return options_.transparent; }
+
+        inline void setDscp(uint8_t val) noexcept { options_.dscp = val; }
+        [[nodiscard]] inline uint8_t getDscp() const noexcept { return options_.dscp; }
+
+        inline void setMptcp(bool enable) noexcept { options_.enableMptcp = enable; }
+        [[nodiscard]] inline bool isMptcp() const noexcept { return options_.enableMptcp; }
+
+        inline void setInterface(std::string_view ifname) noexcept { options_.bindInterface = ifname; }
+        [[nodiscard]] inline std::string_view getInterface() const noexcept { return options_.bindInterface; }
+
+        virtual HandshakeStatus handshake(int targetFd, ConnectionBase *&outConn)
+        {
+            (void)targetFd;
+            outConn = nullptr;
+            return HandshakeStatus::SUCCESS;
+        }
+
+        virtual void reset() noexcept {}
+
+        [[nodiscard]] Result<DialTcpResult> dialTcp(const sockaddr_in &target,
+                                                    const char *bindIface = nullptr) const noexcept
+        {
             ::signal(SIGPIPE, SIG_IGN);
 
-            targetAddr.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip, &targetAddr.sin_addr) <= 0) [[unlikely]]
+            int sockFd = -1;
+#if defined(IPPROTO_MPTCP)
+            if (options_.enableMptcp)
             {
-                LOG_ERROR("dialTcp {}:{}: not an IPv4 address literal", ip, port);
-                reset();
-                return std::unexpected(ERR::ADDR_INVALID);
+                sockFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_MPTCP);
             }
-            targetAddr.sin_port = ::htons(static_cast<uint16_t>(port));
-            return dialTcp(targetAddr, bindIface);
+#endif
+            if (sockFd < 0)
+            {
+                sockFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            }
+            if (sockFd < 0) [[unlikely]]
+            {
+                LOG_ERROR("dialTcp: socket() failed: {}", errnoText(errno));
+                return std::unexpected(ERR::SOCKET_FAILED);
+            }
+
+            constexpr int opt = 1;
+            [[maybe_unused]] auto _ = ::setsockopt(sockFd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+            [[maybe_unused]] auto _keepalive = ::setsockopt(sockFd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
+
+            const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
+                                    ? bindIface
+                                    : (!options_.bindInterface.empty() ? options_.bindInterface.c_str() : nullptr);
+            if (iface != nullptr && iface[0] != '\0')
+            {
+                if (::setsockopt(sockFd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialTcp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
+                }
+            }
+
+            if (options_.fwmark > 0)
+            {
+                if (::setsockopt(sockFd, SOL_SOCKET, SO_MARK, &options_.fwmark, sizeof(options_.fwmark)) < 0)
+                    [[unlikely]]
+                {
+                    LOG_WARN("dialTcp: setsockopt(SO_MARK={}) failed: {}", options_.fwmark, errnoText(errno));
+                }
+            }
+
+            if (options_.transparent)
+            {
+                if (::setsockopt(sockFd, SOL_IP, IP_TRANSPARENT, &opt, sizeof(opt)) < 0) [[unlikely]]
+                {
+                    LOG_WARN("dialTcp: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
+                }
+            }
+
+            if (options_.dscp > 0)
+            {
+                int tos = static_cast<int>(options_.dscp) << 2;
+                [[maybe_unused]] auto _ = ::setsockopt(sockFd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+            }
+
+            int rc = ::connect(sockFd, reinterpret_cast<const sockaddr *>(&target), sizeof(sockaddr_in));
+            if (rc == 0)
+            {
+                return DialTcpResult{sockFd, true};
+            }
+            if (errno == EINPROGRESS)
+            {
+                return DialTcpResult{sockFd, false};
+            }
+
+            LOG_ERROR("dialTcp: connect() failed: {}", errnoText(errno));
+            ::close(sockFd);
+            return std::unexpected(ERR::CONNECT_FAILED);
         }
 
-        [[nodiscard]] Result<bool> dialTcp(std::string_view host, uint16_t port,
-                                           const char *bindIface = nullptr) noexcept
+        [[nodiscard]] Result<DialTcpResult> dialTcp(std::string_view host, uint16_t port,
+                                                    const char *bindIface = nullptr) const noexcept
         {
             if (host.empty())
             {
@@ -250,133 +328,65 @@ namespace mynet
             return dialTcp(target, bindIface);
         }
 
-        [[nodiscard]] Result<bool> dialTcp(const sockaddr_in &target, const char *bindIface = nullptr) noexcept
+        [[nodiscard]] Result<DialTcpResult> dialTcp(const char *ip, int port,
+                                                    const char *bindIface = nullptr) const noexcept
         {
-            reset();
-            ::signal(SIGPIPE, SIG_IGN);
-            targetAddr = target;
-
-#if defined(IPPROTO_MPTCP)
-            if (enableMptcp)
+            if (ip == nullptr)
             {
-                fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_MPTCP);
-            }
-#endif
-            if (fd < 0)
-            {
-                fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            }
-            if (fd < 0) [[unlikely]]
-            {
-                LOG_ERROR("dialTcp: socket() failed: {}", errnoText(errno));
-                reset();
-                return std::unexpected(ERR::SOCKET_FAILED);
-            }
-
-            constexpr int opt = 1;
-            [[maybe_unused]] auto _ = ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-            [[maybe_unused]] auto _keepalive = ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt));
-
-            const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
-                                    ? bindIface
-                                    : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
-            if (iface != nullptr && iface[0] != '\0')
-            {
-                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
-                {
-                    LOG_WARN("dialTcp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
-                }
-            }
-
-            if (fwmark > 0)
-            {
-                if (::setsockopt(fd, SOL_SOCKET, SO_MARK, &fwmark, sizeof(fwmark)) < 0) [[unlikely]]
-                {
-                    LOG_WARN("dialTcp: setsockopt(SO_MARK={}) failed: {}", fwmark, errnoText(errno));
-                }
-            }
-
-            if (transparent)
-            {
-                if (::setsockopt(fd, SOL_IP, IP_TRANSPARENT, &opt, sizeof(opt)) < 0) [[unlikely]]
-                {
-                    LOG_WARN("dialTcp: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
-                }
-            }
-
-            if (dscp > 0)
-            {
-                int tos = static_cast<int>(dscp) << 2;
-                [[maybe_unused]] auto _ = ::setsockopt(fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
-            }
-
-            int rc = ::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in));
-            if (rc == 0)
-            {
-                return true;
-            }
-            if (errno == EINPROGRESS)
-            {
-                return false;
-            }
-
-            LOG_ERROR("dialTcp: connect() failed: {}", errnoText(errno));
-            reset();
-            return std::unexpected(ERR::CONNECT_FAILED);
-        }
-
-        [[nodiscard]] Result<> dialUdp(const char *ip, int port, const char *bindIface = nullptr) noexcept
-        {
-            contract_assert(ip != nullptr);
-            reset();
-
-            targetAddr.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip, &targetAddr.sin_addr) <= 0) [[unlikely]]
-            {
-                LOG_ERROR("dialUdp {}:{}: not an IPv4 address literal", ip, port);
-                reset();
                 return std::unexpected(ERR::ADDR_INVALID);
             }
-            targetAddr.sin_port = ::htons(static_cast<uint16_t>(port));
+            sockaddr_in target{};
+            target.sin_family = AF_INET;
+            if (::inet_pton(AF_INET, ip, &target.sin_addr) <= 0) [[unlikely]]
+            {
+                LOG_ERROR("dialTcp {}:{}: not an IPv4 address literal", ip, port);
+                return std::unexpected(ERR::ADDR_INVALID);
+            }
+            target.sin_port = ::htons(static_cast<uint16_t>(port));
+            return dialTcp(target, bindIface);
+        }
 
-            fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) [[unlikely]]
+        [[nodiscard]] Result<int> dialUdp(const sockaddr_in &target, const char *bindIface = nullptr) const noexcept
+        {
+            int sockFd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            if (sockFd < 0) [[unlikely]]
             {
                 LOG_ERROR("dialUdp: socket() failed: {}", errnoText(errno));
-                reset();
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
 
             const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
                                     ? bindIface
-                                    : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
+                                    : (!options_.bindInterface.empty() ? options_.bindInterface.c_str() : nullptr);
             if (iface != nullptr && iface[0] != '\0')
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
+                if (::setsockopt(sockFd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
                 {
                     LOG_WARN("dialUdp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
                 }
             }
 
-            if (fwmark > 0)
+            if (options_.fwmark > 0)
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_MARK, &fwmark, sizeof(fwmark)) < 0) [[unlikely]]
+                if (::setsockopt(sockFd, SOL_SOCKET, SO_MARK, &options_.fwmark, sizeof(options_.fwmark)) < 0)
+                    [[unlikely]]
                 {
-                    LOG_WARN("dialUdp: setsockopt(SO_MARK={}) failed: {}", fwmark, errnoText(errno));
+                    LOG_WARN("dialUdp: setsockopt(SO_MARK={}) failed: {}", options_.fwmark, errnoText(errno));
                 }
             }
 
-            if (::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in)) < 0) [[unlikely]]
+            if (::connect(sockFd, reinterpret_cast<const sockaddr *>(&target), sizeof(sockaddr_in)) < 0) [[unlikely]]
             {
                 LOG_ERROR("dialUdp: connect() failed: {}", errnoText(errno));
-                reset();
+                ::close(sockFd);
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
 
-            return {};
+            return sockFd;
         }
 
-        [[nodiscard]] Result<> dialUdp(std::string_view host, uint16_t port, const char *bindIface = nullptr) noexcept
+        [[nodiscard]] Result<int> dialUdp(std::string_view host, uint16_t port,
+                                          const char *bindIface = nullptr) const noexcept
         {
             if (host.empty())
             {
@@ -406,53 +416,28 @@ namespace mynet
             return dialUdp(target, bindIface);
         }
 
-        [[nodiscard]] Result<> dialUdp(const sockaddr_in &target, const char *bindIface = nullptr) noexcept
+        [[nodiscard]] Result<int> dialUdp(const char *ip, int port, const char *bindIface = nullptr) const noexcept
         {
-            reset();
-            targetAddr = target;
-
-            fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) [[unlikely]]
+            if (ip == nullptr)
             {
-                LOG_ERROR("dialUdp: socket() failed: {}", errnoText(errno));
-                reset();
-                return std::unexpected(ERR::SOCKET_FAILED);
+                return std::unexpected(ERR::ADDR_INVALID);
             }
-
-            const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
-                                    ? bindIface
-                                    : (!this->bindInterface.empty() ? this->bindInterface.c_str() : nullptr);
-            if (iface != nullptr && iface[0] != '\0')
+            sockaddr_in target{};
+            target.sin_family = AF_INET;
+            if (::inet_pton(AF_INET, ip, &target.sin_addr) <= 0) [[unlikely]]
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
-                {
-                    LOG_WARN("dialUdp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
-                }
+                LOG_ERROR("dialUdp {}:{}: not an IPv4 address literal", ip, port);
+                return std::unexpected(ERR::ADDR_INVALID);
             }
-
-            if (fwmark > 0)
-            {
-                if (::setsockopt(fd, SOL_SOCKET, SO_MARK, &fwmark, sizeof(fwmark)) < 0) [[unlikely]]
-                {
-                    LOG_WARN("dialUdp: setsockopt(SO_MARK={}) failed: {}", fwmark, errnoText(errno));
-                }
-            }
-
-            if (::connect(fd, reinterpret_cast<const sockaddr *>(&targetAddr), sizeof(sockaddr_in)) < 0) [[unlikely]]
-            {
-                LOG_ERROR("dialUdp: connect() failed: {}", errnoText(errno));
-                reset();
-                return std::unexpected(ERR::CONNECT_FAILED);
-            }
-
-            return {};
+            target.sin_port = ::htons(static_cast<uint16_t>(port));
+            return dialUdp(target, bindIface);
         }
     };
 
     /**
-     * @brief 模板化客户端出站握手器基类
+     * @brief 兼容泛型出站拨号器模板包装（零数据成员，支持直接作为默认拨号器或兼容原有泛型写法）
      *
-     * @tparam OutboundContext 协议特有的 outbound_ 结构体。默认为 EmptyOutbound。
+     * @tparam OutboundContext 协议特有的 outbound 上下文类型。默认为 EmptyOutbound。
      */
     template <typename OutboundContext = EmptyOutbound>
     class Dialer : public IDialer
@@ -461,60 +446,13 @@ namespace mynet
         using Outbound = OutboundContext;
         using Handler = OutboundContext;
 
-        [[no_unique_address]] Outbound outbound_{};
-
         Dialer() = default;
-        explicit Dialer(OutboundContext outbound)
-            : outbound_(std::move(outbound))
+        explicit Dialer([[maybe_unused]] OutboundContext outbound) {}
+        explicit Dialer(DialerOptions options)
+            : IDialer(std::move(options))
         {
         }
         ~Dialer() override = default;
-
-        Dialer(const Dialer &) = delete;
-        Dialer &operator=(const Dialer &) = delete;
-        Dialer(Dialer &&other) noexcept
-            : outbound_(std::move(other.outbound_))
-        {
-            fd = other.fd;
-            targetAddr = other.targetAddr;
-            fwmark = other.fwmark;
-            transparent = other.transparent;
-            dscp = other.dscp;
-            enableMptcp = other.enableMptcp;
-            bindInterface = std::move(other.bindInterface);
-            tcpPrefix = std::move(other.tcpPrefix);
-            other.fd = -1;
-            other.targetAddr = {};
-        }
-        Dialer &operator=(Dialer &&other) noexcept
-        {
-            if (this != &other)
-            {
-                reset();
-                outbound_ = std::move(other.outbound_);
-                fd = other.fd;
-                targetAddr = other.targetAddr;
-                fwmark = other.fwmark;
-                transparent = other.transparent;
-                dscp = other.dscp;
-                enableMptcp = other.enableMptcp;
-                bindInterface = std::move(other.bindInterface);
-                tcpPrefix = std::move(other.tcpPrefix);
-                other.fd = -1;
-                other.targetAddr = {};
-            }
-            return *this;
-        }
-
-        [[nodiscard]] inline Outbound &outbound() noexcept { return outbound_; }
-        [[nodiscard]] inline const Outbound &outbound() const noexcept { return outbound_; }
-
-        HandshakeStatus handshake(int targetFd, ConnectionBase *&outConn) override
-        {
-            (void)targetFd;
-            outConn = nullptr;
-            return HandshakeStatus::SUCCESS;
-        }
     };
 
     template <typename OutboundContext = EmptyOutbound>
@@ -622,10 +560,10 @@ namespace mynet
                               std::chrono::milliseconds totalTimeout = std::chrono::milliseconds(3000),
                               uint32_t fwmark = 0) noexcept
         {
-            const auto startTotal = std::chrono::steady_clock::now();
             std::vector<Racer> activeRacers;
+            auto startTime = std::chrono::steady_clock::now();
 
-            auto cleanupRacers = [&activeRacers](int exceptFd = -1) noexcept
+            auto cleanupRacers = [&](int exceptFd = -1)
             {
                 for (auto &r : activeRacers)
                 {
@@ -635,116 +573,110 @@ namespace mynet
                         r.fd = -1;
                     }
                 }
+                activeRacers.clear();
             };
 
-            auto startInterfaceRacer = [&](const std::string &ifname, bool isPrimary) noexcept
+            // 1. 发起所有主网卡建连
+            for (const auto &ifname : primaryInterfaces)
             {
                 int fd = initiateNonBlockingConnect(targetAddr, ifname, fwmark);
                 if (fd >= 0)
                 {
-                    activeRacers.push_back(Racer{.fd = fd,
-                                                 .ifname = ifname,
-                                                 .isPrimary = isPrimary,
-                                                 .startTime = std::chrono::steady_clock::now()});
+                    activeRacers.push_back(Racer{
+                        .fd = fd, .ifname = ifname, .isPrimary = true, .startTime = std::chrono::steady_clock::now()});
                 }
-            };
-
-            // 1. 启动主网卡
-            for (const auto &ifname : primaryInterfaces)
-            {
-                startInterfaceRacer(ifname, true);
             }
 
-            // 若无主网卡，或策略为 HYBRID，立即启动备选网卡
-            bool fallbackStarted = false;
-            if (primaryInterfaces.empty() || strategy == InterfaceStrategy::HYBRID)
+            // 若策略为 HYBRID，立即激活所有备用网卡一同参赛
+            if (strategy == InterfaceStrategy::HYBRID)
             {
                 for (const auto &ifname : fallbackInterfaces)
                 {
-                    startInterfaceRacer(ifname, false);
+                    int fd = initiateNonBlockingConnect(targetAddr, ifname, fwmark);
+                    if (fd >= 0)
+                    {
+                        activeRacers.push_back(Racer{.fd = fd,
+                                                     .ifname = ifname,
+                                                     .isPrimary = false,
+                                                     .startTime = std::chrono::steady_clock::now()});
+                    }
                 }
-                fallbackStarted = true;
             }
 
-            if (activeRacers.empty())
-            {
-                return InterfaceRacerResult{};
-            }
+            bool fallbackTriggered = (strategy == InterfaceStrategy::HYBRID);
 
-            // 轮询直至出现首个赢家或超时
-            while (true)
+            // 2. Poll 轮询等待连接就绪
+            while (!activeRacers.empty())
             {
-                const auto elapsedTotal = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - startTotal);
-                if (elapsedTotal >= totalTimeout)
+                auto now = std::chrono::steady_clock::now();
+                if (now - startTime >= totalTimeout)
                 {
                     break;
                 }
 
-                // 检查是否应当激活 fallback 网卡
-                if (!fallbackStarted && strategy == InterfaceStrategy::FALLBACK)
+                // 检查是否需要激活 Fallback 备用网卡
+                if (strategy == InterfaceStrategy::FALLBACK && !fallbackTriggered && (now - startTime >= fallbackDelay))
                 {
-                    bool allPrimaryDead = true;
+                    fallbackTriggered = true;
+                    // 检查主网卡是否全挂或超时未连通
+                    bool primaryStillConnecting = false;
                     for (const auto &r : activeRacers)
                     {
                         if (r.isPrimary && r.fd >= 0)
                         {
-                            allPrimaryDead = false;
+                            primaryStillConnecting = true;
                             break;
                         }
                     }
 
-                    if (allPrimaryDead || elapsedTotal >= fallbackDelay)
+                    if (primaryStillConnecting || activeRacers.empty())
                     {
                         for (const auto &ifname : fallbackInterfaces)
                         {
-                            startInterfaceRacer(ifname, false);
+                            int fd = initiateNonBlockingConnect(targetAddr, ifname, fwmark);
+                            if (fd >= 0)
+                            {
+                                activeRacers.push_back(Racer{.fd = fd,
+                                                             .ifname = ifname,
+                                                             .isPrimary = false,
+                                                             .startTime = std::chrono::steady_clock::now()});
+                            }
                         }
-                        fallbackStarted = true;
                     }
                 }
 
-                // 组装 pollfd
-                std::vector<struct pollfd> pfds;
-                std::vector<size_t> racerIdxs;
+                std::vector<pollfd> pfds;
+                std::vector<size_t> racerIdx;
                 for (size_t i = 0; i < activeRacers.size(); ++i)
                 {
                     if (activeRacers[i].fd >= 0)
                     {
                         pfds.push_back(
                             pollfd{.fd = activeRacers[i].fd, .events = POLLOUT | POLLERR | POLLHUP, .revents = 0});
-                        racerIdxs.push_back(i);
+                        racerIdx.push_back(i);
                     }
                 }
 
                 if (pfds.empty())
+                    break;
+
+                int remainingMs = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(totalTimeout - (now - startTime)).count());
+                int pollTimeout = std::min(50, std::max(1, remainingMs));
+
+                int prc = ::poll(pfds.data(), pfds.size(), pollTimeout);
+                if (prc < 0)
                 {
-                    // 所有网卡均已失败
+                    if (errno == EINTR)
+                        continue;
                     break;
                 }
 
-                // 计算当前一轮 poll 的超时时间
-                int pollWaitMs = 20;
-                if (!fallbackStarted && strategy == InterfaceStrategy::FALLBACK)
-                {
-                    auto remainToFallback = fallbackDelay - elapsedTotal;
-                    if (remainToFallback.count() > 0 && remainToFallback.count() < pollWaitMs)
-                    {
-                        pollWaitMs = static_cast<int>(remainToFallback.count());
-                    }
-                }
-
-                int ret = ::poll(pfds.data(), pfds.size(), pollWaitMs);
-                if (ret > 0)
+                if (prc > 0)
                 {
                     for (size_t p = 0; p < pfds.size(); ++p)
                     {
-                        if (pfds[p].revents == 0)
-                            continue;
-
-                        size_t rIdx = racerIdxs[p];
-                        auto &racer = activeRacers[rIdx];
-
+                        auto &racer = activeRacers[racerIdx[p]];
                         if (pfds[p].revents & (POLLERR | POLLHUP))
                         {
                             // 该套接字发生故障，关闭淘汰

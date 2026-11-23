@@ -50,4 +50,6 @@ namespace mynet
         }
     };
 
+    using DialerShadowsocks = OutboundShadowsocks;
+
 } // namespace mynet

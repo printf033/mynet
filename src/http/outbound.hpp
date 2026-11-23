@@ -51,4 +51,6 @@ namespace mynet
         }
     };
 
+    using DialerHttp = OutboundHttp;
+
 } // namespace mynet

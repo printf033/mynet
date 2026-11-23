@@ -49,4 +49,6 @@ namespace mynet
         }
     };
 
+    using DialerSocks5 = OutboundSocks5;
+
 } // namespace mynet

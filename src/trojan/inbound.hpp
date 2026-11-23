@@ -18,11 +18,17 @@ namespace mynet
         std::string password_{};
 
     public:
-        InboundTrojan(std::string tag, std::string host, uint16_t port, std::string password,
-                      bool enableSniffing = true)
+        InboundTrojan(std::string tag = "trojan", std::string host = "0.0.0.0", uint16_t port = 443,
+                      std::string password = "", bool enableSniffing = true)
             : InboundBase(std::move(tag), "trojan", std::move(host), port, enableSniffing),
               password_(std::move(password))
         {
+        }
+
+        [[nodiscard]] bool match(std::span<const uint8_t> initialBytes) const noexcept override
+        {
+            // Trojan 首包为 56 字节密码哈希后跟 CRLF (0x0D, 0x0A)
+            return initialBytes.size() >= 58 && initialBytes[56] == '\r' && initialBytes[57] == '\n';
         }
 
         [[nodiscard]] inline const std::string &password() const noexcept { return password_; }
@@ -32,5 +38,7 @@ namespace mynet
             return std::make_unique<handler::HandlerInboundTrojan>(password_);
         }
     };
+
+    using AcceptorTrojan = InboundTrojan;
 
 } // namespace mynet

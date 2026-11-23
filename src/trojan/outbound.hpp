@@ -46,4 +46,6 @@ namespace mynet
         }
     };
 
+    using DialerTrojan = OutboundTrojan;
+
 } // namespace mynet

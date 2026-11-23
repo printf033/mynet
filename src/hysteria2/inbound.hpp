@@ -18,8 +18,8 @@ namespace mynet
         std::string password_{};
 
     public:
-        InboundHysteria2(std::string tag, std::string host, uint16_t port, std::string password,
-                         bool enableSniffing = true)
+        InboundHysteria2(std::string tag = "hysteria2", std::string host = "0.0.0.0", uint16_t port = 443,
+                         std::string password = "", bool enableSniffing = true)
             : InboundBase(std::move(tag), "hysteria2", std::move(host), port, enableSniffing),
               password_(std::move(password))
         {
@@ -32,5 +32,7 @@ namespace mynet
             return std::make_unique<handler::HandlerInboundHysteria2>(password_);
         }
     };
+
+    using AcceptorHysteria2 = InboundHysteria2;
 
 } // namespace mynet

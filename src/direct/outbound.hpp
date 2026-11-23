@@ -22,24 +22,15 @@ namespace mynet
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
         {
-            Dialer<handler::HandlerOutboundDirect> dialer;
-            if (options_.fwmark != 0)
-            {
-                dialer.setMark(options_.fwmark);
-            }
-            if (!options_.bindInterface.empty())
-            {
-                dialer.setInterface(options_.bindInterface);
-            }
-            Result<bool> res;
+            Result<DialTcpResult> res;
 
             if (auto sin = target.toSockAddrIn(); sin.has_value())
             {
-                res = dialer.dialTcp(*sin);
+                res = dialTcp(*sin);
             }
             else
             {
-                res = dialer.dialTcp(target.host, target.port);
+                res = dialTcp(target.host, target.port);
             }
 
             if (!res)
@@ -48,34 +39,25 @@ namespace mynet
             }
 
             OutboundDialResult outRes;
-            outRes.fd = dialer.release();
+            outRes.fd = res->fd;
             outRes.handler = std::make_unique<handler::HandlerOutboundDirect>(target);
             outRes.outboundTag = tag_;
             outRes.targetEndpoint = target.toString();
-            outRes.immediateConnected = *res;
+            outRes.immediateConnected = res->immediateConnected;
             return outRes;
         }
 
         Result<int> dialDatagram(const handler::ProxyAddress &target) override
         {
-            Dialer<handler::HandlerOutboundDirect> dialer;
-            if (options_.fwmark != 0)
-            {
-                dialer.setMark(options_.fwmark);
-            }
-            if (!options_.bindInterface.empty())
-            {
-                dialer.setInterface(options_.bindInterface);
-            }
-            Result<> res;
+            Result<int> res;
 
             if (auto sin = target.toSockAddrIn(); sin.has_value())
             {
-                res = dialer.dialUdp(*sin);
+                res = dialUdp(*sin);
             }
             else
             {
-                res = dialer.dialUdp(target.host, target.port);
+                res = dialUdp(target.host, target.port);
             }
 
             if (!res)
@@ -83,7 +65,7 @@ namespace mynet
                 return std::unexpected(res.error());
             }
 
-            return dialer.release();
+            return *res;
         }
     };
 

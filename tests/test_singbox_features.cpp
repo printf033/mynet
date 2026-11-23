@@ -375,13 +375,12 @@ TEST(SingboxFeaturesTest, TcpPrefixInjection)
     };
 
     Dialer<DummyHandler> dialer;
-    dialer.attach(sv[0]);
 
     std::vector<uint8_t> prefix = {'P', 'R', 'E', 'F', 'I', 'X', 0x01, 0x02};
     dialer.setTcpPrefix(prefix);
     EXPECT_EQ(dialer.getTcpPrefix().size(), prefix.size());
 
-    EXPECT_TRUE(dialer.flushTcpPrefix());
+    EXPECT_TRUE(dialer.flushTcpPrefix(sv[0]));
 
     uint8_t buf[16]{};
     ssize_t n = ::recv(sv[1], buf, sizeof(buf), 0);
@@ -389,6 +388,7 @@ TEST(SingboxFeaturesTest, TcpPrefixInjection)
     EXPECT_EQ(std::memcmp(buf, prefix.data(), prefix.size()), 0);
 
     dialer.reset();
+    ::close(sv[0]);
     ::close(sv[1]);
 }
 

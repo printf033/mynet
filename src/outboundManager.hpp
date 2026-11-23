@@ -40,18 +40,6 @@ namespace mynet
 {
 
     /**
-     * @brief 统一出站拨号选项策略 (Dialer Options)
-     */
-    struct DialerOptions
-    {
-        uint32_t fwmark{0};                      ///< Linux SO_MARK 策略路由打标（防止回环死锁）
-        std::string bindInterface{};             ///< SO_BINDTODEVICE 绑定出口网卡 (例如 eth0, wan1)
-        std::string bindAddress{};               ///< 绑定本地特定出口 IP 地址
-        bool tcpFastOpen{false};                 ///< 是否启用 TCP Fast Open (MSG_FASTOPEN)
-        std::chrono::milliseconds timeout{5000}; ///< 拨号超时
-    };
-
-    /**
      * @brief 出站拨号结果
      */
     struct OutboundDialResult
@@ -103,12 +91,11 @@ namespace mynet
      * 业务出站端点元数据描述符与出站协议装配中心。
      * 底层四元组建连与套接字描述符托管给基础传输设施 DialerBase。
      */
-    class OutboundBase
+    class OutboundBase : public IDialer
     {
     protected:
         std::string tag_{};
         std::string type_{};
-        DialerOptions options_{};
         std::atomic<bool> running_{false};
 
         /**
@@ -118,16 +105,7 @@ namespace mynet
         Result<OutboundDialResult> dialStreamHelper(std::string_view serverHost, uint16_t serverPort,
                                                     const handler::ProxyAddress &target, Args &&...args)
         {
-            Dialer<HandlerType> dialer;
-            if (options_.fwmark != 0)
-            {
-                dialer.setMark(options_.fwmark);
-            }
-            if (!options_.bindInterface.empty())
-            {
-                dialer.setInterface(options_.bindInterface);
-            }
-            auto dialRes = dialer.dialTcp(serverHost, serverPort);
+            auto dialRes = dialTcp(serverHost, serverPort);
             if (!dialRes)
             {
                 return std::unexpected(dialRes.error());
@@ -137,19 +115,19 @@ namespace mynet
             h->handle();
 
             OutboundDialResult res;
-            res.fd = dialer.release();
+            res.fd = dialRes->fd;
             res.handler = std::move(h);
             res.outboundTag = tag_;
             res.targetEndpoint = target.toString();
-            res.immediateConnected = *dialRes;
+            res.immediateConnected = dialRes->immediateConnected;
             return res;
         }
 
     public:
         OutboundBase(std::string tag, std::string type, DialerOptions options = {})
-            : tag_(std::move(tag)),
-              type_(std::move(type)),
-              options_(std::move(options))
+            : IDialer(std::move(options)),
+              tag_(std::move(tag)),
+              type_(std::move(type))
         {
         }
 
@@ -158,8 +136,6 @@ namespace mynet
         [[nodiscard]] inline const std::string &tag() const noexcept { return tag_; }
         [[nodiscard]] inline const std::string &type() const noexcept { return type_; }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
-        [[nodiscard]] inline const DialerOptions &options() const noexcept { return options_; }
-        inline void setOptions(DialerOptions options) noexcept { options_ = std::move(options); }
 
         [[nodiscard]] virtual std::string_view serverHost() const noexcept { return ""; }
         [[nodiscard]] virtual uint16_t serverPort() const noexcept { return 0; }
@@ -177,6 +153,8 @@ namespace mynet
          * @brief 停止出站节点生命周期
          */
         virtual void stop() noexcept { running_.store(false, std::memory_order_release); }
+
+        virtual Result<OutboundDialResult> dial(const handler::ProxyAddress &target) { return dialStream(target); }
 
         /**
          * @brief 发起流式出站建连 (TCP / TLS / 代理协议)

@@ -45,4 +45,6 @@ namespace mynet
         }
     };
 
+    using DialerHysteria2 = OutboundHysteria2;
+
 } // namespace mynet

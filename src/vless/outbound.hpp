@@ -50,4 +50,6 @@ namespace mynet
         }
     };
 
+    using DialerVless = OutboundVless;
+
 } // namespace mynet

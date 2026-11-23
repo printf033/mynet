@@ -20,8 +20,8 @@ namespace mynet
         std::string password_{};
 
     public:
-        InboundShadowsocks(std::string tag, std::string host, uint16_t port, std::string method, std::string password,
-                           bool enableSniffing = true)
+        InboundShadowsocks(std::string tag = "shadowsocks", std::string host = "0.0.0.0", uint16_t port = 8388,
+                           std::string method = "aes-128-gcm", std::string password = "", bool enableSniffing = true)
             : InboundBase(std::move(tag), "shadowsocks", std::move(host), port, enableSniffing),
               method_(std::move(method)),
               password_(std::move(password))
@@ -36,5 +36,7 @@ namespace mynet
             return std::make_unique<handler::HandlerInboundShadowsocks>(method_, password_);
         }
     };
+
+    using AcceptorShadowsocks = InboundShadowsocks;
 
 } // namespace mynet

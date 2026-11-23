@@ -5,11 +5,10 @@
  * @brief 协议接收器（Acceptor）基类与握手抽象。
  *
  * 职责彻底解耦：
- * 1. 剥离套接字描述符 (fd) 与地址 (sockaddr)，底层传输套接字交由 Reactor / Proactor 纳管；
- * 2. 专职负责特定协议的入站握手 (Inbound Handshake)；
- * 3. 包含特定协议相关的 inbound_ 结构体（模板特化占位，不需要时为 EmptyInbound，配合 [[no_unique_address]] 占 0
- * 字节）；
- * 4. 支持首包特征嗅探 match() 与精准握手驱动 handshake()。
+ * 1. 纯虚/基类，无模板参数，零连接级可变成员；
+ * 2. 专职负责特定协议的入站握手 (Inbound Handshake) 与首包特征嗅探 match()；
+ * 3. 各协议自身继承并实现定制握手协议；
+ * 4. 握手成功后交付装配好对应 Handler 的 ConnectionBase 实例。
  */
 
 #include "config/log.hpp"
@@ -46,7 +45,7 @@ namespace mynet
     };
 
     /**
-     * @brief 接收器纯虚抽象接口
+     * @brief 协议接收器抽象基类（零连接级可变成员）
      */
     class IAcceptor
     {
@@ -65,7 +64,12 @@ namespace mynet
         /**
          * @brief 针对新接入的 clientFd 执行协议握手
          */
-        virtual HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn) = 0;
+        virtual HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn)
+        {
+            (void)clientFd;
+            outConn = nullptr;
+            return HandshakeStatus::SUCCESS;
+        }
 
         /**
          * @brief 重置握手器状态
@@ -127,9 +131,9 @@ namespace mynet
     };
 
     /**
-     * @brief 模板化协议接收器基类
+     * @brief 兼容泛型接收器模板包装（零数据成员，支持直接作为默认接收器或兼容原有泛型写法）
      *
-     * @tparam InboundContext 协议特有的 inbound_ 结构体。默认为 EmptyInbound。
+     * @tparam InboundContext 协议特有的 inbound 上下文类型。默认为 EmptyInbound。
      */
     template <typename InboundContext = EmptyInbound>
     class Acceptor : public IAcceptor
@@ -138,32 +142,14 @@ namespace mynet
         using Inbound = InboundContext;
         using Handler = InboundContext;
 
-        [[no_unique_address]] Inbound inbound_{};
-
         Acceptor() = default;
-        explicit Acceptor(InboundContext inbound)
-            : inbound_(std::move(inbound))
-        {
-        }
+        explicit Acceptor([[maybe_unused]] InboundContext inbound) {}
         ~Acceptor() override = default;
 
-        Acceptor(const Acceptor &) = delete;
-        Acceptor &operator=(const Acceptor &) = delete;
-        Acceptor(Acceptor &&other) noexcept
-            : inbound_(std::move(other.inbound_))
-        {
-        }
-        Acceptor &operator=(Acceptor &&other) noexcept
-        {
-            if (this != &other)
-            {
-                inbound_ = std::move(other.inbound_);
-            }
-            return *this;
-        }
-
-        [[nodiscard]] inline Inbound &inbound() noexcept { return inbound_; }
-        [[nodiscard]] inline const Inbound &inbound() const noexcept { return inbound_; }
+        Acceptor(const Acceptor &) = default;
+        Acceptor &operator=(const Acceptor &) = default;
+        Acceptor(Acceptor &&) noexcept = default;
+        Acceptor &operator=(Acceptor &&) noexcept = default;
 
         inline Result<SSL *> startTls(int clientFd, SSL_CTX *ctx) noexcept
         {
@@ -176,13 +162,6 @@ namespace mynet
         }
 
         inline HandshakeStatus doTlsHandshake(SSL *ssl) noexcept { return IAcceptor::doTlsHandshake(ssl); }
-
-        HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn) override
-        {
-            (void)clientFd;
-            outConn = nullptr;
-            return HandshakeStatus::SUCCESS;
-        }
     };
 
     template <typename InboundContext = EmptyInbound>

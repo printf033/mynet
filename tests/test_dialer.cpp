@@ -105,7 +105,6 @@ TEST(DnsResolverTest, DecodeResponseAndCache)
 TEST(DialerTest, LifecycleAndReset)
 {
     Dialer<HandlerConnection> dialer;
-    EXPECT_EQ(dialer.fd, -1);
 
     // 拨号非法 IP 格式失败
     auto res = dialer.dialTcp("not_an_ip", 80);
@@ -116,22 +115,10 @@ TEST(DialerTest, LifecycleAndReset)
     auto res2 = dialer.dialTcp("127.0.0.1", 65534);
     if (res2.has_value())
     {
-        // 若为 false，说明处于 EINPROGRESS 异步连接中
-        EXPECT_GE(dialer.fd, 0);
+        EXPECT_GE(res2->fd, 0);
+        ::close(res2->fd);
     }
     dialer.reset();
-    EXPECT_EQ(dialer.fd, -1);
-
-    // 测试 attach 与 release 机制
-    int dummyFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    ASSERT_GE(dummyFd, 0);
-    dialer.attach(dummyFd);
-    EXPECT_EQ(dialer.fd, dummyFd);
-
-    int releasedFd = dialer.release();
-    EXPECT_EQ(releasedFd, dummyFd);
-    EXPECT_EQ(dialer.fd, -1);
-    ::close(releasedFd);
 }
 
 // =============================================================================
@@ -428,6 +415,4 @@ TEST(DialerTest, StrategyRoutingOptionsFwmarkAndTransparent)
     EXPECT_TRUE(dialer.isTransparent());
 
     dialer.reset();
-    // reset clears fd and targetAddr
-    EXPECT_EQ(dialer.fd, -1);
 }

@@ -403,6 +403,8 @@ namespace mynet
         }
     };
 
+    using AcceptorTransparent = InboundTransparent;
+
     /**
      * @brief Linux TUN 虚拟网络接口端点 (InboundTun)
      */
@@ -486,5 +488,7 @@ namespace mynet
             return std::make_unique<handler::HandlerInboundTProxy>();
         }
     };
+
+    using AcceptorTransparent = InboundTransparent;
 
 } // namespace mynet
