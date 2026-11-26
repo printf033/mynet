@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../outboundManager.hpp"
+#include "../dialer.hpp"
 #include "direct.hpp"
 #include <memory>
 #include <string>
@@ -10,13 +10,13 @@ namespace mynet
 {
 
     /**
-     * @brief 直连出站端点 (OutboundDirect)
+     * @brief 直连拨号器 (DialerDirect / OutboundDirect)
      */
-    class OutboundDirect : public OutboundBase
+    class DialerDirect : public Dialer
     {
     public:
-        explicit OutboundDirect(std::string tag = "direct", DialerOptions options = {})
-            : OutboundBase(std::move(tag), "direct", std::move(options))
+        explicit DialerDirect(std::string tag = "direct", DialerOptions options = {})
+            : Dialer(std::move(tag), "direct", std::move(options))
         {
         }
 
@@ -44,29 +44,23 @@ namespace mynet
             outRes.outboundTag = tag_;
             outRes.targetEndpoint = target.toString();
             outRes.immediateConnected = res->immediateConnected;
+            outRes.peerAddr = res->peerAddr;
+            outRes.connectDeferred = res->connectDeferred;
             return outRes;
         }
 
         Result<int> dialDatagram(const handler::ProxyAddress &target) override
         {
-            Result<int> res;
-
-            if (auto sin = target.toSockAddrIn(); sin.has_value())
+            (void)target;
+            auto dgramRes = createConfiguredDatagram();
+            if (!dgramRes)
             {
-                res = dialUdp(*sin);
+                return std::unexpected(dgramRes.error());
             }
-            else
-            {
-                res = dialUdp(target.host, target.port);
-            }
-
-            if (!res)
-            {
-                return std::unexpected(res.error());
-            }
-
-            return *res;
+            return dgramRes->release();
         }
     };
+
+    using OutboundDirect = DialerDirect;
 
 } // namespace mynet

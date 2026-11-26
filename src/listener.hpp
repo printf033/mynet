@@ -5,6 +5,7 @@
 #endif
 
 #include "config/log.hpp"
+#include "datagramCore.hpp"
 #include "error.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <expected>
 #include <fcntl.h>
+#include <mutex>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -27,6 +29,12 @@ namespace mynet
         TCP,
         UDP
     };
+
+    inline void ignoreSigpipeOnce() noexcept
+    {
+        static std::once_flag once;
+        std::call_once(once, []() noexcept { ::signal(SIGPIPE, SIG_IGN); });
+    }
 
     /**
      * @brief 真实传输套接字端点（封装基础套接字系统调用与地址状态）
@@ -59,7 +67,7 @@ namespace mynet
                 return std::unexpected(ERR::ADDR_INVALID);
             }
 
-            ::signal(SIGPIPE, SIG_IGN);
+            ignoreSigpipeOnce();
 
             addr.sin_family = AF_INET;
             if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]
@@ -130,56 +138,24 @@ namespace mynet
                 return std::unexpected(ERR::ADDR_INVALID);
             }
 
-            addr.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]
+            sockaddr_in sa{};
+            sa.sin_family = AF_INET;
+            if (::inet_pton(AF_INET, ip, &sa.sin_addr) <= 0) [[unlikely]]
             {
                 LOG_ERROR("SocketEndpoint::listenUdp {}:{}: not an IPv4 address literal", ip, port);
                 return std::unexpected(ERR::ADDR_INVALID);
             }
-            addr.sin_port = ::htons(static_cast<uint16_t>(port));
+            sa.sin_port = ::htons(static_cast<uint16_t>(port));
 
-            fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) [[unlikely]]
+            auto dgramRes = Datagram::bind(sa, reuseAddr, reusePort);
+            if (!dgramRes) [[unlikely]]
             {
-                LOG_ERROR("SocketEndpoint::listenUdp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
-                return std::unexpected(ERR::SOCKET_FAILED);
+                LOG_ERROR("SocketEndpoint::listenUdp {}:{}: failed: {}", ip, port, toString(dgramRes.error()));
+                return std::unexpected(dgramRes.error());
             }
 
-            constexpr int opt = 1;
-            if (reuseAddr)
-            {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
-                {
-                    LOG_ERROR("SocketEndpoint::listenUdp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port,
-                              errnoText(errno));
-                    reset();
-                    return std::unexpected(ERR::SETSOCKOPT_FAILED);
-                }
-            }
-            if (reusePort)
-            {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
-                {
-                    LOG_ERROR("SocketEndpoint::listenUdp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port,
-                              errnoText(errno));
-                    reset();
-                    return std::unexpected(ERR::SETSOCKOPT_FAILED);
-                }
-            }
-
-            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0) [[unlikely]]
-            {
-                LOG_ERROR("SocketEndpoint::listenUdp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
-                reset();
-                return std::unexpected(ERR::BIND_FAILED);
-            }
-
-            if (port == 0)
-            {
-                socklen_t len = sizeof(addr);
-                ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
-            }
-
+            addr = dgramRes->localAddr();
+            fd = dgramRes->release();
             return fd;
         }
 

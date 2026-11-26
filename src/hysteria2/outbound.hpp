@@ -11,9 +11,9 @@ namespace mynet
 {
 
     /**
-     * @brief Hysteria 2 协议出站端点 (OutboundHysteria2)
+     * @brief Hysteria 2 协议出站拨号器 (DialerHysteria2 / OutboundHysteria2)
      */
-    class OutboundHysteria2 : public OutboundBase
+    class DialerHysteria2 : public Dialer
     {
     private:
         std::string serverHost_{};
@@ -21,9 +21,9 @@ namespace mynet
         std::string password_{};
 
     public:
-        OutboundHysteria2(std::string tag, std::string serverHost, uint16_t serverPort, std::string password,
-                          DialerOptions options = {})
-            : OutboundBase(std::move(tag), "hysteria2", std::move(options)),
+        DialerHysteria2(std::string tag, std::string serverHost, uint16_t serverPort, std::string password,
+                        DialerOptions options = {})
+            : Dialer(std::move(tag), "hysteria2", std::move(options)),
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort),
               password_(std::move(password))
@@ -45,6 +45,6 @@ namespace mynet
         }
     };
 
-    using DialerHysteria2 = OutboundHysteria2;
+    using OutboundHysteria2 = DialerHysteria2;
 
 } // namespace mynet

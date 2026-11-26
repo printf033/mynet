@@ -225,12 +225,70 @@ namespace mynet::encoding
         return true;
     }
 
-} // namespace mynet::encoding
+    /**
+     * @brief RFC 4648 URL 安全 Base64 编码器 (可选无 '=' 填充)
+     */
+    [[nodiscard]] inline std::string base64UrlEncode(std::span<const uint8_t> in, bool padding = false)
+    {
+        std::string out = base64Encode(in);
+        for (char &c : out)
+        {
+            if (c == '+')
+            {
+                c = '-';
+            }
+            else if (c == '/')
+            {
+                c = '_';
+            }
+        }
+        if (!padding)
+        {
+            while (!out.empty() && out.back() == '=')
+            {
+                out.pop_back();
+            }
+        }
+        return out;
+    }
 
-namespace mynet
-{
-    namespace encoding = mynet::encoding;
-}
+    /**
+     * @brief RFC 4648 URL 安全 Base64 解码器 (自动补全省略的 '=' 填充)
+     */
+    inline bool base64UrlDecode(std::string_view in, std::vector<uint8_t> &out)
+    {
+        std::string normalized;
+        normalized.reserve(in.size() + 4);
+        for (char c : in)
+        {
+            if (c == '-')
+            {
+                normalized.push_back('+');
+            }
+            else if (c == '_')
+            {
+                normalized.push_back('/');
+            }
+            else
+            {
+                normalized.push_back(c);
+            }
+        }
+        while (normalized.size() % 4 != 0)
+        {
+            normalized.push_back('=');
+        }
+        std::string raw;
+        if (!base64Decode(normalized, raw))
+        {
+            out.clear();
+            return false;
+        }
+        out.assign(raw.begin(), raw.end());
+        return true;
+    }
+
+} // namespace mynet::encoding
 
 namespace mynet::handler
 {

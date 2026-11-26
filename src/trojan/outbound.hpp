@@ -11,9 +11,9 @@ namespace mynet
 {
 
     /**
-     * @brief Trojan 协议出站端点 (OutboundTrojan)
+     * @brief Trojan 协议拨号器 (DialerTrojan / OutboundTrojan)
      */
-    class OutboundTrojan : public OutboundBase
+    class DialerTrojan : public Dialer
     {
     private:
         std::string serverHost_{};
@@ -21,9 +21,9 @@ namespace mynet
         std::string password_{};
 
     public:
-        OutboundTrojan(std::string tag, std::string serverHost, uint16_t serverPort, std::string password,
-                       DialerOptions options = {})
-            : OutboundBase(std::move(tag), "trojan", std::move(options)),
+        DialerTrojan(std::string tag, std::string serverHost, uint16_t serverPort, std::string password,
+                     DialerOptions options = {})
+            : Dialer(std::move(tag), "trojan", std::move(options)),
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort),
               password_(std::move(password))
@@ -46,6 +46,6 @@ namespace mynet
         }
     };
 
-    using DialerTrojan = OutboundTrojan;
+    using OutboundTrojan = DialerTrojan;
 
 } // namespace mynet

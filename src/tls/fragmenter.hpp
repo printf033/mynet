@@ -13,6 +13,7 @@
  *    确保前序分片已被远端或中间件物理 ACK 确认后再发射后续分片，彻底破坏 DPI 滑动流重组。
  */
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -45,6 +46,22 @@ namespace mynet::tls
         std::string_view serverName{};
     };
 
+    /**
+     * @brief 解析后的 TLS ClientHello 零拷贝结构视图 (Single Source of Truth)
+     */
+    struct ClientHelloView
+    {
+        std::array<uint8_t, 32> clientRandom{};
+        const uint8_t *sessionIdData{nullptr};
+        size_t sessionIdOffset{0};
+        size_t sessionIdLength{0};
+        size_t sniOffset{0};
+        size_t sniLength{0};
+        std::string_view serverName{};
+        std::array<uint8_t, 32> keyShareX25519{};
+        bool hasKeyShare{false};
+    };
+
     class TlsFragmenter
     {
     public:
@@ -53,10 +70,9 @@ namespace mynet::tls
         static constexpr uint8_t HANDSHAKE_CLIENT_HELLO = 0x01;
 
         /**
-         * @brief 定位 TLS ClientHello 中的 SNI 字段 (支持 0x16 记录层报文与 0x01 裸 ClientHello)
-         * @param data 原始 TLS 数据包（记录层报文或裸 ClientHello 握手报文）
+         * @brief 解析 TLS ClientHello（支持 0x16 记录层与 0x01 裸握手报文，单遍零拷贝提取 SNI/Random/SessionID/KeyShare）
          */
-        [[nodiscard]] static std::optional<SniIndexInfo> findSni(std::span<const uint8_t> data) noexcept
+        [[nodiscard]] static std::optional<ClientHelloView> parseClientHello(std::span<const uint8_t> data) noexcept
         {
             if (data.empty())
                 return std::nullopt;
@@ -86,7 +102,6 @@ namespace mynet::tls
                 return std::nullopt;
             }
 
-            // 握手类型必须为 ClientHello (1)
             if (p >= end || *p != HANDSHAKE_CLIENT_HELLO)
                 return std::nullopt;
             p += 1;
@@ -98,18 +113,24 @@ namespace mynet::tls
             if (p + handshakeLen > end)
                 return std::nullopt;
 
-            // Client Version (2 bytes) + Random (32 bytes)
+            // Client Version (2B) + ClientRandom (32B)
             if (p + 2 + 32 > end)
                 return std::nullopt;
+            ClientHelloView view{};
+            std::memcpy(view.clientRandom.data(), p + 2, 32);
             p += 2 + 32;
 
             // Session ID
             if (p + 1 > end)
                 return std::nullopt;
             const uint8_t sessionIdLen = *p;
-            p += 1 + sessionIdLen;
-            if (p > end)
+            p += 1;
+            if (p + sessionIdLen > end)
                 return std::nullopt;
+            view.sessionIdOffset = static_cast<size_t>(p - data.data());
+            view.sessionIdLength = sessionIdLen;
+            view.sessionIdData = p;
+            p += sessionIdLen;
 
             // Cipher Suites
             if (p + 2 > end)
@@ -129,14 +150,13 @@ namespace mynet::tls
 
             // Extensions Length
             if (p + 2 > end)
-                return std::nullopt;
+                return view;
             const size_t extTotalLen = (static_cast<size_t>(p[0]) << 8) | p[1];
             p += 2;
             const uint8_t *extEnd = p + extTotalLen;
             if (extEnd > end)
                 return std::nullopt;
 
-            // 遍历扩展寻找 server_name (0x0000)
             while (p + 4 <= extEnd)
             {
                 const uint16_t extType = (static_cast<uint16_t>(p[0]) << 8) | p[1];
@@ -145,28 +165,50 @@ namespace mynet::tls
                 if (p + extLen > extEnd)
                     return std::nullopt;
 
-                if (extType == 0x0000) // server_name extension
+                if (extType == 0x0000 && extLen >= 5 && p[2] == 0x00) // server_name (SNI)
                 {
-                    if (extLen < 5)
-                        return std::nullopt;
-                    // server_name_list_length (2) + name_type (1) + name_length (2)
-                    const uint8_t nameType = p[2];
-                    if (nameType == 0x00) // host_name
+                    const size_t nameLen = (static_cast<size_t>(p[3]) << 8) | p[4];
+                    if (5 + nameLen <= extLen)
                     {
-                        const size_t nameLen = (static_cast<size_t>(p[3]) << 8) | p[4];
-                        if (5 + nameLen > extLen)
-                            return std::nullopt;
-
                         const uint8_t *namePtr = p + 5;
-                        const size_t offset = static_cast<size_t>(namePtr - data.data());
-                        std::string_view name(reinterpret_cast<const char *>(namePtr), nameLen);
-                        return SniIndexInfo{.sniOffset = offset, .sniLength = nameLen, .serverName = name};
+                        view.sniOffset = static_cast<size_t>(namePtr - data.data());
+                        view.sniLength = nameLen;
+                        view.serverName = std::string_view(reinterpret_cast<const char *>(namePtr), nameLen);
+                    }
+                }
+                else if (extType == 0x0033 && extLen >= 6) // key_share (TLS 1.3)
+                {
+                    size_t ksOffset = 2;
+                    while (ksOffset + 4 <= extLen)
+                    {
+                        const uint16_t group = (static_cast<uint16_t>(p[ksOffset]) << 8) | p[ksOffset + 1];
+                        const uint16_t kLen = (static_cast<uint16_t>(p[ksOffset + 2]) << 8) | p[ksOffset + 3];
+                        ksOffset += 4;
+                        if (group == 0x001d && kLen == 32 && ksOffset + 32 <= extLen)
+                        {
+                            std::memcpy(view.keyShareX25519.data(), p + ksOffset, 32);
+                            view.hasKeyShare = true;
+                            break;
+                        }
+                        ksOffset += kLen;
                     }
                 }
                 p += extLen;
             }
 
-            return std::nullopt;
+            return view;
+        }
+
+        /**
+         * @brief 定位 TLS ClientHello 中的 SNI 字段 (支持 0x16 记录层报文与 0x01 裸 ClientHello)
+         * @param data 原始 TLS 数据包（记录层报文或裸 ClientHello 握手报文）
+         */
+        [[nodiscard]] static std::optional<SniIndexInfo> findSni(std::span<const uint8_t> data) noexcept
+        {
+            auto view = parseClientHello(data);
+            if (!view.has_value() || view->sniLength == 0)
+                return std::nullopt;
+            return SniIndexInfo{.sniOffset = view->sniOffset, .sniLength = view->sniLength, .serverName = view->serverName};
         }
 
         /**

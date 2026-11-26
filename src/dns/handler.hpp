@@ -302,10 +302,11 @@ namespace mynet::handler
 
         void sendQuery()
         {
-            if (!queryDomain_.empty() && remotePeer_.sin_port != 0)
+            const sockaddr_in &peer = remotePeer();
+            if (!queryDomain_.empty() && peer.sin_port != 0)
             {
                 auto queryBytes = dns::encodeQuery(queryDomain_, queryType_, txid_);
-                sendTo(remotePeer_, reinterpret_cast<const char *>(queryBytes.data()), queryBytes.size());
+                sendTo(peer, reinterpret_cast<const char *>(queryBytes.data()), queryBytes.size());
             }
         }
 

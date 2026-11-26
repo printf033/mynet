@@ -342,7 +342,7 @@ namespace mynet
             ss << R"({"proxies":{)";
 
             bool first = true;
-            for (const auto &outbound : core_->outbounds().outbounds())
+            for (const auto &outbound : core_->dialers().dialers())
             {
                 if (!first)
                     ss << ",";
@@ -353,7 +353,7 @@ namespace mynet
 
                 if (outbound->type() == "selector")
                 {
-                    auto sel = std::dynamic_pointer_cast<OutboundSelector>(outbound);
+                    auto sel = std::dynamic_pointer_cast<DialerSelector>(outbound);
                     ss << "\"type\":\"Selector\",";
                     ss << "\"now\":\"" << (sel ? sel->selected() : "") << "\",";
                     ss << "\"all\":[";
@@ -370,7 +370,7 @@ namespace mynet
                 }
                 else if (outbound->type() == "urltest")
                 {
-                    auto urlTest = std::dynamic_pointer_cast<OutboundUrlTest>(outbound);
+                    auto urlTest = std::dynamic_pointer_cast<DialerUrlTest>(outbound);
                     ss << "\"type\":\"URLTest\",";
                     ss << "\"now\":\"" << (urlTest ? urlTest->getBestTag() : "") << "\",";
                     ss << "\"all\":[";
@@ -407,6 +407,18 @@ namespace mynet
                 {
                     ss << "\"type\":\"Socks5\"";
                 }
+                else if (outbound->type() == "http")
+                {
+                    ss << "\"type\":\"Http\"";
+                }
+                else if (outbound->type() == "http2")
+                {
+                    ss << "\"type\":\"Http2\"";
+                }
+                else if (outbound->type() == "http3")
+                {
+                    ss << "\"type\":\"Http3\"";
+                }
                 else
                 {
                     ss << "\"type\":\"" << outbound->type() << "\"";
@@ -423,7 +435,7 @@ namespace mynet
         {
             if (core_ == nullptr)
                 return "{}";
-            auto outbound = core_->outbounds().get(name);
+            auto outbound = core_->dialers().get(name);
             if (!outbound)
                 return R"({"error":"Proxy not found"})";
 
@@ -432,12 +444,12 @@ namespace mynet
             ss << "\"type\":\"" << outbound->type() << "\"";
             if (outbound->type() == "selector")
             {
-                auto sel = std::dynamic_pointer_cast<OutboundSelector>(outbound);
+                auto sel = std::dynamic_pointer_cast<DialerSelector>(outbound);
                 ss << ",\"now\":\"" << (sel ? sel->selected() : "") << "\"";
             }
             else if (outbound->type() == "urltest")
             {
-                auto urlTest = std::dynamic_pointer_cast<OutboundUrlTest>(outbound);
+                auto urlTest = std::dynamic_pointer_cast<DialerUrlTest>(outbound);
                 ss << ",\"now\":\"" << (urlTest ? urlTest->getBestTag() : "") << "\"";
             }
             ss << "}";
@@ -448,11 +460,11 @@ namespace mynet
         {
             if (core_ == nullptr)
                 return false;
-            auto outbound = core_->outbounds().get(name);
+            auto outbound = core_->dialers().get(name);
             if (!outbound)
                 return false;
 
-            auto sel = std::dynamic_pointer_cast<OutboundSelector>(outbound);
+            auto sel = std::dynamic_pointer_cast<DialerSelector>(outbound);
             if (!sel)
                 return false;
 
@@ -478,7 +490,7 @@ namespace mynet
         {
             if (core_ == nullptr)
                 return R"({"delay":9999})";
-            auto outbound = core_->outbounds().get(name);
+            auto outbound = core_->dialers().get(name);
             if (!outbound)
                 return R"({"delay":9999})";
 
@@ -489,7 +501,7 @@ namespace mynet
                 delay = 9999;
             else if (outbound->type() == "urltest")
             {
-                auto ut = std::dynamic_pointer_cast<OutboundUrlTest>(outbound);
+                auto ut = std::dynamic_pointer_cast<DialerUrlTest>(outbound);
                 if (ut)
                     delay = ut->getRtt(ut->getBestTag());
             }

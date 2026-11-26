@@ -19,7 +19,7 @@ namespace mynet::handler
     class HandlerInboundBlock : public HandlerInboundConnectionBase
     {
     public:
-        static constexpr bool kEnableSplice = false;
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
 
         HandlerInboundBlock() noexcept
         {
@@ -57,7 +57,7 @@ namespace mynet::handler
     class HandlerOutboundBlock : public HandlerOutboundConnectionBase
     {
     public:
-        static constexpr bool kEnableSplice = false;
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
 
         HandlerOutboundBlock() noexcept
         {

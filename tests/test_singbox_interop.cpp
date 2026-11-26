@@ -54,6 +54,72 @@ using namespace mynet::handler;
 namespace
 {
 
+    bool driveTestHandshake(int clientFd, HandlerBase &handler, int timeoutMs = 2000)
+    {
+        auto drainResponses = [&]() noexcept
+        {
+            while (handler.hasResponse())
+            {
+                std::string resp = handler.takeResponse();
+                size_t offset = 0;
+                while (offset < resp.size())
+                {
+                    const ssize_t wn = ::send(clientFd, resp.data() + offset, resp.size() - offset, MSG_NOSIGNAL);
+                    if (wn > 0)
+                    {
+                        offset += static_cast<size_t>(wn);
+                        continue;
+                    }
+                    if (wn < 0 && errno == EINTR)
+                    {
+                        continue;
+                    }
+                    if (wn < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                    {
+                        pollfd wpfd{clientFd, POLLOUT, 0};
+                        if (::poll(&wpfd, 1, timeoutMs) <= 0)
+                        {
+                            return false;
+                        }
+                        continue;
+                    }
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!drainResponses())
+        {
+            return false;
+        }
+        while (!handler.isEstablished() && handler.inboundStage() != handler::InboundStage::ERROR &&
+               !handler.closeAfterResponse())
+        {
+            pollfd pfd{clientFd, POLLIN, 0};
+            if (::poll(&pfd, 1, timeoutMs) <= 0)
+            {
+                return false;
+            }
+            char buf[4096];
+            const ssize_t n = ::read(clientFd, buf, sizeof(buf));
+            if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+            {
+                continue;
+            }
+            if (n <= 0)
+            {
+                return false;
+            }
+            [[maybe_unused]] auto _ = handler.appendRequest(buf, n);
+            handler.drive();
+            if (!drainResponses())
+            {
+                return false;
+            }
+        }
+        return handler.isEstablished();
+    }
+
     std::string findSingBoxBinary()
     {
         const char *home = std::getenv("HOME");
@@ -453,7 +519,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundSocks5ToMynetInbound)
             int clientFd = acc->first;
 
             HandlerInboundSocks5 h;
-            if (!inbound::driveHandshake(clientFd, h, 2000))
+            if (!driveTestHandshake(clientFd, h, 2000))
             {
                 ::close(clientFd);
                 return;
@@ -627,7 +693,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundHttpToMynetInbound)
             int clientFd = acc->first;
 
             HandlerInboundHttpProxy h;
-            if (!inbound::driveHandshake(clientFd, h, 2000))
+            if (!driveTestHandshake(clientFd, h, 2000))
             {
                 ::close(clientFd);
                 return;
@@ -791,7 +857,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundTrojanToMynetInbound)
             int clientFd = acc->first;
 
             HandlerInboundTrojan h("secretpass");
-            if (!inbound::driveHandshake(clientFd, h, 2000))
+            if (!driveTestHandshake(clientFd, h, 2000))
             {
                 ::close(clientFd);
                 return;
@@ -960,7 +1026,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundVlessToMynetInbound)
             int clientFd = acc->first;
 
             HandlerInboundVless h(testUuid);
-            if (!inbound::driveHandshake(clientFd, h, 2000))
+            if (!driveTestHandshake(clientFd, h, 2000))
             {
                 ::close(clientFd);
                 return;
@@ -1108,7 +1174,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundShadowsocksToMynetInbound)
             int clientFd = acc->first;
 
             HandlerInboundShadowsocks h("aes-128-gcm", "sspassword");
-            if (inbound::driveHandshake(clientFd, h, 2000))
+            if (driveTestHandshake(clientFd, h, 2000))
             {
                 handshakeOk = h.isEstablished();
                 if (h.targetAddress().has_value())

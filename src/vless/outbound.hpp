@@ -12,9 +12,9 @@ namespace mynet
 {
 
     /**
-     * @brief VLESS 协议出站端点 (OutboundVless)
+     * @brief VLESS 协议出站拨号器 (DialerVless / OutboundVless)
      */
-    class OutboundVless : public OutboundBase
+    class DialerVless : public Dialer
     {
     private:
         std::string serverHost_{};
@@ -22,9 +22,9 @@ namespace mynet
         std::array<uint8_t, 16> uuid_{};
 
     public:
-        OutboundVless(std::string tag, std::string serverHost, uint16_t serverPort, std::string_view uuidStr,
-                      DialerOptions options = {})
-            : OutboundBase(std::move(tag), "vless", std::move(options)),
+        DialerVless(std::string tag, std::string serverHost, uint16_t serverPort, std::string_view uuidStr,
+                    DialerOptions options = {})
+            : Dialer(std::move(tag), "vless", std::move(options)),
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort)
         {
@@ -50,6 +50,6 @@ namespace mynet
         }
     };
 
-    using DialerVless = OutboundVless;
+    using OutboundVless = DialerVless;
 
 } // namespace mynet

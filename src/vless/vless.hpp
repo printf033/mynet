@@ -325,28 +325,7 @@ namespace mynet::handler
 
             const auto &tgt = target();
             header.push_back(0x01); // CMD: 0x01 (TCP)
-            header.push_back(static_cast<uint8_t>(tgt.port >> 8));
-            header.push_back(static_cast<uint8_t>(tgt.port & 0xFF));
-
-            // ATYP + Address (VLESS: 0x01 IPv4, 0x02 Domain, 0x03 IPv6)
-            if (tgt.type == AddressType::IPV4)
-            {
-                header.push_back(0x01);
-                const auto *p = reinterpret_cast<const uint8_t *>(&tgt.ipv4_.s_addr);
-                header.insert(header.end(), p, p + 4);
-            }
-            else if (tgt.type == AddressType::DOMAIN)
-            {
-                header.push_back(0x02);
-                header.push_back(static_cast<uint8_t>(tgt.host.size()));
-                header.insert(header.end(), tgt.host.begin(), tgt.host.end());
-            }
-            else if (tgt.type == AddressType::IPV6)
-            {
-                header.push_back(0x03);
-                const auto *p = reinterpret_cast<const uint8_t *>(&tgt.ipv6_);
-                header.insert(header.end(), p, p + 16);
-            }
+            tgt.encodeVless(header);
 
             [[maybe_unused]] auto _ =
                 pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));

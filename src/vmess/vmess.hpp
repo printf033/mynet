@@ -53,7 +53,7 @@ namespace mynet::handler
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &authId)>;
 
-        static constexpr bool kEnableSplice = false;
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
 
     private:
         VmessStage vmessStage_{VmessStage::AUTH};
@@ -295,28 +295,7 @@ namespace mynet::handler
             header.push_back(0x00);            // Reserved
             const auto &tgt = target();
             header.push_back(vmess::kCmdTcp); // CMD: 0x01 TCP
-            header.push_back(static_cast<uint8_t>(tgt.port >> 8));
-            header.push_back(static_cast<uint8_t>(tgt.port & 0xFF));
-
-            // ATYP + Address
-            if (tgt.type == AddressType::IPV4)
-            {
-                header.push_back(0x01); // ATYP IPv4
-                const auto *p = reinterpret_cast<const uint8_t *>(&tgt.ipv4_.s_addr);
-                header.insert(header.end(), p, p + 4);
-            }
-            else if (tgt.type == AddressType::DOMAIN)
-            {
-                header.push_back(0x02); // ATYP Domain
-                header.push_back(static_cast<uint8_t>(tgt.host.size()));
-                header.insert(header.end(), tgt.host.begin(), tgt.host.end());
-            }
-            else if (tgt.type == AddressType::IPV6)
-            {
-                header.push_back(0x03); // ATYP IPv6
-                const auto *p = reinterpret_cast<const uint8_t *>(&tgt.ipv6_);
-                header.insert(header.end(), p, p + 16);
-            }
+            tgt.encodeVless(header);
 
             [[maybe_unused]] auto _ =
                 pushResponse(std::string_view(reinterpret_cast<const char *>(header.data()), header.size()));

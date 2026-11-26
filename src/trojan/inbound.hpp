@@ -10,17 +10,17 @@ namespace mynet
 {
 
     /**
-     * @brief Trojan 协议入站端点 (InboundTrojan)
+     * @brief Trojan 协议接收器 (AcceptorTrojan / InboundTrojan)
      */
-    class InboundTrojan : public InboundBase
+    class AcceptorTrojan : public Acceptor
     {
     private:
         std::string password_{};
 
     public:
-        InboundTrojan(std::string tag = "trojan", std::string host = "0.0.0.0", uint16_t port = 443,
-                      std::string password = "", bool enableSniffing = true)
-            : InboundBase(std::move(tag), "trojan", std::move(host), port, enableSniffing),
+        AcceptorTrojan(std::string tag = "trojan", std::string host = "0.0.0.0", uint16_t port = 443,
+                       std::string password = "", bool enableSniffing = true)
+            : Acceptor(std::move(tag), "trojan", std::move(host), port, enableSniffing),
               password_(std::move(password))
         {
         }
@@ -33,12 +33,12 @@ namespace mynet
 
         [[nodiscard]] inline const std::string &password() const noexcept { return password_; }
 
-        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<Handler> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundTrojan>(password_);
         }
     };
 
-    using AcceptorTrojan = InboundTrojan;
+    using InboundTrojan = AcceptorTrojan;
 
 } // namespace mynet

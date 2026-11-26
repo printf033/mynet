@@ -1,4 +1,5 @@
 #include "address.hpp"
+#include "cipher.hpp"
 #include "outboundManager.hpp"
 #include "shadowsocks/outbound.hpp"
 #include <gtest/gtest.h>
@@ -15,7 +16,7 @@ using namespace mynet::handler;
 
 TEST(OutboundManagerTest, DefaultOutbounds)
 {
-    OutboundManager mgr;
+    DialerManager mgr;
     EXPECT_GE(mgr.size(), 2u);
     EXPECT_TRUE(mgr.has("direct"));
     EXPECT_TRUE(mgr.has("block"));
@@ -41,7 +42,7 @@ TEST(OutboundManagerTest, DefaultOutbounds)
 
 TEST(OutboundManagerTest, OutboundBlockBehavior)
 {
-    OutboundManager mgr;
+    DialerManager mgr;
     auto target = ProxyAddress::fromDomain("evil-malware.com", 80);
 
     auto res = mgr.dialStream("block", target);
@@ -79,8 +80,8 @@ TEST(OutboundManagerTest, OutboundDirectLocalhost)
     ASSERT_EQ(::getsockname(listenFd, reinterpret_cast<sockaddr *>(&listenAddr), &slen), 0);
     uint16_t port = ntohs(listenAddr.sin_port);
 
-    // 使用 OutboundManager 直连出站
-    OutboundManager mgr;
+    // 使用 DialerManager 直连出站
+    DialerManager mgr;
     auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), port);
 
     auto res = mgr.dialStream("direct", target);
@@ -112,9 +113,9 @@ TEST(OutboundManagerTest, OutboundDirectLocalhost)
 
 TEST(OutboundManagerTest, OutboundSelectorSwitch)
 {
-    OutboundManager mgr;
-    auto selector = std::make_shared<OutboundSelector>("proxy_group", std::vector<std::string>{"direct", "block"});
-    mgr.registerOutbound(selector);
+    DialerManager mgr;
+    auto selector = std::make_shared<DialerSelector>("proxy_group", std::vector<std::string>{"direct", "block"});
+    mgr.registerDialer(selector);
 
     EXPECT_TRUE(mgr.has("proxy_group"));
     EXPECT_EQ(selector->selected(), "direct");
@@ -137,17 +138,17 @@ TEST(OutboundManagerTest, OutboundSelectorSwitch)
 
 TEST(OutboundManagerTest, ProtocolOutboundRegistration)
 {
-    OutboundManager mgr;
+    DialerManager mgr;
 
     auto s5 = std::make_shared<OutboundSocks5>("my_socks5", "192.168.1.100", 1080, "user", "pass");
     EXPECT_EQ(s5->serverHost(), "192.168.1.100");
     EXPECT_EQ(s5->serverPort(), 1080);
-    mgr.registerOutbound(s5);
+    mgr.registerDialer(s5);
 
     auto trojan = std::make_shared<OutboundTrojan>("my_trojan", "trojan.node.com", 443, "password123");
     EXPECT_EQ(trojan->serverHost(), "trojan.node.com");
     EXPECT_EQ(trojan->serverPort(), 443);
-    mgr.registerOutbound(trojan);
+    mgr.registerDialer(trojan);
 
     DialerOptions ssOpt;
     ssOpt.fwmark = 0x100;
@@ -157,7 +158,7 @@ TEST(OutboundManagerTest, ProtocolOutboundRegistration)
     EXPECT_EQ(ss->serverPort(), 8388);
     EXPECT_EQ(ss->options().fwmark, 0x100);
     EXPECT_TRUE(ss->options().tcpFastOpen);
-    mgr.registerOutbound(ss);
+    mgr.registerDialer(ss);
 
     EXPECT_TRUE(mgr.has("my_socks5"));
     EXPECT_TRUE(mgr.has("my_trojan"));
@@ -211,11 +212,11 @@ TEST(OutboundManagerTest, LatenciesNRingBuffer)
 
 TEST(OutboundManagerTest, UrlTestToleranceWindowDamping)
 {
-    OutboundManager mgr;
+    DialerManager mgr;
     std::vector<std::string> candidates = {"nodeA", "nodeB"};
     // toleranceMs = 20ms
-    auto urlTest = std::make_shared<OutboundUrlTest>("auto_group", candidates, &mgr,
-                                                     "http://cp.cloudflare.com/generate_204", 300, 20);
+    auto urlTest = std::make_shared<DialerUrlTest>("auto_group", candidates, &mgr,
+                                                   "http://cp.cloudflare.com/generate_204", 300, 20);
 
     // 初始状态下 nodeA 为默认主节点
     urlTest->setRtt("nodeA", 50);
@@ -241,4 +242,61 @@ TEST(OutboundManagerTest, UrlTestToleranceWindowDamping)
     // nodeA 优势达到 25ms (nodeB 25ms, nodeA 0ms)，切换回 nodeA
     urlTest->setRtt("nodeA", 0);
     EXPECT_EQ(urlTest->getBestTag(), "nodeA");
+}
+
+TEST(OutboundManagerTest, ResolveIpv4PublicAndCache)
+{
+    auto lit = Dialer::resolveIpv4Public("127.0.0.1", SOCK_STREAM, false);
+    ASSERT_TRUE(lit.has_value());
+    EXPECT_EQ(lit->s_addr, htonl(INADDR_LOOPBACK));
+
+    auto viaWrapper = resolveDomainIpv4("127.0.0.1");
+    ASSERT_TRUE(viaWrapper.has_value());
+    EXPECT_EQ(viaWrapper->s_addr, htonl(INADDR_LOOPBACK));
+
+    auto localhostCold = Dialer::resolveIpv4Public("localhost", SOCK_STREAM, true);
+    ASSERT_TRUE(localhostCold.has_value());
+    EXPECT_EQ(localhostCold->s_addr, htonl(INADDR_LOOPBACK));
+
+    auto localhostCached = Dialer::resolveIpv4Public("localhost", SOCK_STREAM, true);
+    ASSERT_TRUE(localhostCached.has_value());
+    EXPECT_EQ(localhostCached->s_addr, localhostCold->s_addr);
+
+    EXPECT_FALSE(Dialer::resolveIpv4Public("").has_value());
+}
+
+TEST(OutboundManagerTest, DeduplicatedAeadAndEcbHelpersRoundtrip)
+{
+    const std::array<uint8_t, 16> key16 = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    const std::array<uint8_t, 12> nonce12 = {0xAA, 0xBB, 0xCC, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    const std::string plainStr = "deduplicated-aead-payload";
+    const std::string aadStr = "aad-header";
+    const std::vector<uint8_t> plain(plainStr.begin(), plainStr.end());
+    const std::vector<uint8_t> aad(aadStr.begin(), aadStr.end());
+
+    std::vector<uint8_t> cipherText;
+    std::array<uint8_t, 16> tag{};
+    ASSERT_TRUE(cipher::aes128GcmEncryptWithAad(key16, nonce12, aad, plain, cipherText, tag));
+    EXPECT_EQ(cipherText.size(), plain.size());
+
+    std::vector<uint8_t> decrypted;
+    ASSERT_TRUE(cipher::aes128GcmDecryptWithAad(key16, nonce12, aad, cipherText, tag, decrypted));
+    EXPECT_EQ(decrypted, plain);
+
+    auto badTag = tag;
+    badTag[0] ^= 0xFF;
+    EXPECT_FALSE(cipher::aes128GcmDecryptWithAad(key16, nonce12, aad, cipherText, badTag, decrypted));
+
+    const std::array<uint8_t, 32> key32 = {1};
+    cipherText.clear();
+    decrypted.clear();
+    ASSERT_TRUE(cipher::aeadEncryptWithAad(EVP_chacha20_poly1305(), key32, nonce12, aad, plain, cipherText, tag));
+    ASSERT_TRUE(cipher::aeadDecryptWithAad(EVP_chacha20_poly1305(), key32, nonce12, aad, cipherText, tag, decrypted));
+    EXPECT_EQ(decrypted, plain);
+
+    std::array<uint8_t, 16> ecbIn{};
+    ecbIn.fill(0x42);
+    std::array<uint8_t, 16> ecbOut{};
+    ASSERT_TRUE(cipher::aes128EcbEncryptBlock(key16, ecbIn, ecbOut));
+    EXPECT_NE(ecbOut, ecbIn);
 }

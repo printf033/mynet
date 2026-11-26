@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compat.hpp"
 #include "reflection.hpp"
 #include <array>
 #include <cerrno>

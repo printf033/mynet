@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../outboundManager.hpp"
+#include "../dialer.hpp"
 #include "block.hpp"
 #include <memory>
 #include <string>
@@ -10,13 +10,13 @@ namespace mynet
 {
 
     /**
-     * @brief 拦截黑洞出站端点 (OutboundBlock)
+     * @brief 拦截黑洞拨号器 (DialerBlock / OutboundBlock)
      */
-    class OutboundBlock : public OutboundBase
+    class DialerBlock : public Dialer
     {
     public:
-        explicit OutboundBlock(std::string tag = "block", DialerOptions options = {})
-            : OutboundBase(std::move(tag), "block", std::move(options))
+        explicit DialerBlock(std::string tag = "block", DialerOptions options = {})
+            : Dialer(std::move(tag), "block", std::move(options))
         {
         }
 
@@ -38,6 +38,6 @@ namespace mynet
         }
     };
 
-    using DialerBlock = OutboundBlock;
+    using OutboundBlock = DialerBlock;
 
 } // namespace mynet

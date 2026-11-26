@@ -909,9 +909,12 @@ int mynet_sockmap_verdict(struct __sk_buff *skb)
     }
 
     // 内核将收到数据直接转交至 peer 套接字发送队列
-    // 若找不到 peer_key，返回 SK_PASS 交给用户态保底，绝不丢包
-    bpf_sk_redirect_hash(skb, &mynet_fast_sock, &peer_key, 0);
-    return SK_PASS;
+    // 若未命中 peer_key 或重定向失败，返回 SK_PASS 交给用户态 Splice/内存搬运保底，绝不丢包
+    long ret = bpf_sk_redirect_hash(skb, &mynet_fast_sock, &peer_key, 0);
+    if (ret != SK_PASS) {
+        return SK_PASS;
+    }
+    return ret;
 }
 
 /* ========================================================================= */

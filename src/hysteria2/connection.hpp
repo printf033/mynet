@@ -9,10 +9,10 @@ namespace mynet::hysteria2
      *
      * 继承自统一的 ConnectionBase，在连接层管理 Hysteria 2 代理会话流式传输与状态。
      */
-    class ConnectionHysteria2 : public ConnectionBase
+    class ConnectionHysteria2 : public Connection
     {
     public:
-        using ConnectionBase::ConnectionBase;
+        using Connection::Connection;
     };
 
     using Hysteria2Connection = ConnectionHysteria2;

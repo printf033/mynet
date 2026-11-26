@@ -1,3 +1,9 @@
 [submodule "thirdparty/mylog"]
 	path = thirdparty/mylog
 	url = https://github.com/printf033/mylog.git
+[submodule "thirdparty/throne"]
+	path = thirdparty/throne
+	url = https://github.com/throneproj/Throne.git
+[submodule "thirdparty/nekobox"]
+	path = thirdparty/nekobox
+	url = https://github.com/MatsuriDayo/NekoBoxForAndroid.git

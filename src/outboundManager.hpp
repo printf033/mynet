@@ -2,11 +2,11 @@
 
 /**
  * @file outboundManager.hpp
- * @brief 出站节点抽象基类 (OutboundBase) 与统一出站管理器 (OutboundManager)。
+ * @brief 拨号器管理器 (DialerManager) 与出站调度节点。
  *
- * 与 InboundManager 形成严格对称的架构设计：
+ * 与 AcceptorManager 形成严格对称的架构设计：
  * 1. 统一拨号抽象：提供面向流式 (TCP) 与数据报 (UDP) 的异步非阻塞出站建连；
- * 2. 状态机就绪装配：拨号成功后自动构造匹配的出站协议状态机处理器 (HandlerOutboundConnectionBase)；
+ * 2. 状态机就绪装配：拨号成功后自动构造匹配的出站协议状态机处理器 (HandlerOutboundConnection)；
  * 3. 统一出口策略：支持通过 DialerOptions 下发 Linux SO_MARK 策略路由打标、绑定物理网卡与超时；
  * 4. 节点调度与选择器：原生支持 Selector、UrlTest 与 Fallback 等节点调度组；
  * 5. 全生命周期描述符托管：确保套接字在拨号成功时通过 release() 安全转移给上层会话。
@@ -40,154 +40,28 @@ namespace mynet
 {
 
     /**
-     * @brief 出站拨号结果
-     */
-    struct OutboundDialResult
-    {
-        int fd{-1};                                    ///< 拨号成功的套接字描述符
-        std::unique_ptr<HandlerBase> handler{nullptr}; ///< 对应的出站协议状态机处理器
-        std::string outboundTag{};                     ///< 命中的出站标签
-        std::string targetEndpoint{};                  ///< 目标端点字符串表示
-        bool immediateConnected{false};                ///< 连接是否立即可用（已非阻塞连上）
-
-        [[nodiscard]] inline bool ok() const noexcept { return handler != nullptr; }
-    };
-
-    /**
      * @brief 出站域名解析辅助函数（将域名解析为 IPv4 地址）
      */
     inline Result<in_addr> resolveDomainIpv4(std::string_view domain) noexcept
     {
-        if (domain.empty())
-        {
-            return std::unexpected(ERR::ADDR_INVALID);
-        }
-
-        std::string domStr(domain);
-        in_addr addr{};
-        if (::inet_pton(AF_INET, domStr.c_str(), &addr) == 1)
-        {
-            return addr;
-        }
-
-        addrinfo hints{};
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        addrinfo *res = nullptr;
-        if (::getaddrinfo(domStr.c_str(), nullptr, &hints, &res) != 0 || res == nullptr)
-        {
-            return std::unexpected(ERR::ADDR_INVALID);
-        }
-
-        const auto *sin = reinterpret_cast<const sockaddr_in *>(res->ai_addr);
-        addr = sin->sin_addr;
-        ::freeaddrinfo(res);
-        return addr;
+        return Dialer::resolveIpv4Public(domain, SOCK_STREAM);
     }
 
-    /**
-     * @brief 出站节点抽象基类 (Abstract Outbound Base)
-     *
-     * 业务出站端点元数据描述符与出站协议装配中心。
-     * 底层四元组建连与套接字描述符托管给基础传输设施 DialerBase。
-     */
-    class OutboundBase : public IDialer
-    {
-    protected:
-        std::string tag_{};
-        std::string type_{};
-        std::atomic<bool> running_{false};
-
-        /**
-         * @brief 通用出站流式拨号建连与状态机处理器装配辅助函数 (DRY 统一代码复用)
-         */
-        template <typename HandlerType, typename... Args>
-        Result<OutboundDialResult> dialStreamHelper(std::string_view serverHost, uint16_t serverPort,
-                                                    const handler::ProxyAddress &target, Args &&...args)
-        {
-            auto dialRes = dialTcp(serverHost, serverPort);
-            if (!dialRes)
-            {
-                return std::unexpected(dialRes.error());
-            }
-
-            auto h = std::make_unique<HandlerType>(std::forward<Args>(args)..., target);
-            h->handle();
-
-            OutboundDialResult res;
-            res.fd = dialRes->fd;
-            res.handler = std::move(h);
-            res.outboundTag = tag_;
-            res.targetEndpoint = target.toString();
-            res.immediateConnected = dialRes->immediateConnected;
-            return res;
-        }
-
-    public:
-        OutboundBase(std::string tag, std::string type, DialerOptions options = {})
-            : IDialer(std::move(options)),
-              tag_(std::move(tag)),
-              type_(std::move(type))
-        {
-        }
-
-        virtual ~OutboundBase() noexcept = default;
-
-        [[nodiscard]] inline const std::string &tag() const noexcept { return tag_; }
-        [[nodiscard]] inline const std::string &type() const noexcept { return type_; }
-        [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
-
-        [[nodiscard]] virtual std::string_view serverHost() const noexcept { return ""; }
-        [[nodiscard]] virtual uint16_t serverPort() const noexcept { return 0; }
-
-        /**
-         * @brief 启动出站节点生命周期
-         */
-        virtual Result<> start() noexcept
-        {
-            running_.store(true, std::memory_order_release);
-            return {};
-        }
-
-        /**
-         * @brief 停止出站节点生命周期
-         */
-        virtual void stop() noexcept { running_.store(false, std::memory_order_release); }
-
-        virtual Result<OutboundDialResult> dial(const handler::ProxyAddress &target) { return dialStream(target); }
-
-        /**
-         * @brief 发起流式出站建连 (TCP / TLS / 代理协议)
-         *
-         * @param target 代理目标网络地址
-         * @return Result<OutboundDialResult> 拨号结果
-         */
-        virtual Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) = 0;
-
-        /**
-         * @brief 发起数据报出站建连 (UDP)
-         *
-         * @param target 代理目标网络地址
-         * @return Result<int> 已创建或连接的 UDP 套接字描述符
-         */
-        virtual Result<int> dialDatagram(const handler::ProxyAddress &target) = 0;
-    };
-
-    class OutboundManager;
+    class DialerManager;
 
     /**
-     * @brief 节点选择器 / 分组出站 (OutboundSelector)
+     * @brief 节点选择器 / 分组出站 (DialerSelector)
      */
-    class OutboundSelector : public OutboundBase
+    class DialerSelector : public Dialer
     {
     private:
         std::vector<std::string> candidateTags_{};
         std::string selectedTag_{};
-        OutboundManager *manager_{nullptr};
+        DialerManager *manager_{nullptr};
 
     public:
-        OutboundSelector(std::string tag, std::vector<std::string> candidates, OutboundManager *mgr = nullptr)
-            : OutboundBase(std::move(tag), "selector"),
+        DialerSelector(std::string tag, std::vector<std::string> candidates, DialerManager *mgr = nullptr)
+            : Dialer(std::move(tag), "selector"),
               candidateTags_(std::move(candidates)),
               manager_(mgr)
         {
@@ -197,7 +71,7 @@ namespace mynet
             }
         }
 
-        inline void setManager(OutboundManager *mgr) noexcept { manager_ = mgr; }
+        inline void setManager(DialerManager *mgr) noexcept override { manager_ = mgr; }
         [[nodiscard]] inline const std::vector<std::string> &candidates() const noexcept { return candidateTags_; }
         [[nodiscard]] inline std::string_view selected() const noexcept { return selectedTag_; }
 
@@ -220,7 +94,7 @@ namespace mynet
             {
                 selectedTag_ = candidateTags_.front();
             }
-            return OutboundBase::start();
+            return Dialer::start();
         }
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
@@ -303,13 +177,13 @@ namespace mynet
     };
 
     /**
-     * @brief URL 延迟测速自动优选出站 (OutboundUrlTest, 结合机制 63 容差阻尼窗口与机制 64 LatenciesN)
+     * @brief URL 延迟测速自动优选出站 (DialerUrlTest, 结合机制 63 容差阻尼窗口与机制 64 LatenciesN)
      */
-    class OutboundUrlTest : public OutboundBase
+    class DialerUrlTest : public Dialer
     {
     private:
         std::vector<std::string> candidateTags_{};
-        OutboundManager *manager_{nullptr};
+        DialerManager *manager_{nullptr};
         std::string testUrl_{"http://cp.cloudflare.com/generate_204"};
         uint32_t intervalSecs_{300};
         uint32_t toleranceMs_{0};
@@ -321,10 +195,10 @@ namespace mynet
         std::unordered_map<std::string, LatenciesN<10>> latenciesMap_{};
 
     public:
-        OutboundUrlTest(std::string tag, std::vector<std::string> candidates, OutboundManager *mgr = nullptr,
-                        std::string url = "http://cp.cloudflare.com/generate_204", uint32_t intervalSecs = 300,
-                        uint32_t toleranceMs = 0, DialerSelectionPolicy policy = DialerSelectionPolicy::MIN)
-            : OutboundBase(std::move(tag), "urltest"),
+        DialerUrlTest(std::string tag, std::vector<std::string> candidates, DialerManager *mgr = nullptr,
+                      std::string url = "http://cp.cloudflare.com/generate_204", uint32_t intervalSecs = 300,
+                      uint32_t toleranceMs = 0, DialerSelectionPolicy policy = DialerSelectionPolicy::MIN)
+            : Dialer(std::move(tag), "urltest"),
               candidateTags_(std::move(candidates)),
               manager_(mgr),
               testUrl_(std::move(url)),
@@ -343,7 +217,7 @@ namespace mynet
             }
         }
 
-        inline void setManager(OutboundManager *mgr) noexcept { manager_ = mgr; }
+        inline void setManager(DialerManager *mgr) noexcept override { manager_ = mgr; }
         [[nodiscard]] inline const std::vector<std::string> &candidates() const noexcept { return candidateTags_; }
         [[nodiscard]] inline const std::string &testUrl() const noexcept { return testUrl_; }
         [[nodiscard]] inline uint32_t intervalSecs() const noexcept { return intervalSecs_; }
@@ -444,33 +318,33 @@ namespace mynet
         uint32_t probeNode(std::string_view tag, std::chrono::milliseconds timeout = std::chrono::milliseconds(2000));
         void probeAll(std::chrono::milliseconds timeout = std::chrono::milliseconds(2000));
 
-        Result<> start() noexcept override { return OutboundBase::start(); }
+        Result<> start() noexcept override { return Dialer::start(); }
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
         Result<int> dialDatagram(const handler::ProxyAddress &target) override;
     };
 
     /**
-     * @brief 故障按序回退出站 (OutboundFallback)
+     * @brief 故障按序回退出站 (DialerFallback)
      */
-    class OutboundFallback : public OutboundBase
+    class DialerFallback : public Dialer
     {
     private:
         std::vector<std::string> candidateTags_{};
-        OutboundManager *manager_{nullptr};
+        DialerManager *manager_{nullptr};
 
     public:
-        OutboundFallback(std::string tag, std::vector<std::string> candidates, OutboundManager *mgr = nullptr)
-            : OutboundBase(std::move(tag), "fallback"),
+        DialerFallback(std::string tag, std::vector<std::string> candidates, DialerManager *mgr = nullptr)
+            : Dialer(std::move(tag), "fallback"),
               candidateTags_(std::move(candidates)),
               manager_(mgr)
         {
         }
 
-        inline void setManager(OutboundManager *mgr) noexcept { manager_ = mgr; }
+        inline void setManager(DialerManager *mgr) noexcept override { manager_ = mgr; }
         [[nodiscard]] inline const std::vector<std::string> &candidates() const noexcept { return candidateTags_; }
 
-        Result<> start() noexcept override { return OutboundBase::start(); }
+        Result<> start() noexcept override { return Dialer::start(); }
 
         Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
         Result<int> dialDatagram(const handler::ProxyAddress &target) override;
@@ -493,32 +367,32 @@ namespace mynet
 {
 
     /**
-     * @brief 统一出站管理器 (Outbound Manager)
+     * @brief 统一拨号器管理器 (DialerManager)
      *
      * 维护系统所有出站节点的注册表，默认自动预置 direct 与 block 两个标准出口。
      */
-    class OutboundManager
+    class DialerManager
     {
     private:
         mutable std::mutex mutex_{};
-        std::unordered_map<std::string, std::shared_ptr<OutboundBase>> outbounds_{};
+        std::unordered_map<std::string, std::shared_ptr<Dialer>> dialers_{};
         std::string defaultTag_{"direct"};
         std::atomic<bool> running_{false};
 
     public:
-        OutboundManager()
+        DialerManager()
         {
             // 默认自动装配 direct 与 block 标准出口
-            registerOutbound(std::make_shared<OutboundDirect>("direct"));
-            registerOutbound(std::make_shared<OutboundBlock>("block"));
+            registerDialer(std::make_shared<DialerDirect>("direct"));
+            registerDialer(std::make_shared<DialerBlock>("block"));
         }
 
-        ~OutboundManager() noexcept { stopAll(); }
+        ~DialerManager() noexcept { stopAll(); }
 
-        OutboundManager(const OutboundManager &) = delete;
-        OutboundManager &operator=(const OutboundManager &) = delete;
-        OutboundManager(OutboundManager &&) = delete;
-        OutboundManager &operator=(OutboundManager &&) = delete;
+        DialerManager(const DialerManager &) = delete;
+        DialerManager &operator=(const DialerManager &) = delete;
+        DialerManager(DialerManager &&) = delete;
+        DialerManager &operator=(DialerManager &&) = delete;
 
         /**
          * @brief 批量启动所有注册的出站节点生命周期
@@ -526,11 +400,11 @@ namespace mynet
         Result<> startAll() noexcept
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (auto &[tag, ob] : outbounds_)
+            for (auto &[tag, dl] : dialers_)
             {
-                if (ob != nullptr)
+                if (dl != nullptr)
                 {
-                    auto res = ob->start();
+                    auto res = dl->start();
                     if (!res)
                     {
                         return res;
@@ -547,14 +421,26 @@ namespace mynet
         void stopAll() noexcept
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (auto &[tag, ob] : outbounds_)
+            for (auto &[tag, dl] : dialers_)
             {
-                if (ob != nullptr)
+                if (dl != nullptr)
                 {
-                    ob->stop();
+                    dl->stop();
                 }
             }
             running_.store(false, std::memory_order_release);
+        }
+
+        void clear() noexcept
+        {
+            stopAll();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                dialers_.clear();
+                defaultTag_ = "direct";
+            }
+            registerDialer(std::make_shared<DialerDirect>("direct"));
+            registerDialer(std::make_shared<DialerBlock>("block"));
         }
 
         [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
@@ -567,62 +453,59 @@ namespace mynet
         }
 
         /**
-         * @brief 注册一个出站节点
+         * @brief 注册一个拨号器节点 (Dialer)
          */
-        void registerOutbound(std::shared_ptr<OutboundBase> outbound)
+        void registerDialer(std::shared_ptr<Dialer> dialer)
         {
-            if (outbound == nullptr)
+            if (dialer == nullptr)
                 return;
             std::lock_guard<std::mutex> lock(mutex_);
-            if (auto *sel = dynamic_cast<OutboundSelector *>(outbound.get()); sel != nullptr)
-            {
-                sel->setManager(this);
-            }
-            if (auto *ut = dynamic_cast<OutboundUrlTest *>(outbound.get()); ut != nullptr)
-            {
-                ut->setManager(this);
-            }
-            if (auto *fb = dynamic_cast<OutboundFallback *>(outbound.get()); fb != nullptr)
-            {
-                fb->setManager(this);
-            }
-            outbounds_[outbound->tag()] = std::move(outbound);
+            dialer->setManager(this);
+            dialers_[dialer->tag()] = std::move(dialer);
         }
 
         /**
          * @brief 根据标签获取出站节点指针
          */
-        [[nodiscard]] std::shared_ptr<OutboundBase> get(std::string_view tag) const
+        [[nodiscard]] std::shared_ptr<Dialer> get(std::string_view tag) const
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto it = outbounds_.find(std::string(tag));
-            return (it != outbounds_.end()) ? it->second : nullptr;
+            auto it = dialers_.find(std::string(tag));
+            return (it != dialers_.end()) ? it->second : nullptr;
+        }
+
+        /**
+         * @brief 根据标签获取拨号器节点指针
+         */
+        [[nodiscard]] inline std::shared_ptr<Dialer> getDialer(std::string_view tag) const
+        {
+            return get(tag);
         }
 
         [[nodiscard]] bool has(std::string_view tag) const
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return outbounds_.contains(std::string(tag));
+            return dialers_.contains(std::string(tag));
         }
 
         inline void remove(std::string_view tag)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            outbounds_.erase(std::string(tag));
+            dialers_.erase(std::string(tag));
         }
 
         [[nodiscard]] size_t size() const noexcept
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return outbounds_.size();
+            return dialers_.size();
         }
 
-        [[nodiscard]] std::vector<std::shared_ptr<OutboundBase>> outbounds() const
+        [[nodiscard]] std::vector<std::shared_ptr<Dialer>> dialers() const
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            std::vector<std::shared_ptr<OutboundBase>> list;
-            list.reserve(outbounds_.size());
-            for (const auto &pair : outbounds_)
+            std::vector<std::shared_ptr<Dialer>> list;
+            list.reserve(dialers_.size());
+            for (const auto &pair : dialers_)
             {
                 list.push_back(pair.second);
             }
@@ -633,8 +516,8 @@ namespace mynet
         {
             std::lock_guard<std::mutex> lock(mutex_);
             std::vector<std::string> tags;
-            tags.reserve(outbounds_.size());
-            for (const auto &pair : outbounds_)
+            tags.reserve(dialers_.size());
+            for (const auto &pair : dialers_)
             {
                 tags.push_back(pair.first);
             }
@@ -646,16 +529,16 @@ namespace mynet
          */
         Result<OutboundDialResult> dialStream(std::string_view tag, const handler::ProxyAddress &target)
         {
-            std::shared_ptr<OutboundBase> ob = get(tag);
-            if (ob == nullptr)
+            std::shared_ptr<Dialer> dl = get(tag);
+            if (dl == nullptr)
             {
-                ob = get(defaultTag_);
+                dl = get(defaultTag_);
             }
-            if (ob == nullptr)
+            if (dl == nullptr)
             {
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
-            return ob->dialStream(target);
+            return dl->dialStream(target);
         }
 
         /**
@@ -663,21 +546,21 @@ namespace mynet
          */
         Result<int> dialDatagram(std::string_view tag, const handler::ProxyAddress &target)
         {
-            std::shared_ptr<OutboundBase> ob = get(tag);
-            if (ob == nullptr)
+            std::shared_ptr<Dialer> dl = get(tag);
+            if (dl == nullptr)
             {
-                ob = get(defaultTag_);
+                dl = get(defaultTag_);
             }
-            if (ob == nullptr)
+            if (dl == nullptr)
             {
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
-            return ob->dialDatagram(target);
+            return dl->dialDatagram(target);
         }
     };
 
-    // OutboundSelector 延迟实现
-    inline Result<OutboundDialResult> OutboundSelector::dialStream(const handler::ProxyAddress &target)
+    // DialerSelector 延迟实现
+    inline Result<OutboundDialResult> DialerSelector::dialStream(const handler::ProxyAddress &target)
     {
         if (manager_ == nullptr || selectedTag_.empty())
         {
@@ -686,7 +569,7 @@ namespace mynet
         return manager_->dialStream(selectedTag_, target);
     }
 
-    inline Result<int> OutboundSelector::dialDatagram(const handler::ProxyAddress &target)
+    inline Result<int> DialerSelector::dialDatagram(const handler::ProxyAddress &target)
     {
         if (manager_ == nullptr || selectedTag_.empty())
         {
@@ -695,8 +578,8 @@ namespace mynet
         return manager_->dialDatagram(selectedTag_, target);
     }
 
-    // OutboundUrlTest 延迟实现
-    inline Result<OutboundDialResult> OutboundUrlTest::dialStream(const handler::ProxyAddress &target)
+    // DialerUrlTest 延迟实现
+    inline Result<OutboundDialResult> DialerUrlTest::dialStream(const handler::ProxyAddress &target)
     {
         if (manager_ == nullptr)
         {
@@ -710,7 +593,7 @@ namespace mynet
         return manager_->dialStream(best, target);
     }
 
-    inline Result<int> OutboundUrlTest::dialDatagram(const handler::ProxyAddress &target)
+    inline Result<int> DialerUrlTest::dialDatagram(const handler::ProxyAddress &target)
     {
         if (manager_ == nullptr)
         {
@@ -724,7 +607,7 @@ namespace mynet
         return manager_->dialDatagram(best, target);
     }
 
-    inline uint32_t OutboundUrlTest::probeNode(std::string_view tag, std::chrono::milliseconds timeout)
+    inline uint32_t DialerUrlTest::probeNode(std::string_view tag, std::chrono::milliseconds timeout)
     {
         if (manager_ == nullptr)
             return 9999;
@@ -783,7 +666,7 @@ namespace mynet
         return 9999;
     }
 
-    inline void OutboundUrlTest::probeAll(std::chrono::milliseconds timeout)
+    inline void DialerUrlTest::probeAll(std::chrono::milliseconds timeout)
     {
         for (const auto &tag : candidateTags_)
         {
@@ -791,8 +674,8 @@ namespace mynet
         }
     }
 
-    // OutboundFallback 延迟实现
-    inline Result<OutboundDialResult> OutboundFallback::dialStream(const handler::ProxyAddress &target)
+    // DialerFallback 延迟实现
+    inline Result<OutboundDialResult> DialerFallback::dialStream(const handler::ProxyAddress &target)
     {
         if (manager_ == nullptr || candidateTags_.empty())
         {
@@ -809,7 +692,7 @@ namespace mynet
         return std::unexpected(ERR::CONNECT_FAILED);
     }
 
-    inline Result<int> OutboundFallback::dialDatagram(const handler::ProxyAddress &target)
+    inline Result<int> DialerFallback::dialDatagram(const handler::ProxyAddress &target)
     {
         if (manager_ == nullptr || candidateTags_.empty())
         {

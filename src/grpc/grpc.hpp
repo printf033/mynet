@@ -150,7 +150,7 @@ namespace mynet::grpc
         TransportState state_{TransportState::INITIAL};
         std::string serviceName_{"GunService"};
         std::string host_{};
-        std::vector<uint8_t> inBuffer_{};
+        RequestBuffer inBuffer_{};
 
     public:
         explicit GrpcSession(bool isServer, std::string serviceName = "GunService", std::string host = "")
@@ -161,18 +161,65 @@ namespace mynet::grpc
         {
         }
 
-        [[nodiscard]] TransportType type() const noexcept override { return TransportType::GRPC; }
+        [[nodiscard]] mynet::transport::TransportType type() const noexcept override
+        {
+            return mynet::transport::TransportType::GRPC;
+        }
         [[nodiscard]] TransportState state() const noexcept override { return state_; }
         [[nodiscard]] bool isReady() const noexcept override { return state_ == TransportState::STREAMING; }
 
         void reset() noexcept override
         {
             state_ = TransportState::STREAMING;
-            inBuffer_.clear();
+            inBuffer_.reset();
         }
 
         [[nodiscard]] const std::string &serviceName() const noexcept { return serviceName_; }
         [[nodiscard]] const std::string &host() const noexcept { return host_; }
+
+        [[nodiscard]] Result<> onWireInput(std::span<const uint8_t> wireIn, RequestBuffer &appOut,
+                                           ResponseQueue &wireOut) override
+        {
+            (void)wireOut;
+            if (!wireIn.empty())
+            {
+                if (auto r = inBuffer_.append(reinterpret_cast<const char *>(wireIn.data()), wireIn.size()); !r)
+                {
+                    return r;
+                }
+            }
+            while (inBuffer_.readableBytes() > 0)
+            {
+                std::vector<uint8_t> msg;
+                std::span<const uint8_t> span(reinterpret_cast<const uint8_t *>(inBuffer_.readableBegin()),
+                                              inBuffer_.readableBytes());
+                const size_t consumed = decodeMessage(span, msg);
+                if (consumed == 0)
+                {
+                    break;
+                }
+                inBuffer_.retrieve(consumed);
+                if (!msg.empty())
+                {
+                    if (auto r = appOut.append(reinterpret_cast<const char *>(msg.data()), msg.size()); !r)
+                    {
+                        return r;
+                    }
+                }
+            }
+            return {};
+        }
+
+        [[nodiscard]] Result<> onAppOutput(std::span<const uint8_t> appIn, ResponseQueue &wireOut) override
+        {
+            if (appIn.empty())
+            {
+                return {};
+            }
+            std::vector<uint8_t> encoded;
+            encodeMessage(appIn, encoded);
+            return wireOut.emplace(reinterpret_cast<const char *>(encoded.data()), encoded.size());
+        }
 
         /**
          * @brief 将上层应用报文封装为 gRPC 消息流
@@ -189,17 +236,24 @@ namespace mynet::grpc
          */
         void feedData(std::span<const uint8_t> incoming, std::vector<uint8_t> &appData)
         {
-            inBuffer_.insert(inBuffer_.end(), incoming.begin(), incoming.end());
+            if (!incoming.empty())
+            {
+                [[maybe_unused]] auto _ =
+                    inBuffer_.append(reinterpret_cast<const char *>(incoming.data()), incoming.size());
+            }
 
-            while (!inBuffer_.empty())
+            while (inBuffer_.readableBytes() > 0)
             {
                 std::vector<uint8_t> msg;
-                size_t consumed = decodeMessage(std::span<const uint8_t>(inBuffer_.data(), inBuffer_.size()), msg);
+                size_t consumed = decodeMessage(
+                    std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(inBuffer_.readableBegin()),
+                                             inBuffer_.readableBytes()),
+                    msg);
                 if (consumed == 0)
                 {
                     break;
                 }
-                inBuffer_.erase(inBuffer_.begin(), inBuffer_.begin() + consumed);
+                inBuffer_.retrieve(consumed);
                 appData.insert(appData.end(), msg.begin(), msg.end());
             }
         }

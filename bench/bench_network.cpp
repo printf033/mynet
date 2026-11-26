@@ -422,7 +422,7 @@ namespace
         auto [certPath, keyPath] = findCertFiles();
         (void)certPath;
         (void)keyPath;
-        auto server = std::make_unique<EngineType<Acceptor<example::SpliceEchoHandler>>>();
+        auto server = std::make_unique<EngineType<AcceptorBase<example::SpliceEchoHandler>>>();
         std::atomic<bool> srvFailed = false;
         std::thread srvThread(
             [&]()
@@ -827,7 +827,7 @@ namespace
         (void)certPath;
         (void)keyPath;
         http::v3::HandlerHttp3 handler;
-        Reactor<Acceptor<http::v3::HandlerHttp3<>>> reactor;
+        Reactor<AcceptorBase<http::v3::HandlerHttp3<>>> reactor;
         std::thread srvThread([&]() { [[maybe_unused]] auto _ = reactor.runUdp("127.0.0.1", port, handler); });
 
         // 等待服务监听就绪

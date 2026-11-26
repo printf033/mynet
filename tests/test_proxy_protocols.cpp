@@ -1056,3 +1056,29 @@ TEST(HandlerTransparentTest, DatagramTProxyPacketHandling)
     tproxy.onDatagramWithDst(clientPeer, origDst, reinterpret_cast<const char *>(dnsQuery.data()), dnsQuery.size());
     EXPECT_TRUE(packetReceived);
 }
+
+TEST(HandlerTransparentTest, AcceptorTransparentAcceptConnectionPropagatesFdAndSniffing)
+{
+    AcceptorTransparent acc("tproxy-test", "127.0.0.1", 0, false);
+    int sp[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
+
+    ConnectionBase *conn = nullptr;
+    EXPECT_EQ(acc.acceptConnection(sp[0], conn), HandshakeStatus::SUCCESS);
+    ASSERT_NE(conn, nullptr);
+    ASSERT_NE(conn->handler(), nullptr);
+    EXPECT_EQ(conn->handler()->fd(), sp[0]);
+
+    auto *tproxyH = dynamic_cast<handler::HandlerInboundTProxy *>(conn->handler());
+    ASSERT_NE(tproxyH, nullptr);
+    EXPECT_FALSE(tproxyH->isSniffingEnabled());
+
+    // 直接触发 handle()：socketpair 非 netfilter IPv4 TPROXY 套接字，应干净转入 ERROR 状态并置 closeAfterResponse
+    conn->handle();
+    EXPECT_EQ(tproxyH->stage(), TransparentStage::ERROR);
+    EXPECT_TRUE(tproxyH->closeAfterResponse());
+
+    conn->close();
+    delete conn;
+    ::close(sp[1]);
+}

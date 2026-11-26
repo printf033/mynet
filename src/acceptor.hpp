@@ -2,30 +2,38 @@
 
 /**
  * @file acceptor.hpp
- * @brief 协议接收器（Acceptor）基类与握手抽象。
+ * @brief 协议接收器（Acceptor）基类与统一入站抽象。
  *
  * 职责彻底解耦：
- * 1. 纯虚/基类，无模板参数，零连接级可变成员；
- * 2. 专职负责特定协议的入站握手 (Inbound Handshake) 与首包特征嗅探 match()；
- * 3. 各协议自身继承并实现定制握手协议；
- * 4. 握手成功后交付装配好对应 Handler 的 ConnectionBase 实例。
+ * 1. 作为所有入站协议的统一抽象基类（IAcceptor / InboundBase）；
+ * 2. 托管监听套接字生命周期 (listenFd) 的绑定、非阻塞 accept 与优雅停机；
+ * 3. 专职负责特定协议的入站握手 (Inbound Handshake) 与首包特征嗅探 match()；
+ * 4. 握手成功后交付装配好对应 Handler 的 Connection 实例。
  */
 
 #include "config/log.hpp"
+#include "connection.hpp"
 #include "error.hpp"
+#include "listener.hpp"
+#include "transportStack.hpp"
 #include <concepts>
 #include <cstdint>
 #include <memory>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <poll.h>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 
 namespace mynet
 {
 
-    class ConnectionBase;
+    class Connection;
+    using ConnectionBase = Connection;
+    class Handler;
+    using HandlerBase = Handler;
 
     /**
      * @brief 空入站上下文结构（不占任何空间）
@@ -45,12 +53,115 @@ namespace mynet
     };
 
     /**
-     * @brief 协议接收器抽象基类（零连接级可变成员）
+     * @brief 协议接收器统一抽象基类 (Acceptor / Inbound)
+     *
+     * 业务入站端点元数据描述符与协议接收器。
+     * 直接管理监听套接字生命周期与非阻塞 accept，并抽象各协议的 match() 与握手逻辑。
      */
-    class IAcceptor
+    class Acceptor
     {
+    protected:
+        struct SslCtxDeleter
+        {
+            void operator()(SSL_CTX *ctx) const noexcept
+            {
+                if (ctx != nullptr)
+                {
+                    SSL_CTX_free(ctx);
+                }
+            }
+        };
+
+        std::string tag_{};
+        std::string type_{};
+        std::string host_{"0.0.0.0"};
+        uint16_t port_{0};
+        SocketEndpoint socket_{};
+        bool running_{false};
+        bool enableSniffing_{true};
+        transport::TransportConfig transportConfig_{};
+        std::shared_ptr<SSL_CTX> ownedSslCtx_{};
+        SSL_CTX *externalSslCtx_{nullptr};
+
+        [[nodiscard]] inline bool attachTransportToHandler(Handler &handler) const
+        {
+            if (!transportConfig_.enableTls && transportConfig_.type == transport::TransportType::TCP)
+            {
+                return true;
+            }
+            auto res = transport::attachConfiguredTransport(handler, transportConfig_, true, sslContext());
+            return static_cast<bool>(res);
+        }
+
     public:
-        virtual ~IAcceptor() = default;
+        Acceptor(std::string tag = "", std::string type = "", std::string host = "0.0.0.0", uint16_t port = 0,
+                 bool enableSniffing = true)
+            : tag_(std::move(tag)),
+              type_(std::move(type)),
+              host_(std::move(host)),
+              port_(port),
+              enableSniffing_(enableSniffing)
+        {
+        }
+
+        virtual ~Acceptor() noexcept { close(); }
+
+        Acceptor(const Acceptor &) = delete;
+        Acceptor &operator=(const Acceptor &) = delete;
+        Acceptor(Acceptor &&) = delete;
+        Acceptor &operator=(Acceptor &&) = delete;
+
+        [[nodiscard]] inline const std::string &tag() const noexcept { return tag_; }
+        [[nodiscard]] inline const std::string &type() const noexcept { return type_; }
+        [[nodiscard]] inline const std::string &host() const noexcept { return host_; }
+        [[nodiscard]] inline uint16_t port() const noexcept { return port_; }
+        [[nodiscard]] inline int listenFd() const noexcept { return socket_.fd; }
+        [[nodiscard]] inline const sockaddr_in &addr() const noexcept { return socket_.addr; }
+        [[nodiscard]] inline bool isRunning() const noexcept { return running_; }
+        [[nodiscard]] inline bool running() const noexcept { return running_; }
+        [[nodiscard]] inline bool isSniffingEnabled() const noexcept { return enableSniffing_; }
+        inline void setSniffingEnabled(bool enable) noexcept { enableSniffing_ = enable; }
+
+        /**
+         * @brief 启动非阻塞 TCP 监听
+         */
+        virtual Result<> listen(int backlog = 128, bool reuseAddr = true, bool reusePort = true) noexcept
+        {
+            if (running_ && socket_.valid())
+            {
+                return {};
+            }
+            close();
+
+            auto res = socket_.listenTcp(host_.c_str(), port_, backlog, reuseAddr, reusePort);
+            if (!res)
+            {
+                LOG_ERROR("Acceptor '{}' ({}): listenTcp {}:{} failed", tag_, type_, host_, port_);
+                return std::unexpected(res.error());
+            }
+
+            if (port_ == 0)
+            {
+                port_ = ntohs(socket_.addr.sin_port);
+            }
+
+            running_ = true;
+            return {};
+        }
+
+        /**
+         * @brief 非阻塞接收一个接入的客户端连接
+         */
+        [[nodiscard]] virtual Result<std::pair<int, sockaddr_in>> acceptOne() noexcept { return socket_.accept(); }
+
+        /**
+         * @brief 关闭监听套接字
+         */
+        virtual void close() noexcept
+        {
+            socket_.reset();
+            running_ = false;
+        }
 
         /**
          * @brief 快速首包特征嗅探（用于单端口多协议混合调度）
@@ -62,12 +173,97 @@ namespace mynet
         }
 
         /**
-         * @brief 针对新接入的 clientFd 执行协议握手
+         * @brief 为新接入的连接创建对应的协议状态机处理器
          */
-        virtual HandshakeStatus handshake(int clientFd, ConnectionBase *&outConn)
+        [[nodiscard]] virtual std::unique_ptr<Handler> createHandler()
         {
-            (void)clientFd;
-            outConn = nullptr;
+            return nullptr;
+        }
+
+        /**
+         * @brief 配置入站传输层（支持 TLS / WebSocket / gRPC 及共享服务端 SSL_CTX 预构建）
+         */
+        inline Result<> setTransportConfig(transport::TransportConfig cfg)
+        {
+            transportConfig_ = std::move(cfg);
+            ownedSslCtx_.reset();
+            if ((transportConfig_.enableTls || transportConfig_.type == transport::TransportType::TLS) &&
+                externalSslCtx_ == nullptr && !transportConfig_.certFile.empty() && !transportConfig_.keyFile.empty())
+            {
+                auto ctxRes = transport::createSharedServerSslContext(transportConfig_);
+                if (!ctxRes)
+                {
+                    return std::unexpected(ctxRes.error());
+                }
+                ownedSslCtx_ = std::shared_ptr<SSL_CTX>(*ctxRes, SslCtxDeleter{});
+            }
+            return {};
+        }
+
+        [[nodiscard]] inline const transport::TransportConfig &transportConfig() const noexcept
+        {
+            return transportConfig_;
+        }
+
+        inline Result<> configureTls(std::string certFile, std::string keyFile, std::string alpnProtocols = "")
+        {
+            transport::TransportConfig cfg = transportConfig_;
+            cfg.enableTls = true;
+            cfg.certFile = std::move(certFile);
+            cfg.keyFile = std::move(keyFile);
+            if (!alpnProtocols.empty())
+            {
+                cfg.alpnProtocols = std::move(alpnProtocols);
+            }
+            return setTransportConfig(std::move(cfg));
+        }
+
+        inline void setSslContext(SSL_CTX *ctx) noexcept { externalSslCtx_ = ctx; }
+
+        [[nodiscard]] inline SSL_CTX *sslContext() const noexcept
+        {
+            return externalSslCtx_ != nullptr ? externalSslCtx_ : ownedSslCtx_.get();
+        }
+
+        /**
+         * @brief 创建并装配好传输管线的协议 Handler（所有子类共用单一入口）
+         */
+        [[nodiscard]] virtual std::unique_ptr<Handler> buildConfiguredHandler()
+        {
+            auto h = createHandler();
+            if (!h)
+            {
+                return nullptr;
+            }
+            if (!attachTransportToHandler(*h))
+            {
+                return nullptr;
+            }
+            return h;
+        }
+
+        /**
+         * @brief 非阻塞建连装配：分配 owned Handler 并初始化传输握手（供 Reactor / Proactor 异步事件循环复用）
+         */
+        [[nodiscard]] virtual HandshakeStatus acceptConnection(int clientFd, ConnectionBase *&outConn)
+        {
+            auto h = createHandler();
+            if (!h)
+            {
+                outConn = nullptr;
+                return HandshakeStatus::SUCCESS;
+            }
+            if (!attachTransportToHandler(*h))
+            {
+                outConn = nullptr;
+                return HandshakeStatus::FAILED;
+            }
+            auto *conn = new Connection();
+            conn->setFd(clientFd);
+            h->onConnect(clientFd);
+            [[maybe_unused]] auto _ = h->startTransportHandshake();
+            conn->setOwnedHandler(std::move(h));
+            outConn = conn;
             return HandshakeStatus::SUCCESS;
         }
 
@@ -131,52 +327,51 @@ namespace mynet
     };
 
     /**
-     * @brief 兼容泛型接收器模板包装（零数据成员，支持直接作为默认接收器或兼容原有泛型写法）
-     *
-     * @tparam InboundContext 协议特有的 inbound 上下文类型。默认为 EmptyInbound。
+     * @brief 兼容别名：IAcceptor / InboundBase 直接收敛至统一的 Acceptor
+     */
+    using IAcceptor = Acceptor;
+    using InboundBase = Acceptor;
+    using Inbound = Acceptor;
+
+    /**
+     * @brief 泛型接收器模板包装（继承自 Acceptor）
      */
     template <typename InboundContext = EmptyInbound>
-    class Acceptor : public IAcceptor
+    class TypedAcceptor : public Acceptor
     {
     public:
         using Inbound = InboundContext;
         using Handler = InboundContext;
 
-        Acceptor() = default;
-        explicit Acceptor([[maybe_unused]] InboundContext inbound) {}
-        ~Acceptor() override = default;
-
-        Acceptor(const Acceptor &) = default;
-        Acceptor &operator=(const Acceptor &) = default;
-        Acceptor(Acceptor &&) noexcept = default;
-        Acceptor &operator=(Acceptor &&) noexcept = default;
-
-        inline Result<SSL *> startTls(int clientFd, SSL_CTX *ctx) noexcept
+        TypedAcceptor() = default;
+        explicit TypedAcceptor([[maybe_unused]] InboundContext inbound) {}
+        TypedAcceptor(std::string tag, std::string type, std::string host = "0.0.0.0", uint16_t port = 0,
+                      bool enableSniffing = true)
+            : Acceptor(std::move(tag), std::move(type), std::move(host), port, enableSniffing)
         {
-            return IAcceptor::startTls(clientFd, ctx);
+        }
+        ~TypedAcceptor() override = default;
+
+        TypedAcceptor(const TypedAcceptor &) = default;
+        TypedAcceptor &operator=(const TypedAcceptor &) = default;
+        TypedAcceptor(TypedAcceptor &&) noexcept = default;
+        TypedAcceptor &operator=(TypedAcceptor &&) noexcept = default;
+
+        [[nodiscard]] std::unique_ptr<mynet::Handler> createHandler() override
+        {
+            if constexpr (std::derived_from<InboundContext, mynet::Handler>)
+            {
+                return std::make_unique<InboundContext>();
+            }
+            return nullptr;
         }
 
-        inline Result<SSL *> startTLS(int clientFd, SSL_CTX *ctx) noexcept
-        {
-            return IAcceptor::startTls(clientFd, ctx);
-        }
-
-        inline HandshakeStatus doTlsHandshake(SSL *ssl) noexcept { return IAcceptor::doTlsHandshake(ssl); }
     };
 
     template <typename InboundContext = EmptyInbound>
-    using AcceptorBase = Acceptor<InboundContext>;
-
-    template <typename InboundContext = EmptyInbound>
-    using AcceptorBaseCompat = Acceptor<InboundContext>;
+    using AcceptorBase = TypedAcceptor<InboundContext>;
 
     template <typename A>
-    concept DerivedFromAcceptor = std::derived_from<A, IAcceptor>;
-
-    template <typename A>
-    concept BaseAcceptor = DerivedFromAcceptor<A>;
-
-    template <typename A>
-    concept DerivedFromAcceptorBase = DerivedFromAcceptor<A>;
+    concept DerivedFromAcceptor = std::derived_from<A, Acceptor>;
 
 } // namespace mynet

@@ -1,16 +1,24 @@
 #pragma once
 
 /**
- * @file handler/proxy/shadowsocks.hpp
- * @brief Shadowsocks AEAD 代理协议服务端状态机处理器（RFC/SIP002 规范）。
+ * @file shadowsocks/shadowsocks.hpp
+ * @brief Shadowsocks AEAD 代理协议双向状态机编解码器（RFC/SIP002 规范）。
+ *
+ * 彻底复用基础设施：
+ * 1. 基于 Handler 双缓冲/编解码分层（wireRxBuffer_ 收密文 -> requestBuffer_ 吐明文），
+ *    不再自建 rawRx_ 也不再混淆明密文；
+ * 2. 基于 cipher::AeadCipherContext 持久化单连接 EVP_CIPHER_CTX，零热路径上下文分配；
+ * 3. 入站/出站共享 ShadowsocksAeadStream 状态机，支持完整的双向加解密与 TLS/WS 叠加承载。
  */
 
 #include "../address.hpp"
 #include "../cipher.hpp"
 #include "../connection.hpp"
 #include "../kdf.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <openssl/rand.h>
 #include <optional>
@@ -19,27 +27,245 @@
 #include <string_view>
 #include <vector>
 
+#if defined(__ANDROID__)
+extern "C" inline const EVP_CIPHER *EVP_chacha20_poly1305()
+{
+    return nullptr;
+}
+#endif
+
 namespace mynet::handler
 {
 
-    enum class ShadowsocksCipher : uint8_t
-    {
-        AES_128_GCM,
-        AES_256_GCM,
-        CHACHA20_POLY1305,
-        NONE
-    };
+    using ShadowsocksCipher = mynet::cipher::AeadAlgorithm;
 
     /**
      * @brief Shadowsocks 会话阶段
      */
     enum class ShadowsocksStage : uint8_t
     {
-        SALT,          ///< 读取客户端发来的初始随机盐 (Salt)
+        SALT,          ///< 读取初始随机盐 (Salt)
         CHUNK_LEN,     ///< 解密下一个数据分块的载荷长度 (2B + 16B Tag)
         CHUNK_PAYLOAD, ///< 解密数据分块载荷 (Length B + 16B Tag)
         STREAMING,     ///< 握手完成并解析得目标地址，持续转发解密数据
         ERROR          ///< 密文解密失败或格式错误
+    };
+
+    /**
+     * @brief Shadowsocks AEAD 双向共享流式编解码内核 (RX 解密状态机 + TX 分块加密器)
+     */
+    struct ShadowsocksCodecCore
+    {
+        ShadowsocksCipher cipherType{ShadowsocksCipher::AES_128_GCM};
+        size_t keyLen{16};
+        size_t saltLen{16};
+        std::vector<uint8_t> masterKey{};
+
+        ShadowsocksStage rxStage{ShadowsocksStage::SALT};
+        std::vector<uint8_t> rxSubkey{};
+        std::array<uint8_t, 12> rxNonce{};
+        size_t rxChunkLen{0};
+        cipher::AeadCipherContext rxCtx{};
+
+        bool txInitialized{false};
+        std::vector<uint8_t> txSubkey{};
+        std::array<uint8_t, 12> txNonce{};
+        cipher::AeadCipherContext txCtx{};
+
+        void setMethod(std::string_view method, std::string_view password)
+        {
+            cipherType = cipher::parseAeadAlgorithm(method).value_or(ShadowsocksCipher::AES_128_GCM);
+            keyLen = cipher::aeadKeySize(cipherType);
+            saltLen = keyLen;
+            deriveMasterKey(password);
+        }
+
+        void deriveMasterKey(std::string_view password)
+        {
+            if (keyLen == 0)
+            {
+                masterKey.clear();
+                return;
+            }
+            masterKey.resize(keyLen);
+            const EVP_CIPHER *c = (keyLen == 16) ? EVP_aes_128_gcm() : EVP_aes_256_gcm();
+            EVP_BytesToKey(c, EVP_md5(), nullptr, reinterpret_cast<const unsigned char *>(password.data()),
+                           password.size(), 1, masterKey.data(), nullptr);
+        }
+
+        [[nodiscard]] const EVP_CIPHER *evpCipher() const noexcept
+        {
+            return cipher::resolveEvpCipher(cipherType);
+        }
+
+        void reset() noexcept
+        {
+            rxStage = (cipherType == ShadowsocksCipher::NONE) ? ShadowsocksStage::CHUNK_PAYLOAD : ShadowsocksStage::SALT;
+            rxSubkey.clear();
+            std::memset(rxNonce.data(), 0, rxNonce.size());
+            rxChunkLen = 0;
+            rxCtx.reset();
+
+            txInitialized = false;
+            txSubkey.clear();
+            std::memset(txNonce.data(), 0, txNonce.size());
+            txCtx.reset();
+        }
+
+        [[nodiscard]] bool initTxHeader(std::string &outSalt)
+        {
+            if (txInitialized)
+            {
+                return true;
+            }
+            outSalt.resize(saltLen);
+            if (RAND_bytes(reinterpret_cast<uint8_t *>(outSalt.data()), static_cast<int>(saltLen)) != 1)
+            {
+                return false;
+            }
+            static constexpr uint8_t kInfo[] = {'s', 's', '-', 's', 'u', 'b', 'k', 'e', 'y'};
+            txSubkey.resize(keyLen);
+            std::span<const uint8_t> saltSpan(reinterpret_cast<const uint8_t *>(outSalt.data()), outSalt.size());
+            if (!kdf::hkdfSha1(masterKey, saltSpan, kInfo, txSubkey))
+            {
+                return false;
+            }
+            std::memset(txNonce.data(), 0, txNonce.size());
+            if (!txCtx.init(evpCipher(), txSubkey, true, txNonce.size()))
+            {
+                return false;
+            }
+            txInitialized = true;
+            return true;
+        }
+
+        [[nodiscard]] bool encryptChunk(std::span<const uint8_t> plain, std::string &packet)
+        {
+            const uint16_t plen = htons(static_cast<uint16_t>(plain.size()));
+            std::span<const uint8_t> plainLenSpan(reinterpret_cast<const uint8_t *>(&plen), 2);
+            std::vector<uint8_t> cipherLen;
+            std::array<uint8_t, 16> lenTag{};
+            if (!txCtx.encrypt(txNonce, {}, plainLenSpan, cipherLen, lenTag))
+            {
+                return false;
+            }
+            cipher::incrementLittleEndianNonce(txNonce);
+
+            std::vector<uint8_t> cipherPayload;
+            std::array<uint8_t, 16> payloadTag{};
+            if (!txCtx.encrypt(txNonce, {}, plain, cipherPayload, payloadTag))
+            {
+                return false;
+            }
+            cipher::incrementLittleEndianNonce(txNonce);
+
+            packet.reserve(packet.size() + cipherLen.size() + lenTag.size() + cipherPayload.size() + payloadTag.size());
+            packet.append(reinterpret_cast<const char *>(cipherLen.data()), cipherLen.size());
+            packet.append(reinterpret_cast<const char *>(lenTag.data()), lenTag.size());
+            packet.append(reinterpret_cast<const char *>(cipherPayload.data()), cipherPayload.size());
+            packet.append(reinterpret_cast<const char *>(payloadTag.data()), payloadTag.size());
+            return true;
+        }
+
+        template <typename OnPayloadFn, typename OnErrorFn>
+        [[nodiscard]] bool decodeChunks(RequestBuffer &wireIn, OnPayloadFn &&onPayload, OnErrorFn &&onError,
+                                        bool stopAfterChunkPayload = false)
+        {
+            while (true)
+            {
+                if (rxStage == ShadowsocksStage::SALT)
+                {
+                    if (wireIn.readableBytes() < saltLen)
+                    {
+                        return true;
+                    }
+                    const auto *data = reinterpret_cast<const uint8_t *>(wireIn.readableBegin());
+                    std::span<const uint8_t> salt(data, saltLen);
+                    static constexpr uint8_t kInfo[] = {'s', 's', '-', 's', 'u', 'b', 'k', 'e', 'y'};
+                    rxSubkey.resize(keyLen);
+                    if (!kdf::hkdfSha1(masterKey, salt, kInfo, rxSubkey) ||
+                        !rxCtx.init(evpCipher(), rxSubkey, false, rxNonce.size()))
+                    {
+                        onError("Shadowsocks: HKDF subkey derivation failed");
+                        return false;
+                    }
+                    std::memset(rxNonce.data(), 0, rxNonce.size());
+                    wireIn.retrieve(saltLen);
+                    rxStage = ShadowsocksStage::CHUNK_LEN;
+                }
+
+                if (rxStage == ShadowsocksStage::CHUNK_LEN || rxStage == ShadowsocksStage::STREAMING)
+                {
+                    constexpr size_t kLenPacketSize = 2 + 16;
+                    if (wireIn.readableBytes() < kLenPacketSize)
+                    {
+                        return true;
+                    }
+                    const auto *data = reinterpret_cast<const uint8_t *>(wireIn.readableBegin());
+                    std::span<const uint8_t> cipherLen(data, 2);
+                    std::array<uint8_t, 16> tag{};
+                    std::memcpy(tag.data(), data + 2, 16);
+
+                    std::vector<uint8_t> plainLen;
+                    if (!rxCtx.decrypt(rxNonce, {}, cipherLen, tag, plainLen))
+                    {
+                        onError("Shadowsocks: Decrypt chunk length failed");
+                        return false;
+                    }
+                    cipher::incrementLittleEndianNonce(rxNonce);
+                    if (plainLen.size() < 2)
+                    {
+                        onError("Shadowsocks: Invalid decrypted chunk length");
+                        return false;
+                    }
+                    rxChunkLen = (static_cast<size_t>(plainLen[0]) << 8) | static_cast<size_t>(plainLen[1]);
+                    if (rxChunkLen > 0x3FFF)
+                    {
+                        onError("Shadowsocks: Chunk length exceeds 0x3FFF");
+                        return false;
+                    }
+                    wireIn.retrieve(kLenPacketSize);
+                    rxStage = ShadowsocksStage::CHUNK_PAYLOAD;
+                }
+
+                if (rxStage == ShadowsocksStage::CHUNK_PAYLOAD)
+                {
+                    const size_t totalExpected = rxChunkLen + 16;
+                    if (wireIn.readableBytes() < totalExpected)
+                    {
+                        return true;
+                    }
+                    const auto *data = reinterpret_cast<const uint8_t *>(wireIn.readableBegin());
+                    std::span<const uint8_t> cipherPayload(data, rxChunkLen);
+                    std::array<uint8_t, 16> tag{};
+                    std::memcpy(tag.data(), data + rxChunkLen, 16);
+
+                    std::vector<uint8_t> plainPayload;
+                    if (!rxCtx.decrypt(rxNonce, {}, cipherPayload, tag, plainPayload))
+                    {
+                        onError("Shadowsocks: Decrypt chunk payload failed");
+                        return false;
+                    }
+                    cipher::incrementLittleEndianNonce(rxNonce);
+                    wireIn.retrieve(totalExpected);
+                    rxStage = ShadowsocksStage::CHUNK_LEN;
+
+                    if (!onPayload(plainPayload))
+                    {
+                        return false;
+                    }
+                    if (stopAfterChunkPayload)
+                    {
+                        return true;
+                    }
+                }
+
+                if (rxStage == ShadowsocksStage::ERROR)
+                {
+                    return false;
+                }
+            }
+        }
     };
 
     /**
@@ -48,19 +274,10 @@ namespace mynet::handler
     class HandlerInboundShadowsocks : public HandlerInboundConnectionBase
     {
     public:
-        static constexpr bool kEnableSplice = false;
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
 
     private:
-        ShadowsocksStage ssStage_{ShadowsocksStage::SALT};
-        ShadowsocksCipher cipherType_{ShadowsocksCipher::AES_128_GCM};
-
-        size_t keyLen_{16};
-        size_t saltLen_{16};
-        std::vector<uint8_t> masterKey_{};
-        std::vector<uint8_t> rxSubkey_{};
-        std::array<uint8_t, 12> rxNonce_{};
-
-        size_t currentChunkLen_{0};
+        ShadowsocksCodecCore codec_{};
         bool targetResolved_{false};
 
     public:
@@ -77,331 +294,156 @@ namespace mynet::handler
 
         void setMethod(std::string_view method, std::string_view password)
         {
-            if (method == "aes-256-gcm")
-            {
-                cipherType_ = ShadowsocksCipher::AES_256_GCM;
-                keyLen_ = 32;
-                saltLen_ = 32;
-            }
-            else if (method == "chacha20-ietf-poly1305")
-            {
-                cipherType_ = ShadowsocksCipher::CHACHA20_POLY1305;
-                keyLen_ = 32;
-                saltLen_ = 32;
-            }
-            else if (method == "none")
-            {
-                cipherType_ = ShadowsocksCipher::NONE;
-                keyLen_ = 0;
-                saltLen_ = 0;
-            }
-            else
-            {
-                // 默认 aes-128-gcm
-                cipherType_ = ShadowsocksCipher::AES_128_GCM;
-                keyLen_ = 16;
-                saltLen_ = 16;
-            }
-
-            // 使用 EVP_BytesToKey 从 password 派生主密钥
-            deriveKey(password);
+            codec_.setMethod(method, password);
+            codec_.reset();
+            setCodecMode(codec_.cipherType != ShadowsocksCipher::NONE);
         }
 
         void setOnRequest(RequestCallback cb) noexcept { requestCallback_ = std::move(cb); }
 
-        [[nodiscard]] ShadowsocksStage stage() const noexcept { return ssStage_; }
-        [[nodiscard]] bool isEstablished() const noexcept { return targetResolved_; }
+        [[nodiscard]] ShadowsocksStage stage() const noexcept { return codec_.rxStage; }
+        [[nodiscard]] bool isEstablished() const noexcept override { return targetResolved_; }
 
         void reset() noexcept override
         {
             HandlerInboundConnectionBase::reset();
-            ssStage_ =
-                (cipherType_ == ShadowsocksCipher::NONE) ? ShadowsocksStage::CHUNK_PAYLOAD : ShadowsocksStage::SALT;
-            rxSubkey_.clear();
-            std::memset(rxNonce_.data(), 0, rxNonce_.size());
-            currentChunkLen_ = 0;
+            codec_.reset();
+            setCodecMode(codec_.cipherType != ShadowsocksCipher::NONE);
             targetResolved_ = false;
         }
 
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept
+        void onParseError(const char *reason) noexcept override
         {
             (void)reason;
-            ssStage_ = ShadowsocksStage::ERROR;
+            codec_.rxStage = ShadowsocksStage::ERROR;
             setStage(InboundStage::ERROR);
+            setCloseAfterResponse(true);
         }
 
-        void handle()
+        [[nodiscard]] Result<> onWireDecode(RequestBuffer &wireIn, RequestBuffer &appOut) noexcept override
         {
-            if (cipherType_ == ShadowsocksCipher::NONE)
+            if (codec_.cipherType == ShadowsocksCipher::NONE)
             {
-                processNone();
-                return;
+                return decodeNoneFrom(wireIn, appOut);
             }
 
-            while (true)
+            const bool ok = codec_.decodeChunks(
+                wireIn,
+                [&](const std::vector<uint8_t> &plainPayload) -> bool
+                {
+                    if (!targetResolved_)
+                    {
+                        size_t addrConsumed = 0;
+                        auto target = ProxyAddress::decodeSocks5(plainPayload, addrConsumed);
+                        if (!target.has_value())
+                        {
+                            onParseError("Shadowsocks: Failed to decode initial destination address");
+                            return false;
+                        }
+                        targetAddress_ = std::move(target);
+                        targetResolved_ = true;
+                        codec_.rxStage = ShadowsocksStage::STREAMING;
+                        setStage(InboundStage::STREAMING);
+                        onMessageComplete();
+
+                        if (plainPayload.size() > addrConsumed)
+                        {
+                            const char *extra = reinterpret_cast<const char *>(plainPayload.data() + addrConsumed);
+                            [[maybe_unused]] auto _ = appOut.append(extra, plainPayload.size() - addrConsumed);
+                        }
+                        if (requestCallback_)
+                        {
+                            requestCallback_(0x01, *targetAddress_);
+                        }
+                        return true;
+                    }
+                    if (!plainPayload.empty())
+                    {
+                        const char *p = reinterpret_cast<const char *>(plainPayload.data());
+                        [[maybe_unused]] auto _ = appOut.append(p, plainPayload.size());
+                    }
+                    codec_.rxStage = ShadowsocksStage::STREAMING;
+                    return true;
+                },
+                [&](const char *err) { onParseError(err); });
+
+            return ok ? Result<>{} : std::unexpected(ERR::CONNECT_FAILED);
+        }
+
+        [[nodiscard]] Result<> onEncodePayload(std::string_view plain, ResponseQueue &encodedOut) noexcept override
+        {
+            if (plain.empty())
             {
-                if (ssStage_ == ShadowsocksStage::SALT)
+                return {};
+            }
+            if (codec_.cipherType == ShadowsocksCipher::NONE)
+            {
+                return encodedOut.emplace(plain);
+            }
+            std::string packet;
+            if (!codec_.txInitialized)
+            {
+                if (!codec_.initTxHeader(packet))
                 {
-                    if (!processSalt())
-                    {
-                        return;
-                    }
+                    return std::unexpected(ERR::CONNECT_FAILED);
                 }
+            }
+            while (!plain.empty())
+            {
+                const size_t chunkLen = std::min(plain.size(), static_cast<size_t>(0x3FFF));
+                std::span<const uint8_t> chunkSpan(reinterpret_cast<const uint8_t *>(plain.data()), chunkLen);
+                if (!codec_.encryptChunk(chunkSpan, packet))
+                {
+                    return std::unexpected(ERR::CONNECT_FAILED);
+                }
+                plain.remove_prefix(chunkLen);
+            }
+            return encodedOut.push(std::move(packet));
+        }
 
-                if (ssStage_ == ShadowsocksStage::CHUNK_LEN)
-                {
-                    if (!processChunkLen())
-                    {
-                        return;
-                    }
-                }
-
-                if (ssStage_ == ShadowsocksStage::CHUNK_PAYLOAD)
-                {
-                    if (!processChunkPayload())
-                    {
-                        return;
-                    }
-                }
-
-                if (ssStage_ == ShadowsocksStage::STREAMING)
-                {
-                    // 在数据流转发阶段，持续解析后续 AEAD 块
-                    if (!processChunkLen())
-                    {
-                        return;
-                    }
-                }
-
-                if (ssStage_ == ShadowsocksStage::ERROR)
-                {
-                    return;
-                }
+        void handle() override
+        {
+            if (codec_.cipherType == ShadowsocksCipher::NONE && !targetResolved_)
+            {
+                [[maybe_unused]] auto _ = decodeNoneFrom(requestBuffer_, requestBuffer_);
             }
         }
 
     private:
-        void deriveKey(std::string_view password)
-        {
-            if (keyLen_ == 0)
-            {
-                masterKey_.clear();
-                return;
-            }
-            masterKey_.resize(keyLen_);
-            const EVP_CIPHER *c = (keyLen_ == 16) ? EVP_aes_128_gcm() : EVP_aes_256_gcm();
-            EVP_BytesToKey(c, EVP_md5(), nullptr, reinterpret_cast<const unsigned char *>(password.data()),
-                           password.size(), 1, masterKey_.data(), nullptr);
-        }
-
-        void incrementNonce() noexcept
-        {
-            for (size_t i = 0; i < rxNonce_.size(); ++i)
-            {
-                if (++rxNonce_[i] != 0)
-                {
-                    break;
-                }
-            }
-        }
-
-        const EVP_CIPHER *getEvpCipher() const noexcept
-        {
-            switch (cipherType_)
-            {
-            case ShadowsocksCipher::AES_128_GCM:
-                return EVP_aes_128_gcm();
-            case ShadowsocksCipher::AES_256_GCM:
-                return EVP_aes_256_gcm();
-            case ShadowsocksCipher::CHACHA20_POLY1305:
-                return EVP_chacha20_poly1305();
-            default:
-                return nullptr;
-            }
-        }
-
-        void processNone()
+        Result<> decodeNoneFrom(RequestBuffer &src, RequestBuffer &dst) noexcept
         {
             if (!targetResolved_)
             {
-                const size_t avail = requestBytes();
+                const size_t avail = src.readableBytes();
                 if (avail < 7)
                 {
-                    return;
+                    return {};
                 }
-                const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
+                const auto *data = reinterpret_cast<const uint8_t *>(src.readableBegin());
                 size_t consumed = 0;
-                std::span<const uint8_t> span(data, avail);
-                auto target = ProxyAddress::decodeSocks5(span, consumed);
+                auto target = ProxyAddress::decodeSocks5(std::span<const uint8_t>(data, avail), consumed);
                 if (!target.has_value())
                 {
-                    return;
+                    return {};
                 }
                 targetAddress_ = std::move(target);
                 targetResolved_ = true;
-                requestConsume(consumed);
-                ssStage_ = ShadowsocksStage::STREAMING;
+                src.retrieve(consumed);
+                codec_.rxStage = ShadowsocksStage::STREAMING;
                 setStage(InboundStage::STREAMING);
                 onMessageComplete();
-
                 if (requestCallback_)
                 {
                     requestCallback_(0x01, *targetAddress_);
                 }
             }
-        }
-
-        bool processSalt()
-        {
-            const size_t avail = requestBytes();
-            if (avail < saltLen_)
+            if (&src != &dst && src.readableBytes() > 0)
             {
-                return false;
+                auto r = dst.append(src.readableBegin(), src.readableBytes());
+                src.retrieve(src.readableBytes());
+                return r;
             }
-
-            const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
-            std::span<const uint8_t> salt(data, saltLen_);
-
-            // 派生子密钥 subkey = HKDF-SHA1(masterKey, salt, "ss-subkey")
-            static constexpr uint8_t kInfo[] = {'s', 's', '-', 's', 'u', 'b', 'k', 'e', 'y'};
-            rxSubkey_.resize(keyLen_);
-            if (!kdf::hkdfSha1(masterKey_, salt, kInfo, rxSubkey_))
-            {
-                onParseError("Shadowsocks: HKDF subkey derivation failed");
-                ssStage_ = ShadowsocksStage::ERROR;
-                setStage(InboundStage::ERROR);
-                setCloseAfterResponse(true);
-                return false;
-            }
-
-            std::memset(rxNonce_.data(), 0, rxNonce_.size());
-            requestConsume(saltLen_);
-            ssStage_ = ShadowsocksStage::CHUNK_LEN;
-            return true;
-        }
-
-        bool processChunkLen()
-        {
-            // 块长度密文结构：[2B encrypted length][16B tag] -> 共 18 字节
-            constexpr size_t kLenPacketSize = 2 + 16;
-            const size_t avail = requestBytes();
-            if (avail < kLenPacketSize)
-            {
-                return false;
-            }
-
-            const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
-            std::span<const uint8_t> cipherLen(data, 2);
-            std::array<uint8_t, 16> tag{};
-            std::memcpy(tag.data(), data + 2, 16);
-
-            std::vector<uint8_t> plainLen{};
-            if (!cipher::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherLen, tag, plainLen))
-            {
-                onParseError("Shadowsocks: Decrypt chunk length failed");
-                ssStage_ = ShadowsocksStage::ERROR;
-                setStage(InboundStage::ERROR);
-                setCloseAfterResponse(true);
-                return false;
-            }
-            incrementNonce();
-
-            if (plainLen.size() < 2)
-            {
-                onParseError("Shadowsocks: Invalid decrypted chunk length");
-                ssStage_ = ShadowsocksStage::ERROR;
-                setStage(InboundStage::ERROR);
-                setCloseAfterResponse(true);
-                return false;
-            }
-
-            currentChunkLen_ = (static_cast<size_t>(plainLen[0]) << 8) | static_cast<size_t>(plainLen[1]);
-            // RFC 约束：分块最大不超过 0x3FFF (16383 字节)
-            if (currentChunkLen_ > 0x3FFF)
-            {
-                onParseError("Shadowsocks: Chunk length exceeds 0x3FFF");
-                ssStage_ = ShadowsocksStage::ERROR;
-                setStage(InboundStage::ERROR);
-                setCloseAfterResponse(true);
-                return false;
-            }
-
-            requestConsume(kLenPacketSize);
-            ssStage_ = ShadowsocksStage::CHUNK_PAYLOAD;
-            return true;
-        }
-
-        bool processChunkPayload()
-        {
-            // 载荷结构：[Length B encrypted payload][16B tag]
-            const size_t totalExpected = currentChunkLen_ + 16;
-            const size_t avail = requestBytes();
-            if (avail < totalExpected)
-            {
-                return false;
-            }
-
-            const auto *data = reinterpret_cast<const uint8_t *>(requestBegin());
-            std::span<const uint8_t> cipherPayload(data, currentChunkLen_);
-            std::array<uint8_t, 16> tag{};
-            std::memcpy(tag.data(), data + currentChunkLen_, 16);
-
-            std::vector<uint8_t> plainPayload{};
-            if (!cipher::aeadDecrypt(getEvpCipher(), rxSubkey_, rxNonce_, cipherPayload, tag, plainPayload))
-            {
-                onParseError("Shadowsocks: Decrypt chunk payload failed");
-                ssStage_ = ShadowsocksStage::ERROR;
-                setStage(InboundStage::ERROR);
-                setCloseAfterResponse(true);
-                return false;
-            }
-            incrementNonce();
-            requestConsume(totalExpected);
-
-            // 如果这是首个解密载荷，其中必定包含目标 SOCKS5 代理地址
-            if (!targetResolved_)
-            {
-                size_t addrConsumed = 0;
-                auto target = ProxyAddress::decodeSocks5(plainPayload, addrConsumed);
-                if (!target.has_value())
-                {
-                    onParseError("Shadowsocks: Failed to decode initial destination address");
-                    ssStage_ = ShadowsocksStage::ERROR;
-                    setStage(InboundStage::ERROR);
-                    setCloseAfterResponse(true);
-                    return false;
-                }
-
-                targetAddress_ = std::move(target);
-                targetResolved_ = true;
-                ssStage_ = ShadowsocksStage::STREAMING;
-                setStage(InboundStage::STREAMING);
-                onMessageComplete();
-
-                if (plainPayload.size() > addrConsumed)
-                {
-                    const char *extra = reinterpret_cast<const char *>(plainPayload.data() + addrConsumed);
-                    size_t extraLen = plainPayload.size() - addrConsumed;
-                    [[maybe_unused]] auto _ = appendRequest(extra, static_cast<ssize_t>(extraLen));
-                }
-
-                if (requestCallback_)
-                {
-                    requestCallback_(0x01, *targetAddress_);
-                }
-            }
-            else
-            {
-                if (!plainPayload.empty())
-                {
-                    const char *p = reinterpret_cast<const char *>(plainPayload.data());
-                    [[maybe_unused]] auto _ = appendRequest(p, static_cast<ssize_t>(plainPayload.size()));
-                }
-                ssStage_ = ShadowsocksStage::CHUNK_LEN;
-            }
-
-            return true;
+            return {};
         }
     };
 
@@ -410,15 +452,15 @@ namespace mynet::handler
      */
     class HandlerOutboundShadowsocks : public HandlerOutboundConnectionBase
     {
+    public:
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
+
     private:
-        ShadowsocksCipher cipherType_{ShadowsocksCipher::AES_128_GCM};
-        size_t keyLen_{16};
-        size_t saltLen_{16};
-        std::vector<uint8_t> masterKey_{};
+        ShadowsocksCodecCore codec_{};
         bool handshakeSent_{false};
 
     public:
-        HandlerOutboundShadowsocks() noexcept = default;
+        HandlerOutboundShadowsocks() noexcept { setMethod("aes-128-gcm", "password"); }
         HandlerOutboundShadowsocks(std::string_view method, std::string_view password, const ProxyAddress &target)
             : HandlerOutboundConnectionBase(target)
         {
@@ -427,34 +469,26 @@ namespace mynet::handler
 
         void setMethod(std::string_view method, std::string_view password)
         {
-            if (method == "aes-256-gcm")
-            {
-                cipherType_ = ShadowsocksCipher::AES_256_GCM;
-                keyLen_ = 32;
-                saltLen_ = 32;
-            }
-            else if (method == "chacha20-poly1305" || method == "chacha20-ietf-poly1305")
-            {
-                cipherType_ = ShadowsocksCipher::CHACHA20_POLY1305;
-                keyLen_ = 32;
-                saltLen_ = 32;
-            }
-            else
-            {
-                cipherType_ = ShadowsocksCipher::AES_128_GCM;
-                keyLen_ = 16;
-                saltLen_ = 16;
-            }
-            masterKey_.resize(keyLen_);
-            const EVP_CIPHER *c = (keyLen_ == 16) ? EVP_aes_128_gcm() : EVP_aes_256_gcm();
-            EVP_BytesToKey(c, EVP_md5(), nullptr, reinterpret_cast<const unsigned char *>(password.data()),
-                           password.size(), 1, masterKey_.data(), nullptr);
+            codec_.setMethod(method, password);
+            codec_.reset();
+            setCodecMode(codec_.cipherType != ShadowsocksCipher::NONE);
         }
+
+        [[nodiscard]] bool isEstablished() const noexcept override { return handshakeSent_; }
 
         void reset() noexcept override
         {
             HandlerOutboundConnectionBase::reset();
             handshakeSent_ = false;
+            codec_.reset();
+            setCodecMode(codec_.cipherType != ShadowsocksCipher::NONE);
+        }
+
+        void onParseError(const char *reason) noexcept override
+        {
+            (void)reason;
+            setStage(OutboundStage::ERROR);
+            codec_.rxStage = ShadowsocksStage::ERROR;
         }
 
         void handle() override
@@ -465,9 +499,69 @@ namespace mynet::handler
             }
         }
 
+        [[nodiscard]] Result<> onWireDecode(RequestBuffer &wireIn, RequestBuffer &appOut) noexcept override
+        {
+            if (codec_.cipherType == ShadowsocksCipher::NONE)
+            {
+                if (wireIn.readableBytes() > 0)
+                {
+                    auto r = appOut.append(wireIn.readableBegin(), wireIn.readableBytes());
+                    wireIn.retrieve(wireIn.readableBytes());
+                    return r;
+                }
+                return {};
+            }
+
+            const bool ok = codec_.decodeChunks(
+                wireIn,
+                [&](const std::vector<uint8_t> &plainPayload) -> bool
+                {
+                    if (!plainPayload.empty())
+                    {
+                        const char *p = reinterpret_cast<const char *>(plainPayload.data());
+                        [[maybe_unused]] auto _ = appOut.append(p, plainPayload.size());
+                    }
+                    return true;
+                },
+                [&](const char *err) { onParseError(err); });
+            return ok ? Result<>{} : std::unexpected(ERR::CONNECT_FAILED);
+        }
+
+        [[nodiscard]] Result<> onEncodePayload(std::string_view plain, ResponseQueue &encodedOut) noexcept override
+        {
+            if (plain.empty())
+            {
+                return {};
+            }
+            if (!handshakeSent_)
+            {
+                sendHandshake();
+            }
+            if (codec_.cipherType == ShadowsocksCipher::NONE)
+            {
+                return encodedOut.emplace(plain);
+            }
+            std::string packet;
+            while (!plain.empty())
+            {
+                const size_t chunkLen = std::min(plain.size(), static_cast<size_t>(0x3FFF));
+                std::span<const uint8_t> chunkSpan(reinterpret_cast<const uint8_t *>(plain.data()), chunkLen);
+                if (!codec_.encryptChunk(chunkSpan, packet))
+                {
+                    return std::unexpected(ERR::CONNECT_FAILED);
+                }
+                plain.remove_prefix(chunkLen);
+            }
+            return encodedOut.push(std::move(packet));
+        }
+
     private:
         void sendHandshake()
         {
+            if (handshakeSent_)
+            {
+                return;
+            }
             handshakeSent_ = true;
             std::vector<uint8_t> encodedTarget;
             target().encodeSocks5(encodedTarget);
@@ -477,61 +571,27 @@ namespace mynet::handler
                 return;
             }
 
-            std::vector<uint8_t> salt(saltLen_);
-            if (RAND_bytes(salt.data(), static_cast<int>(salt.size())) != 1)
+            if (codec_.cipherType == ShadowsocksCipher::NONE)
             {
-                onParseError("HandlerOutboundShadowsocks: Failed to generate random salt");
-                return;
-            }
-
-            static constexpr uint8_t kInfo[] = {'s', 's', '-', 's', 'u', 'b', 'k', 'e', 'y'};
-            std::vector<uint8_t> subkey(keyLen_);
-            if (!kdf::hkdfSha1(masterKey_, salt, kInfo, subkey))
-            {
-                onParseError("HandlerOutboundShadowsocks: HKDF subkey derivation failed");
-                return;
-            }
-
-            std::array<uint8_t, 12> nonce{};
-            std::memset(nonce.data(), 0, nonce.size());
-
-            const EVP_CIPHER *cipher = (cipherType_ == ShadowsocksCipher::AES_256_GCM)         ? EVP_aes_256_gcm()
-                                       : (cipherType_ == ShadowsocksCipher::CHACHA20_POLY1305) ? EVP_chacha20_poly1305()
-                                                                                               : EVP_aes_128_gcm();
-
-            uint16_t plen = htons(static_cast<uint16_t>(encodedTarget.size()));
-            std::span<const uint8_t> plainLenSpan(reinterpret_cast<const uint8_t *>(&plen), 2);
-            std::vector<uint8_t> cipherLen;
-            std::array<uint8_t, 16> lenTag{};
-            if (!cipher::aeadEncrypt(cipher, subkey, nonce, plainLenSpan, cipherLen, lenTag))
-            {
-                onParseError("HandlerOutboundShadowsocks: Encrypt length failed");
-                return;
-            }
-            for (size_t i = 0; i < nonce.size(); ++i)
-            {
-                if (++nonce[i] != 0)
-                    break;
-            }
-
-            std::span<const uint8_t> payloadSpan(encodedTarget.data(), encodedTarget.size());
-            std::vector<uint8_t> cipherPayload;
-            std::array<uint8_t, 16> payloadTag{};
-            if (!cipher::aeadEncrypt(cipher, subkey, nonce, payloadSpan, cipherPayload, payloadTag))
-            {
-                onParseError("HandlerOutboundShadowsocks: Encrypt payload failed");
+                [[maybe_unused]] auto _ = emitEncodedToWire(
+                    std::string_view(reinterpret_cast<const char *>(encodedTarget.data()), encodedTarget.size()));
+                setStage(OutboundStage::STREAMING);
                 return;
             }
 
             std::string packet;
-            packet.reserve(salt.size() + cipherLen.size() + lenTag.size() + cipherPayload.size() + payloadTag.size());
-            packet.append(reinterpret_cast<const char *>(salt.data()), salt.size());
-            packet.append(reinterpret_cast<const char *>(cipherLen.data()), cipherLen.size());
-            packet.append(reinterpret_cast<const char *>(lenTag.data()), lenTag.size());
-            packet.append(reinterpret_cast<const char *>(cipherPayload.data()), cipherPayload.size());
-            packet.append(reinterpret_cast<const char *>(payloadTag.data()), payloadTag.size());
+            if (!codec_.initTxHeader(packet))
+            {
+                onParseError("HandlerOutboundShadowsocks: Failed to init TX cipher");
+                return;
+            }
+            if (!codec_.encryptChunk(encodedTarget, packet))
+            {
+                onParseError("HandlerOutboundShadowsocks: Encrypt target payload failed");
+                return;
+            }
 
-            [[maybe_unused]] auto _ = pushResponse(packet);
+            [[maybe_unused]] auto _ = emitEncodedToWire(packet);
             setStage(OutboundStage::STREAMING);
         }
     };

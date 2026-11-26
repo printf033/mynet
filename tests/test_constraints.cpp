@@ -114,16 +114,6 @@ namespace
         void setMaxRequestBytes(size_t) noexcept {}
         bool closeAfterResponse() noexcept { return false; }
         void setCloseAfterResponse(bool) noexcept {}
-        void setSpliceTarget(int) noexcept {}
-        void setSpliceTarget(SPLICE_CONTROL) noexcept {}
-        void setSpliceControl(SPLICE_CONTROL) noexcept {}
-        SPLICE_CONTROL spliceControl() noexcept { return SPLICE_CONTROL::DISABLED; }
-        int spliceTarget() noexcept { return -1; }
-        bool isSpliceActive() noexcept { return false; }
-        void pauseSplice() noexcept {}
-        void resumeSplice() noexcept {}
-        void drainSplice() noexcept {}
-        void disableSplice() noexcept {}
         int fd() noexcept { return -1; }
     };
 
@@ -163,16 +153,6 @@ namespace
     struct DeletedPrepareRequestWritableHandler : public HandlerConnection
     {
         std::expected<char *, ERR> prepareRequestWritable(size_t) = delete;
-    };
-
-    struct DeletedSpliceControlHandler : public HandlerConnection
-    {
-        void setSpliceControl(SPLICE_CONTROL) = delete;
-    };
-
-    struct DeletedPauseSpliceHandler : public HandlerConnection
-    {
-        void pauseSplice() = delete;
     };
 
     /// 双特化组合：统一 HandlerBase 兼具流式与数据报双模能力
@@ -247,6 +227,21 @@ namespace
     template <typename E, typename H>
     concept CanRunUdp = requires(E &e, H &h) { e.runUdp("0.0.0.0", 0, h); };
 
+    template <typename E>
+    concept HasLoopParity =
+        requires(E &e, int fd, uint32_t ev, std::function<void(uint32_t)> watchCb, std::function<void()> task,
+                 std::chrono::milliseconds ms) {
+            { e.loop().addWatch(fd, ev, watchCb) } -> std::same_as<bool>;
+            { e.loop().modWatch(fd, ev) } -> std::same_as<bool>;
+            e.loop().delWatch(fd);
+            e.loop().runInLoop(task);
+            e.loop().queueInLoop(task);
+            e.loop().runAfter(ms, task);
+            e.loop().runEvery(ms, task);
+            e.loop().cancelTimer(uint64_t{1});
+            e.stop();
+        };
+
     struct NonDerivedHandler
     {
         [[nodiscard]] Result<> appendRequest(const char *, ssize_t) noexcept { return {}; }
@@ -266,9 +261,7 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<DatagramQueue>);
     static_assert(Resettable<HandlerConnection>);
     static_assert(Resettable<HandlerDatagram>);
-    static_assert(Resettable<Acceptor<HandlerConnection>>);
     static_assert(Resettable<AcceptorBase<HandlerConnection>>);
-    static_assert(Resettable<Dialer<HandlerConnection>>);
     static_assert(Resettable<DialerBase<HandlerConnection>>);
     static_assert(Resettable<HandlerInboundConnectionBase>);
     static_assert(Resettable<HandlerInboundDatagramBase>);
@@ -331,8 +324,6 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     static_assert(!MandatoryMethodConnection<DeletedTakeResponseHandler>);
     static_assert(!MandatoryMethodConnection<DeletedPushResponseHandler>);
     static_assert(!MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);
-    static_assert(!MandatoryMethodConnection<DeletedSpliceControlHandler>);
-    static_assert(!MandatoryMethodConnection<DeletedPauseSpliceHandler>);
     static_assert(!MandatoryMethodConnection<NonDerivedHandler>);
     static_assert(!MandatoryMethodConnection<NoReset>);
 
@@ -345,8 +336,6 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     EXPECT_FALSE(MandatoryMethodConnection<DeletedTakeResponseHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedPushResponseHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<DeletedPrepareRequestWritableHandler>);
-    EXPECT_FALSE(MandatoryMethodConnection<DeletedSpliceControlHandler>);
-    EXPECT_FALSE(MandatoryMethodConnection<DeletedPauseSpliceHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<NonDerivedHandler>);
 }
 
@@ -431,29 +420,24 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
 
 TEST(Constraints, AcceptorConceptsEvaluationOnCompleteTypes)
 {
-    using Acc = Acceptor<HandlerConnection>;
-    using BaseAcc = AcceptorBase<HandlerConnection>;
+    using Acc = AcceptorBase<HandlerConnection>;
+    using BaseAcc = Acceptor;
 
-    // 概念约束测试：DerivedFromAcceptor & DerivedFromAcceptorBase
     static_assert(DerivedFromAcceptor<Acc>);
-    static_assert(DerivedFromAcceptorBase<BaseAcc>);
+    static_assert(DerivedFromAcceptor<BaseAcc>);
     static_assert(!DerivedFromAcceptor<HandlerConnection>);
 
-    // 概念约束测试：BaseAcceptor
-    static_assert(BaseAcceptor<Acc>);
-    static_assert(BaseAcceptor<BaseAcc>);
-
     EXPECT_TRUE(DerivedFromAcceptor<Acc>);
-    EXPECT_TRUE(BaseAcceptor<Acc>);
 }
 
 TEST(Constraints, DialerAndOutboundConceptsEvaluation)
 {
-    using Dial = Dialer<HandlerConnection>;
-    using BaseDial = DialerBase<HandlerConnection>;
+    using Dial = DialerBase<HandlerConnection>;
+    using BaseDial = Dialer;
 
     // 概念约束测试：DerivedFromDialer & DerivedFromDialerBase
     static_assert(DerivedFromDialer<Dial>);
+    static_assert(DerivedFromDialer<BaseDial>);
     static_assert(DerivedFromDialerBase<BaseDial>);
     static_assert(!DerivedFromDialer<HandlerConnection>);
 
@@ -507,45 +491,45 @@ TEST(Constraints, DialerAndOutboundConceptsEvaluation)
 TEST(Constraints, AcceptorAndDialerPlaceholderZeroOverhead)
 {
     // 测试 Acceptor 与 Dialer 的占位符在没有上下文时占 0 额外字节 (Zero Overhead)
-    struct CustomAcceptor : Acceptor<EmptyInbound>
+    struct CustomAcceptor : AcceptorBase<EmptyInbound>
     {
     };
-    struct CustomDialer : Dialer<EmptyOutbound>
+    struct CustomDialer : DialerBase<EmptyOutbound>
     {
     };
     static_assert(DerivedFromAcceptor<CustomAcceptor>);
     static_assert(DerivedFromDialer<CustomDialer>);
 
     // 纯 TCP 反应器：自动推导推算出 1 个 TCP 监听器
-    using PureTcpReactor = Reactor<Acceptor<ProtoHttp>>;
+    using PureTcpReactor = Reactor<AcceptorBase<ProtoHttp>>;
     static_assert(PureTcpReactor::kListenerCount == 1);
     static_assert(PureTcpReactor::kHasTcp);
     static_assert(!PureTcpReactor::kHasUdp);
 
-    using BaseReactor = Reactor<Acceptor<HandlerConnection>>;
+    using BaseReactor = Reactor<AcceptorBase<HandlerConnection>>;
     static_assert(BaseReactor::kListenerCount == 1);
     static_assert(BaseReactor::kHasTcp);
     static_assert(!BaseReactor::kHasUdp);
 
     // 纯 UDP 反应器：自动推导推算出 1 个 UDP 监听器
-    using PureUdpReactor = Reactor<Acceptor<ProtoDns>>;
+    using PureUdpReactor = Reactor<AcceptorBase<ProtoDns>>;
     static_assert(PureUdpReactor::kListenerCount == 1);
     static_assert(!PureUdpReactor::kHasTcp);
     static_assert(PureUdpReactor::kHasUdp);
 
     // 双传输反应器：自动推导推算出 2 个监听器 (1 个 TCP + 1 个 UDP)
-    using DualReactor = Reactor<Acceptor<ProtoHttp>, Acceptor<ProtoDns>>;
+    using DualReactor = Reactor<AcceptorBase<ProtoHttp>, AcceptorBase<ProtoDns>>;
     static_assert(DualReactor::kListenerCount == 2);
     static_assert(DualReactor::kHasTcp);
     static_assert(DualReactor::kHasUdp);
 
     // 多协议共享端口嗅探场景：2 个 Acceptor 共享 443 端口 -> 自动推导合并为 1 个 Listener (<= Acceptor 数量)
-    using SniffReactor = Reactor<Acceptor<SniffProtoA>, Acceptor<SniffProtoB>>;
+    using SniffReactor = Reactor<AcceptorBase<SniffProtoA>, AcceptorBase<SniffProtoB>>;
     static_assert(SniffReactor::kProtocolCount == 2);
     static_assert(SniffReactor::kListenerCount == 1); // 2 Acceptors -> 1 Listener!
 
     // 多协议不同端口场景：HTTP(80) + HTTPS(443) + DNS(53) -> 自动推导分配 3 个 Listener
-    using MultiPortReactor = Reactor<Acceptor<ProtoHttp>, Acceptor<ProtoHttps>, Acceptor<ProtoDns>>;
+    using MultiPortReactor = Reactor<AcceptorBase<ProtoHttp>, AcceptorBase<ProtoHttps>, AcceptorBase<ProtoDns>>;
     static_assert(MultiPortReactor::kProtocolCount == 3);
     static_assert(MultiPortReactor::kListenerCount == 3);
     static_assert(MultiPortReactor::kListenerConfigs[0].defaultPort == 80);
@@ -554,7 +538,7 @@ TEST(Constraints, AcceptorAndDialerPlaceholderZeroOverhead)
 
     // 实例运行与容量检查
     Reactor<CustomAcceptor> singleReactor;
-    Reactor<CustomAcceptor, Acceptor<EmptyInbound>> multiReactor;
+    Reactor<CustomAcceptor, AcceptorBase<EmptyInbound>> multiReactor;
 
     EXPECT_EQ(singleReactor.connections(), 0u);
     EXPECT_EQ(multiReactor.connections(), 0u);
@@ -570,10 +554,10 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
     poison.server.port = 1;
     mynet::publishMynetConfig(poison);
 
-    mynet::Reactor<mynet::Acceptor<mynet::EmptyInbound>> reactor;
+    mynet::Reactor<mynet::AcceptorBase<mynet::EmptyInbound>> reactor;
 
 #if defined(MYNET_ENABLE_URING)
-    mynet::Proactor<mynet::Acceptor<mynet::EmptyInbound>> proactor;
+    mynet::Proactor<mynet::AcceptorBase<mynet::EmptyInbound>> proactor;
 #endif
 
     [[maybe_unused]] auto r1 = reactor.runTcp("1.2.3.4", 0);
@@ -590,4 +574,22 @@ TEST(Constraints, EveryRunOverloadIsInstantiable)
 
     mynet::publishMynetConfig(saved);
     SUCCEED();
+}
+
+TEST(Constraints, ReactorAndProactorLoopParity)
+{
+    static_assert(CanRunTcp<Reactor<AcceptorBase<EmptyInbound>>>);
+    static_assert(HasLoopParity<Reactor<AcceptorBase<EmptyInbound>>>);
+    EXPECT_TRUE((HasLoopParity<Reactor<AcceptorBase<EmptyInbound>>>));
+
+#if defined(MYNET_ENABLE_URING)
+    static_assert(CanRunTcp<Proactor<AcceptorBase<EmptyInbound>>>);
+    static_assert(HasLoopParity<Proactor<AcceptorBase<EmptyInbound>>>);
+    static_assert(requires(Proactor<AcceptorBase<EmptyInbound>> &p, ForwarderLoopHooks &h, const sockaddr_in &sin,
+                           std::function<void(int)> cb) {
+        p.loop().attachForwarderHooks(h);
+        p.asyncConnect(1, sin, cb);
+    });
+    EXPECT_TRUE((HasLoopParity<Proactor<AcceptorBase<EmptyInbound>>>));
+#endif
 }

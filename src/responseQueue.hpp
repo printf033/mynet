@@ -24,6 +24,7 @@ namespace mynet
     struct DatagramPacket
     {
         sockaddr_in peer{};
+        sockaddr_in origDst{};
         std::string bytes{};
 
         DatagramPacket() noexcept = default;
@@ -53,10 +54,23 @@ namespace mynet
               bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
         {
         }
+        DatagramPacket(const sockaddr_in &p, const sockaddr_in &dst, std::string b) noexcept
+            : peer(p),
+              origDst(dst),
+              bytes(std::move(b))
+        {
+        }
+        DatagramPacket(const sockaddr_in &p, const sockaddr_in &dst, const char *buf, size_t n)
+            : peer(p),
+              origDst(dst),
+              bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
+        {
+        }
 
         void clear() noexcept
         {
             peer = {};
+            origDst = {};
             bytes.clear();
         }
         [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
@@ -96,21 +110,21 @@ namespace mynet
      * 弹出与重置时调用槽位的 clear() 复用已分配容量。
      */
     template <typename ItemType = DatagramPacket>
-    class ResponseQueueBase
+    class BasicResponseQueue
     {
     public:
         using Item = ItemType;
 
-        ResponseQueueBase() noexcept = default;
+        BasicResponseQueue() noexcept = default;
 
-        ~ResponseQueueBase() noexcept { destroy(); }
+        ~BasicResponseQueue() noexcept { destroy(); }
 
-        ResponseQueueBase(const ResponseQueueBase &) =
+        BasicResponseQueue(const BasicResponseQueue &) =
             delete; // a response queue owns one slot array; a copy would alias the elements
-        ResponseQueueBase &operator=(const ResponseQueueBase &) =
+        BasicResponseQueue &operator=(const BasicResponseQueue &) =
             delete; // a response queue owns one slot array; a copy would alias the elements
 
-        ResponseQueueBase(ResponseQueueBase &&other) noexcept
+        BasicResponseQueue(BasicResponseQueue &&other) noexcept
             : slots_(std::exchange(other.slots_, nullptr)),
               capacity_(std::exchange(other.capacity_, 0)),
               head_(std::exchange(other.head_, 0)),
@@ -118,7 +132,7 @@ namespace mynet
         {
         }
 
-        ResponseQueueBase &operator=(ResponseQueueBase &&other) noexcept
+        BasicResponseQueue &operator=(BasicResponseQueue &&other) noexcept
         {
             if (this != &other)
             {
@@ -307,8 +321,13 @@ namespace mynet
     };
 
     /**
-     * @brief 默认流式单连接响应队列别名
+     * @brief 默认流式单连接响应队列别名与兼容别名
      */
-    using ResponseQueue = ResponseQueueBase<DatagramPacket>;
+    using ResponseQueue = BasicResponseQueue<DatagramPacket>;
+
+    template <typename ItemType = DatagramPacket>
+    using ResponseQueueBase = BasicResponseQueue<ItemType>;
+
+    using ResponseQueueDefault = ResponseQueue;
 
 } // namespace mynet

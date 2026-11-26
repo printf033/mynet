@@ -10,14 +10,14 @@ namespace mynet
 {
 
     /**
-     * @brief TCP/UDP 直通入站端点 (InboundDirect)
+     * @brief TCP/UDP 直通接收器 (AcceptorDirect / InboundDirect)
      */
-    class InboundDirect : public InboundBase
+    class AcceptorDirect : public Acceptor
     {
     public:
-        InboundDirect(std::string tag = "direct", std::string host = "0.0.0.0", uint16_t port = 0,
-                      bool enableSniffing = true)
-            : InboundBase(std::move(tag), "direct", std::move(host), port, enableSniffing)
+        AcceptorDirect(std::string tag = "direct", std::string host = "0.0.0.0", uint16_t port = 0,
+                       bool enableSniffing = true)
+            : Acceptor(std::move(tag), "direct", std::move(host), port, enableSniffing)
         {
         }
 
@@ -27,12 +27,12 @@ namespace mynet
             return true;
         }
 
-        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<Handler> createHandler() override
         {
             return std::make_unique<handler::HandlerInboundDirect>();
         }
     };
 
-    using AcceptorDirect = InboundDirect;
+    using InboundDirect = AcceptorDirect;
 
 } // namespace mynet

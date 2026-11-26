@@ -9,7 +9,7 @@
 //     ./reactor_tcp              # 监听 0.0.0.0:8888
 //     ./reactor_tcp 127.0.0.1:9000
 //
-// SpliceEchoHandler 在明文 TCP 下自动走 Linux splice 内核零拷贝环回通道。
+// SpliceEchoHandler 对单端 TCP 连接执行字节流回显。
 
 int main(int argc, char *argv[])
 {

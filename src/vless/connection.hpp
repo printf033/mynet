@@ -9,10 +9,10 @@ namespace mynet::vless
      *
      * 继承自统一的 ConnectionBase，在连接层管理 VLESS 代理会话流式传输与状态。
      */
-    class ConnectionVless : public ConnectionBase
+    class ConnectionVless : public Connection
     {
     public:
-        using ConnectionBase::ConnectionBase;
+        using Connection::Connection;
     };
 
     using VlessConnection = ConnectionVless;

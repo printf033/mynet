@@ -8,6 +8,7 @@
 #include "../address.hpp"
 #include "../connection.hpp"
 #include "../digest.hpp"
+#include "../tls/fragmenter.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -257,70 +258,13 @@ namespace mynet::handler
 
         void parseSni(const uint8_t *handshake, size_t len)
         {
-            // 找到 Extensions 偏移
-            // [Type 1B][Len 3B][Ver 2B][Random 32B][SessionId 1B + N]
-            size_t offset = 4 + 2 + 32;
-            if (offset >= len)
+            if (handshake == nullptr || len == 0)
             {
                 return;
             }
-            const uint8_t sidLen = handshake[offset++];
-            offset += sidLen;
-            if (offset + 2 > len)
+            if (auto info = tls::TlsFragmenter::findSni(std::span<const uint8_t>(handshake, len)); info.has_value())
             {
-                return;
-            }
-
-            // Cipher Suites
-            const uint16_t cipherLen = (static_cast<uint16_t>(handshake[offset]) << 8) | handshake[offset + 1];
-            offset += 2 + cipherLen;
-            if (offset + 1 > len)
-            {
-                return;
-            }
-
-            // Compression Methods
-            const uint8_t compLen = handshake[offset++];
-            offset += compLen;
-            if (offset + 2 > len)
-            {
-                return;
-            }
-
-            // Extensions Length
-            const uint16_t extTotalLen = (static_cast<uint16_t>(handshake[offset]) << 8) | handshake[offset + 1];
-            offset += 2;
-            const size_t extEnd = offset + extTotalLen;
-            if (extEnd > len)
-            {
-                return;
-            }
-
-            while (offset + 4 <= extEnd)
-            {
-                const uint16_t extType = (static_cast<uint16_t>(handshake[offset]) << 8) | handshake[offset + 1];
-                const uint16_t extLen = (static_cast<uint16_t>(handshake[offset + 2]) << 8) | handshake[offset + 3];
-                offset += 4;
-                if (offset + extLen > extEnd)
-                {
-                    break;
-                }
-
-                if (extType == 0x0000) // Server Name Indication (SNI)
-                {
-                    if (extLen >= 5)
-                    {
-                        // [ServerNameListLen 2B][ServerNameType 1B][NameLen 2B][Name String]
-                        const uint16_t nameLen =
-                            (static_cast<uint16_t>(handshake[offset + 3]) << 8) | handshake[offset + 4];
-                        if (offset + 5 + nameLen <= extEnd)
-                        {
-                            sni_ = std::string(reinterpret_cast<const char *>(handshake + offset + 5), nameLen);
-                        }
-                    }
-                    break;
-                }
-                offset += extLen;
+                sni_ = std::string(info->serverName);
             }
         }
     };

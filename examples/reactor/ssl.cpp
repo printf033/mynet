@@ -28,9 +28,13 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (tls, reactor)", listen.text);
 
     using namespace mynet;
-    (void)crt;
-    (void)key;
-    if (auto res = Reactor<Acceptor<HandlerConnection>>().runTcp(listen.ip, listen.port()); !res)
+    Reactor<AcceptorBase<HandlerConnection>> server;
+    if (auto tlsRes = server.acceptor().configureTls(crt, key); !tlsRes)
+    {
+        LOG_ERROR("mynet: TLS configure failed ({})", toString(tlsRes.error()));
+        return toExitCode(tlsRes.error());
+    }
+    if (auto res = server.runTcp(listen.ip, listen.port()); !res)
     {
         LOG_ERROR("mynet: {}", toString(res.error()));
         return toExitCode(res.error());

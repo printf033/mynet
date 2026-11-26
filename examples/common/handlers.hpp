@@ -18,17 +18,12 @@ namespace mynet::example
     /**
      * @brief 流式回显处理器
      *
-     * handle() 显式实现字节流回显。
-     * 声明 kEnableSplice 后，明文 TCP 上由 handler 在 onConnect(fd) 钩子中
-     * 将零拷贝目标设定为对端套接字（socket -> pipe -> socket），数据不进入用户态；
-     * TLS 下自动退回用户态回显。
+     * handle() 在用户态读取请求缓冲并推入响应队列完成字节流回显；
+     * 内核 eBPF/splice 零拷贝旁路仅用于 Forwarder 双端桥接会话。
      */
     class SpliceEchoHandler : public HandlerConnection
     {
     public:
-        static constexpr bool kEnableSplice = true;
-
-        void onConnect(int fd) noexcept override { setSpliceTarget(fd); }
 
         void handle()
         {

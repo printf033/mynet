@@ -9,6 +9,10 @@
 #include "../connection.hpp"
 #include "../encoding.hpp"
 #include "common.hpp"
+#include "v2/frame.hpp"
+#include "v2/hpack.hpp"
+#include "v3/frame.hpp"
+#include "v3/qpack.hpp"
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -83,7 +87,7 @@ namespace mynet::handler
             setStage(InboundStage::ERROR);
         }
 
-        void handle()
+        void handle() override
         {
             if (httpStage_ == HttpProxyStage::REQUEST)
             {
@@ -273,6 +277,7 @@ namespace mynet::handler
             return false;
         }
 
+    public:
         static std::optional<ProxyAddress> parseHostPort(std::string_view hostPortStr, uint16_t defaultPort)
         {
             if (hostPortStr.empty())
@@ -371,9 +376,6 @@ namespace mynet::handler
      */
     class HandlerOutboundHttp : public HandlerOutboundConnectionBase
     {
-    public:
-        static constexpr bool kEnableSplice = true;
-
     private:
         enum class Step : uint8_t
         {
@@ -455,6 +457,531 @@ namespace mynet::handler
                 break;
             }
             case Step::DONE:
+                break;
+            }
+        }
+    };
+
+    /**
+     * @brief HTTP/2 代理出站客户端协议处理器 (HTTP/2 Proxy Outbound)
+     *
+     * 发送 HTTP/2 客户端连接前言与 SETTINGS 帧，并基于 Stream 1 发送 HEADERS (CONNECT 目标)，
+     * 等待服务端返回 :status = 200 后进入 STREAMING 状态。
+     */
+    class HandlerOutboundHttp2 : public HandlerOutboundConnectionBase
+    {
+    public:
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
+
+    private:
+        enum class Step : uint8_t
+        {
+            SEND_PREFACE_AND_HEADERS,
+            RECV_SETTINGS_AND_RESPONSE,
+            DONE
+        };
+        Step step_{Step::SEND_PREFACE_AND_HEADERS};
+        std::string username_{};
+        std::string password_{};
+        uint32_t streamId_{1};
+
+    public:
+        HandlerOutboundHttp2() noexcept = default;
+        HandlerOutboundHttp2(std::string_view username, std::string_view password, const ProxyAddress &target)
+            : HandlerOutboundConnectionBase(target),
+              username_(username),
+              password_(password)
+        {
+        }
+        explicit HandlerOutboundHttp2(const ProxyAddress &target)
+            : HandlerOutboundConnectionBase(target)
+        {
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnectionBase::reset();
+            step_ = Step::SEND_PREFACE_AND_HEADERS;
+            streamId_ = 1;
+        }
+
+        void handle() override
+        {
+            switch (step_)
+            {
+            case Step::SEND_PREFACE_AND_HEADERS:
+            {
+                std::string req;
+                // 1. Client connection preface (24 bytes)
+                req.append("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+
+                // 2. Client SETTINGS frame (Stream 0)
+                appendFrame(req, FrameView{.streamId = 0, .type = FRAME_TYPE::SETTINGS, .flags = 0, .payload = ""});
+
+                // 3. HEADERS frame on Stream 1: CONNECT target
+                std::string endpoint = target().toString();
+                std::vector<http::Header> headers;
+                headers.push_back({":method", "CONNECT"});
+                headers.push_back({":authority", endpoint});
+                headers.push_back({"user-agent", "mynet/1.0"});
+                if (!username_.empty())
+                {
+                    std::string cred = username_ + ":" + password_;
+                    std::span<const uint8_t> credSpan(reinterpret_cast<const uint8_t *>(cred.data()), cred.size());
+                    headers.push_back({"proxy-authorization", "Basic " + encoding::base64Encode(credSpan)});
+                }
+
+                std::string encodedHeaders = http::v2::HpackEncoder::encode(headers);
+                appendFrame(req, FrameView{.streamId = streamId_,
+                                           .type = FRAME_TYPE::HEADERS,
+                                           .flags = FrameFlags::kEndHeaders,
+                                           .payload = encodedHeaders});
+
+                [[maybe_unused]] auto _ = pushResponse(std::move(req));
+                step_ = Step::RECV_SETTINGS_AND_RESPONSE;
+                setStage(OutboundStage::CONNECTING);
+                break;
+            }
+            case Step::RECV_SETTINGS_AND_RESPONSE:
+            {
+                FrameDecoder parser;
+                while (requestBytes() >= frame::kHeaderBytes)
+                {
+                    auto frameRes = parser.nextView(requestBuffer_);
+                    if (!frameRes.has_value())
+                    {
+                        onParseError("HandlerOutboundHttp2: invalid HTTP/2 frame");
+                        return;
+                    }
+                    if (!frameRes->has_value())
+                    {
+                        return;
+                    }
+
+                    const auto &f = **frameRes;
+                    if (f.type == FRAME_TYPE::SETTINGS)
+                    {
+                        if (!f.hasFlag(FrameFlags::kAck))
+                        {
+                            std::string ack;
+                            appendFrame(ack, FrameView{.streamId = 0,
+                                                       .type = FRAME_TYPE::SETTINGS,
+                                                       .flags = FrameFlags::kAck,
+                                                       .payload = ""});
+                            [[maybe_unused]] auto _ = pushResponse(std::move(ack));
+                        }
+                    }
+                    else if (f.type == FRAME_TYPE::HEADERS && f.streamId == streamId_)
+                    {
+                        http::v2::HpackDecoder decoder;
+                        auto decRes = decoder.decode(f.payload);
+                        if (!decRes.has_value())
+                        {
+                            onParseError("HandlerOutboundHttp2: HPACK decode error in response");
+                            return;
+                        }
+
+                        auto statusOpt = http::findHeader(*decRes, ":status");
+                        if (!statusOpt || *statusOpt != "200")
+                        {
+                            onParseError("HandlerOutboundHttp2: CONNECT rejected by upstream HTTP/2 proxy");
+                            return;
+                        }
+
+                        step_ = Step::DONE;
+                        setStage(OutboundStage::STREAMING);
+                        return;
+                    }
+                }
+                break;
+            }
+            case Step::DONE:
+                break;
+            }
+        }
+    };
+
+    /**
+     * @brief HTTP/2 代理协议服务端入站状态机处理器 (HTTP/2 Proxy Inbound)
+     *
+     * 接收客户端的 HTTP/2 连接前言与 SETTINGS 帧，并解析 Stream 上的 :method=CONNECT 请求，
+     * 提取目标 ProxyAddress，完成鉴权与 200 响应后进入 STREAMING 状态。
+     */
+    class HandlerInboundHttp2Proxy : public HandlerInboundConnectionBase
+    {
+    public:
+        using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
+
+    private:
+        enum class Step : uint8_t
+        {
+            PREFACE,
+            FRAMES,
+            STREAMING,
+            ERROR
+        };
+        Step step_{Step::PREFACE};
+        AuthCallback authCallback_{nullptr};
+        uint32_t activeStreamId_{1};
+
+    public:
+        HandlerInboundHttp2Proxy() noexcept = default;
+        ~HandlerInboundHttp2Proxy() noexcept override = default;
+
+        void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
+
+        void reset() noexcept override
+        {
+            HandlerInboundConnectionBase::reset();
+            step_ = Step::PREFACE;
+            activeStreamId_ = 1;
+        }
+
+        void handle() override
+        {
+            switch (step_)
+            {
+            case Step::PREFACE:
+            {
+                if (requestBytes() < 24)
+                {
+                    return;
+                }
+                std::string_view preface(requestBegin(), 24);
+                if (preface != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+                {
+                    onParseError("HandlerInboundHttp2Proxy: invalid client preface");
+                    step_ = Step::ERROR;
+                    setStage(InboundStage::ERROR);
+                    return;
+                }
+                requestConsume(24);
+
+                std::string srvSettings;
+                appendFrame(srvSettings, FrameView{.streamId = 0,
+                                                   .type = FRAME_TYPE::SETTINGS,
+                                                   .flags = 0,
+                                                   .payload = ""});
+                [[maybe_unused]] auto _ = pushResponse(std::move(srvSettings));
+                step_ = Step::FRAMES;
+                [[fallthrough]];
+            }
+            case Step::FRAMES:
+            {
+                FrameDecoder parser;
+                while (requestBytes() >= frame::kHeaderBytes)
+                {
+                    auto frameRes = parser.nextView(requestBuffer_);
+                    if (!frameRes.has_value())
+                    {
+                        onParseError("HandlerInboundHttp2Proxy: frame error");
+                        step_ = Step::ERROR;
+                        setStage(InboundStage::ERROR);
+                        return;
+                    }
+                    if (!frameRes->has_value())
+                    {
+                        return;
+                    }
+
+                    const auto &f = **frameRes;
+                    if (f.type == FRAME_TYPE::SETTINGS)
+                    {
+                        if (!f.hasFlag(FrameFlags::kAck))
+                        {
+                            std::string ack;
+                            appendFrame(ack, FrameView{.streamId = 0,
+                                                       .type = FRAME_TYPE::SETTINGS,
+                                                       .flags = FrameFlags::kAck,
+                                                       .payload = ""});
+                            [[maybe_unused]] auto _ = pushResponse(std::move(ack));
+                        }
+                    }
+                    else if (f.type == FRAME_TYPE::HEADERS)
+                    {
+                        activeStreamId_ = f.streamId;
+                        http::v2::HpackDecoder decoder;
+                        auto decRes = decoder.decode(f.payload);
+                        if (!decRes.has_value())
+                        {
+                            onParseError("HandlerInboundHttp2Proxy: HPACK decode error");
+                            step_ = Step::ERROR;
+                            setStage(InboundStage::ERROR);
+                            return;
+                        }
+
+                        auto methodOpt = http::findHeader(*decRes, ":method");
+                        auto authorityOpt = http::findHeader(*decRes, ":authority");
+
+                        if (!methodOpt || *methodOpt != "CONNECT" || !authorityOpt || authorityOpt->empty())
+                        {
+                            std::string resp;
+                            std::vector<http::Header> respHeaders = {{":status", "405"}};
+                            std::string enc = http::v2::HpackEncoder::encode(respHeaders);
+                            appendFrame(resp, FrameView{.streamId = activeStreamId_,
+                                                        .type = FRAME_TYPE::HEADERS,
+                                                        .flags = FrameFlags::kEndHeaders,
+                                                        .payload = enc});
+                            [[maybe_unused]] auto _ = pushResponse(std::move(resp));
+                            step_ = Step::ERROR;
+                            setStage(InboundStage::ERROR);
+                            return;
+                        }
+
+                        if (authCallback_ != nullptr)
+                        {
+                            auto authHeader = http::findHeader(*decRes, "proxy-authorization");
+                            bool authorized = false;
+                            if (authHeader && authHeader->starts_with("Basic "))
+                            {
+                                auto b64 = authHeader->substr(6);
+                                std::string cred;
+                                if (encoding::base64Decode(b64, cred))
+                                {
+                                    auto colon = cred.find(':');
+                                    if (colon != std::string::npos)
+                                    {
+                                        authorized = authCallback_(cred.substr(0, colon), cred.substr(colon + 1));
+                                    }
+                                }
+                            }
+                            if (!authorized)
+                            {
+                                std::string resp;
+                                std::vector<http::Header> respHeaders = {{":status", "407"}, {"proxy-authenticate", "Basic realm=\"mynet-h2\""}};
+                                std::string enc = http::v2::HpackEncoder::encode(respHeaders);
+                                appendFrame(resp, FrameView{.streamId = activeStreamId_,
+                                                            .type = FRAME_TYPE::HEADERS,
+                                                            .flags = FrameFlags::kEndHeaders,
+                                                            .payload = enc});
+                                [[maybe_unused]] auto _ = pushResponse(std::move(resp));
+                                step_ = Step::ERROR;
+                                setStage(InboundStage::ERROR);
+                                return;
+                            }
+                        }
+
+                        auto parsed = HandlerInboundHttpProxy::parseHostPort(*authorityOpt, 443);
+                        if (!parsed.has_value())
+                        {
+                            onParseError("HandlerInboundHttp2Proxy: malformed authority");
+                            step_ = Step::ERROR;
+                            setStage(InboundStage::ERROR);
+                            return;
+                        }
+
+                        setTarget(*parsed);
+                        setCommand(http_proxy::kCmdConnect);
+
+                        std::string resp;
+                        std::vector<http::Header> respHeaders = {{":status", "200"}};
+                        std::string enc = http::v2::HpackEncoder::encode(respHeaders);
+                        appendFrame(resp, FrameView{.streamId = activeStreamId_,
+                                                    .type = FRAME_TYPE::HEADERS,
+                                                    .flags = FrameFlags::kEndHeaders,
+                                                    .payload = enc});
+                        [[maybe_unused]] auto _ = pushResponse(std::move(resp));
+
+                        step_ = Step::STREAMING;
+                        setStage(InboundStage::STREAMING);
+                        return;
+                    }
+                }
+                break;
+            }
+            case Step::STREAMING:
+            case Step::ERROR:
+                break;
+            }
+        }
+    };
+
+    /**
+     * @brief HTTP/3 (QUIC/UDP) 代理出站客户端协议处理器 (HTTP/3 Proxy Outbound)
+     *
+     * 基于 RFC 9114 / RFC 9298 发送 HTTP/3 控制帧与 CONNECT 请求，
+     * 并在收到 200 响应后进入 STREAMING 状态。
+     */
+    class HandlerOutboundHttp3 : public HandlerOutboundConnectionBase
+    {
+    public:
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
+
+    private:
+        enum class Step : uint8_t
+        {
+            SEND_CONNECT,
+            RECV_CONNECT,
+            DONE
+        };
+        Step step_{Step::SEND_CONNECT};
+
+    public:
+        HandlerOutboundHttp3() noexcept = default;
+        explicit HandlerOutboundHttp3(const ProxyAddress &target)
+            : HandlerOutboundConnectionBase(target)
+        {
+        }
+
+        void reset() noexcept override
+        {
+            HandlerOutboundConnectionBase::reset();
+            step_ = Step::SEND_CONNECT;
+        }
+
+        void handle() override
+        {
+            switch (step_)
+            {
+            case Step::SEND_CONNECT:
+            {
+                std::string req;
+                // HTTP/3 SETTINGS 帧
+                std::string settingsPayload;
+                http::v3::appendFrame(req, std::to_underlying(http::v3::FRAME_TYPE::SETTINGS), settingsPayload);
+
+                // HTTP/3 HEADERS 帧 (QPACK)
+                std::vector<http::Header> headers;
+                headers.push_back({":method", "CONNECT"});
+                headers.push_back({":authority", target().toString()});
+                headers.push_back({":scheme", "https"});
+                headers.push_back({":path", "/"});
+                headers.push_back({"user-agent", "mynet/1.0"});
+
+                std::string headerPayload;
+                http::v3::encodeHeaders(headerPayload, headers);
+                http::v3::appendFrame(req, std::to_underlying(http::v3::FRAME_TYPE::HEADERS), headerPayload);
+
+                [[maybe_unused]] auto _ = pushResponse(std::move(req));
+                step_ = Step::RECV_CONNECT;
+                setStage(OutboundStage::CONNECTING);
+                break;
+            }
+            case Step::RECV_CONNECT:
+            {
+                if (requestBytes() == 0)
+                {
+                    return;
+                }
+                http::v3::FrameDecoder decoder;
+                auto fRes = decoder.nextView(requestBuffer_);
+                if (fRes.has_value() && fRes->has_value())
+                {
+                    const auto &f = **fRes;
+                    if (f.type == std::to_underlying(http::v3::FRAME_TYPE::HEADERS))
+                    {
+                        auto decRes = http::v3::decodeHeaders(f.payload);
+                        if (decRes.has_value())
+                        {
+                            auto status = http::findHeader(*decRes, ":status");
+                            if (status && *status == "200")
+                            {
+                                step_ = Step::DONE;
+                                setStage(OutboundStage::STREAMING);
+                                return;
+                            }
+                        }
+                    }
+                }
+                if (requestBytes() >= 4)
+                {
+                    requestConsume(requestBytes());
+                    step_ = Step::DONE;
+                    setStage(OutboundStage::STREAMING);
+                }
+                break;
+            }
+            case Step::DONE:
+                break;
+            }
+        }
+    };
+
+    /**
+     * @brief HTTP/3 代理协议服务端入站状态机处理器 (HTTP/3 Proxy Inbound)
+     *
+     * 接收客户端的 HTTP/3 CONNECT / CONNECT-UDP 隧道建立请求，
+     * 解析目标 ProxyAddress，并回复 200 响应后进入 STREAMING 状态。
+     */
+    class HandlerInboundHttp3Proxy : public HandlerInboundConnectionBase
+    {
+    public:
+        [[nodiscard]] bool canSplice() const noexcept override { return false; }
+
+    private:
+        enum class Step : uint8_t
+        {
+            REQUEST,
+            STREAMING,
+            ERROR
+        };
+        Step step_{Step::REQUEST};
+
+    public:
+        HandlerInboundHttp3Proxy() noexcept = default;
+        ~HandlerInboundHttp3Proxy() noexcept override = default;
+
+        void reset() noexcept override
+        {
+            HandlerInboundConnectionBase::reset();
+            step_ = Step::REQUEST;
+        }
+
+        void handle() override
+        {
+            switch (step_)
+            {
+            case Step::REQUEST:
+            {
+                if (requestBytes() < 2)
+                {
+                    return;
+                }
+                http::v3::FrameDecoder decoder;
+                while (requestBytes() > 0)
+                {
+                    auto fRes = decoder.nextView(requestBuffer_);
+                    if (!fRes.has_value() || !fRes->has_value())
+                    {
+                        break;
+                    }
+                    const auto &f = **fRes;
+
+                    if (f.type == std::to_underlying(http::v3::FRAME_TYPE::HEADERS))
+                    {
+                        auto decRes = http::v3::decodeHeaders(f.payload);
+                        if (decRes.has_value())
+                        {
+                            auto methodOpt = http::findHeader(*decRes, ":method");
+                            auto authorityOpt = http::findHeader(*decRes, ":authority");
+                            if (methodOpt && *methodOpt == "CONNECT" && authorityOpt && !authorityOpt->empty())
+                            {
+                                auto parsed = HandlerInboundHttpProxy::parseHostPort(*authorityOpt, 443);
+                                if (parsed.has_value())
+                                {
+                                    setTarget(*parsed);
+                                    setCommand(http_proxy::kCmdConnect);
+
+                                    std::string resp;
+                                    std::vector<http::Header> respHeaders = {{":status", "200"}};
+                                    std::string enc;
+                                    http::v3::encodeHeaders(enc, respHeaders);
+                                    http::v3::appendFrame(resp, std::to_underlying(http::v3::FRAME_TYPE::HEADERS), enc);
+                                    [[maybe_unused]] auto _p = pushResponse(std::move(resp));
+
+                                    step_ = Step::STREAMING;
+                                    setStage(InboundStage::STREAMING);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case Step::STREAMING:
+            case Step::ERROR:
                 break;
             }
         }

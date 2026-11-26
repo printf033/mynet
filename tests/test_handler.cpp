@@ -7,6 +7,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
 
 using namespace mynet;
 using namespace mynet::http::v1;
@@ -17,33 +18,6 @@ namespace
     {
         [[maybe_unused]] auto _ = handler.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
     }
-
-    /**
-     * @brief 测试夹具：开启 splice 内核零拷贝的流式回显处理器
-     *
-     * splice 路由由具体处理器类型选择：Connection::isSpliceEnabled() 要求
-     * HandlerType::kEnableSplice 为真且运行期 spliceEnabled() 为真。
-     * handle() 显式实现回显；基类默认不处理请求。
-     */
-    class SpliceEchoHandler : public HandlerConnection
-    {
-    public:
-        static constexpr bool kEnableSplice = true;
-
-        void onConnect(int fd) noexcept override { setSpliceTarget(fd); }
-
-        void handle()
-        {
-            const size_t n = requestBytes();
-            if (n > 0)
-            {
-                [[maybe_unused]] auto result = pushResponse(std::string_view(requestBegin(), n));
-                requestClear();
-            }
-        }
-
-        void reset() noexcept override { HandlerConnection::reset(); }
-    };
 
     /**
      * @brief 测试夹具：同时组合流式与报文两种基类的回显处理器
@@ -415,74 +389,6 @@ TEST(HandlerDatagram, CombinedHandlerResetsBothSides)
     EXPECT_EQ(handler.requestBytes(), 0u);
 }
 
-TEST(Connection, SpliceZeroCopyEcho)
-{
-    int sp[2];
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
-
-    ConnectionBase conn;
-    SpliceEchoHandler handler;
-    conn.setHandler(&handler);
-    conn.setFd(sp[1]);
-    EXPECT_TRUE(conn.isSpliceEnabled());
-
-    const std::string msg = "kernel_splice_zero_copy_payload";
-    ssize_t wn = ::write(sp[0], msg.data(), msg.size());
-    ASSERT_EQ(wn, static_cast<ssize_t>(msg.size()));
-
-    // 执行 handleRead：通过 splice 内核通道直接环回
-    IO_STATUS status = conn.handleRead();
-    EXPECT_EQ(status, IO_STATUS::KEEP);
-
-    // 零拷贝核心断言：数据未进入用户态请求缓冲区
-    EXPECT_EQ(handler.requestBytes(), 0u);
-    EXPECT_FALSE(handler.hasResponse());
-
-    // 从对端套接字读出回显数据
-    char buf[128] = {};
-    ssize_t rn = ::read(sp[0], buf, sizeof(buf));
-    ASSERT_EQ(rn, static_cast<ssize_t>(msg.size()));
-    EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), msg);
-
-    // 验证 EOF 场景
-    ::close(sp[0]);
-    status = conn.handleRead();
-    EXPECT_EQ(status, IO_STATUS::CLOSE);
-}
-
-TEST(Connection, SpliceDisabledFallback)
-{
-    int sp[2];
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
-
-    ConnectionBase conn;
-    SpliceEchoHandler handler;
-    conn.setHandler(&handler);
-    conn.setFd(sp[1]);
-    handler.disableSplice();
-    EXPECT_FALSE(conn.isSpliceEnabled());
-
-    const std::string msg = "user_space_fallback_payload";
-    ssize_t wn = ::write(sp[0], msg.data(), msg.size());
-    ASSERT_EQ(wn, static_cast<ssize_t>(msg.size()));
-
-    // 执行 handleRead：降级进入用户态直写并 handle()
-    IO_STATUS status = conn.handleRead();
-    EXPECT_EQ(status, IO_STATUS::KEEP);
-    EXPECT_TRUE(conn.hasPendingWrite());
-
-    // 发送回写
-    status = conn.handleWrite();
-    EXPECT_EQ(status, IO_STATUS::KEEP);
-
-    char buf[128] = {};
-    ssize_t rn = ::read(sp[0], buf, sizeof(buf));
-    ASSERT_EQ(rn, static_cast<ssize_t>(msg.size()));
-    EXPECT_EQ(std::string(buf, static_cast<size_t>(rn)), msg);
-
-    ::close(sp[0]);
-}
-
 TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
 {
     // 慢读放大回归：对端不读（套接字缓冲满）时反复收割大响应，
@@ -494,7 +400,6 @@ TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
     HandlerBase handler;
     conn.setHandler(&handler);
     conn.setFd(sp[1]);
-    conn.disableSplice();
 
     // 把发送端塞满，模拟对端零窗口。socketpair 保持非阻塞，
     // 写到 EAGAIN/EWOULDBLOCK 即说明内核缓冲已满，绝不能阻塞。
@@ -556,7 +461,6 @@ TEST(Connection, CommitSentRestoresReadPause)
     HandlerBase handler;
     conn.setHandler(&handler);
     conn.setFd(sp[1]);
-    conn.disableSplice();
 
     const std::string bigRequest(3u << 20, 'a');
     ASSERT_TRUE(handler.pushResponse(bigRequest));
@@ -670,143 +574,6 @@ TEST(DatagramQueue, ResetClearsElementsAndPreservesCapacity)
     EXPECT_EQ(queue.front().bytes, "dns_query_3");
 }
 
-TEST(Connection, SpliceDecoupledProxyForward)
-{
-    // 验证解耦改造：splice 不再写死 echo（自己发回自己），可作为内核零拷贝反向代理
-    int clientSp[2];
-    int proxySp[2];
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, clientSp), 0);
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, proxySp), 0);
-
-    ConnectionBase conn;
-    SpliceEchoHandler handler;
-    conn.setHandler(&handler);
-    conn.setFd(clientSp[1]);
-    // 将零拷贝目标重定向至上游代理套接字
-    handler.setSpliceTarget(proxySp[1]);
-    EXPECT_TRUE(conn.isSpliceEnabled());
-    EXPECT_EQ(handler.spliceTarget(), proxySp[1]);
-
-    const std::string proxyPayload = "splice_proxy_upstream_payload";
-    ssize_t wn = ::write(clientSp[0], proxyPayload.data(), proxyPayload.size());
-    ASSERT_EQ(wn, static_cast<ssize_t>(proxyPayload.size()));
-
-    // 执行 handleRead：数据应从 client 套接字经内核管道直接泵入 proxySp[1]
-    IO_STATUS status = conn.handleRead();
-    EXPECT_EQ(status, IO_STATUS::KEEP);
-
-    // 零拷贝断言：无用户态内存堆积
-    EXPECT_EQ(handler.requestBytes(), 0u);
-    EXPECT_FALSE(handler.hasResponse());
-
-    // 验证 clientSp[0] 没有收到 echo 回显（不是 echo）
-    char echoBuf[32] = {};
-    ssize_t echoRn = ::recv(clientSp[0], echoBuf, sizeof(echoBuf), MSG_DONTWAIT);
-    EXPECT_TRUE(echoRn < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
-
-    // 验证代理对端 proxySp[0] 成功收到零拷贝转交的报文
-    char proxyBuf[128] = {};
-    ssize_t proxyRn = ::read(proxySp[0], proxyBuf, sizeof(proxyBuf));
-    ASSERT_EQ(proxyRn, static_cast<ssize_t>(proxyPayload.size()));
-    EXPECT_EQ(std::string(proxyBuf, static_cast<size_t>(proxyRn)), proxyPayload);
-
-    ::close(clientSp[0]);
-    ::close(proxySp[0]);
-    ::close(proxySp[1]);
-}
-
-TEST(Connection, SpliceToAndSpliceFromApis)
-{
-    int sp[2];
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
-
-    ConnectionBase conn;
-    SpliceEchoHandler handler;
-    conn.setHandler(&handler);
-    conn.setFd(sp[1]);
-
-    int pipe1[2];
-    ASSERT_EQ(::pipe2(pipe1, O_NONBLOCK | O_CLOEXEC), 0);
-
-    // 1. 测试 spliceTo：将 socket 输入零拷贝搬移到目标管道
-    const std::string msgTo = "hello_splice_to_pipe";
-    ssize_t wn = ::write(sp[0], msgTo.data(), msgTo.size());
-    ASSERT_EQ(wn, static_cast<ssize_t>(msgTo.size()));
-
-    auto resTo = conn.spliceTo(pipe1[1], msgTo.size());
-    ASSERT_TRUE(resTo.has_value());
-    EXPECT_EQ(resTo.value(), msgTo.size());
-
-    char bufTo[64] = {};
-    ssize_t rnTo = ::read(pipe1[0], bufTo, sizeof(bufTo));
-    ASSERT_EQ(rnTo, static_cast<ssize_t>(msgTo.size()));
-    EXPECT_EQ(std::string(bufTo, static_cast<size_t>(rnTo)), msgTo);
-
-    // 2. 测试 spliceFrom：从源管道零拷贝搬移到当前 socket 并由对端读取
-    int pipe2[2];
-    ASSERT_EQ(::pipe2(pipe2, O_NONBLOCK | O_CLOEXEC), 0);
-
-    const std::string msgFrom = "hello_splice_from_pipe";
-    wn = ::write(pipe2[1], msgFrom.data(), msgFrom.size());
-    ASSERT_EQ(wn, static_cast<ssize_t>(msgFrom.size()));
-
-    auto resFrom = conn.spliceFrom(pipe2[0], msgFrom.size());
-    ASSERT_TRUE(resFrom.has_value());
-    EXPECT_EQ(resFrom.value(), msgFrom.size());
-
-    char bufFrom[64] = {};
-    ssize_t rnFrom = ::read(sp[0], bufFrom, sizeof(bufFrom));
-    ASSERT_EQ(rnFrom, static_cast<ssize_t>(msgFrom.size()));
-    EXPECT_EQ(std::string(bufFrom, static_cast<size_t>(rnFrom)), msgFrom);
-
-    ::close(pipe1[0]);
-    ::close(pipe1[1]);
-    ::close(pipe2[0]);
-    ::close(pipe2[1]);
-    ::close(sp[0]);
-}
-
-TEST(HandlerConnection, SpliceTargetApis)
-{
-    HandlerConnection handler;
-    EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-
-    handler.setSpliceTarget(42);
-    EXPECT_TRUE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceTarget(), 42);
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
-
-    // 暂停挂起
-    handler.pauseSplice();
-    EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::PAUSED);
-    EXPECT_EQ(handler.spliceTarget(), 42);
-
-    // 恢复活跃
-    handler.resumeSplice();
-    EXPECT_TRUE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
-
-    // 管道排空
-    handler.drainSplice();
-    EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DRAINING);
-    EXPECT_EQ(handler.spliceTarget(), 42);
-
-    // 禁用重置
-    handler.disableSplice();
-    EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-
-    // 控制状态枚举设置与闭合
-    handler.setSpliceControl(SPLICE_CONTROL::CLOSED);
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::CLOSED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-}
-
 TEST(HandlerHttp, LifecycleAndFd)
 {
     http::v1::HandlerHttp<HTTP_MODE::REQUEST> handler;
@@ -844,24 +611,6 @@ TEST(HandlerHttp, SendResponseAndProcess)
     EXPECT_NE(echoResp.find("\r\n\r\n12345"), std::string::npos);
 }
 
-TEST(HandlerHttp, SpliceTunnelApis)
-{
-    http::v1::HandlerHttp<HTTP_MODE::REQUEST> handler;
-    EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-
-    handler.enableSpliceTunnel(100);
-    EXPECT_TRUE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceTarget(), 100);
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
-
-    handler.disableSpliceTunnel();
-    EXPECT_FALSE(handler.isSpliceTunnelActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-}
-
 class StreamTestHttpHandler : public http::v1::HandlerHttp<HTTP_MODE::REQUEST>
 {
 public:
@@ -892,4 +641,131 @@ TEST(HandlerHttp, StreamingBodyPassThroughZeroCopy)
     EXPECT_EQ(handler.chunks.size(), 2u);
     EXPECT_EQ(handler.chunks[1], "67890");
     EXPECT_TRUE(handler.body().empty());
+}
+
+namespace
+{
+    class TrackedOwnedHandler final : public Handler
+    {
+    public:
+        explicit TrackedOwnedHandler(int *destroyCount) noexcept : destroyCount_(destroyCount) {}
+        ~TrackedOwnedHandler() noexcept override
+        {
+            if (destroyCount_ != nullptr)
+            {
+                ++(*destroyCount_);
+            }
+        }
+
+    private:
+        int *destroyCount_{nullptr};
+    };
+} // namespace
+
+TEST(Connection, SetOwnedHandlerDeletesOwnedAndPreservesBorrowed)
+{
+    int destroyed = 0;
+    {
+        Connection conn;
+        conn.setOwnedHandler(std::make_unique<TrackedOwnedHandler>(&destroyed));
+        EXPECT_NE(conn.handler(), nullptr);
+        conn.reset();
+        EXPECT_EQ(destroyed, 1);
+        EXPECT_EQ(conn.handler(), nullptr);
+    }
+
+    TrackedOwnedHandler stackHandler(&destroyed);
+    {
+        Connection conn;
+        conn.setHandler(&stackHandler);
+        EXPECT_EQ(conn.handler(), &stackHandler);
+        conn.reset();
+        EXPECT_EQ(destroyed, 1);
+    }
+    EXPECT_EQ(destroyed, 1);
+}
+
+TEST(Handler, LazyDatagramQueueAllocation)
+{
+    Handler h;
+    EXPECT_EQ(std::as_const(h).outgoing().capacity(), 0u);
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(5353);
+    h.sendTo(peer, "hello", 5);
+    EXPECT_GT(h.outgoing().capacity(), 0u);
+    EXPECT_EQ(h.outgoingCount(), 1u);
+    auto pkt = h.takeOutgoing();
+    EXPECT_EQ(pkt.bytes, "hello");
+}
+
+TEST(Handler, MuxInboundHandlerVariantDispatchAndReset)
+{
+    class TestMux final : public MuxInboundHandler<HandlerConnection, HandlerHttp<HTTP_MODE::REQUEST>>
+    {
+    public:
+        void handle() override
+        {
+            if (activeChild() == nullptr && requestBytes() > 0)
+            {
+                emplaceChild<HandlerConnection>();
+            }
+            if (auto *c = activeChild(); c != nullptr)
+            {
+                (void)driveChild(*c);
+            }
+        }
+    };
+
+    TestMux mux;
+    EXPECT_TRUE(mux.appendRequest("ping", 4).has_value());
+    mux.drive();
+    EXPECT_TRUE(mux.canSplice());
+    mux.reset();
+}
+
+namespace
+{
+    class DummyNonPassthroughTransport final : public transport::ITransport
+    {
+    public:
+        [[nodiscard]] transport::TransportType type() const noexcept override { return transport::TransportType::WEBSOCKET; }
+        [[nodiscard]] transport::TransportState state() const noexcept override { return transport::TransportState::STREAMING; }
+        [[nodiscard]] bool isReady() const noexcept override { return true; }
+        void reset() noexcept override {}
+    };
+} // namespace
+
+TEST(Handler, ColdWireAndDatagramStateLazyDefaultsAndRemotePeer)
+{
+    Handler h;
+    EXPECT_TRUE(h.isPassthrough());
+    EXPECT_TRUE(h.canSplice());
+    EXPECT_TRUE(std::as_const(h).transportPipeline().empty());
+    EXPECT_FALSE(h.hasOutgoing());
+    EXPECT_EQ(h.outgoingCount(), 0u);
+    EXPECT_EQ(h.droppedOutgoing(), 0u);
+    EXPECT_EQ(h.remotePeer().sin_port, 0);
+
+    Connection conn;
+    conn.setHandler(&h);
+    EXPECT_EQ(conn.ssl(), nullptr);
+    EXPECT_FALSE(conn.ktlsRxActive());
+    EXPECT_FALSE(conn.ktlsTxActive());
+    EXPECT_TRUE(h.isPassthrough());
+    EXPECT_TRUE(std::as_const(h).transportPipeline().empty());
+
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(8443);
+    peer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    h.setRemotePeer(peer);
+    EXPECT_EQ(h.remotePeer().sin_port, htons(8443));
+    EXPECT_EQ(h.remotePeer().sin_addr.s_addr, htonl(INADDR_LOOPBACK));
+
+    h.addTransportLayer(std::make_unique<DummyNonPassthroughTransport>());
+    EXPECT_FALSE(std::as_const(h).transportPipeline().empty());
+    EXPECT_FALSE(h.isPassthrough());
+    EXPECT_FALSE(h.canSplice());
+    h.reset();
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "compat.hpp"
+#include "transport.hpp"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -421,6 +423,7 @@ namespace mynet
         std::string inetIp = "172.19.0.1"; ///< TUN 本地 IPv4 (TUN 专用)
         std::string inetMask = "255.255.255.0"; ///< TUN 掩码 (TUN 专用)
         uint32_t mtu = 1500;                    ///< TUN MTU (TUN 专用)
+        transport::TransportConfig transport{}; ///< 可叠加传输层配置 (TLS / WebSocket / gRPC)
     };
 
     /**
@@ -443,6 +446,7 @@ namespace mynet
         std::string url = "http://cp.cloudflare.com/generate_204"; ///< 测速 URL (UrlTest 专用)
         uint32_t intervalSecs = 300;                               ///< 测速周期 (秒, UrlTest 专用)
         uint32_t toleranceMs = 50;                                 ///< 延迟抖动容差 (毫秒, UrlTest 专用)
+        transport::TransportConfig transport{};                    ///< 可叠加传输层配置 (TLS / WebSocket / gRPC)
     };
 
     /**

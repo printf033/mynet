@@ -2,7 +2,7 @@
 
 /**
  * @file vmess/outbound.hpp
- * @brief VMess 代理协议出站节点 (OutboundVmess)。
+ * @brief VMess 代理协议拨号器 (DialerVmess / OutboundVmess)。
  */
 
 #include "../connection.hpp"
@@ -15,7 +15,7 @@
 namespace mynet
 {
 
-    class OutboundVmess : public OutboundBase
+    class DialerVmess : public Dialer
     {
     private:
         std::string serverHost_{};
@@ -24,9 +24,9 @@ namespace mynet
         std::string security_{"auto"};
 
     public:
-        OutboundVmess(std::string tag, std::string host, uint16_t port, std::string uuid, std::string security = "auto",
-                      DialerOptions options = {})
-            : OutboundBase(std::move(tag), "vmess", std::move(options)),
+        DialerVmess(std::string tag, std::string host, uint16_t port, std::string uuid, std::string security = "auto",
+                    DialerOptions options = {})
+            : Dialer(std::move(tag), "vmess", std::move(options)),
               serverHost_(std::move(host)),
               serverPort_(port),
               uuid_(std::move(uuid)),
@@ -50,6 +50,6 @@ namespace mynet
         }
     };
 
-    using DialerVmess = OutboundVmess;
+    using OutboundVmess = DialerVmess;
 
 } // namespace mynet

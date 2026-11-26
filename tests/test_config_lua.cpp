@@ -1103,7 +1103,7 @@ TEST(ConfigLua, ReactorAppliesMaxEventsToTheEventLoop)
     cfg.server.maxConnections = 16;
     mynet::publishMynetConfig(cfg);
 
-    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> server;
+    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> server;
     // 端口 0 交给内核挑，避免与本机其他测试/服务抢端口
     std::thread runner([&] { (void)server.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -1190,7 +1190,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     cfg.reactor.maxEvents = 384;
     mynet::publishMynetConfig(cfg);
 
-    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> running;
+    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> running;
     std::thread runner([&] { (void)running.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     ASSERT_EQ(running.loop().eventCapacity(), 384u);
@@ -1205,7 +1205,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     runner.join();
 
     // 新启动的实例则采用新值。
-    mynet::Reactor<mynet::Acceptor<mynet::HandlerConnection>> fresh;
+    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> fresh;
     std::thread runner2([&] { (void)fresh.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     EXPECT_EQ(fresh.loop().eventCapacity(), 768u);
@@ -1383,10 +1383,10 @@ TEST(ConfigLua, CoreLoadLuaConfigEndToEnd)
     const auto netCfg = mynet::getMynetConfig();
 
     mynet::Core core(netCfg);
-    EXPECT_TRUE(core.inbounds().has("mixed-in"));
-    EXPECT_TRUE(core.outbounds().has("direct"));
-    EXPECT_TRUE(core.outbounds().has("block"));
-    EXPECT_TRUE(core.outbounds().has("proxy-node"));
+    EXPECT_TRUE(core.acceptors().has("mixed-in"));
+    EXPECT_TRUE(core.dialers().has("direct"));
+    EXPECT_TRUE(core.dialers().has("block"));
+    EXPECT_TRUE(core.dialers().has("proxy-node"));
     EXPECT_EQ(core.router().defaultOutbound(), "direct");
 
     // 规则匹配测试
@@ -1395,6 +1395,70 @@ TEST(ConfigLua, CoreLoadLuaConfigEndToEnd)
     auto res = core.dispatch(inbound, -1, "mixed-in");
     EXPECT_EQ(res.status, mynet::CoreDispatchStatus::BLOCKED);
     EXPECT_EQ(res.outboundTag, "block");
+
+    std::filesystem::remove(configPath);
+}
+
+TEST(ConfigLua, LoadTransportAndTlsOnInboundAndOutbound)
+{
+    const std::filesystem::path configPath = "test_config_transport_lua.lua";
+    writeTestConfigFile(configPath, "inbounds = {\n"
+                                    "  {\n"
+                                    "    tag = \"vless-ws-lua\",\n"
+                                    "    protocol = \"vless\",\n"
+                                    "    host = \"127.0.0.1\",\n"
+                                    "    port = 0,\n"
+                                    "    uuid = \"de04add9-5c1a-4b08-8e65-244e45cf5483\",\n"
+                                    "    transport = {\n"
+                                    "      type = \"ws\",\n"
+                                    "      path = \"/lua-in\",\n"
+                                    "      host = \"lua.in.test\"\n"
+                                    "    }\n"
+                                    "  }\n"
+                                    "}\n"
+                                    "outbounds = {\n"
+                                    "  {\n"
+                                    "    tag = \"direct-ws-lua\",\n"
+                                    "    type = \"direct\",\n"
+                                    "    tls = {\n"
+                                    "      enabled = true,\n"
+                                    "      sni = \"lua.sni.test\",\n"
+                                    "      alpn = \"h2,http/1.1\"\n"
+                                    "    },\n"
+                                    "    transport = {\n"
+                                    "      type = \"ws\",\n"
+                                    "      path = \"/lua-out\",\n"
+                                    "      host = \"lua.out.test\"\n"
+                                    "    }\n"
+                                    "  }\n"
+                                    "}\n");
+
+    ASSERT_TRUE(mynet::reloadConfig(configPath));
+    const auto netCfg = mynet::getMynetConfig();
+    ASSERT_EQ(netCfg.inbounds.size(), 1u);
+    EXPECT_EQ(netCfg.inbounds[0].transport.type, mynet::transport::TransportType::WEBSOCKET);
+    EXPECT_EQ(netCfg.inbounds[0].transport.path, "/lua-in");
+    EXPECT_EQ(netCfg.inbounds[0].transport.host, "lua.in.test");
+
+    ASSERT_EQ(netCfg.outbounds.size(), 1u);
+    EXPECT_TRUE(netCfg.outbounds[0].transport.enableTls);
+    EXPECT_EQ(netCfg.outbounds[0].transport.sni, "lua.sni.test");
+    EXPECT_EQ(netCfg.outbounds[0].transport.alpnProtocols, "h2,http/1.1");
+    EXPECT_EQ(netCfg.outbounds[0].transport.type, mynet::transport::TransportType::WEBSOCKET);
+    EXPECT_EQ(netCfg.outbounds[0].transport.path, "/lua-out");
+    EXPECT_EQ(netCfg.outbounds[0].transport.host, "lua.out.test");
+
+    mynet::Core core(netCfg);
+    auto acc = core.acceptors().get("vless-ws-lua");
+    ASSERT_NE(acc, nullptr);
+    EXPECT_EQ(acc->transportConfig().type, mynet::transport::TransportType::WEBSOCKET);
+    EXPECT_EQ(acc->transportConfig().path, "/lua-in");
+
+    auto dialer = core.dialers().get("direct-ws-lua");
+    ASSERT_NE(dialer, nullptr);
+    EXPECT_TRUE(dialer->transportConfig().enableTls);
+    EXPECT_EQ(dialer->transportConfig().sni, "lua.sni.test");
+    EXPECT_EQ(dialer->transportConfig().path, "/lua-out");
 
     std::filesystem::remove(configPath);
 }

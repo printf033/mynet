@@ -1,11 +1,14 @@
 #include "address.hpp"
 #include "direct/direct.hpp"
 #include "forwarder.hpp"
+#include "shadowsocks/shadowsocks.hpp"
 #include "socks/socks5.hpp"
+#include <chrono>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -122,41 +125,6 @@ TEST(ForwarderTest, ClosePropagation)
 }
 
 // =============================================================================
-// 4. Linux 内核零拷贝 Direct Splice 测试 (SocketPair Zero-Copy Splice)
-// =============================================================================
-
-TEST(ForwarderTest, SpliceDirectSocketPair)
-{
-    int sp1[2] = {-1, -1}; // sp1[0]: client, sp1[1]: proxy Inbound
-    int sp2[2] = {-1, -1}; // sp2[0]: proxy Outbound, sp2[1]: remote server
-
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp1), 0);
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp2), 0);
-
-    // Client 发送数据至 sp1[0]
-    const std::string msg = "KERNEL_SPLICE_ZERO_COPY_DATA_STREAM_TEST";
-    ssize_t wn = ::write(sp1[0], msg.data(), msg.size());
-    ASSERT_EQ(wn, static_cast<ssize_t>(msg.size()));
-
-    // 使用 Forwarder 提供的静态零拷贝函数从 sp1[1] 直通至 sp2[0]
-    SpliceResult res = Forwarder::spliceDirect(sp1[1], sp2[0], 65536);
-    EXPECT_EQ(res.err, 0);
-    EXPECT_EQ(res.bytesSpliced, static_cast<ssize_t>(msg.size()));
-    EXPECT_FALSE(res.eof);
-
-    // Remote Server 从 sp2[1] 读取，检验数据完整性
-    char buf[128]{};
-    ssize_t rn = ::read(sp2[1], buf, sizeof(buf));
-    ASSERT_EQ(rn, static_cast<ssize_t>(msg.size()));
-    EXPECT_EQ(std::string_view(buf, static_cast<size_t>(rn)), msg);
-
-    ::close(sp1[0]);
-    ::close(sp1[1]);
-    ::close(sp2[0]);
-    ::close(sp2[1]);
-}
-
-// =============================================================================
 // 5. Connection 对象桥接与自动检测模式测试 (Connection<Handler> Bridge)
 // =============================================================================
 
@@ -180,10 +148,8 @@ TEST(ForwarderTest, ConnectionObjectBridge)
     auto session = forwarder.bridge(inConn, outConn);
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
-    EXPECT_TRUE(inHandler.isSpliceActive());
-    EXPECT_EQ(inHandler.spliceTarget(), sp[1]);
-    EXPECT_TRUE(outHandler.isSpliceActive());
-    EXPECT_EQ(outHandler.spliceTarget(), sp[0]);
+    EXPECT_TRUE(inHandler.canSplice());
+    EXPECT_TRUE(outHandler.canSplice());
 
     inConn.reset();
     outConn.reset();
@@ -270,70 +236,323 @@ TEST(ForwarderTest, AggregatedMetricsAndCloseAll)
     EXPECT_EQ(forwarder.totalBytesUp(), 13u);
 }
 
-// =============================================================================
-// 8. 分散-聚集向量写入与前缀冲刷测试 (借鉴 dae writev scatter-gather header prefixing)
-// =============================================================================
-
-TEST(ForwarderTest, ScatterGatherPrefixedFlushing)
+TEST(ForwarderTest, ShadowsocksCodecSymmetricRelayViaPump)
 {
-    int fds[2];
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    int tx = fds[0];
-    int rx = fds[1];
+    ProxyAddress target;
+    target.type = AddressType::DOMAIN;
+    target.host = "example.com";
+    target.port = 443;
 
-    std::vector<uint8_t> header = {'S', 'S', '-', 'H', 'D', 'R', ':'};
-    std::vector<uint8_t> payload = {'G', 'E', 'T', ' ', '/', ' ', 'H', 'T', 'T', 'P', '/', '1', '.', '1'};
+    HandlerInboundShadowsocks ssServer("aes-128-gcm", "test-secret");
+    HandlerOutboundShadowsocks ssClient("aes-128-gcm", "test-secret", target);
+    ssClient.handle();
 
-    ssize_t written = ScatterGatherFlusher::writePrefixed(tx, header, payload);
-    EXPECT_EQ(written, static_cast<ssize_t>(header.size() + payload.size()));
+    // 1. 客户端发送首包 (salt + target addr chunk) 给入站完成 Shadowsocks 解码握手
+    while (ssClient.hasResponse())
+    {
+        std::string wire = ssClient.takeResponse();
+        ASSERT_TRUE(ssServer.appendRequest(wire.data(), static_cast<ssize_t>(wire.size())).has_value());
+    }
+    ssServer.drive();
+    ASSERT_TRUE(ssServer.isEstablished());
+    EXPECT_EQ(ssServer.target().host, "example.com");
+    EXPECT_EQ(ssServer.target().port, 443);
+    EXPECT_FALSE(ssServer.canSplice());
 
-    char recvBuf[64] = {};
-    ssize_t n = ::read(rx, recvBuf, sizeof(recvBuf));
-    ASSERT_EQ(n, static_cast<ssize_t>(header.size() + payload.size()));
+    HandlerConnection upstream;
+    Forwarder forwarder;
+    auto session = forwarder.bridge(ssServer, upstream);
+    EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
 
-    std::string received(recvBuf, static_cast<size_t>(n));
-    EXPECT_EQ(received, "SS-HDR:GET / HTTP/1.1");
+    // 2. 上行载荷：ssClient.sendPayload -> wire -> ssServer decode -> Forwarder -> upstream
+    ASSERT_TRUE(ssClient.sendPayload("ss-uplink-payload").has_value());
+    while (ssClient.hasResponse())
+    {
+        std::string wire = ssClient.takeResponse();
+        ASSERT_TRUE(ssServer.appendRequest(wire.data(), static_cast<ssize_t>(wire.size())).has_value());
+    }
+    (void)forwarder.pumpSession(*session);
+    ASSERT_TRUE(upstream.hasResponse());
+    EXPECT_EQ(upstream.takeResponse(), "ss-uplink-payload");
 
-    ::close(tx);
-    ::close(rx);
+    // 3. 下行载荷：upstream -> Forwarder -> ssServer.sendPayload (AEAD 加密) -> wire -> ssClient 解密
+    ASSERT_TRUE(upstream.appendRequest("ss-downlink-reply").has_value());
+    (void)forwarder.pumpSession(*session);
+    ASSERT_TRUE(ssServer.hasResponse());
+    while (ssServer.hasResponse())
+    {
+        std::string wire = ssServer.takeResponse();
+        ASSERT_TRUE(ssClient.appendRequest(wire.data(), static_cast<ssize_t>(wire.size())).has_value());
+    }
+    ssClient.drive();
+    EXPECT_EQ(std::string_view(ssClient.requestBegin(), ssClient.requestBytes()), "ss-downlink-reply");
 }
 
-// =============================================================================
-// 9. FIONREAD 动态就绪载荷聚集前缀写入测试 (机制 71: tryRelayGatherWrite)
-// =============================================================================
-
-TEST(ForwarderTest, ScatterGatherPrefixedWithFionread)
+namespace
 {
-    // 模拟三方套接字：srcClient -> srcServer (中继读端) / dstClient (中继写端) -> dstServer
-    int srcPair[2];
-    int dstPair[2];
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, srcPair), 0);
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, dstPair), 0);
+    class MemoryStreamChannel final : public IStreamChannel
+    {
+    public:
+        std::string rxQueue{};
+        std::string txSink{};
+        bool open{true};
 
-    int clientWriter = srcPair[0];
-    int relaySrcReader = srcPair[1];
-    int relayDstWriter = dstPair[0];
-    int upstreamReader = dstPair[1];
+        [[nodiscard]] int fd() const noexcept override { return -1; }
+        [[nodiscard]] bool isOpen() const noexcept override { return open; }
+        [[nodiscard]] bool isPassthrough() const noexcept override { return false; }
 
-    // 客户端先写入一段后续载荷
-    const std::string payload = "HTTP_PAYLOAD_BODY_READY";
-    ASSERT_EQ(::write(clientWriter, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+        [[nodiscard]] Result<size_t> readBytes(std::span<uint8_t> dst) noexcept override
+        {
+            if (!open)
+                return std::unexpected(ERR::CONNECT_FAILED);
+            const size_t n = std::min(dst.size(), rxQueue.size());
+            if (n > 0)
+            {
+                std::memcpy(dst.data(), rxQueue.data(), n);
+                rxQueue.erase(0, n);
+            }
+            return n;
+        }
 
-    // 中继使用 writePrefixedWithGather 将协议前缀与源端待读载荷单次 writev 发送
-    std::vector<uint8_t> header = {'P', 'R', 'O', 'T', 'O', ':'};
-    std::vector<uint8_t> scratch(1024);
+        [[nodiscard]] Result<size_t> writeBytes(std::span<const uint8_t> src) noexcept override
+        {
+            if (!open)
+                return std::unexpected(ERR::CONNECT_FAILED);
+            txSink.append(reinterpret_cast<const char *>(src.data()), src.size());
+            return src.size();
+        }
 
-    ssize_t written = ScatterGatherFlusher::writePrefixedWithGather(relayDstWriter, header, relaySrcReader, scratch);
-    EXPECT_EQ(written, static_cast<ssize_t>(header.size() + payload.size()));
+        void closeChannel() noexcept override { open = false; }
+    };
+} // namespace
 
-    char recvBuf[128] = {};
-    ssize_t n = ::read(upstreamReader, recvBuf, sizeof(recvBuf));
-    ASSERT_EQ(n, static_cast<ssize_t>(header.size() + payload.size()));
-    std::string result(recvBuf, static_cast<size_t>(n));
-    EXPECT_EQ(result, "PROTO:HTTP_PAYLOAD_BODY_READY");
+TEST(ForwarderTest, VirtualStreamChannelNonFdBidirectionalBridge)
+{
+    auto inCh = std::make_shared<MemoryStreamChannel>();
+    auto outCh = std::make_shared<MemoryStreamChannel>();
+    inCh->rxQueue = "virtual-up";
+    outCh->rxQueue = "virtual-down";
 
-    ::close(clientWriter);
-    ::close(relaySrcReader);
-    ::close(relayDstWriter);
-    ::close(upstreamReader);
+    HandlerConnection inbound;
+    HandlerConnection outbound;
+    Forwarder forwarder;
+    auto session = forwarder.bridgeChannels(inbound, inCh, outbound, outCh);
+    EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
+
+    (void)forwarder.pumpSession(*session);
+    EXPECT_EQ(outCh->txSink, "virtual-up");
+    EXPECT_EQ(inCh->txSink, "virtual-down");
+}
+
+TEST(ForwarderTest, ProactorManagedSessionHooksConnectSendRecvSpliceAndRetire)
+{
+    int sv[2];
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sv), 0);
+
+    Forwarder forwarder;
+    uint64_t registeredId = 0;
+    int notifyCount = 0;
+    uint64_t retiredId = 0;
+    bool transferredOwnership = false;
+
+    ForwarderLoopHooks hooks;
+    hooks.deferOutboundConnect = true;
+    hooks.registerSession = [&](const std::shared_ptr<ForwarderStreamSession> &s)
+    {
+        registeredId = s->id();
+        return true;
+    };
+    hooks.notifySession = [&](uint64_t sid)
+    {
+        EXPECT_EQ(sid, registeredId);
+        ++notifyCount;
+    };
+    hooks.retireSession = [&](uint64_t sid, bool ownsFd)
+    {
+        retiredId = sid;
+        transferredOwnership = ownsFd;
+        if (ownsFd)
+        {
+            ::close(sv[0]);
+        }
+        return true;
+    };
+    forwarder.setLoopHooks(std::move(hooks));
+
+    HandlerInboundDirect inbound;
+    HandlerOutboundDirect outbound;
+    auto session = forwarder.bridge(inbound, outbound);
+    ASSERT_NE(session, nullptr);
+
+    sockaddr_in targetAddr{};
+    targetAddr.sin_family = AF_INET;
+    targetAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    targetAddr.sin_port = htons(18080);
+
+    session->setOutboundFd(sv[0]);
+    session->setOwnsOutboundFd(true);
+    session->setOutboundConnectState(true, true, targetAddr);
+
+    EXPECT_TRUE(forwarder.activateLoopWatch(session));
+    EXPECT_EQ(registeredId, session->id());
+    EXPECT_TRUE(session->proactorManaged());
+    EXPECT_TRUE(session->isOutboundConnecting());
+    EXPECT_TRUE(session->isOutboundConnectDeferred());
+    EXPECT_EQ(session->outboundTargetAddr().sin_port, htons(18080));
+
+    // 连接完成回调
+    session->onProactorConnectComplete(0);
+    EXPECT_FALSE(session->isOutboundConnecting());
+    EXPECT_FALSE(session->isOutboundConnectDeferred());
+
+    // 在 Proactor 托管模式下，pump() 不得再同步 recv/send，而是桥接内存并通知 Proactor
+    ASSERT_TRUE(inbound.appendRequest("hello-proactor-send").has_value());
+    (void)session->pump();
+    EXPECT_GT(notifyCount, 0);
+    EXPECT_TRUE(session->hasOutboundPendingToSend());
+
+    // 模拟 io_uring_prep_send 部分写出与 O(1) 游标推进
+    std::string_view part1 = session->beginProactorOutboundSend(4096);
+    EXPECT_EQ(part1, "hello-proactor-send");
+    EXPECT_TRUE(session->finishProactorOutboundSend(6));
+    std::string_view part2 = session->beginProactorOutboundSend(4096);
+    EXPECT_EQ(part2, "proactor-send");
+    EXPECT_FALSE(session->finishProactorOutboundSend(static_cast<ssize_t>(part2.size())));
+    EXPECT_EQ(session->stats().bytesUp, 19u);
+
+    // 模拟 io_uring_prep_recv 收到对端回包 -> 自动桥接推入 inbound 响应队列
+    constexpr char kDown[] = "downlink-from-uring";
+    session->onProactorOutboundRecv(kDown, sizeof(kDown) - 1);
+    ASSERT_TRUE(inbound.hasResponse());
+    EXPECT_EQ(inbound.takeResponse(), "downlink-from-uring");
+    EXPECT_EQ(session->stats().bytesDown, 19u);
+
+    // 模拟 io_uring_prep_splice 统计与 EOF 收敛
+    session->onProactorSpliceResult(false, 64);
+    session->onProactorSpliceResult(true, 128);
+    EXPECT_EQ(session->stats().bytesUp, 19u + 64u);
+    EXPECT_EQ(session->stats().bytesDown, 19u + 128u);
+
+    // 关闭时应通过 retireSession 异步移交 fd 所有权
+    session->close(true);
+    EXPECT_EQ(retiredId, session->id());
+    EXPECT_TRUE(transferredOwnership);
+    EXPECT_EQ(session->outboundFd(), -1);
+    ::close(sv[1]);
+}
+
+TEST(ForwarderTest, DatagramReuseNatKeyAndSendViaDatagramEndpoint)
+{
+    auto remote = Datagram::bind("127.0.0.1", 0);
+    auto outEp = Datagram::bind("127.0.0.1", 0);
+    ASSERT_TRUE(remote.has_value());
+    ASSERT_TRUE(outEp.has_value());
+
+    sockaddr_in clientPeer{};
+    clientPeer.sin_family = AF_INET;
+    clientPeer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    clientPeer.sin_port = htons(41234);
+
+    Forwarder forwarder;
+    auto s1 = forwarder.getOrCreateDatagramSession(clientPeer, remote->localAddr(), outEp->release());
+    ASSERT_NE(s1, nullptr);
+    EXPECT_TRUE(s1->outbound().valid());
+    EXPECT_EQ(forwarder.activeDatagramSessions(), 1u);
+
+    // 相同五元组必须复用同一 NAT 会话；额外传入的多余 fd 必须被安全关断不泄漏
+    auto extraEp = Datagram::create(true);
+    ASSERT_TRUE(extraEp.has_value());
+    auto s2 = forwarder.getOrCreateDatagramSession(clientPeer, remote->localAddr(), extraEp->release());
+    EXPECT_EQ(s2, s1);
+    EXPECT_EQ(forwarder.activeDatagramSessions(), 1u);
+    EXPECT_EQ(forwarder.findDatagramSession(clientPeer, remote->localAddr()), s1);
+
+    auto sent = forwarder.forwardDatagramToRemote(*s1, "udp-nat-reuse");
+    ASSERT_TRUE(sent.has_value());
+    EXPECT_EQ(*sent, 13u);
+    EXPECT_EQ(s1->stats().bytesUp, 13u);
+
+    char buf[64]{};
+    sockaddr_in from{};
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    auto rn = remote->recvFrom(buf, sizeof(buf), from);
+    ASSERT_TRUE(rn.has_value());
+    EXPECT_EQ(std::string_view(buf, *rn), "udp-nat-reuse");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    EXPECT_EQ(forwarder.sweepIdleDatagramSessions(std::chrono::seconds(0)), 1u);
+    EXPECT_EQ(forwarder.activeDatagramSessions(), 0u);
+    EXPECT_EQ(forwarder.findDatagramSession(clientPeer, remote->localAddr()), nullptr);
+}
+
+TEST(ForwarderTest, DeferredConnectPromotesAfterConnectAndDrain)
+{
+    int spIn[2] = {-1, -1};
+    int spOut[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, spIn), 0);
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, spOut), 0);
+
+    handler::HandlerInboundDirect in;
+    in.onConnect(spIn[1]);
+    Forwarder forwarder;
+    sockaddr_in targetAddr{};
+    targetAddr.sin_family = AF_INET;
+    targetAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    targetAddr.sin_port = htons(18080);
+    auto session = forwarder.bridgeDispatched(
+        in, std::make_unique<handler::HandlerOutboundDirect>(), spIn[1], spOut[0], false, true, true, targetAddr,
+        ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), 18080), "direct");
+    ASSERT_NE(session, nullptr);
+    // 尚在延迟建连阶段，不得提前激活 KERNEL_SOCKMAP/ZERO_COPY_SPLICE
+    EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
+
+    session->onProactorConnectComplete(0);
+    EXPECT_FALSE(session->isOutboundConnecting());
+    EXPECT_FALSE(session->isOutboundConnectDeferred());
+    EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
+
+    session->close(true);
+    ::close(spIn[0]);
+    ::close(spIn[1]);
+    ::close(spOut[0]);
+    ::close(spOut[1]);
+}
+
+TEST(ForwarderTest, SpliceUnsupportedTargetTriggersLosslessBufferFallback)
+{
+    int spIn[2] = {-1, -1};
+    int badOut[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, spIn), 0);
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, badOut), 0);
+    // 将出站描述符置为 O_APPEND，使 splice(pipe -> badOut[0]) 返回 EINVAL，而 ::send 仍可正常工作
+    const int flags = ::fcntl(badOut[0], F_GETFL, 0);
+    ASSERT_GE(flags, 0);
+    ASSERT_EQ(::fcntl(badOut[0], F_SETFL, flags | O_APPEND), 0);
+
+    handler::HandlerInboundDirect in;
+    handler::HandlerOutboundDirect out;
+    in.onConnect(spIn[1]);
+    out.onConnect(badOut[0]);
+    Forwarder forwarder;
+    auto session = forwarder.bridge(in, out);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
+
+    constexpr std::string_view kMsg = "payload-survives-splice-fallback";
+    ASSERT_EQ(::send(spIn[0], kMsg.data(), kMsg.size(), 0), static_cast<ssize_t>(kMsg.size()));
+
+    // pump() 从 spIn[1] splice 到 pipeUp_，再 splice 到 O_APPEND 目标端返回 EINVAL，无损排空管道并降级至 BUFFER_PUMP 送达
+    (void)session->pump();
+    EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
+
+    char rbuf[128]{};
+    const ssize_t n = ::recv(badOut[1], rbuf, sizeof(rbuf), 0);
+    ASSERT_EQ(n, static_cast<ssize_t>(kMsg.size()));
+    EXPECT_EQ(std::string_view(rbuf, static_cast<size_t>(n)), kMsg);
+
+    session->close(true);
+    ::close(spIn[0]);
+    ::close(spIn[1]);
+    ::close(badOut[0]);
+    ::close(badOut[1]);
 }

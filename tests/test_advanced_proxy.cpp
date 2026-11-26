@@ -15,14 +15,14 @@ using namespace mynet;
 
 TEST(AdvancedProxyTest, UrlTestSelectsLowestLatencyNode)
 {
-    OutboundManager mgr;
-    mgr.registerOutbound(std::make_shared<OutboundDirect>("hk-node"));
-    mgr.registerOutbound(std::make_shared<OutboundDirect>("jp-node"));
-    mgr.registerOutbound(std::make_shared<OutboundDirect>("us-node"));
+    DialerManager mgr;
+    mgr.registerDialer(std::make_shared<OutboundDirect>("hk-node"));
+    mgr.registerDialer(std::make_shared<OutboundDirect>("jp-node"));
+    mgr.registerDialer(std::make_shared<OutboundDirect>("us-node"));
 
-    auto urltest = std::make_shared<OutboundUrlTest>("auto-fastest",
-                                                     std::vector<std::string>{"hk-node", "jp-node", "us-node"}, &mgr);
-    mgr.registerOutbound(urltest);
+    auto urltest = std::make_shared<DialerUrlTest>("auto-fastest",
+                                                   std::vector<std::string>{"hk-node", "jp-node", "us-node"}, &mgr);
+    mgr.registerDialer(urltest);
 
     // 默认初始选择第一个节点
     EXPECT_EQ(urltest->getBestTag(), "hk-node");
@@ -46,14 +46,14 @@ TEST(AdvancedProxyTest, UrlTestSelectsLowestLatencyNode)
 
 TEST(AdvancedProxyTest, OutboundFallbackSequence)
 {
-    OutboundManager mgr;
+    DialerManager mgr;
     // 假定主节点指向无效地址，备用节点为 direct
-    mgr.registerOutbound(std::make_shared<OutboundBlock>("faulty-primary"));
-    mgr.registerOutbound(std::make_shared<OutboundDirect>("backup-node"));
+    mgr.registerDialer(std::make_shared<OutboundBlock>("faulty-primary"));
+    mgr.registerDialer(std::make_shared<OutboundDirect>("backup-node"));
 
-    auto fallback = std::make_shared<OutboundFallback>("auto-fallback",
+    auto fallback = std::make_shared<DialerFallback>("auto-fallback",
                                                        std::vector<std::string>{"faulty-primary", "backup-node"}, &mgr);
-    mgr.registerOutbound(fallback);
+    mgr.registerDialer(fallback);
 
     ASSERT_EQ(fallback->candidates().size(), 2u);
     EXPECT_EQ(fallback->candidates()[0], "faulty-primary");
@@ -160,10 +160,10 @@ TEST(AdvancedProxyTest, CoreApplyConfigWithAdvancedProtocolsAndGeoRules)
     cfg.router.rules.push_back(ruleAd);
 
     Core core(cfg);
-    EXPECT_TRUE(core.inbounds().has("vless-in"));
-    EXPECT_TRUE(core.inbounds().has("tun-in"));
-    EXPECT_TRUE(core.outbounds().has("vless-out"));
-    EXPECT_TRUE(core.outbounds().has("auto-fast"));
+    EXPECT_TRUE(core.acceptors().has("vless-in"));
+    EXPECT_TRUE(core.acceptors().has("tun-in"));
+    EXPECT_TRUE(core.dialers().has("vless-out"));
+    EXPECT_TRUE(core.dialers().has("auto-fast"));
     EXPECT_EQ(core.router().rules().size(), 2u);
     EXPECT_EQ(core.router().defaultOutbound(), "auto-fast");
 

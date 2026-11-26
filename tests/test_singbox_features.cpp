@@ -1,11 +1,9 @@
 #include "checksum.hpp"
 #include "dialer.hpp"
 #include "dns/ech.hpp"
-#include "portPool.hpp"
 #include "process.hpp"
 #include "tls/fragmenter.hpp"
 #include "tls/pinning.hpp"
-#include "tls/spoof.hpp"
 #include "uot/uot.hpp"
 #include "uvarint.hpp"
 #include <arpa/inet.h>
@@ -23,10 +21,57 @@ using namespace mynet::transport;
 namespace
 {
 
-    // 构造测试用的标准 TLS 1.2/1.3 ClientHello 报文
+    // 构造测试用的标准 TLS ClientHello 报文（携带 SNI 扩展）
     std::vector<uint8_t> makeSampleClientHello(std::string_view sni = "www.cloudflare.com")
     {
-        return TlsSpoofer::buildFakeClientHello(sni);
+        std::vector<uint8_t> ch;
+        const size_t sniLen = sni.size();
+        const size_t extSniPayloadLen = 2 + 1 + 2 + sniLen;
+        const size_t extLen = 4 + extSniPayloadLen;
+        const size_t hsBodyLen = 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + extLen;
+        const size_t recLen = 4 + hsBodyLen;
+        ch.reserve(5 + recLen);
+
+        // TLS Record Header: Handshake (0x16), TLS 1.0 (0x03 0x01)
+        ch.push_back(0x16);
+        ch.push_back(0x03);
+        ch.push_back(0x01);
+        ch.push_back(static_cast<uint8_t>((recLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(recLen & 0xFF));
+        // Handshake Header: ClientHello (0x01)
+        ch.push_back(0x01);
+        ch.push_back(static_cast<uint8_t>((hsBodyLen >> 16) & 0xFF));
+        ch.push_back(static_cast<uint8_t>((hsBodyLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(hsBodyLen & 0xFF));
+        // Client Version TLS 1.2 + 32-byte Random + empty session_id
+        ch.push_back(0x03);
+        ch.push_back(0x03);
+        ch.insert(ch.end(), 32, 0x11);
+        ch.push_back(0x00);
+        // Cipher suites: 1 suite (0x1301)
+        ch.push_back(0x00);
+        ch.push_back(0x02);
+        ch.push_back(0x13);
+        ch.push_back(0x01);
+        // Compression methods: 1 null
+        ch.push_back(0x01);
+        ch.push_back(0x00);
+        // Extensions total length
+        ch.push_back(static_cast<uint8_t>((extLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(extLen & 0xFF));
+        // Extension SNI (0x0000)
+        ch.push_back(0x00);
+        ch.push_back(0x00);
+        ch.push_back(static_cast<uint8_t>((extSniPayloadLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(extSniPayloadLen & 0xFF));
+        const size_t listLen = 1 + 2 + sniLen;
+        ch.push_back(static_cast<uint8_t>((listLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(listLen & 0xFF));
+        ch.push_back(0x00); // host_name
+        ch.push_back(static_cast<uint8_t>((sniLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(sniLen & 0xFF));
+        ch.insert(ch.end(), sni.begin(), sni.end());
+        return ch;
     }
 
 } // namespace
@@ -115,49 +160,6 @@ TEST(SingboxFeaturesTest, TlsFragmenterSendOverSocketPair)
 
     // 验证接收端收到了分片数据，并且能成功解析出分片记录
     EXPECT_GT(received.size(), 0u);
-}
-
-// ============================================================================
-// 2. TCP Desync & TLS Spoofing 测试
-// ============================================================================
-
-TEST(SingboxFeaturesTest, TlsSpoofBuildFakeClientHello)
-{
-    auto fakeHello = TlsSpoofer::buildFakeClientHello("microsoft.com");
-    ASSERT_GE(fakeHello.size(), 50u);
-    EXPECT_EQ(fakeHello[0], 0x16); // Handshake
-
-    auto sniInfo = TlsFragmenter::findSni(fakeHello);
-    ASSERT_TRUE(sniInfo.has_value());
-    EXPECT_EQ(sniInfo->serverName, "microsoft.com");
-}
-
-TEST(SingboxFeaturesTest, TlsSpoofFrameMethods)
-{
-    TcpEndpoints ep{.srcIp = 0x7F000001, // 127.0.0.1
-                    .srcPort = 12345,
-                    .dstIp = 0x7F000001,
-                    .dstPort = 443};
-
-    auto fakeHello = TlsSpoofer::buildFakeClientHello("whitelist.gov");
-
-    // 1. WRONG_CHECKSUM
-    auto frameCksum = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_CHECKSUM, ep, 1000, 2000, 50000, fakeHello);
-    ASSERT_GT(frameCksum.size(), 40u);
-    EXPECT_EQ(frameCksum[0], 0x45); // IPv4
-    EXPECT_EQ(frameCksum[9], IPPROTO_TCP);
-
-    // 2. WRONG_SEQUENCE
-    auto frameSeq = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_SEQUENCE, ep, 1000, 2000, 50000, fakeHello);
-    ASSERT_GT(frameSeq.size(), 40u);
-
-    // 3. WRONG_TIMESTAMP
-    auto frameTs = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_TIMESTAMP, ep, 1000, 2000, 50000, fakeHello);
-    ASSERT_GT(frameTs.size(), 40u);
-
-    // 4. WRONG_MD5
-    auto frameMd5 = TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_MD5, ep, 1000, 2000, 50000, fakeHello);
-    ASSERT_GT(frameMd5.size(), 40u);
 }
 
 // ============================================================================
@@ -312,25 +314,6 @@ TEST(SingboxFeaturesTest, CertPinnerSha256)
 }
 
 // ============================================================================
-// 7. Kernel Ephemeral Port Pool & Conflict Reservation 测试
-// ============================================================================
-
-TEST(SingboxFeaturesTest, KernelPortPoolSafeRangeAndAlloc)
-{
-    auto &pool = mynet::transparent::KernelPortPool::instance();
-    auto safeRange = pool.safeRange();
-
-    EXPECT_GE(safeRange.start, 1024u);
-    EXPECT_GT(safeRange.count, 0u);
-
-    // 尝试分配一个安全端口
-    auto optPort = pool.allocatePort(IPPROTO_TCP);
-    ASSERT_TRUE(optPort.has_value());
-    EXPECT_GE(*optPort, safeRange.start);
-    EXPECT_LT(*optPort, safeRange.start + safeRange.count);
-}
-
-// ============================================================================
 // 8. ECH (Encrypted Client Hello) HTTPS/SVCB DNS 反向映射测试
 // ============================================================================
 
@@ -374,7 +357,7 @@ TEST(SingboxFeaturesTest, TcpPrefixInjection)
         void onParseError(const char *) noexcept {}
     };
 
-    Dialer<DummyHandler> dialer;
+    DialerBase<DummyHandler> dialer;
 
     std::vector<uint8_t> prefix = {'P', 'R', 'E', 'F', 'I', 'X', 0x01, 0x02};
     dialer.setTcpPrefix(prefix);

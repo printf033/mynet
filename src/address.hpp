@@ -554,6 +554,133 @@ namespace mynet::handler
         }
 
         /**
+         * @brief 编码为 VLESS / VMess 格式目标地址：[Port 2B BE][ATYP 1B (0x01/0x02/0x03)][Address]
+         */
+        void encodeVless(std::vector<uint8_t> &out) const
+        {
+            out.push_back(static_cast<uint8_t>((port >> 8) & 0xFF));
+            out.push_back(static_cast<uint8_t>(port & 0xFF));
+            switch (type)
+            {
+            case AddressType::IPV4:
+            {
+                out.push_back(0x01);
+                const auto *p = reinterpret_cast<const uint8_t *>(&ipv4_.s_addr);
+                out.insert(out.end(), p, p + 4);
+                break;
+            }
+            case AddressType::DOMAIN:
+            {
+                out.push_back(0x02);
+                const uint8_t len = static_cast<uint8_t>(std::min<size_t>(host.size(), 255));
+                out.push_back(len);
+                out.insert(out.end(), host.begin(), host.begin() + len);
+                break;
+            }
+            case AddressType::IPV6:
+            {
+                out.push_back(0x03);
+                const auto *p = reinterpret_cast<const uint8_t *>(&ipv6_);
+                out.insert(out.end(), p, p + 16);
+                break;
+            }
+            }
+        }
+
+        /**
+         * @brief 从 UoT 格式二进制解析目标地址：[ATYP (0x00=IPv4, 0x01=IPv6, 0x02=Domain)][Addr][Port 2B BE]
+         */
+        static std::optional<ProxyAddress> decodeUot(std::span<const uint8_t> bytes, size_t &consumed)
+        {
+            if (bytes.empty())
+            {
+                return std::nullopt;
+            }
+            const uint8_t atyp = bytes[0];
+            switch (atyp)
+            {
+            case 0x00: // IPv4
+            {
+                constexpr size_t kLen = 1 + 4 + 2;
+                if (bytes.size() < kLen)
+                {
+                    return std::nullopt;
+                }
+                uint32_t ipBe = 0;
+                std::memcpy(&ipBe, bytes.data() + 1, 4);
+                const uint16_t p = (static_cast<uint16_t>(bytes[5]) << 8) | bytes[6];
+                consumed = kLen;
+                return fromIPv4(ipBe, p);
+            }
+            case 0x01: // IPv6
+            {
+                constexpr size_t kLen = 1 + 16 + 2;
+                if (bytes.size() < kLen)
+                {
+                    return std::nullopt;
+                }
+                const uint16_t p = (static_cast<uint16_t>(bytes[17]) << 8) | bytes[18];
+                consumed = kLen;
+                return fromIPv6(bytes.data() + 1, p);
+            }
+            case 0x02: // Domain
+            {
+                if (bytes.size() < 2)
+                {
+                    return std::nullopt;
+                }
+                const uint8_t domainLen = bytes[1];
+                const size_t kLen = 1 + 1 + domainLen + 2;
+                if (bytes.size() < kLen)
+                {
+                    return std::nullopt;
+                }
+                std::string_view domain(reinterpret_cast<const char *>(bytes.data() + 2), domainLen);
+                const size_t pOff = 2 + domainLen;
+                const uint16_t p = (static_cast<uint16_t>(bytes[pOff]) << 8) | bytes[pOff + 1];
+                consumed = kLen;
+                return fromDomain(domain, p);
+            }
+            default:
+                return std::nullopt;
+            }
+        }
+
+        /**
+         * @brief 编码为 UoT 地址格式：[ATYP 1B][Addr][Port 2B BE]
+         */
+        void encodeUot(std::vector<uint8_t> &out) const
+        {
+            switch (type)
+            {
+            case AddressType::IPV4:
+            {
+                out.push_back(0x00);
+                const auto *p = reinterpret_cast<const uint8_t *>(&ipv4_.s_addr);
+                out.insert(out.end(), p, p + 4);
+                break;
+            }
+            case AddressType::IPV6:
+            {
+                out.push_back(0x01);
+                const auto *p = reinterpret_cast<const uint8_t *>(&ipv6_);
+                out.insert(out.end(), p, p + 16);
+                break;
+            }
+            case AddressType::DOMAIN:
+            {
+                out.push_back(0x02);
+                const uint8_t len = static_cast<uint8_t>(std::min<size_t>(host.size(), 255));
+                out.push_back(len);
+                out.insert(out.end(), host.begin(), host.begin() + len);
+                break;
+            }
+            }
+            out.push_back(static_cast<uint8_t>((port >> 8) & 0xFF));
+            out.push_back(static_cast<uint8_t>(port & 0xFF));
+        }
+
+        /**
          * @brief 从已连接套接字提取透明代理原始目的地址 (Linux Netfilter SO_ORIGINAL_DST)
          *
          * @param fd 套接字描述符

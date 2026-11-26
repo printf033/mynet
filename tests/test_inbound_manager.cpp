@@ -3,9 +3,12 @@
 #if defined(MYNET_ENABLE_URING)
 #include "proactor.hpp"
 #endif
+#include <atomic>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 using namespace mynet;
@@ -17,7 +20,7 @@ using namespace mynet::handler;
 
 TEST(InboundManagerTest, RegistryAndTypes)
 {
-    InboundManager mgr;
+    AcceptorManager mgr;
     EXPECT_EQ(mgr.size(), 0u);
 
     auto vless = std::make_shared<InboundVless>("vless-in", "127.0.0.1", 1080, "de04add9-5c1a-4b08-8e65-244e45cf5483");
@@ -44,12 +47,12 @@ TEST(InboundManagerTest, RegistryAndTypes)
     EXPECT_EQ(ss->tag(), "ss-in");
     EXPECT_EQ(ss->type(), "shadowsocks");
 
-    mgr.registerInbound(vless);
-    mgr.registerInbound(socks);
-    mgr.registerInbound(http);
-    mgr.registerInbound(trojan);
-    mgr.registerInbound(direct);
-    mgr.registerInbound(ss);
+    mgr.registerAcceptor(vless);
+    mgr.registerAcceptor(socks);
+    mgr.registerAcceptor(http);
+    mgr.registerAcceptor(trojan);
+    mgr.registerAcceptor(direct);
+    mgr.registerAcceptor(ss);
 
     EXPECT_EQ(mgr.size(), 6u);
     EXPECT_TRUE(mgr.has("vless-in"));
@@ -155,18 +158,18 @@ TEST(InboundManagerTest, ListenAndAcceptOne)
 }
 
 // =============================================================================
-// 4. InboundManager 批量并发启停测试 (Batch StartAll / StopAll)
+// 4. AcceptorManager 批量并发启停测试 (Batch StartAll / StopAll)
 // =============================================================================
 
 TEST(InboundManagerTest, BatchStartAllAndStopAll)
 {
-    InboundManager mgr;
+    AcceptorManager mgr;
 
     auto in1 = std::make_shared<InboundSocks5>("in-1", "127.0.0.1", 0);
     auto in2 = std::make_shared<InboundHttp>("in-2", "127.0.0.1", 0);
 
-    mgr.registerInbound(in1);
-    mgr.registerInbound(in2);
+    mgr.registerAcceptor(in1);
+    mgr.registerAcceptor(in2);
 
     auto res = mgr.startAll();
     ASSERT_TRUE(res.has_value());
@@ -192,7 +195,7 @@ TEST(InboundManagerTest, BatchStartAllAndStopAll)
 
 TEST(InboundManagerTest, ReactorDrivesAcceptor)
 {
-    using Server = Reactor<Acceptor<HandlerConnection>>;
+    using Server = Reactor<AcceptorBase<HandlerConnection>>;
     Server reactor;
 
     auto listenRes = reactor.listenTcp("127.0.0.1", 0);
@@ -246,7 +249,7 @@ TEST(InboundManagerTest, ReactorDrivesAcceptor)
 
 TEST(InboundManagerTest, ProactorDrivesAcceptor)
 {
-    using Server = Proactor<Acceptor<HandlerConnection>>;
+    using Server = Proactor<AcceptorBase<HandlerConnection>>;
     Server proactor;
 
     auto listenRes = proactor.listenTcp("127.0.0.1", 0);
@@ -257,5 +260,67 @@ TEST(InboundManagerTest, ProactorDrivesAcceptor)
     proactor.reset();
     EXPECT_EQ(proactor.tcpFd(), -1);
     EXPECT_EQ(proactor.listenerCount(), 0u);
+}
+
+TEST(InboundManagerTest, ProactorServeTcpAcceptAndStop)
+{
+    using Server = Proactor<AcceptorBase<HandlerConnection>>;
+    Server proactor;
+
+    ASSERT_TRUE(proactor.listenTcp("127.0.0.1", 0).has_value());
+    const sockaddr_in listenAddr = proactor.tcpAddr();
+    ASSERT_GT(ntohs(listenAddr.sin_port), 0);
+
+    std::atomic<bool> serveFinished{false};
+    Result<> serveRes{};
+    std::thread serverThread(
+        [&]()
+        {
+            ServerConfig srv;
+            srv.idleTimeoutSecs = 5;
+            ProactorConfig pc;
+            pc.sqEntries = 64;
+            pc.cqEntries = 128;
+            serveRes = proactor.serve(srv, pc);
+            serveFinished.store(true, std::memory_order_release);
+        });
+
+    int clientFd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(clientFd, 0);
+    if (::connect(clientFd, reinterpret_cast<const sockaddr *>(&listenAddr), sizeof(listenAddr)) == 0)
+    {
+        constexpr char kPayload[] = "proactor-uring-ok";
+        [[maybe_unused]] auto _ = ::send(clientFd, kPayload, sizeof(kPayload) - 1, MSG_NOSIGNAL);
+    }
+
+    bool sawConn = false;
+    for (int i = 0; i < 60; ++i)
+    {
+        if (proactor.connections() >= 1u)
+        {
+            sawConn = true;
+            break;
+        }
+        if (serveFinished.load(std::memory_order_acquire))
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    ::close(clientFd);
+    proactor.stop();
+    if (serverThread.joinable())
+    {
+        serverThread.join();
+    }
+    proactor.reset();
+
+    if (!serveRes && serveRes.error() == ERR::URING_QUEUE_FAILED)
+    {
+        GTEST_SKIP() << "io_uring_queue_init restricted in sandbox environment";
+    }
+    EXPECT_TRUE(serveRes.has_value());
+    EXPECT_TRUE(sawConn);
 }
 #endif

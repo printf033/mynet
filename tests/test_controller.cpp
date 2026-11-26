@@ -59,15 +59,15 @@ namespace
 TEST(ControllerTest, RestApiEndpoints)
 {
     Core core;
-    core.outbounds().registerOutbound(std::make_shared<OutboundDirect>("direct"));
-    core.outbounds().registerOutbound(std::make_shared<OutboundBlock>("block"));
+    core.dialers().registerDialer(std::make_shared<OutboundDirect>("direct"));
+    core.dialers().registerDialer(std::make_shared<OutboundBlock>("block"));
     auto sel =
-        std::make_shared<OutboundSelector>("proxy", std::vector<std::string>{"direct", "block"}, &core.outbounds());
-    core.outbounds().registerOutbound(sel);
+        std::make_shared<DialerSelector>("proxy", std::vector<std::string>{"direct", "block"}, &core.dialers());
+    core.dialers().registerDialer(sel);
 
     auto urltest =
-        std::make_shared<OutboundUrlTest>("auto", std::vector<std::string>{"direct", "block"}, &core.outbounds());
-    core.outbounds().registerOutbound(urltest);
+        std::make_shared<DialerUrlTest>("auto", std::vector<std::string>{"direct", "block"}, &core.dialers());
+    core.dialers().registerDialer(urltest);
 
     // 绑定端口 19890
     const uint16_t apiPort = 19890;
@@ -209,18 +209,18 @@ TEST(ControllerTest, ProcessResolverCurrentPid)
 }
 
 // =============================================================================
-// 4. OutboundUrlTest 自动健康探测测试
+// 4. DialerUrlTest 自动健康探测测试
 // =============================================================================
 
 TEST(ControllerTest, UrlTestProbeDirect)
 {
-    OutboundManager mgr;
-    mgr.registerOutbound(std::make_shared<OutboundDirect>("direct-node"));
-    mgr.registerOutbound(std::make_shared<OutboundBlock>("block-node"));
+    DialerManager mgr;
+    mgr.registerDialer(std::make_shared<OutboundDirect>("direct-node"));
+    mgr.registerDialer(std::make_shared<OutboundBlock>("block-node"));
 
     auto urltest =
-        std::make_shared<OutboundUrlTest>("auto-probe", std::vector<std::string>{"direct-node", "block-node"}, &mgr);
-    mgr.registerOutbound(urltest);
+        std::make_shared<DialerUrlTest>("auto-probe", std::vector<std::string>{"direct-node", "block-node"}, &mgr);
+    mgr.registerDialer(urltest);
 
     // 探测 direct-node
     uint32_t rttDirect = urltest->probeNode("direct-node");

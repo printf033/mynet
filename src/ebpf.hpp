@@ -61,7 +61,7 @@
 #include <sys/vfs.h>
 
 #if defined(MYNET_HAVE_LIBBPF)
-#include "ebpf/mynet_kernel_bpf_embedded.hpp"
+#include "mynet_kernel_bpf_embedded.hpp"
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #endif
@@ -231,86 +231,6 @@ namespace mynet::ebpf
             if (!wanIf.empty() && !setSendRedirects(wanIf, false))
                 ok = false;
             return ok;
-        }
-    };
-
-    /// 局域网 ICMP 重定向内核参数安全控制器别名 (机制 77)
-    using SendRedirectsController = SysctlManager;
-
-    /**
-     * @brief 判定是否为短生命周期 UDP 流量 (如 DNS 53 端口查询) (机制 65: is_short_lived_udp_traffic)
-     *
-     * 避免随机高频端口的 DNS 查询频繁插入 conn_state_map 导致 65536 映射表满载颠簸与 Map Churn
-     */
-    [[nodiscard]] constexpr bool isShortLivedUdp(uint16_t sport, uint16_t dport) noexcept
-    {
-        return sport == 53 || dport == 53;
-    }
-
-    /**
-     * @brief 自适应 BPF 连接跟踪回收步调控制器 (借鉴 dae conn_state_janitor, 机制 87)
-     *
-     * 稳态步调 5s；当 map 利用率超过 70% 时进入压力模式加速为 1s；
-     * 连续 3 轮低于 50% 时退出压力模式；并在系统平静时退避至 30s。
-     * 同时通过 DELETE_RETAIN_MAX = 8192 上限回收暂存空间，避免突发内存常驻。
-     */
-    class JanitorCadenceController
-    {
-    public:
-        static constexpr std::chrono::seconds STEADY_INTERVAL{5};
-        static constexpr std::chrono::seconds PRESSURE_INTERVAL{1};
-        static constexpr std::chrono::seconds MAX_INTERVAL{30};
-        static constexpr uint32_t PRESSURE_ENTER_USAGE_PCT{70};
-        static constexpr uint32_t PRESSURE_EXIT_USAGE_PCT{50};
-        static constexpr uint32_t PRESSURE_EXIT_ROUNDS{3};
-        static constexpr size_t DELETE_RETAIN_MAX{8192};
-
-    private:
-        bool inPressureMode_{false};
-        uint32_t consecutiveCalmRounds_{0};
-
-    public:
-        [[nodiscard]] std::chrono::seconds step(uint32_t currentEntries, uint32_t maxEntries) noexcept
-        {
-            if (maxEntries == 0)
-                return STEADY_INTERVAL;
-            uint32_t usagePct = (currentEntries * 100) / maxEntries;
-
-            if (!inPressureMode_)
-            {
-                if (usagePct >= PRESSURE_ENTER_USAGE_PCT)
-                {
-                    inPressureMode_ = true;
-                    consecutiveCalmRounds_ = 0;
-                    return PRESSURE_INTERVAL;
-                }
-                return (usagePct == 0) ? MAX_INTERVAL : STEADY_INTERVAL;
-            }
-            else
-            {
-                if (usagePct < PRESSURE_EXIT_USAGE_PCT)
-                {
-                    consecutiveCalmRounds_++;
-                    if (consecutiveCalmRounds_ >= PRESSURE_EXIT_ROUNDS)
-                    {
-                        inPressureMode_ = false;
-                        consecutiveCalmRounds_ = 0;
-                        return STEADY_INTERVAL;
-                    }
-                }
-                else
-                {
-                    consecutiveCalmRounds_ = 0;
-                }
-                return PRESSURE_INTERVAL;
-            }
-        }
-
-        [[nodiscard]] bool inPressureMode() const noexcept { return inPressureMode_; }
-        void reset() noexcept
-        {
-            inPressureMode_ = false;
-            consecutiveCalmRounds_ = 0;
         }
     };
 
@@ -750,7 +670,9 @@ namespace mynet::ebpf
         [[nodiscard]] inline bool isVerdictAttached() const noexcept { return verdictAttached_; }
         [[nodiscard]] inline bool isCgroupAttached() const noexcept { return cgroupAttached_; }
         [[nodiscard]] inline const EbpfConfig &config() const noexcept { return config_; }
-        [[nodiscard]] inline int sockMapFd() const noexcept { return sockMapFd_; }
+        /// 仅当内核真实加载并挂载了 sk_skb/stream_verdict 到 SOCKHASH 时才返回有效 fd，避免伪 sockmap 截断回落链
+        [[nodiscard]] inline int sockMapFd() const noexcept { return verdictAttached_ ? sockMapFd_ : -1; }
+        [[nodiscard]] inline int rawSockMapFd() const noexcept { return sockMapFd_; }
         [[nodiscard]] inline int cookieMapFd() const noexcept { return cookieMapFd_; }
         [[nodiscard]] inline int connStateMapFd() const noexcept { return connStateMapFd_; }
         [[nodiscard]] inline int listenSockMapFd() const noexcept { return listenSockMapFd_; }
@@ -1150,7 +1072,7 @@ namespace mynet::ebpf
         {
             std::lock_guard<std::mutex> lock(mutex_);
             config_.tproxyPortProtect = protect;
-#if defined(__linux__)
+#if defined(__linux__) && defined(MYNET_HAVE_LIBBPF)
             if (kernelBpfActive_ && configMapFd_ >= 0)
             {
                 uint32_t key = 0;
@@ -2279,9 +2201,9 @@ namespace mynet::ebpf
             return true;
 #elif defined(__linux__) && defined(__NR_bpf)
             union bpf_attr attr{};
-            attr.map_type = BPF_MAP_TYPE_SOCKMAP;
-            attr.key_size = sizeof(uint32_t);
-            attr.value_size = sizeof(uint32_t);
+            attr.map_type = BPF_MAP_TYPE_SOCKHASH;
+            attr.key_size = sizeof(TuplesKey);
+            attr.value_size = sizeof(uint64_t);
             attr.max_entries = 1;
 
             long mapFd = ::syscall(__NR_bpf, BPF_MAP_CREATE, &attr, sizeof(attr));
@@ -2414,31 +2336,6 @@ namespace mynet::ebpf
             return detachPair(sockMapFd_, clientFd, upstreamFd);
         }
 
-        /**
-         * @brief 智能流卸载策略驱动：优先尝试 eBPF Sockmap 卸载，失败或未配置时回退至 splice
-         */
-        static bool enableOffloadOrSplice(HandlerConnection &handler, int clientFd, int upstreamFd,
-                                          int sockmapFd = -1) noexcept
-        {
-            if (clientFd < 0 || upstreamFd < 0)
-            {
-                return false;
-            }
-
-            if (sockmapFd >= 0)
-            {
-                if (attachPair(sockmapFd, clientFd, upstreamFd))
-                {
-                    LOG_INFO("EbpfManager: eBPF sockmap offload attached between fd {} and {}", clientFd, upstreamFd);
-                    return true;
-                }
-                LOG_WARN("EbpfManager: sockmap attach failed, falling back to splice(2)");
-            }
-
-            handler.setSpliceTarget(upstreamFd);
-            return handler.isSpliceActive();
-        }
-
         // =====================================================================
         // Sockmap 内核背压熔断保险丝 (tcp_offload_pause) (借鉴 dae)
         // =====================================================================
@@ -2558,218 +2455,6 @@ namespace mynet::ebpf
             }
 #endif
             return total;
-        }
-
-        /**
-         * @brief 生成完整的 dae-style Linux eBPF 内核 C 源码
-         */
-        [[nodiscard]] static std::string generateBpfSource()
-        {
-            return R"(// SPDX-License-Identifier: GPL-2.0-only
-/* dae-style high-performance transparent proxy eBPF kernel driver for mynet */
-#include <linux/bpf.h>
-#include <linux/pkt_cls.h>
-#include <linux/if_ether.h>
-#include <linux/ip.h>
-#include <linux/ipv6.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
-#include <linux/in.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_endian.h>
-
-#define ACTION_DIRECT 0
-#define ACTION_PROXY  1
-#define ACTION_BLOCK  2
-
-#define TASK_COMM_LEN 16
-
-struct tuples_key {
-    __u32 saddr;
-    __u32 daddr;
-    __u16 sport;
-    __u16 dport;
-    __u8  proto;
-    __u8  pad[3];
-};
-
-struct bpf_lpm_key_ipv4 {
-    __u32 prefixlen;
-    __u32 ip;
-};
-
-struct bpf_lpm_key_ipv6 {
-    __u32 prefixlen;
-    __u8  ip[16];
-};
-
-struct pid_pname {
-    __u32 pid;
-    char  pname[TASK_COMM_LEN];
-    __u64 last_seen_ns;
-};
-
-struct mynet_bpf_config {
-    __u16 tproxy_port;
-    __u16 pad;
-    __u32 fwmark;
-    __u8  direct_bypass;
-    __u8  drop_quic;
-    __u16 wan_ifindex;
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-    __type(key, struct bpf_lpm_key_ipv4);
-    __type(value, __u32);
-    __uint(max_entries, 65536);
-    __uint(map_flags, BPF_F_NO_PREALLOC);
-} mynet_lpm_trie_ipv4 SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
-    __type(key, struct bpf_lpm_key_ipv6);
-    __type(value, __u32);
-    __uint(max_entries, 65536);
-    __uint(map_flags, BPF_F_NO_PREALLOC);
-} mynet_lpm_trie_ipv6 SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u32);
-    __type(value, __u8);
-    __uint(max_entries, 16384);
-} mynet_direct_ips SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, struct mynet_bpf_config);
-    __uint(max_entries, 1);
-} mynet_config SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_SOCKHASH);
-    __type(key, struct tuples_key);
-    __type(value, __u64);
-    __uint(max_entries, 65536);
-} mynet_fast_sock SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, __u64);
-    __type(value, struct pid_pname);
-    __uint(max_entries, 65536);
-} mynet_cookie_pid_map SEC(".maps");
-
-SEC("tc")
-int mynet_tc_filter(struct __sk_buff *skb)
-{
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
-
-    __u32 key_idx = 0;
-    struct mynet_bpf_config *cfg = bpf_map_lookup_elem(&mynet_config, &key_idx);
-    if (!cfg)
-        return TC_ACT_OK;
-
-    if (eth->h_proto == bpf_htons(ETH_P_IP)) {
-        struct iphdr *ip = (void *)(eth + 1);
-        if ((void *)(ip + 1) > data_end)
-            return TC_ACT_OK;
-
-        if (cfg->drop_quic && ip->protocol == IPPROTO_UDP) {
-            struct udphdr *udp = (void *)ip + (ip->ihl * 4);
-            if ((void *)(udp + 1) <= data_end && udp->dest == bpf_htons(443)) {
-                return TC_ACT_SHOT;
-            }
-        }
-
-        __u32 dst_ip = ip->daddr;
-        __u8 *direct = bpf_map_lookup_elem(&mynet_direct_ips, &dst_ip);
-        if (direct && cfg->direct_bypass) {
-            return TC_ACT_OK;
-        }
-
-        struct bpf_lpm_key_ipv4 lpm_key = {
-            .prefixlen = 32,
-            .ip = dst_ip
-        };
-        __u32 *action = bpf_map_lookup_elem(&mynet_lpm_trie_ipv4, &lpm_key);
-        if (action) {
-            if (*action == ACTION_DIRECT)
-                return TC_ACT_OK;
-            if (*action == ACTION_BLOCK)
-                return TC_ACT_SHOT;
-        }
-
-        skb->mark = cfg->fwmark;
-        return TC_ACT_OK;
-    }
-    return TC_ACT_OK;
-}
-
-SEC("sk_skb/stream_verdict")
-int mynet_sockmap_verdict(struct __sk_buff *skb)
-{
-    struct tuples_key peer_key = {};
-    peer_key.proto = IPPROTO_TCP;
-    peer_key.sport = (__u16)(skb->remote_port >> 16);
-    peer_key.dport = bpf_htons((__u16)skb->local_port);
-    peer_key.saddr = skb->remote_ip4;
-    peer_key.daddr = skb->local_ip4;
-
-    bpf_sk_redirect_hash(skb, &mynet_fast_sock, &peer_key, 0);
-    return SK_PASS;
-}
-
-static __always_inline void update_cookie_process(__u64 cookie)
-{
-    if (!cookie) return;
-    struct pid_pname val = { 0 };
-    val.pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-    val.last_seen_ns = bpf_ktime_get_ns();
-    bpf_get_current_comm(&val.pname, sizeof(val.pname));
-    bpf_map_update_elem(&mynet_cookie_pid_map, &cookie, &val, BPF_ANY);
-}
-
-SEC("cgroup/connect4")
-int mynet_cg_connect4(struct bpf_sock_addr *ctx)
-{
-    update_cookie_process(bpf_get_socket_cookie(ctx));
-    return 1;
-}
-
-SEC("cgroup/connect6")
-int mynet_cg_connect6(struct bpf_sock_addr *ctx)
-{
-    update_cookie_process(bpf_get_socket_cookie(ctx));
-    return 1;
-}
-
-SEC("cgroup/sock_create")
-int mynet_cg_sock_create(struct bpf_sock *sk)
-{
-    update_cookie_process(bpf_get_socket_cookie(sk));
-    return 1;
-}
-
-SEC("cgroup/sock_release")
-int mynet_cg_sock_release(struct bpf_sock *sk)
-{
-    __u64 cookie = bpf_get_socket_cookie(sk);
-    if (cookie) {
-        bpf_map_delete_elem(&mynet_cookie_pid_map, &cookie);
-    }
-    return 1;
-}
-
-char _license[] SEC("license") = "GPL";
-)";
         }
 
     public:
@@ -3069,7 +2754,34 @@ char _license[] SEC("license") = "GPL";
             if (err)
             {
                 ::bpf_object__close(obj);
-                return false;
+                obj = nullptr;
+
+                // 回退策略：在纯代理节点或受限容器环境下，可能仅允许 sk_skb/stream_verdict + SOCKHASH，
+                // 不具备 tc / cgroupv2 权限；关闭 tc/cgroup 程序 autoload 后重试仅加载 Sockmap 卸载引擎。
+                if (!config_.bpfObjectPath.empty() && ::access(config_.bpfObjectPath.c_str(), R_OK) == 0)
+                {
+                    obj = ::bpf_object__open_file(config_.bpfObjectPath.c_str(), &openOpts);
+                }
+                else
+                {
+                    obj = ::bpf_object__open_mem(kMynetBpfBytecode, kMynetBpfBytecodeSize, &openOpts);
+                }
+                if (!obj)
+                {
+                    return false;
+                }
+                struct bpf_program *prog = nullptr;
+                bpf_object__for_each_program(prog, obj)
+                {
+                    const char *pname = ::bpf_program__name(prog);
+                    const bool keep = (pname != nullptr && std::strcmp(pname, "mynet_sockmap_verdict") == 0);
+                    ::bpf_program__set_autoload(prog, keep);
+                }
+                if (::bpf_object__load(obj) != 0)
+                {
+                    ::bpf_object__close(obj);
+                    return false;
+                }
             }
 
             // Map Pinning 钉住 (在 bpf_object__load 之后将未钉住的 Map 钉入 bpffs)
@@ -3163,7 +2875,7 @@ char _license[] SEC("license") = "GPL";
             if (!bpfObj_)
                 return false;
             auto *prog = ::bpf_object__find_program_by_name(bpfObj_, "mynet_tc_filter");
-            if (!prog)
+            if (!prog || !::bpf_program__autoload(prog) || ::bpf_program__fd(prog) < 0)
                 return false;
 
             std::string name(ifName);
@@ -3411,11 +3123,11 @@ char _license[] SEC("license") = "GPL";
                 return false;
             configMapFd_ = static_cast<int>(cfgFd);
 
-            // 4. SockMap
+            // 4. SockHash (与内核 fast_sock 对齐 16B TuplesKey / 8B sockfd；无 verdict 挂载时不通过 sockMapFd() 对外暴露)
             union bpf_attr sockAttr{};
-            sockAttr.map_type = BPF_MAP_TYPE_SOCKMAP;
-            sockAttr.key_size = sizeof(uint32_t);
-            sockAttr.value_size = sizeof(uint32_t);
+            sockAttr.map_type = BPF_MAP_TYPE_SOCKHASH;
+            sockAttr.key_size = sizeof(TuplesKey);
+            sockAttr.value_size = sizeof(uint64_t);
             sockAttr.max_entries = 65536;
             long sFd = ::syscall(__NR_bpf, BPF_MAP_CREATE, &sockAttr, sizeof(sockAttr));
             if (sFd >= 0)

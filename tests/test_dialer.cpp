@@ -3,6 +3,7 @@
 #include "block/block.hpp"
 #include "dialer.hpp"
 #include "direct/direct.hpp"
+#include "direct/outbound.hpp"
 #include "dns/dns.hpp"
 #include "dns/handler.hpp"
 #include "hysteria2/hysteria2.hpp"
@@ -104,7 +105,7 @@ TEST(DnsResolverTest, DecodeResponseAndCache)
 
 TEST(DialerTest, LifecycleAndReset)
 {
-    Dialer<HandlerConnection> dialer;
+    DialerBase<HandlerConnection> dialer;
 
     // 拨号非法 IP 格式失败
     auto res = dialer.dialTcp("not_an_ip", 80);
@@ -404,7 +405,7 @@ TEST(DialerTest, StrategyRoutingOptionsFwmarkAndTransparent)
         void handle() {}
     };
 
-    Dialer<DummyHandler> dialer;
+    DialerBase<DummyHandler> dialer;
     EXPECT_EQ(dialer.mark(), 0u);
     EXPECT_FALSE(dialer.isTransparent());
 
@@ -415,4 +416,36 @@ TEST(DialerTest, StrategyRoutingOptionsFwmarkAndTransparent)
     EXPECT_TRUE(dialer.isTransparent());
 
     dialer.reset();
+}
+
+TEST(DialerTest, ScopedDeferTcpConnectAndPrepareTcpSocket)
+{
+    DialerOptions opts;
+    opts.dscp = 4;
+    DialerDirect dialer("defer-direct", opts);
+
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    target.sin_port = htons(1);
+
+    {
+        ScopedDeferTcpConnect deferGuard(true);
+        auto res = dialer.dialTcp(target);
+        ASSERT_TRUE(res.has_value());
+        EXPECT_GE(res->fd, 0);
+        EXPECT_FALSE(res->immediateConnected);
+        EXPECT_TRUE(res->connectDeferred);
+        EXPECT_EQ(res->peerAddr.sin_port, target.sin_port);
+        EXPECT_EQ(res->peerAddr.sin_addr.s_addr, target.sin_addr.s_addr);
+        ::close(res->fd);
+    }
+
+    // 离开作用域后必须自动恢复默认即时建连行为
+    auto syncRes = dialer.dialTcp(target);
+    if (syncRes.has_value())
+    {
+        EXPECT_FALSE(syncRes->connectDeferred);
+        ::close(syncRes->fd);
+    }
 }

@@ -798,6 +798,157 @@ namespace mynet
             return valid;
         }
 
+        inline void loadTransportSection(lua_State *L, int itemIdx, transport::TransportConfig &cfg, bool &valid)
+        {
+            std::string s;
+            lua_Integer num = 0;
+            bool flag = false;
+
+            auto applyType = [&](std::string_view trType)
+            {
+                if (trType == "ws" || trType == "websocket")
+                {
+                    cfg.type = transport::TransportType::WEBSOCKET;
+                }
+                else if (trType == "grpc")
+                {
+                    cfg.type = transport::TransportType::GRPC;
+                }
+                else if (trType == "tls")
+                {
+                    cfg.type = transport::TransportType::TLS;
+                    cfg.enableTls = true;
+                }
+                else if (trType == "tcp")
+                {
+                    cfg.type = transport::TransportType::TCP;
+                }
+            };
+
+            if (readBoolField(L, itemIdx, "enableTls", flag, valid))
+            {
+                cfg.enableTls = flag;
+            }
+            if (readStringField(L, itemIdx, "certFile", s, valid))
+            {
+                cfg.certFile = std::move(s);
+            }
+            if (readStringField(L, itemIdx, "keyFile", s, valid))
+            {
+                cfg.keyFile = std::move(s);
+            }
+            if (readStringField(L, itemIdx, "caFile", s, valid))
+            {
+                cfg.caFile = std::move(s);
+            }
+            if (readStringField(L, itemIdx, "sni", s, valid))
+            {
+                cfg.sni = std::move(s);
+            }
+            if (readStringField(L, itemIdx, "alpnProtocols", s, valid) || readStringField(L, itemIdx, "alpn", s, valid))
+            {
+                cfg.alpnProtocols = std::move(s);
+            }
+
+            lua_getfield(L, itemIdx, "tls");
+            if (lua_istable(L, -1))
+            {
+                const int tlsIdx = lua_gettop(L);
+                if (readBoolField(L, tlsIdx, "enabled", flag, valid))
+                {
+                    cfg.enableTls = flag;
+                }
+                if (readStringField(L, tlsIdx, "certFile", s, valid))
+                {
+                    cfg.certFile = std::move(s);
+                }
+                if (readStringField(L, tlsIdx, "keyFile", s, valid))
+                {
+                    cfg.keyFile = std::move(s);
+                }
+                if (readStringField(L, tlsIdx, "caFile", s, valid))
+                {
+                    cfg.caFile = std::move(s);
+                }
+                if (readStringField(L, tlsIdx, "sni", s, valid) ||
+                    readStringField(L, tlsIdx, "serverName", s, valid))
+                {
+                    cfg.sni = std::move(s);
+                }
+                if (readStringField(L, tlsIdx, "alpn", s, valid) ||
+                    readStringField(L, tlsIdx, "alpnProtocols", s, valid))
+                {
+                    cfg.alpnProtocols = std::move(s);
+                }
+            }
+            else if (lua_isboolean(L, -1))
+            {
+                cfg.enableTls = lua_toboolean(L, -1) != 0;
+            }
+            lua_pop(L, 1);
+
+            lua_getfield(L, itemIdx, "transport");
+            if (lua_istable(L, -1))
+            {
+                const int trIdx = lua_gettop(L);
+                if (readStringField(L, trIdx, "type", s, valid))
+                {
+                    applyType(s);
+                }
+                if (readStringField(L, trIdx, "path", s, valid))
+                {
+                    cfg.path = std::move(s);
+                }
+                if (readStringField(L, trIdx, "host", s, valid))
+                {
+                    cfg.host = std::move(s);
+                }
+                if (readStringField(L, trIdx, "serviceName", s, valid))
+                {
+                    cfg.serviceName = std::move(s);
+                }
+                if (readNumberField(L, trIdx, "maxEarlyData", num, valid) && num >= 0)
+                {
+                    cfg.maxEarlyData = static_cast<uint32_t>(num);
+                }
+                if (readStringField(L, trIdx, "earlyDataHeaderName", s, valid))
+                {
+                    cfg.earlyDataHeaderName = std::move(s);
+                }
+                if (readBoolField(L, trIdx, "enableTls", flag, valid))
+                {
+                    cfg.enableTls = flag;
+                }
+                if (readStringField(L, trIdx, "sni", s, valid))
+                {
+                    cfg.sni = std::move(s);
+                }
+                if (readStringField(L, trIdx, "certFile", s, valid))
+                {
+                    cfg.certFile = std::move(s);
+                }
+                if (readStringField(L, trIdx, "keyFile", s, valid))
+                {
+                    cfg.keyFile = std::move(s);
+                }
+                if (readStringField(L, trIdx, "alpn", s, valid) ||
+                    readStringField(L, trIdx, "alpnProtocols", s, valid))
+                {
+                    cfg.alpnProtocols = std::move(s);
+                }
+            }
+            else if (lua_isstring(L, -1))
+            {
+                applyType(lua_tostring(L, -1));
+            }
+            lua_pop(L, 1);
+
+            if (cfg.enableTls && cfg.type == transport::TransportType::TCP)
+            {
+                cfg.type = transport::TransportType::TLS;
+            }
+        }
+
         inline bool loadInboundsSection(lua_State *L, int idx, std::vector<InboundConfig> &inbounds)
         {
             bool valid = true;
@@ -875,6 +1026,7 @@ namespace mynet
                         inCfg.enableSniffing = flag;
                     }
 
+                    loadTransportSection(L, itemIdx, inCfg.transport, valid);
                     inbounds.push_back(std::move(inCfg));
                 }
                 lua_pop(L, 1);
@@ -962,6 +1114,7 @@ namespace mynet
                         outCfg.toleranceMs = static_cast<uint32_t>(clampValue<lua_Integer>(num, 0, 10000));
                     }
 
+                    loadTransportSection(L, itemIdx, outCfg.transport, valid);
                     outbounds.push_back(std::move(outCfg));
                 }
                 lua_pop(L, 1);

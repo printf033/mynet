@@ -9,10 +9,10 @@ namespace mynet::direct
      *
      * 继承自统一的 ConnectionBase，在连接层管理 Direct 直连会话流式传输与状态。
      */
-    class ConnectionDirect : public ConnectionBase
+    class ConnectionDirect : public Connection
     {
     public:
-        using ConnectionBase::ConnectionBase;
+        using Connection::Connection;
     };
 
     using DirectConnection = ConnectionDirect;

@@ -131,11 +131,6 @@ namespace mynet::x25519
 
 } // namespace mynet::x25519
 
-namespace mynet
-{
-    namespace x25519 = mynet::x25519;
-}
-
 namespace mynet::handler
 {
     namespace x25519 = mynet::x25519;

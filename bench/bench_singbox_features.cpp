@@ -1,9 +1,7 @@
 #include "dialer.hpp"
 #include "dns/ech.hpp"
-#include "portPool.hpp"
 #include "process.hpp"
 #include "tls/fragmenter.hpp"
-#include "tls/spoof.hpp"
 #include "uot/uot.hpp"
 #include <chrono>
 #include <iomanip>
@@ -20,13 +18,57 @@ using namespace mynet::transport;
 namespace
 {
 
+    std::vector<uint8_t> buildSampleClientHello(std::string_view sni)
+    {
+        std::vector<uint8_t> ch;
+        const size_t sniLen = sni.size();
+        const size_t extSniPayloadLen = 2 + 1 + 2 + sniLen;
+        const size_t extLen = 4 + extSniPayloadLen;
+        const size_t hsBodyLen = 2 + 32 + 1 + 2 + 2 + 1 + 1 + 2 + extLen;
+        const size_t recLen = 4 + hsBodyLen;
+        ch.reserve(5 + recLen);
+        ch.push_back(0x16);
+        ch.push_back(0x03);
+        ch.push_back(0x01);
+        ch.push_back(static_cast<uint8_t>((recLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(recLen & 0xFF));
+        ch.push_back(0x01);
+        ch.push_back(static_cast<uint8_t>((hsBodyLen >> 16) & 0xFF));
+        ch.push_back(static_cast<uint8_t>((hsBodyLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(hsBodyLen & 0xFF));
+        ch.push_back(0x03);
+        ch.push_back(0x03);
+        ch.insert(ch.end(), 32, 0x11);
+        ch.push_back(0x00);
+        ch.push_back(0x00);
+        ch.push_back(0x02);
+        ch.push_back(0x13);
+        ch.push_back(0x01);
+        ch.push_back(0x01);
+        ch.push_back(0x00);
+        ch.push_back(static_cast<uint8_t>((extLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(extLen & 0xFF));
+        ch.push_back(0x00);
+        ch.push_back(0x00);
+        ch.push_back(static_cast<uint8_t>((extSniPayloadLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(extSniPayloadLen & 0xFF));
+        const size_t listLen = 1 + 2 + sniLen;
+        ch.push_back(static_cast<uint8_t>((listLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(listLen & 0xFF));
+        ch.push_back(0x00);
+        ch.push_back(static_cast<uint8_t>((sniLen >> 8) & 0xFF));
+        ch.push_back(static_cast<uint8_t>(sniLen & 0xFF));
+        ch.insert(ch.end(), sni.begin(), sni.end());
+        return ch;
+    }
+
     void benchTlsFragmentThroughput()
     {
         std::cout << "\n=======================================================\n";
         std::cout << " [Benchmark 1] TLS ClientHello 智能分片 (TlsFragmenter)\n";
         std::cout << "=======================================================\n";
 
-        auto ch = TlsSpoofer::buildFakeClientHello("subdomain.target-service.internal.net");
+        auto ch = buildSampleClientHello("subdomain.target-service.internal.net");
         constexpr size_t ITERATIONS = 200'000;
 
         auto start = std::chrono::steady_clock::now();
@@ -54,41 +96,6 @@ namespace
         std::cout << "Latency per Op    : " << std::fixed << std::setprecision(1) << nsPerOp << " ns\n";
         std::cout << "Throughput        : " << std::fixed << std::setprecision(2) << (opsPerSec / 1e6) << " M ops/s\n";
         std::cout << "Result            : [PASS] Zero-copy SNI index + multi-record splitting ultra fast\n";
-    }
-
-    void benchTlsSpoofFrameBuilding()
-    {
-        std::cout << "\n=======================================================\n";
-        std::cout << " [Benchmark 2] TCP Desync / TLS 伪装帧组装 (TlsSpoofer)\n";
-        std::cout << "=======================================================\n";
-
-        TcpEndpoints ep{.srcIp = 0x7F000001, .srcPort = 34567, .dstIp = 0x08080808, .dstPort = 443};
-
-        auto fakeHello = TlsSpoofer::buildFakeClientHello("www.microsoft.com");
-        constexpr size_t ITERATIONS = 200'000;
-
-        auto start = std::chrono::steady_clock::now();
-        size_t totalBytes = 0;
-
-        for (size_t i = 0; i < ITERATIONS; ++i)
-        {
-            auto frame =
-                TlsSpoofer::buildSpoofFrame(SpoofMethod::WRONG_CHECKSUM, ep, 10000 + i, 20000, 300000, fakeHello);
-            totalBytes += frame.size();
-        }
-
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
-
-        double nsPerOp = static_cast<double>(elapsed.count()) / ITERATIONS;
-        double opsPerSec = (static_cast<double>(ITERATIONS) / elapsed.count()) * 1e9;
-
-        std::cout << "Iterations        : " << ITERATIONS << "\n";
-        std::cout << "Total Bytes Built : " << totalBytes << " bytes\n";
-        std::cout << "Latency per Op    : " << std::fixed << std::setprecision(1) << nsPerOp
-                  << " ns (including IP+TCP checksums)\n";
-        std::cout << "Throughput        : " << std::fixed << std::setprecision(2) << (opsPerSec / 1e6)
-                  << " M frames/s\n";
-        std::cout << "Result            : [PASS] RFC 1071 SIMD-friendly dual checksum + frame building\n";
     }
 
     void benchUotFramingAndVectorisedThroughput()
@@ -170,40 +177,6 @@ namespace
         std::cout << "Result            : [PASS] Replaced 10ms /proc scan with <20ns O(1) in-memory resolution\n";
     }
 
-    void benchKernelPortPoolAllocation()
-    {
-        std::cout << "\n=======================================================\n";
-        std::cout << " [Benchmark 5] 内核端口池避让与零碰撞探针分配 (KernelPortPool)\n";
-        std::cout << "=======================================================\n";
-
-        auto &pool = mynet::transparent::KernelPortPool::instance();
-        constexpr size_t ITERATIONS = 50'000;
-
-        auto start = std::chrono::steady_clock::now();
-        size_t allocated = 0;
-
-        for (size_t i = 0; i < ITERATIONS; ++i)
-        {
-            auto port = pool.allocatePort(IPPROTO_TCP, 8);
-            if (port)
-                allocated++;
-        }
-
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start);
-
-        double nsPerAlloc = static_cast<double>(elapsed.count()) / ITERATIONS;
-        double allocsPerSec = (static_cast<double>(ITERATIONS) / elapsed.count()) * 1e9;
-
-        std::cout << "Iterations        : " << ITERATIONS << "\n";
-        std::cout << "Successful Allocs : " << allocated << " (" << std::fixed << std::setprecision(1)
-                  << (100.0 * allocated / ITERATIONS) << "% success)\n";
-        std::cout << "Alloc Latency     : " << std::fixed << std::setprecision(1) << (nsPerAlloc / 1e3)
-                  << " us/alloc (with kernel probe bind)\n";
-        std::cout << "Allocation Rate   : " << std::fixed << std::setprecision(2) << (allocsPerSec / 1e3)
-                  << " K ports/s\n";
-        std::cout << "Result            : [PASS] Guaranteed zero port collision with host ephemeral ports\n";
-    }
-
     void benchEchReverseLookup()
     {
         std::cout << "\n=======================================================\n";
@@ -250,10 +223,8 @@ int main()
     std::cout << "=======================================================\n";
 
     benchTlsFragmentThroughput();
-    benchTlsSpoofFrameBuilding();
     benchUotFramingAndVectorisedThroughput();
     benchProcessCacheResolution();
-    benchKernelPortPoolAllocation();
     benchEchReverseLookup();
 
     std::cout << "\n=======================================================\n";

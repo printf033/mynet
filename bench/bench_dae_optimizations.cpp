@@ -1079,13 +1079,13 @@ void benchToleranceAndLatenciesN()
            (kLatOps / (ms / 1000.0)) / 1000000.0, (ms * 1000000.0) / kLatOps);
 
     // Part B: 路由抖动抑制对比 (Route Flapping Suppression)
-    OutboundManager mgr;
+    DialerManager mgr;
     std::vector<std::string> candidates = {"node_primary", "node_secondary"};
 
     // 对比 1: 无容差阻尼 (tolerance = 0ms)
-    OutboundUrlTest testNoTol("no_tol", candidates, &mgr, "http://cp.cloudflare.com", 300, 0);
+    DialerUrlTest testNoTol("no_tol", candidates, &mgr, "http://cp.cloudflare.com", 300, 0);
     // 对比 2: 启用容差阻尼 (tolerance = 15ms)
-    OutboundUrlTest testWithTol("with_tol", candidates, &mgr, "http://cp.cloudflare.com", 300, 15);
+    DialerUrlTest testWithTol("with_tol", candidates, &mgr, "http://cp.cloudflare.com", 300, 15);
 
     constexpr size_t kSimRounds = 2000;
     size_t flapsNoTol = 0;
@@ -1127,109 +1127,6 @@ void benchToleranceAndLatenciesN()
     printf("    -> 震荡抑制率: +%5.1f%% (大幅减少 TCP 重传与 QUIC 迁移风暴)\n", flapReduction);
 }
 
-// -------------------------------------------------------------
-// 7. FIONREAD 动态就绪载荷聚集前缀发送对比 (机制 71: tryRelayGatherWrite)
-// -------------------------------------------------------------
-void benchScatterGatherGatherWrite()
-{
-    printf("\n-----------------------------------------------------------------\n");
-    printf(" 7. FIONREAD 动态就绪载荷聚集前缀发送对比 (机制 71: tryRelayGatherWrite)\n");
-    printf("-----------------------------------------------------------------\n");
-
-    int pairA[2];
-    int pairB[2];
-    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, pairA) < 0 || ::socketpair(AF_UNIX, SOCK_STREAM, 0, pairB) < 0)
-    {
-        return;
-    }
-
-    constexpr size_t kIterations = 20000;
-    const std::vector<uint8_t> header = {'H', 'E', 'A', 'D', 'E', 'R', ':'};
-    const std::string payload = "GET /resource HTTP/1.1\r\nHost: example.com\r\n\r\n";
-
-    // 测试 1: 朴素方式 (2 次 write 系统调用: 协议头 + 载荷)
-    auto t0 = Clock::now();
-    for (size_t i = 0; i < kIterations; ++i)
-    {
-        [[maybe_unused]] auto _w1 = ::write(pairA[0], header.data(), header.size());
-        [[maybe_unused]] auto _w2 = ::write(pairA[0], payload.data(), payload.size());
-        char drainBuf[128];
-        [[maybe_unused]] auto _r = ::read(pairA[1], drainBuf, sizeof(drainBuf));
-    }
-    auto t1 = Clock::now();
-    double msNaive = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-    // 测试 2: 聚集方式 (FIONREAD + writev 单次系统调用)
-    std::vector<uint8_t> scratch(1024);
-    auto t2 = Clock::now();
-    for (size_t i = 0; i < kIterations; ++i)
-    {
-        // 客户端提前写入就绪载荷
-        [[maybe_unused]] auto _wp = ::write(pairB[1], payload.data(), payload.size());
-        // 中继端利用 FIONREAD 检测并一次性 writev 发出
-        ScatterGatherFlusher::writePrefixedWithGather(pairA[0], header, pairB[0], scratch);
-        char drainBuf[128];
-        [[maybe_unused]] auto _r = ::read(pairA[1], drainBuf, sizeof(drainBuf));
-    }
-    auto t3 = Clock::now();
-    double msGather = std::chrono::duration<double, std::milli>(t3 - t2).count();
-
-    ::close(pairA[0]);
-    ::close(pairA[1]);
-    ::close(pairB[0]);
-    ::close(pairB[1]);
-
-    printf("  [协议前缀与伴随载荷写入系统调用开销对比 (%zu 次迭代)]\n", kIterations);
-    printf("    1. 朴素方案 (两次 write 独立发送):     耗时: %6.2f ms | 系统调用: %zu 次 (存在 Nagle 延迟隐患)\n",
-           msNaive, kIterations * 2);
-    printf("    2. FIONREAD + writev (聚集原子发送):  耗时: %6.2f ms | 系统调用: %zu 次 (-50%% 系统调用)\n", msGather,
-           kIterations);
-    double speedup = ((msNaive - msGather) / msNaive) * 100.0;
-    printf("    -> 写入耗时缩减: +%5.1f%% (单次系统调用上链，消灭分包延迟)\n", speedup);
-}
-
-// -------------------------------------------------------------
-// 8. 短生命周期 UDP 旁路防 Map Churn 稳定性对比 (机制 65)
-// -------------------------------------------------------------
-void benchShortLivedUdpChurnDefense()
-{
-    printf("\n-----------------------------------------------------------------\n");
-    printf(" 8. 短生命周期 UDP 旁路防 Map Churn 稳定性对比 (机制 65)\n");
-    printf("-----------------------------------------------------------------\n");
-
-    constexpr size_t kMaxMapEntries = 65536;
-    constexpr size_t kDnsQueryBurst = 65536;
-
-    printf("  [BPF 状态表抗突发 DNS 泛洪攻击稳定性对比 (表容量上限: %zu 条目)]\n", kMaxMapEntries);
-    printf("    模拟场景: 客户端高频发起 %zu 个随机源端口的 DNS 查询 (UDP dport=53)\n", kDnsQueryBurst);
-
-    // 场景 1: 未开启短生命周期旁路 (全量追踪写入 conn_state_map)
-    size_t simulatedMapOccupancyWithoutBypass = kDnsQueryBurst;
-    double mapUsagePctWithoutBypass =
-        (static_cast<double>(simulatedMapOccupancyWithoutBypass) / kMaxMapEntries) * 100.0;
-    size_t longLivedConnectionsEvictedWithoutBypass = kMaxMapEntries; // 100% 存量长连接被挤压驱逐淘汰
-
-    // 场景 2: 开启短生命周期 UDP 旁路 (isShortLivedUdp)
-    size_t simulatedMapOccupancyWithBypass = 0;
-    for (size_t i = 0; i < kDnsQueryBurst; ++i)
-    {
-        uint16_t sport = static_cast<uint16_t>(1024 + (i % 60000));
-        uint16_t dport = 53;
-        if (!ebpf::isShortLivedUdp(sport, dport))
-        {
-            simulatedMapOccupancyWithBypass++;
-        }
-    }
-    double mapUsagePctWithBypass = (static_cast<double>(simulatedMapOccupancyWithBypass) / kMaxMapEntries) * 100.0;
-    size_t longLivedConnectionsEvictedWithBypass = 0;
-
-    printf("    1. 无旁路保护: Map 利用率: %5.1f%% [满载溢出!] | 存量长连接被误杀驱逐: %zu 条 (Map Churn 灾难)\n",
-           mapUsagePctWithoutBypass, longLivedConnectionsEvictedWithoutBypass);
-    printf("    2. 开启机制 65: Map 利用率: %5.1f%% [零污染]   | 存量长连接被误杀驱逐: %zu 条 (100%% 状态高可用)\n",
-           mapUsagePctWithBypass, longLivedConnectionsEvictedWithBypass);
-    printf("    -> 状态表保护率: 100.0%% (彻底消灭 DNS 瞬态随机端口对 65536 状态表的耗尽攻击)\n");
-}
-
 int main()
 {
     printf("=================================================================\n");
@@ -1242,8 +1139,6 @@ int main()
     benchTcpStreamForwardingComparison();
     benchHttp1ThroughputComparison();
     benchToleranceAndLatenciesN();
-    benchScatterGatherGatherWrite();
-    benchShortLivedUdpChurnDefense();
 
     printf("\n=================================================================\n");
     printf("                     基准测试执行完成                           \n");

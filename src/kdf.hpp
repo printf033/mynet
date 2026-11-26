@@ -178,11 +178,6 @@ namespace mynet::kdf
 
 } // namespace mynet::kdf
 
-namespace mynet
-{
-    namespace kdf = mynet::kdf;
-}
-
 namespace mynet::handler
 {
     namespace kdf = mynet::kdf;

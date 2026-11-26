@@ -3,7 +3,7 @@
  * @brief mynet 生产级统一代理内核守护进程入口 (mynetd Daemon Entrypoint)。
  *
  * 完全复用 mynet 现有代码架构：
- * 1. 采用 AcceptorBase<KernelProxyHandler> 接入混合代理（SOCKS4/SOCKS5/HTTP）；
+ * 1. 采用 AcceptorMixed 接入混合代理（SOCKS4/SOCKS5/HTTP）；
  * 2. 支持根据 server.engine 动态运行 Reactor (epoll) 或 Proactor (io_uring)；
  * 3. 联动 Core 完成策略路由分流、域名嗅探、eBPF 旁路过滤与出站拨号；
  * 4. 联动 Forwarder 实现 Linux splice 零拷贝双向流中继与流量统计；
@@ -13,11 +13,15 @@
 #include "controller.hpp"
 #include "core.hpp"
 #include "reactor.hpp"
+#include "throne/service.hpp"
 #if defined(MYNET_ENABLE_URING)
 #include "proactor.hpp"
 #endif
 #include "config/log.hpp"
+#if defined(MYNET_HAVE_LUA)
 #include "config/lua.hpp"
+#endif
+#include "config/singbox.hpp"
 #include "configHolder.hpp"
 #include "connection.hpp"
 #include "http/http.hpp"
@@ -29,155 +33,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <getopt.h>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unistd.h>
 
 namespace
 {
-
-    class KernelProxyHandler : public mynet::HandlerBase
-    {
-    public:
-        inline static mynet::Core *g_core = nullptr;
-
-        KernelProxyHandler() noexcept = default;
-        ~KernelProxyHandler() noexcept override = default;
-
-        KernelProxyHandler(const KernelProxyHandler &) = delete;
-        KernelProxyHandler &operator=(const KernelProxyHandler &) = delete;
-        KernelProxyHandler(KernelProxyHandler &&) = delete;
-        KernelProxyHandler &operator=(KernelProxyHandler &&) = delete;
-
-        void handle() override
-        {
-            if (activeHandler_ == nullptr)
-            {
-                if (requestBytes() == 0)
-                {
-                    return;
-                }
-
-                const uint8_t b = static_cast<uint8_t>(*requestBegin());
-                if (b == mynet::handler::socks4::kVersion)
-                {
-                    activeHandler_ = &s4_;
-                }
-                else if (b == mynet::handler::socks5::kVersion)
-                {
-                    activeHandler_ = &s5_;
-                }
-                else if (isHttpChar(b))
-                {
-                    activeHandler_ = &http_;
-                }
-                else
-                {
-                    onParseError("KernelProxyHandler: Unrecognized protocol byte");
-                    setCloseAfterResponse(true);
-                    return;
-                }
-            }
-
-            syncToChild(*activeHandler_);
-            activeHandler_->handle();
-            syncFromChild(*activeHandler_);
-
-            if (activeHandler_->isEstablished())
-            {
-                setStage(mynet::handler::InboundStage::STREAMING);
-                targetAddress_ = activeHandler_->targetAddress();
-                command_ = activeHandler_->command();
-
-                if (!dispatched_ && g_core != nullptr)
-                {
-                    dispatched_ = true;
-                    auto res = g_core->dispatch(*activeHandler_, fd(), "default-mixed", true);
-                    if (res.ok() && res.session != nullptr)
-                    {
-                        session_ = res.session;
-                        if (session_->outboundFd() >= 0)
-                        {
-                            setSpliceTarget(session_->outboundFd());
-                        }
-                    }
-                    else
-                    {
-                        setCloseAfterResponse(true);
-                    }
-                }
-            }
-        }
-
-        void reset() noexcept override
-        {
-            mynet::HandlerBase::reset();
-            activeHandler_ = nullptr;
-            s4_.reset();
-            s5_.reset();
-            http_.reset();
-            dispatched_ = false;
-            if (session_ != nullptr)
-            {
-                session_->close(true);
-                session_.reset();
-            }
-        }
-
-    private:
-        static bool isHttpChar(uint8_t b) noexcept
-        {
-            return (b == 'C' || b == 'G' || b == 'P' || b == 'H' || b == 'D' || b == 'O' || b == 'T' ||
-                    (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'));
-        }
-
-        void syncToChild(mynet::HandlerBase &child)
-        {
-            const size_t avail = requestBytes();
-            if (avail > child.requestBytes())
-            {
-                const size_t diff = avail - child.requestBytes();
-                const char *p = requestBegin() + child.requestBytes();
-                [[maybe_unused]] auto _ = child.appendRequest(p, static_cast<ssize_t>(diff));
-            }
-        }
-
-        void syncFromChild(mynet::HandlerBase &child)
-        {
-            const size_t childAvail = child.requestBytes();
-            if (requestBytes() > childAvail)
-            {
-                requestConsume(requestBytes() - childAvail);
-            }
-
-            while (child.hasResponse())
-            {
-                std::string resp = child.takeResponse();
-                [[maybe_unused]] auto _ = pushResponse(resp);
-            }
-
-            if (child.closeAfterResponse())
-            {
-                setCloseAfterResponse(true);
-            }
-
-            if (child.isSpliceActive())
-            {
-                setSpliceTarget(child.spliceTarget());
-            }
-        }
-
-        bool dispatched_{false};
-        mynet::HandlerBase *activeHandler_{nullptr};
-        mynet::handler::HandlerInboundSocks4 s4_{};
-        mynet::handler::HandlerInboundSocks5 s5_{};
-        mynet::handler::HandlerInboundHttpProxy http_{};
-        std::shared_ptr<mynet::ForwarderStreamSession> session_{nullptr};
-    };
 
     std::function<void()> g_stopHandler{nullptr};
     std::function<void()> g_reloadHandler{nullptr};
@@ -229,38 +96,170 @@ namespace
                   << "  SIGHUP                  Live reload Lua configuration without service interruption\n\n";
     }
 
+    template <typename Server>
+    void attachCoreAcceptorsToServer(Server &server, mynet::Core &core, std::vector<int> &watchedAcceptors)
+    {
+        for (const auto &acc : core.acceptors().acceptors())
+        {
+            if (acc == nullptr || !acc->isRunning() || acc->listenFd() < 0 || acc->type() == "tun")
+            {
+                continue;
+            }
+
+            const int listenFd = acc->listenFd();
+            if (acc->type() == "datagram" || acc->type() == "udp")
+            {
+                auto *dgramAcc = static_cast<mynet::AcceptorDatagram *>(acc.get());
+                auto dgramHandler = std::make_shared<mynet::Handler>();
+                dgramHandler->onConnect(listenFd);
+                const std::string tag = acc->tag();
+                const bool sniff = acc->isSniffingEnabled();
+                if (server.loop().addWatch(
+                        listenFd, EPOLLIN,
+                        [&core, dgramAcc, dgramHandler, tag, sniff](uint32_t events)
+                        {
+                            if (!(events & EPOLLIN))
+                            {
+                                return;
+                            }
+                            char buf[4096];
+                            for (;;)
+                            {
+                                sockaddr_in peer{};
+                                sockaddr_in origDst{};
+                                auto r = dgramAcc->datagram().recvWithDst(buf, sizeof(buf), peer, origDst);
+                                if (!r || *r == 0)
+                                {
+                                    break;
+                                }
+                                if (origDst.sin_port != 0)
+                                {
+                                    const auto target = mynet::handler::ProxyAddress::fromIPv4(
+                                        origDst.sin_addr.s_addr, ntohs(origDst.sin_port));
+                                    [[maybe_unused]] auto tx = core.dispatchDatagram(
+                                        *dgramHandler, peer, target, std::string_view(buf, *r), tag, sniff);
+                                }
+                            }
+                        }))
+                {
+                    watchedAcceptors.push_back(listenFd);
+                }
+                continue;
+            }
+
+            if (server.loop().addWatch(
+                    listenFd, EPOLLIN,
+                    [&server, &core, acc](uint32_t events)
+                    {
+                        if (!(events & EPOLLIN))
+                        {
+                            return;
+                        }
+                        for (;;)
+                        {
+                            auto accRes = acc->acceptOne();
+                            if (!accRes)
+                            {
+                                break;
+                            }
+                            const int clientFd = accRes->first;
+                            const sockaddr_in clientAddr = accRes->second;
+                            mynet::ConnectionBase *conn = nullptr;
+                            if (acc->acceptConnection(clientFd, conn) != mynet::HandshakeStatus::SUCCESS ||
+                                conn == nullptr)
+                            {
+                                ::close(clientFd);
+                                continue;
+                            }
+
+                            conn->setFd(clientFd);
+                            conn->setPeerAddr(clientAddr);
+                            conn->setTransport(mynet::TransportType::TCP);
+
+                            if (mynet::Handler *h = conn->handler(); h != nullptr)
+                            {
+                                const std::string inboundTag = acc->tag();
+                                auto dispatched = std::make_shared<bool>(false);
+                                h->setOnRequest(
+                                    [&core, h, inboundTag, dispatched](uint8_t cmd,
+                                                                       const mynet::handler::ProxyAddress &target)
+                                    {
+                                        (void)cmd;
+                                        (void)target;
+                                        if (*dispatched || h->fd() < 0)
+                                        {
+                                            return;
+                                        }
+                                        *dispatched = true;
+                                        auto res = core.dispatch(*h, h->fd(), inboundTag, true, true);
+                                        if (res.ok() && res.session != nullptr)
+                                        {
+                                            LOG_INFO(
+                                                "Acceptor [{}]: Dispatched target '{}' to outbound '{}' (mode: {})",
+                                                inboundTag,
+                                                h->targetAddress().has_value() ? h->targetAddress()->toString()
+                                                                               : "unknown",
+                                                res.outboundTag, mynet::forwardModeName(res.session->activeMode()));
+                                        }
+                                        else
+                                        {
+                                            LOG_ERROR("Acceptor [{}]: Failed to dispatch target: status {}", inboundTag,
+                                                      static_cast<int>(res.status));
+                                            h->setCloseAfterResponse(true);
+                                        }
+                                    });
+                            }
+
+                            if (!server.adoptConnection(conn))
+                            {
+                                continue;
+                            }
+                            // 立即驱动一次状态机（使 tproxy !enableSniffing / direct 零等待进入出站拨号）
+                            conn->handle();
+                        }
+                    }))
+            {
+                watchedAcceptors.push_back(listenFd);
+            }
+        }
+    }
+
     template <template <typename...> class EngineType>
     int runServer(mynet::Core &core, const mynet::MynetConfig &cfg, const std::string &engineName)
     {
-        KernelProxyHandler::g_core = &core;
-
-        using Server = EngineType<mynet::Acceptor<KernelProxyHandler>>;
+        using Server = EngineType<>;
         Server server;
 
         g_stopHandler = [&server]() { server.stop(); };
 
         LOG_INFO("I/O Engine active: {}", engineName);
 
-        // 启动后台流式转发泵送与空闲会话超时排空任务
-        std::atomic<bool> pumpRunning{true};
-        std::thread pumpThread(
-            [&core, &pumpRunning]()
-            {
-                while (pumpRunning.load(std::memory_order_relaxed))
-                {
-                    core.tick();
-                    core.sweepIdleSessions(60);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-            });
+        core.attachEventLoop(server.loop());
+        std::vector<int> watchedAcceptors;
+        attachCoreAcceptorsToServer(server, core, watchedAcceptors);
+        const uint64_t loopSweepTimerId =
+            server.loop().runEvery(std::chrono::seconds(1), [&core]() { core.sweepIdleSessions(60); });
 
-        auto res = server.runTcp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port));
-
-        pumpRunning.store(false, std::memory_order_release);
-        if (pumpThread.joinable())
+        mynet::Result<> res{};
+        if constexpr (requires { server.serve(cfg.server, cfg.reactor); })
         {
-            pumpThread.join();
+            res = server.serve(cfg.server, cfg.reactor);
         }
+        else
+        {
+            res = server.serve(cfg.server, cfg.proactor);
+        }
+        server.reset();
+
+        for (int fd : watchedAcceptors)
+        {
+            server.loop().delWatch(fd);
+        }
+        if (loopSweepTimerId != 0)
+        {
+            [[maybe_unused]] auto _ = server.loop().cancelTimer(loopSweepTimerId);
+        }
+        core.clearEventLoop();
         g_stopHandler = nullptr;
 
         if (!res)
@@ -275,28 +274,58 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
+    // 1. 兼容 sing-box 风格子命令 (version, run, check)
+    if (argc >= 2)
+    {
+        std::string_view subcmd = argv[1];
+        if (subcmd == "version")
+        {
+            printBanner();
+            std::cout << "mynet core version 1.0.0 (sing-box / throne compatible)\n";
+            return 0;
+        }
+    }
+
     std::string configPath = "config/config.lua";
+    std::string throneSocket = mynet::throne::ThroneIpcService::getSocketPathFromEnv();
     bool testConfigOnly = false;
     bool runDaemon = false;
 
     static struct option longOptions[] = {
         {"config", required_argument, nullptr, 'c'}, {"test", no_argument, nullptr, 't'},
         {"version", no_argument, nullptr, 'v'},      {"help", no_argument, nullptr, 'h'},
-        {"daemon", no_argument, nullptr, 'd'},       {nullptr, 0, nullptr, 0}};
+        {"daemon", no_argument, nullptr, 'd'},       {"socket", required_argument, nullptr, 's'},
+        {nullptr, 0, nullptr, 0}};
+
+    if (argc >= 2 && (std::string_view(argv[1]) == "run" || std::string_view(argv[1]) == "check"))
+    {
+        if (std::string_view(argv[1]) == "check")
+        {
+            testConfigOnly = true;
+        }
+        optind = 2;
+    }
 
     int opt = 0;
-    while ((opt = getopt_long(argc, argv, "c:tvhd", longOptions, nullptr)) != -1)
+    while ((opt = getopt_long(argc, argv, "c:tvhds:", longOptions, nullptr)) != -1)
     {
         switch (opt)
         {
         case 'c':
             configPath = optarg;
             break;
+        case 's':
+            throneSocket = optarg;
+            break;
         case 't':
             testConfigOnly = true;
             break;
         case 'v':
             printBanner();
+            std::cout << "mynet core version 1.0.0 (sing-box / throne compatible)\n";
             return 0;
         case 'h':
             printBanner();
@@ -311,7 +340,36 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 检查配置文件是否存在
+    // 2. 优先检测 Throne UDS IPC 环境变量与启动参数 (彻底解耦本地配置文件依赖)
+    if (!throneSocket.empty())
+    {
+        LOG_INFO("==================================================================");
+        LOG_INFO(" mynet proxy kernel running in Throne IPC Core mode");
+        LOG_INFO(" Connecting to Throne UDS: {}", throneSocket);
+        LOG_INFO("==================================================================");
+
+        auto core = std::make_shared<mynet::Core>();
+        mynet::throne::ThroneIpcService service(core);
+
+        static mynet::throne::ThroneIpcService *g_thronePtr = nullptr;
+        g_thronePtr = &service;
+
+        std::signal(SIGINT, [](int) {
+            if (g_thronePtr != nullptr)
+                g_thronePtr->stop();
+        });
+        std::signal(SIGTERM, [](int) {
+            if (g_thronePtr != nullptr)
+                g_thronePtr->stop();
+        });
+
+        // 阻塞同步接入 Throne UDS 守护循环，等待 Throne GUI 调度生命周期
+        service.runSync(throneSocket);
+        LOG_INFO("Throne IPC Core stopped cleanly");
+        return 0;
+    }
+
+    // 3. 独立模式运行：加载配置文件 (支持 sing-box JSON 与 Lua 脚本)
     if (::access(configPath.c_str(), R_OK) != 0)
     {
         if (::access("config/config.lua", R_OK) == 0)
@@ -322,6 +380,10 @@ int main(int argc, char *argv[])
         {
             configPath = "../config/config.lua";
         }
+        else if (::access("config.json", R_OK) == 0)
+        {
+            configPath = "config.json";
+        }
         else
         {
             std::cerr << "[ERROR] Cannot open configuration file: " << configPath << " (" << std::strerror(errno)
@@ -330,18 +392,41 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 加载并解析 Lua 脚本，统一初始化至 ConfigHolder
-#ifdef MYNET_HAVE_LUA
-    if (!mynet::reloadConfig(configPath, false))
-    {
-        std::cerr << "[FATAL] Failed to parse configuration from: " << configPath << "\n";
-        return 1;
-    }
-#else
-    std::cerr << "[WARN] Built without Lua support; running with compiled-in baseline configuration\n";
-#endif
+    mynet::MynetConfig cfg{};
+    const bool isJsonConfig = configPath.ends_with(".json") || configPath.ends_with(".json5");
 
-    const mynet::MynetConfig cfg = mynet::getMynetConfig();
+    if (isJsonConfig)
+    {
+        std::string jsonStr;
+        std::ifstream ifs(configPath);
+        if (ifs)
+        {
+            std::stringstream ss;
+            ss << ifs.rdbuf();
+            jsonStr = ss.str();
+        }
+        auto parsed = mynet::config::singbox::parseSingBoxConfig(jsonStr);
+        if (!parsed)
+        {
+            std::cerr << "[FATAL] Failed to parse sing-box JSON configuration: " << parsed.error() << "\n";
+            return 1;
+        }
+        cfg = std::move(*parsed);
+    }
+    else
+    {
+#ifdef MYNET_HAVE_LUA
+        if (!mynet::reloadConfig(configPath, false))
+        {
+            std::cerr << "[FATAL] Failed to parse configuration from: " << configPath << "\n";
+            return 1;
+        }
+        cfg = mynet::getMynetConfig();
+#else
+        std::cerr << "[WARN] Built without Lua support; running with compiled-in baseline configuration\n";
+        cfg = mynet::getMynetConfig();
+#endif
+    }
 
     // 模式 1：配置校验模式 (-t / --test)
     if (testConfigOnly)
@@ -359,8 +444,8 @@ int main(int argc, char *argv[])
         std::cout << "[OK] Configuration syntax is valid.\n"
                   << "[OK] Topology check PASSED:\n"
                   << "     - Engine selected:    " << cfg.server.engine << "\n"
-                  << "     - Inbounds declared:  " << testCore.inbounds().size() << "\n"
-                  << "     - Outbounds declared: " << testCore.outbounds().size() << "\n"
+                  << "     - Inbounds declared:  " << testCore.acceptors().size() << "\n"
+                  << "     - Outbounds declared: " << testCore.dialers().size() << "\n"
                   << "     - Route rules loaded: " << testCore.router().rules().size() << "\n"
                   << "     - Default outbound:   '" << testCore.router().defaultOutbound() << "'\n"
                   << "     - Splice zero-copy:   " << (cfg.forwarder.enableSplice ? "ENABLED" : "DISABLED") << "\n";
@@ -433,6 +518,31 @@ int main(int argc, char *argv[])
                  core.ebpf()->isKernelBpfActive() ? "Kernel TC Hook" : "User-space LPM Trie");
     }
 
+    // 若配置未显式占用 cfg.server.port，则由 Core 自动补齐默认 mixed 入站，彻底统一到单一事件循环分发路径
+    {
+        bool hasMainTcpInbound = false;
+        for (const auto &inbound : core.acceptors().acceptors())
+        {
+            if (inbound == nullptr)
+            {
+                continue;
+            }
+            const bool sameHost = (cfg.server.host == "0.0.0.0" || inbound->host() == "0.0.0.0" ||
+                                   inbound->host() == cfg.server.host);
+            if (inbound->type() != "datagram" && inbound->type() != "udp" && inbound->type() != "tun" && sameHost &&
+                inbound->port() == cfg.server.port)
+            {
+                hasMainTcpInbound = true;
+                break;
+            }
+        }
+        if (!hasMainTcpInbound && cfg.server.port > 0)
+        {
+            core.acceptors().registerAcceptor(
+                std::make_shared<mynet::AcceptorMixed>("default-mixed", cfg.server.host, cfg.server.port));
+        }
+    }
+
     // 启动入站监听与出站管理器
     if (auto res = core.start(cfg.server.backlog); !res)
     {
@@ -442,7 +552,7 @@ int main(int argc, char *argv[])
 
     // 打印就绪状态
     LOG_INFO("Core engine started successfully. Active listeners:");
-    for (const auto &inbound : core.inbounds().inbounds())
+    for (const auto &inbound : core.acceptors().acceptors())
     {
         LOG_INFO("  * Inbound [{}] protocol='{}' listening on {}:{} (fd: {})", inbound->tag(), inbound->type(),
                  inbound->host(), inbound->port(), inbound->listenFd());
@@ -467,6 +577,16 @@ int main(int argc, char *argv[])
         }
     }
 
+    // 启动可选的 Throne UDS RPC 服务
+    std::unique_ptr<mynet::throne::ThroneIpcService> throneService{nullptr};
+    if (!throneSocket.empty())
+    {
+        LOG_INFO("Starting Throne UDS IPC service on: {}", throneSocket);
+        throneService = std::make_unique<mynet::throne::ThroneIpcService>(
+            std::shared_ptr<mynet::Core>(&core, [](auto *) {}));
+        throneService->start(throneSocket);
+    }
+
     // 根据配置调度执行选定的 I/O 运行引擎 (Reactor 或 Proactor)
     int exitCode = 0;
 #if defined(MYNET_ENABLE_URING)
@@ -489,6 +609,10 @@ int main(int argc, char *argv[])
     // 优雅关断
     LOG_INFO("Shutting down mynet proxy kernel gracefully...");
     g_reloadHandler = nullptr;
+    if (throneService != nullptr)
+    {
+        throneService->stop();
+    }
     if (apiController != nullptr)
     {
         apiController->stop();

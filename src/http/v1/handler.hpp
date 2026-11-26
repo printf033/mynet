@@ -95,19 +95,6 @@ namespace mynet
             virtual void onBodyChunk([[maybe_unused]] std::string_view chunk) noexcept {}
 
             /**
-             * @brief 开启零拷贝反向代理或升级隧道（直接复用 Connection 零拷贝管道）
-             *
-             * 适用于 HTTP/1.1 Upgrade 协议升级（如 WebSocket 帧通道、CONNECT 正向代理隧道），
-             * 或反向代理网关在解析完首部后将后续负载直接交由内核 splice 传输。
-             *
-             * @param targetFd 目标上游套接字或落盘文件描述符
-             */
-            inline void enableSpliceTunnel(int targetFd) noexcept { setSpliceTarget(targetFd); }
-            inline void enableSpliceTunnel(SPLICE_CONTROL ctrl) noexcept { setSpliceControl(ctrl); }
-            inline void disableSpliceTunnel() noexcept { disableSplice(); }
-            [[nodiscard]] inline bool isSpliceTunnelActive() const noexcept { return isSpliceActive(); }
-
-            /**
              * @brief 向响应队列推入标准格式的 HTTP/1.x 响应报文（直接复用 HandlerConnection::pushResponse）
              *
              * @param statusCode HTTP 状态码（如 200, 404, 500）

@@ -350,29 +350,10 @@ TEST(HandlerSocks5Test, ResetAndReuse)
     EXPECT_EQ(handler.stage(), Socks5Stage::REQUEST);
 }
 
-TEST(HandlerSocks5Test, SpliceForwardApis)
+TEST(HandlerSocks5Test, CanSplicePassthroughCheck)
 {
     HandlerInboundSocks5 handler;
-    static_assert(HandlerInboundSocks5::kEnableSplice, "HandlerInboundSocks5 must declare kEnableSplice = true");
-
-    EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-
-    handler.setSpliceTarget(200);
-    EXPECT_TRUE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceTarget(), 200);
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::ACTIVE);
-
-    handler.disableSplice();
-    EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
-
-    handler.setSpliceTarget(201);
-    EXPECT_TRUE(handler.isSpliceActive());
+    EXPECT_TRUE(handler.canSplice());
     handler.reset();
-    EXPECT_FALSE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceControl(), SPLICE_CONTROL::DISABLED);
-    EXPECT_EQ(handler.spliceTarget(), -1);
+    EXPECT_TRUE(handler.canSplice());
 }

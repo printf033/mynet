@@ -16,6 +16,7 @@
 #include "connection.hpp"
 #include "error.hpp"
 #include "tls/fragmenter.hpp"
+#include "transportStack.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -46,7 +47,8 @@
 namespace mynet
 {
 
-    class ConnectionBase;
+    class Connection;
+    using ConnectionBase = Connection;
 
     /**
      * @brief 空出站上下文结构（不占任何空间）
@@ -147,32 +149,270 @@ namespace mynet
     struct DialTcpResult
     {
         int fd{-1};                     ///< 新建套接字描述符
-        bool immediateConnected{false}; ///< 是否立即连通（如本地回环），false 表示处于 EINPROGRESS 异步握手中
+        bool immediateConnected{false}; ///< 是否立即连通（如本地回环），false 表示处于 EINPROGRESS 或延迟异步握手中
+        sockaddr_in peerAddr{};         ///< 目标 IPv4 地址（供 Proactor io_uring_prep_connect 使用）
+        bool connectDeferred{false};    ///< true 表示已准备 socketOptions 仅延迟至 Proactor 异步发起 connect
 
         [[nodiscard]] inline explicit operator bool() const noexcept { return immediateConnected; }
         [[nodiscard]] inline bool ok() const noexcept { return fd >= 0; }
     };
 
     /**
-     * @brief 拨号器纯虚抽象基类（零连接级可变成员）
+     * @brief 出站拨号结果
      */
-    class IDialer
+    struct OutboundDialResult
+    {
+        int fd{-1};                                    ///< 拨号成功的套接字描述符
+        std::unique_ptr<Handler> handler{nullptr};     ///< 对应的出站协议状态机处理器
+        std::string outboundTag{};                     ///< 命中的出站标签
+        std::string targetEndpoint{};                  ///< 目标端点字符串表示
+        bool immediateConnected{false};                ///< 连接是否立即可用（已非阻塞连上）
+        sockaddr_in peerAddr{};                        ///< 目标 IPv4 地址（供异步建连引擎复用）
+        bool connectDeferred{false};                   ///< 是否由底层 Proactor 异步发起 io_uring connect
+
+        [[nodiscard]] inline bool ok() const noexcept { return handler != nullptr; }
+    };
+
+    namespace detail
+    {
+        [[nodiscard]] inline bool &deferTcpConnectTls() noexcept
+        {
+            static thread_local bool s_defer = false;
+            return s_defer;
+        }
+    } // namespace detail
+
+    /**
+     * @brief RAII 作用域守卫：通知当前线程上的 Dialer::dialTcp 将 ::connect 延迟给异步引擎执行
+     */
+    class ScopedDeferTcpConnect
+    {
+    public:
+        explicit ScopedDeferTcpConnect(bool enable = true) noexcept
+            : prev_(detail::deferTcpConnectTls())
+        {
+            detail::deferTcpConnectTls() = enable;
+        }
+        ~ScopedDeferTcpConnect() noexcept { detail::deferTcpConnectTls() = prev_; }
+
+        ScopedDeferTcpConnect(const ScopedDeferTcpConnect &) = delete;
+        ScopedDeferTcpConnect &operator=(const ScopedDeferTcpConnect &) = delete;
+
+    private:
+        bool prev_{false};
+    };
+
+    using DialerResult = OutboundDialResult;
+
+    /**
+     * @brief 拨号器统一抽象基类 (Dialer / Outbound)
+     *
+     * 业务出站端点元数据描述符与协议拨号器。
+     * 直接管理流式与数据报出站建连、多网卡赛马、路由标记 (SO_MARK) 与出站协议握手。
+     */
+    class DialerManager;
+
+    class Dialer
     {
     protected:
         DialerOptions options_{};
+        std::string tag_{};
+        std::string type_{};
+        std::atomic<bool> running_{false};
+        transport::TransportConfig transportConfig_{};
+
+        /**
+         * @brief 解析主机名/字面值为 IPv4 地址（统一复用，消除 dialTcp / dialUdp 重复 DNS 解析逻辑）
+         */
+        [[nodiscard]] static Result<in_addr> resolveIpv4(std::string_view host, int sockType = SOCK_STREAM,
+                                                         bool useCache = true) noexcept
+        {
+            if (host.empty())
+            {
+                return std::unexpected(ERR::ADDR_INVALID);
+            }
+            in_addr inAddr{};
+            std::string hostStr(host);
+            if (::inet_pton(AF_INET, hostStr.c_str(), &inAddr) == 1)
+            {
+                return inAddr;
+            }
+
+            const auto dnsCfg = getDnsConfig();
+            const bool cacheEnabled = useCache && dnsCfg.enableCache;
+            struct DnsCacheEntry
+            {
+                in_addr addr{};
+                std::chrono::steady_clock::time_point expiresAt{};
+            };
+            static std::mutex s_dnsMutex;
+            static std::unordered_map<std::string, DnsCacheEntry> s_dnsCache;
+
+            const auto now = std::chrono::steady_clock::now();
+            if (cacheEnabled)
+            {
+                std::lock_guard<std::mutex> lock(s_dnsMutex);
+                auto it = s_dnsCache.find(hostStr);
+                if (it != s_dnsCache.end() && it->second.expiresAt > now)
+                {
+                    return it->second.addr;
+                }
+            }
+
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = sockType;
+            addrinfo *res = nullptr;
+            if (::getaddrinfo(hostStr.c_str(), nullptr, &hints, &res) != 0 || res == nullptr)
+            {
+                return std::unexpected(ERR::ADDR_INVALID);
+            }
+            const auto *sin = reinterpret_cast<const sockaddr_in *>(res->ai_addr);
+            inAddr = sin->sin_addr;
+            ::freeaddrinfo(res);
+
+            if (cacheEnabled)
+            {
+                const auto ttl = std::chrono::seconds(dnsCfg.ttlSecs > 0 ? dnsCfg.ttlSecs : 60);
+                std::lock_guard<std::mutex> lock(s_dnsMutex);
+                if (s_dnsCache.size() >= 1024)
+                {
+                    for (auto it = s_dnsCache.begin(); it != s_dnsCache.end();)
+                    {
+                        if (it->second.expiresAt <= now)
+                        {
+                            it = s_dnsCache.erase(it);
+                        }
+                        else
+                        {
+                            ++it;
+                        }
+                    }
+                    if (s_dnsCache.size() >= 1024)
+                    {
+                        s_dnsCache.clear();
+                    }
+                }
+                s_dnsCache[std::move(hostStr)] = DnsCacheEntry{inAddr, now + ttl};
+            }
+            return inAddr;
+        }
+
+        /**
+         * @brief 通用出站流式拨号建连与状态机处理器装配辅助函数 (DRY 统一代码复用)
+         */
+        template <typename HandlerType, typename... Args>
+        Result<OutboundDialResult> dialStreamHelper(std::string_view serverHost, uint16_t serverPort,
+                                                    const handler::ProxyAddress &target, Args &&...args)
+        {
+            auto dialRes = dialTcp(serverHost, serverPort);
+            if (!dialRes)
+            {
+                return std::unexpected(dialRes.error());
+            }
+
+            auto h = std::make_unique<HandlerType>(std::forward<Args>(args)..., target);
+            h->onConnect(dialRes->fd);
+            if (transportConfig_.enableTls || transportConfig_.type != transport::TransportType::TCP)
+            {
+                transport::TransportConfig cfg = transportConfig_;
+                if (cfg.sni.empty() && cfg.host.empty() && !serverHost.empty())
+                {
+                    cfg.sni = std::string(serverHost);
+                }
+                if (auto tr = transport::attachConfiguredTransport(*h, cfg, false); !tr)
+                {
+                    if (dialRes->fd >= 0)
+                    {
+                        ::close(dialRes->fd);
+                    }
+                    return std::unexpected(tr.error());
+                }
+                if (auto hs = h->startTransportHandshake(); !hs)
+                {
+                    if (dialRes->fd >= 0)
+                    {
+                        ::close(dialRes->fd);
+                    }
+                    return std::unexpected(hs.error());
+                }
+            }
+            h->handle();
+
+            OutboundDialResult res;
+            res.fd = dialRes->fd;
+            res.handler = std::move(h);
+            res.outboundTag = tag_;
+            res.targetEndpoint = target.toString();
+            res.immediateConnected = dialRes->immediateConnected;
+            res.peerAddr = dialRes->peerAddr;
+            res.connectDeferred = dialRes->connectDeferred;
+            return res;
+        }
 
     public:
-        IDialer() = default;
-        explicit IDialer(DialerOptions options)
+        Dialer() = default;
+        explicit Dialer(DialerOptions options)
             : options_(std::move(options))
         {
         }
-        virtual ~IDialer() = default;
+        Dialer(std::string tag, std::string type, DialerOptions options = {})
+            : options_(std::move(options)),
+              tag_(std::move(tag)),
+              type_(std::move(type))
+        {
+        }
+        virtual ~Dialer() = default;
 
-        IDialer(const IDialer &) = default;
-        IDialer &operator=(const IDialer &) = default;
-        IDialer(IDialer &&) noexcept = default;
-        IDialer &operator=(IDialer &&) noexcept = default;
+        Dialer(const Dialer &) = default;
+        Dialer &operator=(const Dialer &) = default;
+        Dialer(Dialer &&) noexcept = default;
+        Dialer &operator=(Dialer &&) noexcept = default;
+
+        [[nodiscard]] static Result<in_addr> resolveIpv4Public(std::string_view host, int sockType = SOCK_STREAM,
+                                                               bool useCache = true) noexcept
+        {
+            return resolveIpv4(host, sockType, useCache);
+        }
+
+        [[nodiscard]] inline const std::string &tag() const noexcept { return tag_; }
+        [[nodiscard]] inline const std::string &type() const noexcept { return type_; }
+        [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_relaxed); }
+
+        inline void setTransportConfig(transport::TransportConfig cfg)
+        {
+            transportConfig_ = std::move(cfg);
+        }
+        [[nodiscard]] inline const transport::TransportConfig &transportConfig() const noexcept
+        {
+            return transportConfig_;
+        }
+        virtual void setManager(DialerManager *mgr) noexcept { (void)mgr; }
+
+        [[nodiscard]] virtual std::string_view serverHost() const noexcept { return ""; }
+        [[nodiscard]] virtual uint16_t serverPort() const noexcept { return 0; }
+
+        virtual Result<> start() noexcept
+        {
+            running_.store(true, std::memory_order_release);
+            return {};
+        }
+
+        virtual void stop() noexcept { running_.store(false, std::memory_order_release); }
+
+        virtual Result<OutboundDialResult> dial(const handler::ProxyAddress &target) { return dialStream(target); }
+
+        virtual Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target)
+        {
+            (void)target;
+            return std::unexpected(ERR::CONNECT_FAILED);
+        }
+
+        virtual Result<int> dialDatagram(const handler::ProxyAddress &target)
+        {
+            (void)target;
+            return std::unexpected(ERR::CONNECT_FAILED);
+        }
 
         [[nodiscard]] inline const DialerOptions &options() const noexcept { return options_; }
         inline void setOptions(DialerOptions options) noexcept { options_ = std::move(options); }
@@ -213,19 +453,11 @@ namespace mynet
         inline void setInterface(std::string_view ifname) noexcept { options_.bindInterface = ifname; }
         [[nodiscard]] inline std::string_view getInterface() const noexcept { return options_.bindInterface; }
 
-        virtual HandshakeStatus handshake(int targetFd, ConnectionBase *&outConn)
-        {
-            (void)targetFd;
-            outConn = nullptr;
-            return HandshakeStatus::SUCCESS;
-        }
-
         virtual void reset() noexcept {}
 
-        [[nodiscard]] Result<DialTcpResult> dialTcp(const sockaddr_in &target,
-                                                    const char *bindIface = nullptr) const noexcept
+        [[nodiscard]] Result<int> prepareTcpSocket(const char *bindIface = nullptr) const noexcept
         {
-            ::signal(SIGPIPE, SIG_IGN);
+            ignoreSigpipeOnce();
 
             int sockFd = -1;
 #if defined(IPPROTO_MPTCP)
@@ -240,7 +472,7 @@ namespace mynet
             }
             if (sockFd < 0) [[unlikely]]
             {
-                LOG_ERROR("dialTcp: socket() failed: {}", errnoText(errno));
+                LOG_ERROR("prepareTcpSocket: socket() failed: {}", errnoText(errno));
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
 
@@ -255,7 +487,7 @@ namespace mynet
             {
                 if (::setsockopt(sockFd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
                 {
-                    LOG_WARN("dialTcp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
+                    LOG_WARN("prepareTcpSocket: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
                 }
             }
 
@@ -264,7 +496,8 @@ namespace mynet
                 if (::setsockopt(sockFd, SOL_SOCKET, SO_MARK, &options_.fwmark, sizeof(options_.fwmark)) < 0)
                     [[unlikely]]
                 {
-                    LOG_WARN("dialTcp: setsockopt(SO_MARK={}) failed: {}", options_.fwmark, errnoText(errno));
+                    LOG_WARN("prepareTcpSocket: setsockopt(SO_MARK={}) failed: {}", options_.fwmark,
+                             errnoText(errno));
                 }
             }
 
@@ -272,24 +505,42 @@ namespace mynet
             {
                 if (::setsockopt(sockFd, SOL_IP, IP_TRANSPARENT, &opt, sizeof(opt)) < 0) [[unlikely]]
                 {
-                    LOG_WARN("dialTcp: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
+                    LOG_WARN("prepareTcpSocket: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
                 }
             }
 
             if (options_.dscp > 0)
             {
                 int tos = static_cast<int>(options_.dscp) << 2;
-                [[maybe_unused]] auto _ = ::setsockopt(sockFd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+                [[maybe_unused]] auto _tos = ::setsockopt(sockFd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+            }
+
+            return sockFd;
+        }
+
+        [[nodiscard]] Result<DialTcpResult> dialTcp(const sockaddr_in &target,
+                                                    const char *bindIface = nullptr) const noexcept
+        {
+            auto sockRes = prepareTcpSocket(bindIface);
+            if (!sockRes)
+            {
+                return std::unexpected(sockRes.error());
+            }
+            const int sockFd = *sockRes;
+
+            if (detail::deferTcpConnectTls())
+            {
+                return DialTcpResult{sockFd, false, target, true};
             }
 
             int rc = ::connect(sockFd, reinterpret_cast<const sockaddr *>(&target), sizeof(sockaddr_in));
             if (rc == 0)
             {
-                return DialTcpResult{sockFd, true};
+                return DialTcpResult{sockFd, true, target, false};
             }
             if (errno == EINPROGRESS)
             {
-                return DialTcpResult{sockFd, false};
+                return DialTcpResult{sockFd, false, target, false};
             }
 
             LOG_ERROR("dialTcp: connect() failed: {}", errnoText(errno));
@@ -300,30 +551,15 @@ namespace mynet
         [[nodiscard]] Result<DialTcpResult> dialTcp(std::string_view host, uint16_t port,
                                                     const char *bindIface = nullptr) const noexcept
         {
-            if (host.empty())
+            auto resolved = resolveIpv4(host, SOCK_STREAM);
+            if (!resolved)
             {
-                return std::unexpected(ERR::ADDR_INVALID);
-            }
-            in_addr inAddr{};
-            std::string hostStr(host);
-            if (::inet_pton(AF_INET, hostStr.c_str(), &inAddr) != 1)
-            {
-                addrinfo hints{};
-                hints.ai_family = AF_INET;
-                hints.ai_socktype = SOCK_STREAM;
-                addrinfo *res = nullptr;
-                if (::getaddrinfo(hostStr.c_str(), nullptr, &hints, &res) != 0 || res == nullptr)
-                {
-                    return std::unexpected(ERR::ADDR_INVALID);
-                }
-                const auto *sin = reinterpret_cast<const sockaddr_in *>(res->ai_addr);
-                inAddr = sin->sin_addr;
-                ::freeaddrinfo(res);
+                return std::unexpected(resolved.error());
             }
 
             sockaddr_in target{};
             target.sin_family = AF_INET;
-            target.sin_addr = inAddr;
+            target.sin_addr = *resolved;
             target.sin_port = ::htons(port);
             return dialTcp(target, bindIface);
         }
@@ -346,13 +582,13 @@ namespace mynet
             return dialTcp(target, bindIface);
         }
 
-        [[nodiscard]] Result<int> dialUdp(const sockaddr_in &target, const char *bindIface = nullptr) const noexcept
+        [[nodiscard]] Result<Datagram> createConfiguredDatagram(const char *bindIface = nullptr) const noexcept
         {
-            int sockFd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (sockFd < 0) [[unlikely]]
+            auto dgramRes = Datagram::create(true);
+            if (!dgramRes) [[unlikely]]
             {
-                LOG_ERROR("dialUdp: socket() failed: {}", errnoText(errno));
-                return std::unexpected(ERR::SOCKET_FAILED);
+                LOG_ERROR("createConfiguredDatagram: socket() failed: {}", errnoText(errno));
+                return std::unexpected(dgramRes.error());
             }
 
             const char *iface = (bindIface != nullptr && bindIface[0] != '\0')
@@ -360,58 +596,67 @@ namespace mynet
                                     : (!options_.bindInterface.empty() ? options_.bindInterface.c_str() : nullptr);
             if (iface != nullptr && iface[0] != '\0')
             {
-                if (::setsockopt(sockFd, SOL_SOCKET, SO_BINDTODEVICE, iface, ::strlen(iface)) < 0) [[unlikely]]
+                if (auto r = dgramRes->setInterface(iface); !r) [[unlikely]]
                 {
-                    LOG_WARN("dialUdp: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface, errnoText(errno));
+                    LOG_WARN("createConfiguredDatagram: setsockopt(SO_BINDTODEVICE={}) failed: {}", iface,
+                             errnoText(errno));
                 }
             }
 
             if (options_.fwmark > 0)
             {
-                if (::setsockopt(sockFd, SOL_SOCKET, SO_MARK, &options_.fwmark, sizeof(options_.fwmark)) < 0)
-                    [[unlikely]]
+                if (auto r = dgramRes->setMark(options_.fwmark); !r) [[unlikely]]
                 {
-                    LOG_WARN("dialUdp: setsockopt(SO_MARK={}) failed: {}", options_.fwmark, errnoText(errno));
+                    LOG_WARN("createConfiguredDatagram: setsockopt(SO_MARK={}) failed: {}", options_.fwmark,
+                             errnoText(errno));
                 }
             }
 
-            if (::connect(sockFd, reinterpret_cast<const sockaddr *>(&target), sizeof(sockaddr_in)) < 0) [[unlikely]]
+            if (options_.transparent)
             {
-                LOG_ERROR("dialUdp: connect() failed: {}", errnoText(errno));
-                ::close(sockFd);
-                return std::unexpected(ERR::CONNECT_FAILED);
+                if (auto r = dgramRes->setTransparent(true); !r) [[unlikely]]
+                {
+                    LOG_WARN("createConfiguredDatagram: setsockopt(IP_TRANSPARENT) failed: {}", errnoText(errno));
+                }
             }
 
-            return sockFd;
+            if (options_.dscp > 0)
+            {
+                (void)dgramRes->setDscp(options_.dscp);
+            }
+
+            return dgramRes;
+        }
+
+        [[nodiscard]] Result<int> dialUdp(const sockaddr_in &target, const char *bindIface = nullptr) const noexcept
+        {
+            auto dgramRes = createConfiguredDatagram(bindIface);
+            if (!dgramRes) [[unlikely]]
+            {
+                return std::unexpected(dgramRes.error());
+            }
+
+            if (auto r = dgramRes->connect(target); !r) [[unlikely]]
+            {
+                LOG_ERROR("dialUdp: connect() failed: {}", errnoText(errno));
+                return std::unexpected(r.error());
+            }
+
+            return dgramRes->release();
         }
 
         [[nodiscard]] Result<int> dialUdp(std::string_view host, uint16_t port,
                                           const char *bindIface = nullptr) const noexcept
         {
-            if (host.empty())
+            auto resolved = resolveIpv4(host, SOCK_DGRAM);
+            if (!resolved)
             {
-                return std::unexpected(ERR::ADDR_INVALID);
-            }
-            in_addr inAddr{};
-            std::string hostStr(host);
-            if (::inet_pton(AF_INET, hostStr.c_str(), &inAddr) != 1)
-            {
-                addrinfo hints{};
-                hints.ai_family = AF_INET;
-                hints.ai_socktype = SOCK_DGRAM;
-                addrinfo *res = nullptr;
-                if (::getaddrinfo(hostStr.c_str(), nullptr, &hints, &res) != 0 || res == nullptr)
-                {
-                    return std::unexpected(ERR::ADDR_INVALID);
-                }
-                const auto *sin = reinterpret_cast<const sockaddr_in *>(res->ai_addr);
-                inAddr = sin->sin_addr;
-                ::freeaddrinfo(res);
+                return std::unexpected(resolved.error());
             }
 
             sockaddr_in target{};
             target.sin_family = AF_INET;
-            target.sin_addr = inAddr;
+            target.sin_addr = *resolved;
             target.sin_port = ::htons(port);
             return dialUdp(target, bindIface);
         }
@@ -435,34 +680,50 @@ namespace mynet
     };
 
     /**
-     * @brief 兼容泛型出站拨号器模板包装（零数据成员，支持直接作为默认拨号器或兼容原有泛型写法）
+     * @brief 兼容别名：IDialer / OutboundBase 直接收敛至统一的 Dialer
+     */
+    using IDialer = Dialer;
+    using OutboundBase = Dialer;
+    using Outbound = Dialer;
+
+    /**
+     * @brief 兼容泛型出站拨号器模板包装（继承自 Dialer）
      *
      * @tparam OutboundContext 协议特有的 outbound 上下文类型。默认为 EmptyOutbound。
      */
     template <typename OutboundContext = EmptyOutbound>
-    class Dialer : public IDialer
+    class TypedDialer : public Dialer
     {
     public:
         using Outbound = OutboundContext;
         using Handler = OutboundContext;
 
-        Dialer() = default;
-        explicit Dialer([[maybe_unused]] OutboundContext outbound) {}
-        explicit Dialer(DialerOptions options)
-            : IDialer(std::move(options))
+        TypedDialer() = default;
+        explicit TypedDialer([[maybe_unused]] OutboundContext outbound) {}
+        TypedDialer(std::string tag, std::string type, DialerOptions options = {})
+            : Dialer(std::move(tag), std::move(type), std::move(options))
         {
         }
-        ~Dialer() override = default;
+        explicit TypedDialer(DialerOptions options)
+            : Dialer(std::move(options))
+        {
+        }
+        ~TypedDialer() override = default;
+
+        TypedDialer(const TypedDialer &) = default;
+        TypedDialer &operator=(const TypedDialer &) = default;
+        TypedDialer(TypedDialer &&) noexcept = default;
+        TypedDialer &operator=(TypedDialer &&) noexcept = default;
     };
 
     template <typename OutboundContext = EmptyOutbound>
-    using DialerBase = Dialer<OutboundContext>;
+    using DialerBase = TypedDialer<OutboundContext>;
 
     template <typename OutboundContext = EmptyOutbound>
-    using DialerBaseCompat = Dialer<OutboundContext>;
+    using DialerBaseCompat = TypedDialer<OutboundContext>;
 
     template <typename D>
-    concept DerivedFromDialer = std::derived_from<D, IDialer>;
+    concept DerivedFromDialer = std::derived_from<D, Dialer>;
 
     template <typename D>
     concept BaseDialer = DerivedFromDialer<D>;

@@ -17,6 +17,9 @@
 #include "dns/cache.hpp"
 #include "inboundManager.hpp"
 #include "sniffer.hpp"
+#include "tun.hpp"
+#include "tunPacket.hpp"
+#include <arpa/inet.h>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
@@ -82,6 +85,12 @@ namespace mynet::handler
 
         [[nodiscard]] TransparentStage stage() const noexcept { return transparentStage_; }
 
+        void onConnect(int fd) noexcept override
+        {
+            HandlerInboundConnectionBase::onConnect(fd);
+            clientFd_ = fd;
+        }
+
         void reset() noexcept override
         {
             HandlerInboundConnectionBase::reset();
@@ -118,9 +127,10 @@ namespace mynet::handler
     protected:
         virtual std::optional<ProxyAddress> fetchOriginalDst()
         {
-            if (clientFd_ >= 0)
+            const int targetFd = (clientFd_ >= 0) ? clientFd_ : fd();
+            if (targetFd >= 0)
             {
-                return ProxyAddress::fromOriginalDst(clientFd_);
+                return ProxyAddress::fromOriginalDst(targetFd);
             }
             return std::nullopt;
         }
@@ -242,9 +252,10 @@ namespace mynet::handler
     protected:
         std::optional<ProxyAddress> fetchOriginalDst() override
         {
-            if (clientFd_ >= 0)
+            const int targetFd = (clientFd_ >= 0) ? clientFd_ : fd();
+            if (targetFd >= 0)
             {
-                return ProxyAddress::fromTProxyDst(clientFd_);
+                return ProxyAddress::fromTProxyDst(targetFd);
             }
             return std::nullopt;
         }
@@ -357,13 +368,13 @@ namespace mynet
 {
 
     /**
-     * @brief Linux TProxy 透明代理入站端点 (InboundTransparent)
+     * @brief Linux TProxy 透明代理接收器 (AcceptorTransparent / InboundTransparent)
      */
-    class InboundTransparent : public InboundBase
+    class AcceptorTransparent : public Acceptor
     {
     public:
-        InboundTransparent(std::string tag, std::string host, uint16_t port, bool enableSniffing = true)
-            : InboundBase(std::move(tag), "tproxy", std::move(host), port, enableSniffing)
+        AcceptorTransparent(std::string tag, std::string host, uint16_t port, bool enableSniffing = true)
+            : Acceptor(std::move(tag), "tproxy", std::move(host), port, enableSniffing)
         {
         }
 
@@ -384,7 +395,7 @@ namespace mynet
             int transparentOpt = 1;
             if (::setsockopt(socket_.fd, SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
             {
-                LOG_WARN("InboundTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", socket_.fd,
+                LOG_WARN("AcceptorTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", socket_.fd,
                          errnoText(errno));
             }
 
@@ -397,18 +408,77 @@ namespace mynet
             return {};
         }
 
-        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<Handler> createHandler() override
         {
-            return std::make_unique<handler::HandlerInboundTProxy>();
+            auto h = std::make_unique<handler::HandlerInboundTProxy>();
+            h->setSniffing(enableSniffing_);
+            return h;
         }
     };
 
-    using AcceptorTransparent = InboundTransparent;
+    using InboundTransparent = AcceptorTransparent;
 
     /**
-     * @brief Linux TUN 虚拟网络接口端点 (InboundTun)
+     * @brief Linux 虚拟网卡接口配置辅助工具 (配置 IP、掩码与 MTU 并将接口置为 UP)
      */
-    class InboundTun : public InboundBase
+    inline bool configureTunInterface(const std::string &ifName, const std::string &ip, const std::string &netmask,
+                                      uint32_t mtu) noexcept
+    {
+        int s = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        if (s < 0)
+        {
+            return false;
+        }
+
+        struct ifreq ifr{};
+        std::strncpy(ifr.ifr_name, ifName.c_str(), IFNAMSIZ - 1);
+
+        // 1. 设置 MTU
+        if (mtu > 0)
+        {
+            ifr.ifr_mtu = static_cast<int>(mtu);
+            ::ioctl(s, SIOCSIFMTU, &ifr);
+        }
+
+        // 2. 设置本地 IPv4 地址
+        if (!ip.empty())
+        {
+            struct sockaddr_in sin{};
+            sin.sin_family = AF_INET;
+            if (::inet_pton(AF_INET, ip.c_str(), &sin.sin_addr) == 1)
+            {
+                std::memcpy(&ifr.ifr_addr, &sin, sizeof(sin));
+                ::ioctl(s, SIOCSIFADDR, &ifr);
+            }
+        }
+
+        // 3. 设置子网掩码
+        if (!netmask.empty())
+        {
+            struct sockaddr_in sin{};
+            sin.sin_family = AF_INET;
+            if (::inet_pton(AF_INET, netmask.c_str(), &sin.sin_addr) == 1)
+            {
+                std::memcpy(&ifr.ifr_netmask, &sin, sizeof(sin));
+                ::ioctl(s, SIOCSIFNETMASK, &ifr);
+            }
+        }
+
+        // 4. 将网卡置为 UP 且 RUNNING
+        if (::ioctl(s, SIOCGIFFLAGS, &ifr) == 0)
+        {
+            ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
+            ::ioctl(s, SIOCSIFFLAGS, &ifr);
+        }
+
+        ::close(s);
+        return true;
+    }
+
+    /**
+     * @brief Linux TUN 虚拟网络接口接收器 (AcceptorTun / InboundTun)
+     */
+    class AcceptorTun : public Acceptor
     {
     private:
         std::string ifName_{"tun0"};
@@ -416,17 +486,20 @@ namespace mynet
         std::string netmask_{};
         uint32_t mtu_{1500};
         int tunFd_{-1};
+        int mockPeerFd_{-1};
+        bool mockMode_{false};
+        std::shared_ptr<tun::TunEngine> engine_{nullptr};
 
     public:
-        InboundTun(std::string tag, std::string ifName = "tun0", bool enableSniffing = true)
-            : InboundBase(std::move(tag), "tun", "0.0.0.0", 0, enableSniffing),
+        AcceptorTun(std::string tag, std::string ifName = "tun0", bool enableSniffing = true)
+            : Acceptor(std::move(tag), "tun", "0.0.0.0", 0, enableSniffing),
               ifName_(std::move(ifName))
         {
         }
 
-        InboundTun(std::string tag, std::string ifName, std::string inetIp, std::string netmask = "255.255.255.0",
-                   uint32_t mtu = 1500, bool enableSniffing = true)
-            : InboundBase(std::move(tag), "tun", "0.0.0.0", 0, enableSniffing),
+        AcceptorTun(std::string tag, std::string ifName, std::string inetIp, std::string netmask = "255.255.255.0",
+                    uint32_t mtu = 1500, bool enableSniffing = true)
+            : Acceptor(std::move(tag), "tun", "0.0.0.0", 0, enableSniffing),
               ifName_(std::move(ifName)),
               inetIp_(std::move(inetIp)),
               netmask_(std::move(netmask)),
@@ -434,40 +507,98 @@ namespace mynet
         {
         }
 
-        ~InboundTun() noexcept override { close(); }
+        ~AcceptorTun() noexcept override { close(); }
 
         [[nodiscard]] inline int tunFd() const noexcept { return tunFd_; }
+        [[nodiscard]] inline int mockPeerFd() const noexcept { return mockPeerFd_; }
         [[nodiscard]] inline const std::string &ifName() const noexcept { return ifName_; }
         [[nodiscard]] inline const std::string &interfaceName() const noexcept { return ifName_; }
         [[nodiscard]] inline const std::string &inetIp() const noexcept { return inetIp_; }
         [[nodiscard]] inline const std::string &netmask() const noexcept { return netmask_; }
         [[nodiscard]] inline uint32_t mtu() const noexcept { return mtu_; }
+        [[nodiscard]] inline std::shared_ptr<tun::TunEngine> engine() const noexcept { return engine_; }
+
+        void setTunFd(int fd) noexcept
+        {
+            tunFd_ = fd;
+            socket_.fd = fd;
+        }
+
+        void setMockMode(bool enable) noexcept { mockMode_ = enable; }
+        [[nodiscard]] bool isMockMode() const noexcept { return mockMode_; }
 
         Result<> listen(int = 128, bool = true, bool = true) noexcept override
         {
-            if (tunFd_ >= 0)
+            if (running_ && tunFd_ >= 0)
             {
                 return {};
             }
 
-            tunFd_ = ::open("/dev/net/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
-            if (tunFd_ < 0)
+            if (mockMode_)
             {
-                LOG_ERROR("InboundTun: opening /dev/net/tun failed: {}", errnoText(errno));
-                return std::unexpected(ERR::SOCKET_FAILED);
+                int sv[2];
+                if (::socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sv) == 0)
+                {
+                    tunFd_ = sv[0];
+                    mockPeerFd_ = sv[1];
+                    LOG_INFO("AcceptorTun: initialized mock TUN socketpair (fd={}, peer={})", tunFd_, mockPeerFd_);
+                }
+                else
+                {
+                    return std::unexpected(ERR::SOCKET_FAILED);
+                }
+            }
+            else if (tunFd_ < 0)
+            {
+                tunFd_ = ::open("/dev/net/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+                bool ioctlOk = false;
+                if (tunFd_ >= 0)
+                {
+                    struct ifreq ifr{};
+                    ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+                    std::strncpy(ifr.ifr_name, ifName_.c_str(), IFNAMSIZ - 1);
+
+                    if (::ioctl(tunFd_, TUNSETIFF, &ifr) >= 0)
+                    {
+                        ioctlOk = true;
+                        // 尝试配置网卡 IP / 掩码 / MTU (若进程具备相应网络管理权限)
+                        configureTunInterface(ifName_, inetIp_, netmask_, mtu_);
+                    }
+                    else
+                    {
+                        LOG_WARN("AcceptorTun: ioctl(TUNSETIFF) on '{}' failed: {}", ifName_, errnoText(errno));
+                        ::close(tunFd_);
+                        tunFd_ = -1;
+                    }
+                }
+
+                if (!ioctlOk)
+                {
+                    if (std::getenv("MYNET_MOCK_TUN") != nullptr)
+                    {
+                        int sv[2];
+                        if (::socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sv) == 0)
+                        {
+                            tunFd_ = sv[0];
+                            mockPeerFd_ = sv[1];
+                            LOG_INFO("AcceptorTun: fallback to mock TUN socketpair (fd={}, peer={})", tunFd_,
+                                     mockPeerFd_);
+                        }
+                        else
+                        {
+                            return std::unexpected(ERR::SOCKET_FAILED);
+                        }
+                    }
+                    else
+                    {
+                        return std::unexpected(ERR::SOCKET_FAILED);
+                    }
+                }
             }
 
-            struct ifreq ifr{};
-            ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-            std::strncpy(ifr.ifr_name, ifName_.c_str(), IFNAMSIZ - 1);
-
-            if (::ioctl(tunFd_, TUNSETIFF, &ifr) < 0)
-            {
-                LOG_ERROR("InboundTun: ioctl(TUNSETIFF) on '{}' failed: {}", ifName_, errnoText(errno));
-                ::close(tunFd_);
-                tunFd_ = -1;
-                return std::unexpected(ERR::SOCKET_FAILED);
-            }
+            socket_.fd = tunFd_;
+            engine_ = std::make_shared<tun::TunEngine>(tunFd_, mtu_, enableSniffing_);
+            engine_->start();
 
             running_ = true;
             return {};
@@ -475,20 +606,33 @@ namespace mynet
 
         void close() noexcept override
         {
+            if (engine_ != nullptr)
+            {
+                engine_->stop();
+                engine_.reset();
+            }
+            if (mockPeerFd_ >= 0)
+            {
+                ::close(mockPeerFd_);
+                mockPeerFd_ = -1;
+            }
             if (tunFd_ >= 0)
             {
                 ::close(tunFd_);
                 tunFd_ = -1;
             }
-            InboundBase::close();
+            socket_.fd = -1;
+            Acceptor::close();
         }
 
-        [[nodiscard]] std::unique_ptr<HandlerBase> createHandler() override
+        [[nodiscard]] std::unique_ptr<Handler> createHandler() override
         {
-            return std::make_unique<handler::HandlerInboundTProxy>();
+            auto h = std::make_unique<handler::HandlerInboundTProxy>();
+            h->setSniffing(enableSniffing_);
+            return h;
         }
     };
 
-    using AcceptorTransparent = InboundTransparent;
+    using InboundTun = AcceptorTun;
 
 } // namespace mynet

@@ -39,6 +39,7 @@
 #include <tuple>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -53,14 +54,30 @@ namespace mynet
     {
     private:
         template <typename U>
-        static auto checkAcceptor(int) -> typename U::Acceptor;
-        template <typename U>
-        static auto checkAcceptor(...) -> U;
+        static auto resolveAcceptor()
+        {
+            if constexpr (std::derived_from<U, mynet::Acceptor>)
+            {
+                return std::type_identity<U>{};
+            }
+            else if constexpr (std::derived_from<U, mynet::HandlerBase>)
+            {
+                return std::type_identity<TypedAcceptor<U>>{};
+            }
+            else if constexpr (requires { typename U::Acceptor; })
+            {
+                return std::type_identity<typename U::Acceptor>{};
+            }
+            else
+            {
+                return std::type_identity<TypedAcceptor<U>>{};
+            }
+        }
 
         template <typename U>
         static auto checkDialer(int) -> typename U::Dialer;
         template <typename U>
-        static auto checkDialer(...) -> Dialer<EmptyOutbound>;
+        static auto checkDialer(...) -> DialerBase<EmptyOutbound>;
 
         template <typename U>
         static auto checkConnection(int) -> typename U::Connection;
@@ -68,7 +85,7 @@ namespace mynet
         static auto checkConnection(...) -> ConnectionBase;
 
     public:
-        using Acceptor = decltype(checkAcceptor<T>(0));
+        using Acceptor = typename decltype(resolveAcceptor<T>())::type;
         using Dialer = decltype(checkDialer<T>(0));
         using Connection = decltype(checkConnection<T>(0));
     };
@@ -340,6 +357,121 @@ namespace mynet
         }
     }
 
+    namespace detail
+    {
+        template <size_t... Is, typename TupleT>
+        inline void dispatchProtocolTcpClientImpl(int clientFd, ConnectionBase *&conn, size_t listenerIdx,
+                                                  const std::array<size_t, sizeof...(Is)> &listenerIndices,
+                                                  TupleT &acceptors, std::index_sequence<Is...>)
+        {
+            auto dispatchAcc = [&](auto &acc)
+            {
+                [[maybe_unused]] auto _ = acc.acceptConnection(clientFd, conn);
+            };
+
+            size_t matchedCount = 0;
+            for (size_t idx : listenerIndices)
+            {
+                if (idx == listenerIdx)
+                    ++matchedCount;
+            }
+
+            if (matchedCount == 1)
+            {
+                ((listenerIndices[Is] == listenerIdx ? (dispatchAcc(std::get<Is>(acceptors)), true) : false) || ...);
+            }
+            else if (matchedCount > 1)
+            {
+                uint8_t peekBuf[16]{};
+                ssize_t n = ::recv(clientFd, peekBuf, sizeof(peekBuf), MSG_PEEK);
+                std::span<const uint8_t> bytes(peekBuf, n > 0 ? static_cast<size_t>(n) : 0);
+
+                bool dispatched = false;
+                (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors).match(bytes))
+                      ? (dispatchAcc(std::get<Is>(acceptors)), dispatched = true)
+                      : false) ||
+                 ...);
+
+                if (!dispatched)
+                {
+                    ((listenerIndices[Is] == listenerIdx ? (dispatchAcc(std::get<Is>(acceptors)), true) : false) ||
+                     ...);
+                }
+            }
+        }
+
+        template <typename... Protocols, typename TupleT>
+        inline void dispatchProtocolTcpClient(int clientFd, ConnectionBase *&conn, size_t listenerIdx, TupleT &acceptors)
+        {
+            if constexpr (sizeof...(Protocols) > 0)
+            {
+                [&]<size_t... Is>(std::index_sequence<Is...> seq)
+                {
+                    constexpr auto listenerIndices = std::array<size_t, sizeof...(Protocols)>{
+                        getListenerIndexForProtocol<Is, Protocols...>()...};
+                    dispatchProtocolTcpClientImpl(clientFd, conn, listenerIdx, listenerIndices, acceptors, seq);
+                }(std::make_index_sequence<sizeof...(Protocols)>{});
+            }
+        }
+
+        template <typename... Protocols, typename TupleT, typename HandlerArrayT>
+        inline void drainProtocolUdp(Listener &listener, size_t listenerIdx, HandlerBase *externalUdpHandler,
+                                     HandlerArrayT &udpHandlers, TupleT &acceptors)
+        {
+            inbound::drainDatagramSocket(
+                listener.fd(),
+                [&](std::span<const uint8_t> bytes) -> HandlerBase *
+                {
+                    if (externalUdpHandler != nullptr)
+                    {
+                        return externalUdpHandler;
+                    }
+                    if constexpr (sizeof...(Protocols) > 0)
+                    {
+                        HandlerBase *selected = nullptr;
+                        [&]<size_t... Is>(std::index_sequence<Is...>)
+                        {
+                            constexpr auto listenerIndices = std::array<size_t, sizeof...(Protocols)>{
+                                getListenerIndexForProtocol<Is, Protocols...>()...};
+
+                            size_t matchedIdx = sizeof...(Protocols);
+                            (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors).match(bytes))
+                                  ? (matchedIdx = Is, true)
+                                  : false) ||
+                             ...);
+
+                            if (matchedIdx == sizeof...(Protocols))
+                            {
+                                ((listenerIndices[Is] == listenerIdx ? (matchedIdx = Is, true) : false) || ...);
+                            }
+
+                            if (matchedIdx < sizeof...(Protocols))
+                            {
+                                auto pickSlot = [&](auto &acc, size_t idx)
+                                {
+                                    if (udpHandlers[idx] == nullptr)
+                                    {
+                                        udpHandlers[idx] = acc.buildConfiguredHandler();
+                                        if (udpHandlers[idx] != nullptr)
+                                        {
+                                            udpHandlers[idx]->onConnect(listener.fd());
+                                        }
+                                    }
+                                    if (udpHandlers[idx] != nullptr)
+                                    {
+                                        selected = udpHandlers[idx].get();
+                                    }
+                                };
+                                ((Is == matchedIdx ? (pickSlot(std::get<Is>(acceptors), Is), true) : false) || ...);
+                            }
+                        }(std::make_index_sequence<sizeof...(Protocols)>{});
+                        return selected;
+                    }
+                    return nullptr;
+                });
+        }
+    } // namespace detail
+
     /**
      * @brief 基于 epoll 与 eventfd 的高性能事件循环核心
      */
@@ -351,6 +483,17 @@ namespace mynet
         using Clock = TimerQueue::Clock;
         using Time = TimerQueue::Time;
         using TimerCallback = TimerQueue::Callback;
+        using WatchCallback = std::function<void(uint32_t events)>;
+
+    private:
+        struct WatchEntry
+        {
+            int fd{-1};
+            WatchCallback cb{};
+            bool removed{false};
+        };
+
+    public:
 
         static constexpr size_t kInitialEventCapacity = 1 << 10;
 
@@ -418,6 +561,9 @@ namespace mynet
 
         ~EventLoop() noexcept
         {
+            watches_.clear();
+            watchPtrs_.clear();
+            deferredDeleteWatches_.clear();
             if (wakeFd_ != -1)
             {
                 ::close(wakeFd_);
@@ -428,6 +574,55 @@ namespace mynet
                 ::close(epollFd_);
                 epollFd_ = -1;
             }
+        }
+
+        [[nodiscard]] inline bool addWatch(int fd, uint32_t events, WatchCallback cb)
+        {
+            if (fd < 0 || epollFd_ < 0 || !cb) [[unlikely]]
+            {
+                return false;
+            }
+            if (watches_.contains(fd))
+            {
+                delWatch(fd);
+            }
+            auto entry = std::make_unique<WatchEntry>(WatchEntry{fd, std::move(cb), false});
+            WatchEntry *raw = entry.get();
+            if (auto res = addFd(fd, events, raw); !res)
+            {
+                return false;
+            }
+            watchPtrs_.insert(raw);
+            watches_[fd] = std::move(entry);
+            return true;
+        }
+
+        [[nodiscard]] inline bool modWatch(int fd, uint32_t events) noexcept
+        {
+            auto it = watches_.find(fd);
+            if (it == watches_.end() || it->second == nullptr || it->second->removed)
+            {
+                return false;
+            }
+            return static_cast<bool>(modFd(fd, events, it->second.get()));
+        }
+
+        inline void delWatch(int fd)
+        {
+            auto it = watches_.find(fd);
+            if (it == watches_.end())
+            {
+                return;
+            }
+            [[maybe_unused]] auto _ = delFd(fd);
+            WatchEntry *raw = it->second.get();
+            watchPtrs_.erase(raw);
+            raw->removed = true;
+            if (dispatchingWatches_)
+            {
+                deferredDeleteWatches_.push_back(std::move(it->second));
+            }
+            watches_.erase(it);
         }
 
         inline void setEventCapacity(size_t cap) { events_.resize(cap == 0 ? 1 : cap); }
@@ -529,6 +724,7 @@ namespace mynet
                     return std::unexpected(ERR::EPOLL_CTL_FAILED);
                 }
 
+                dispatchingWatches_ = true;
                 for (int i = 0; i < n; ++i)
                 {
                     if (events_[i].data.u64 == kWakeToken)
@@ -536,11 +732,22 @@ namespace mynet
                         drainWakeup();
                         continue;
                     }
+                    if (!watchPtrs_.empty() && watchPtrs_.contains(events_[i].data.ptr))
+                    {
+                        auto *w = static_cast<WatchEntry *>(events_[i].data.ptr);
+                        if (!w->removed && w->cb)
+                        {
+                            w->cb(events_[i].events);
+                        }
+                        continue;
+                    }
                     if (eventCallback_)
                     {
                         eventCallback_(events_[i].events, events_[i].data.ptr);
                     }
                 }
+                dispatchingWatches_ = false;
+                deferredDeleteWatches_.clear();
 
                 if (!timerQueue_.empty()) [[unlikely]]
                 {
@@ -677,6 +884,10 @@ namespace mynet
         std::atomic<bool> hasPending_{false};
         std::mutex mutex_{};
         std::deque<Task> pending_{};
+        std::unordered_map<int, std::unique_ptr<WatchEntry>> watches_{};
+        std::unordered_set<void *> watchPtrs_{};
+        std::vector<std::unique_ptr<WatchEntry>> deferredDeleteWatches_{};
+        bool dispatchingWatches_{false};
     };
 
     /**
@@ -1023,22 +1234,26 @@ namespace mynet
         template <typename H>
         [[nodiscard]] Result<> runUdp(const char *ip, int port, H &handler, const ReactorConfig &reactor)
         {
-            (void)handler;
+            struct UdpHandlerGuard
+            {
+                HandlerBase *&slot;
+                explicit UdpHandlerGuard(HandlerBase *&s, HandlerBase *h) noexcept : slot(s) { slot = h; }
+                ~UdpHandlerGuard() noexcept { slot = nullptr; }
+            } guard(externalUdpHandler_, &handler);
             return runUdp(ip, port, getServerConfig(), reactor);
         }
 
         template <typename H>
         [[nodiscard]] Result<> runUdp(const char *ip, int port, H &handler)
         {
-            (void)handler;
-            return runUdp(ip, port);
+            return runUdp(ip, port, handler, getReactorConfig());
         }
 
         template <typename H>
         [[nodiscard]] Result<> runUdp(H &handler)
         {
-            (void)handler;
-            return runUdp();
+            const MynetConfig cfg = getMynetConfig();
+            return runUdp(cfg.server.host.c_str(), static_cast<int>(cfg.server.port), handler, cfg.reactor);
         }
 
         [[nodiscard]] Result<> serve(const ServerConfig &server, const ReactorConfig &reactor)
@@ -1132,7 +1347,35 @@ namespace mynet
 
             std::apply([](auto &...acc) { (acc.reset(), ...); }, acceptors_);
             std::apply([](auto &...dia) { (dia.reset(), ...); }, dialers_);
+            for (auto &uh : udpHandlers_)
+            {
+                uh.reset();
+            }
+            externalUdpHandler_ = nullptr;
             loop_.setEventCallback({});
+        }
+
+        /**
+         * @brief 将外部 Acceptor（如 TProxy / 多端口入站）创建的 Connection 纳入 Reactor 事件循环托管
+         */
+        inline bool adoptConnection(ConnectionBase *conn)
+        {
+            if (conn == nullptr || conn->fd() < 0) [[unlikely]]
+            {
+                return false;
+            }
+            const int clientFd = conn->fd();
+            connections_[clientFd] = conn;
+            uint32_t evMask = EPOLLIN | EPOLLOUT | EPOLLET;
+#ifdef EPOLLRDHUP
+            evMask |= EPOLLRDHUP;
+#endif
+            if (auto res = loop_.addFd(clientFd, evMask, conn); !res)
+            {
+                closeConn(conn);
+                return false;
+            }
+            return true;
         }
 
     private:
@@ -1186,6 +1429,7 @@ namespace mynet
                     break;
                 }
 
+                LOG_INFO("Reactor: acceptAllTcp fd {} on listenerIdx {}", clientFd, listenerIdx);
                 dispatchClient(clientFd, clientAddr, listenerIdx);
             }
         }
@@ -1204,7 +1448,12 @@ namespace mynet
                 dispatchClientToAcceptors(clientFd, conn, listenerIdx);
                 if (conn == nullptr)
                 {
+                    LOG_WARN("Reactor: dispatchClientToAcceptors left conn == nullptr for fd {}", clientFd);
                     conn = new ConnectionBase();
+                }
+                else
+                {
+                    LOG_INFO("Reactor: dispatchClientToAcceptors created conn for fd {} with handler {}", clientFd, (void*)conn->handler());
                 }
             }
 
@@ -1213,7 +1462,11 @@ namespace mynet
             conn->setTransport(TransportType::TCP);
             connections_[clientFd] = conn;
 
-            if (auto res = loop_.addFd(clientFd, EPOLLIN | EPOLLOUT | EPOLLET, conn); !res)
+            uint32_t evMask = EPOLLIN | EPOLLOUT | EPOLLET;
+#ifdef EPOLLRDHUP
+            evMask |= EPOLLRDHUP;
+#endif
+            if (auto res = loop_.addFd(clientFd, evMask, conn); !res)
             {
                 closeConn(conn);
             }
@@ -1221,102 +1474,27 @@ namespace mynet
 
         inline void dispatchClientToAcceptors(int clientFd, ConnectionBase *&conn, size_t listenerIdx)
         {
-            [&]<size_t... Is>(std::index_sequence<Is...>)
-            {
-                constexpr auto listenerIndices =
-                    std::array<size_t, sizeof...(Protocols)>{getListenerIndexForProtocol<Is, Protocols...>()...};
-
-                size_t matchedCount = 0;
-                for (size_t i = 0; i < sizeof...(Protocols); ++i)
-                {
-                    if (listenerIndices[i] == listenerIdx)
-                        ++matchedCount;
-                }
-
-                if (matchedCount == 1)
-                {
-                    ((listenerIndices[Is] == listenerIdx ? (std::get<Is>(acceptors_).handshake(clientFd, conn), true)
-                                                         : false) ||
-                     ...);
-                }
-                else if (matchedCount > 1)
-                {
-                    uint8_t peekBuf[16]{};
-                    ssize_t n = ::recv(clientFd, peekBuf, sizeof(peekBuf), MSG_PEEK);
-                    std::span<const uint8_t> bytes(peekBuf, n > 0 ? static_cast<size_t>(n) : 0);
-
-                    IAcceptor *matched = nullptr;
-                    (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors_).match(bytes))
-                          ? (matched = &std::get<Is>(acceptors_), true)
-                          : false) ||
-                     ...);
-
-                    if (matched != nullptr)
-                    {
-                        matched->handshake(clientFd, conn);
-                    }
-                    else
-                    {
-                        ((listenerIndices[Is] == listenerIdx
-                              ? (std::get<Is>(acceptors_).handshake(clientFd, conn), true)
-                              : false) ||
-                         ...);
-                    }
-                }
-            }(std::make_index_sequence<sizeof...(Protocols)>{});
+            detail::dispatchProtocolTcpClient<Protocols...>(clientFd, conn, listenerIdx, acceptors_);
         }
 
         inline void drainUdp(Listener &listener, size_t listenerIdx)
         {
-            uint8_t buf[65536];
-            while (true)
-            {
-                sockaddr_in peer{};
-                socklen_t len = sizeof(peer);
-                ssize_t n = ::recvfrom(listener.fd(), buf, sizeof(buf), 0, reinterpret_cast<sockaddr *>(&peer), &len);
-                if (n < 0)
-                {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        break;
-                    if (errno == EINTR)
-                        continue;
-                    break;
-                }
-
-                if constexpr (sizeof...(Protocols) > 0)
-                {
-                    ConnectionBase *conn = nullptr;
-                    std::span<const uint8_t> bytes(buf, static_cast<size_t>(n));
-
-                    [&]<size_t... Is>(std::index_sequence<Is...>)
-                    {
-                        constexpr auto listenerIndices = std::array<size_t, sizeof...(Protocols)>{
-                            getListenerIndexForProtocol<Is, Protocols...>()...};
-                        IAcceptor *matched = nullptr;
-                        (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors_).match(bytes))
-                              ? (matched = &std::get<Is>(acceptors_), true)
-                              : false) ||
-                         ...);
-
-                        if (matched == nullptr)
-                        {
-                            ((listenerIndices[Is] == listenerIdx ? (matched = &std::get<Is>(acceptors_), true)
-                                                                 : false) ||
-                             ...);
-                        }
-                        if (matched != nullptr)
-                        {
-                            matched->handshake(listener.fd(), conn);
-                        }
-                    }(std::make_index_sequence<sizeof...(Protocols)>{});
-                }
-            }
+            detail::drainProtocolUdp<Protocols...>(listener, listenerIdx, externalUdpHandler_, udpHandlers_, acceptors_);
         }
 
         inline void onConnection(ConnectionBase *conn, uint32_t events)
         {
             if (conn == nullptr || conn->fd() < 0) [[unlikely]]
             {
+                return;
+            }
+
+            if (auto extRes = conn->tryHandleExternalIo(events); extRes.has_value())
+            {
+                if (*extRes == IO_STATUS::CLOSE) [[unlikely]]
+                {
+                    closeConn(conn);
+                }
                 return;
             }
 
@@ -1363,13 +1541,31 @@ namespace mynet
 
         inline void sweepIdle()
         {
-            // 空闲连接清理
+            if (idleTimeout_.count() <= 0 || connections_.empty())
+            {
+                return;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            std::vector<ConnectionBase *> expired;
+            for (const auto &[fd, conn] : connections_)
+            {
+                if (conn != nullptr && (now - conn->lastActive()) > idleTimeout_)
+                {
+                    expired.push_back(conn);
+                }
+            }
+            for (ConnectionBase *conn : expired)
+            {
+                closeConn(conn);
+            }
         }
 
         std::array<Listener, kListenerCount> listeners_{};
 
         std::tuple<typename ProtocolTraits<Protocols>::Acceptor...> acceptors_{};
         std::tuple<typename ProtocolTraits<Protocols>::Dialer...> dialers_{};
+        std::array<std::unique_ptr<Handler>, (kProtocolCount > 0 ? kProtocolCount : 1)> udpHandlers_{};
+        HandlerBase *externalUdpHandler_{nullptr};
         std::unordered_map<int, ConnectionBase *> connections_{};
         size_t maxConnections_{1024};
 

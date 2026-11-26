@@ -28,9 +28,6 @@ namespace mynet::handler
      */
     class HandlerInboundSnell : public HandlerInboundConnectionBase
     {
-    public:
-        static constexpr bool kEnableSplice = true;
-
     private:
         uint8_t version_{2};
         std::string psk_{};

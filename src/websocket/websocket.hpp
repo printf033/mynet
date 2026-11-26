@@ -401,7 +401,7 @@ namespace mynet::websocket
         std::string host_{};
         std::string secKey_{};
 
-        std::vector<uint8_t> inBuffer_{};
+        RequestBuffer inBuffer_{};
         std::vector<uint8_t> outBuffer_{};
 
     public:
@@ -413,7 +413,10 @@ namespace mynet::websocket
         {
         }
 
-        [[nodiscard]] TransportType type() const noexcept override { return TransportType::WEBSOCKET; }
+        [[nodiscard]] mynet::transport::TransportType type() const noexcept override
+        {
+            return mynet::transport::TransportType::WEBSOCKET;
+        }
         [[nodiscard]] TransportState state() const noexcept override { return state_; }
         [[nodiscard]] bool isReady() const noexcept override { return state_ == TransportState::STREAMING; }
 
@@ -421,8 +424,123 @@ namespace mynet::websocket
         {
             state_ = TransportState::INITIAL;
             secKey_.clear();
-            inBuffer_.clear();
+            inBuffer_.reset();
             outBuffer_.clear();
+        }
+
+        [[nodiscard]] std::optional<std::string> startHandshake() override
+        {
+            if (isServer_)
+            {
+                return std::nullopt;
+            }
+            return startClientHandshake();
+        }
+
+        [[nodiscard]] Result<> onWireInput(std::span<const uint8_t> wireIn, RequestBuffer &appOut,
+                                           ResponseQueue &wireOut) override
+        {
+            if (state_ == TransportState::FAILED || state_ == TransportState::CLOSED)
+            {
+                return {};
+            }
+            if (!wireIn.empty())
+            {
+                if (auto r = inBuffer_.append(reinterpret_cast<const char *>(wireIn.data()), wireIn.size()); !r)
+                {
+                    return r;
+                }
+            }
+
+            if (state_ == TransportState::INITIAL || state_ == TransportState::HANDSHAKING)
+            {
+                std::string_view view = inBuffer_.readableView();
+                const size_t headerEnd = view.find("\r\n\r\n");
+                if (headerEnd == std::string_view::npos)
+                {
+                    state_ = TransportState::HANDSHAKING;
+                    return {};
+                }
+                const size_t handshakeBytes = headerEnd + 4;
+                if (isServer_)
+                {
+                    auto resp = feedClientRequest(view.substr(0, handshakeBytes));
+                    if (!resp.has_value())
+                    {
+                        return std::unexpected(ERR::CONNECT_FAILED);
+                    }
+                    if (auto r = wireOut.emplace(resp->data(), resp->size()); !r)
+                    {
+                        return r;
+                    }
+                }
+                else
+                {
+                    if (!feedServerResponse(view.substr(0, handshakeBytes)))
+                    {
+                        return std::unexpected(ERR::CONNECT_FAILED);
+                    }
+                }
+                inBuffer_.retrieve(handshakeBytes);
+            }
+
+            if (state_ == TransportState::STREAMING)
+            {
+                while (inBuffer_.readableBytes() > 0)
+                {
+                    Frame frame;
+                    std::span<const uint8_t> span(reinterpret_cast<const uint8_t *>(inBuffer_.readableBegin()),
+                                                  inBuffer_.readableBytes());
+                    const size_t consumed = decodeFrame(span, frame);
+                    if (consumed == 0)
+                    {
+                        break;
+                    }
+                    inBuffer_.retrieve(consumed);
+
+                    if (frame.opcode == Opcode::BINARY || frame.opcode == Opcode::CONTINUATION ||
+                        frame.opcode == Opcode::TEXT)
+                    {
+                        if (!frame.payload.empty())
+                        {
+                            if (auto r = appOut.append(reinterpret_cast<const char *>(frame.payload.data()),
+                                                       frame.payload.size());
+                                !r)
+                            {
+                                return r;
+                            }
+                        }
+                    }
+                    else if (frame.opcode == Opcode::PING)
+                    {
+                        std::vector<uint8_t> pongFrame;
+                        encodeFrame(frame.payload, Opcode::PONG, !isServer_, pongFrame);
+                        if (auto r = wireOut.emplace(reinterpret_cast<const char *>(pongFrame.data()),
+                                                     pongFrame.size());
+                            !r)
+                        {
+                            return r;
+                        }
+                    }
+                    else if (frame.opcode == Opcode::CLOSE)
+                    {
+                        state_ = TransportState::CLOSED;
+                        break;
+                    }
+                }
+            }
+            return {};
+        }
+
+        [[nodiscard]] Result<> onAppOutput(std::span<const uint8_t> appIn, ResponseQueue &wireOut) override
+        {
+            if (appIn.empty())
+            {
+                return {};
+            }
+            std::vector<uint8_t> wrapped;
+            encodeFrame(appIn, Opcode::BINARY, !isServer_, wrapped);
+            return wireOut.emplace(reinterpret_cast<const char *>(wrapped.data()), wrapped.size());
         }
 
         /**
@@ -491,17 +609,24 @@ namespace mynet::websocket
             {
                 return;
             }
-            inBuffer_.insert(inBuffer_.end(), incoming.begin(), incoming.end());
+            if (!incoming.empty())
+            {
+                [[maybe_unused]] auto _ =
+                    inBuffer_.append(reinterpret_cast<const char *>(incoming.data()), incoming.size());
+            }
 
-            while (!inBuffer_.empty())
+            while (inBuffer_.readableBytes() > 0)
             {
                 Frame frame;
-                size_t consumed = decodeFrame(std::span<const uint8_t>(inBuffer_.data(), inBuffer_.size()), frame);
+                size_t consumed = decodeFrame(
+                    std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(inBuffer_.readableBegin()),
+                                             inBuffer_.readableBytes()),
+                    frame);
                 if (consumed == 0)
                 {
                     break;
                 }
-                inBuffer_.erase(inBuffer_.begin(), inBuffer_.begin() + consumed);
+                inBuffer_.retrieve(consumed);
 
                 if (frame.opcode == Opcode::BINARY || frame.opcode == Opcode::CONTINUATION ||
                     frame.opcode == Opcode::TEXT)

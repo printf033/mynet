@@ -19,6 +19,7 @@
 #include "config/log.hpp"
 #include "configHolder.hpp"
 #include "connection.hpp"
+#include "datagramCore.hpp"
 #include "dialer.hpp"
 #include "ebpf.hpp"
 #include "error.hpp"
@@ -34,6 +35,9 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#if defined(__linux__)
+#include <sys/epoll.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -54,6 +58,22 @@ namespace mynet
         ZERO_COPY_SPLICE, ///< 强制 Linux splice(2) 内核管道零拷贝转发
         BUFFER_PUMP       ///< 强制用户态缓冲泵送（支持 TLS、协议重写、帧拆拼等）
     };
+
+    [[nodiscard]] inline constexpr const char *forwardModeName(ForwardMode mode) noexcept
+    {
+        switch (mode)
+        {
+        case ForwardMode::AUTO:
+            return "AUTO";
+        case ForwardMode::KERNEL_SOCKMAP:
+            return "KERNEL_SOCKMAP";
+        case ForwardMode::ZERO_COPY_SPLICE:
+            return "ZERO_COPY_SPLICE";
+        case ForwardMode::BUFFER_PUMP:
+            return "BUFFER_PUMP";
+        }
+        return "UNKNOWN";
+    }
 
     /**
      * @brief 转发会话生命周期状态
@@ -118,128 +138,125 @@ namespace mynet
         [[nodiscard]] inline size_t total() const noexcept { return bytesUp + bytesDown; }
     };
 
-    /**
-     * @brief 分散-聚集向量写入与协议头前缀冲刷器 (借鉴 dae writev scatter-gather header prefixing)
-     *
-     * 在转发代理协议报文（如 Shadowsocks 盐/Nonce、Socks5 目标头、Trojan 校验散列等）时：
-     * 将协议头（前缀）与后续应用层载荷合并为一个系统调用 ::writev(2) 发送，
-     * 避免因两次 ::write(2) 造成的额外系统调用开销与小包拆分（Nagle 延迟）。
-     */
-    class ScatterGatherFlusher
-    {
-    public:
-        /**
-         * @brief 将多个非连续内存切片一次性原子写入套接字
-         */
-        static ssize_t writevBuffers(int fd, std::span<const iovec> iovs) noexcept
-        {
-            if (fd < 0 || iovs.empty())
-                return 0;
-            return ::writev(fd, iovs.data(), static_cast<int>(iovs.size()));
-        }
-
-        /**
-         * @brief 将前缀协议头与数据载荷以 writev 聚集发送
-         */
-        static ssize_t writePrefixed(int fd, std::span<const uint8_t> header, std::span<const uint8_t> payload) noexcept
-        {
-            if (fd < 0)
-                return -1;
-            iovec iov[2];
-            iov[0].iov_base = const_cast<uint8_t *>(header.data());
-            iov[0].iov_len = header.size();
-            iov[1].iov_base = const_cast<uint8_t *>(payload.data());
-            iov[1].iov_len = payload.size();
-            return ::writev(fd, iov, 2);
-        }
-
-        /**
-         * @brief 配合 FIONREAD 动态从客户端套接字抓取伴随载荷，并与协议头一起原子发送 (机制 71: tryRelayGatherWrite)
-         *
-         * 检查源套接字缓冲区是否有伴随到达的应用层载荷：
-         * 若有，单次读取并与协议前缀以 writev 聚集原子发送，消灭两次系统调用与 Nagle 延时。
-         */
-        static ssize_t writePrefixedWithGather(int dstFd, std::span<const uint8_t> header, int srcFd,
-                                               std::span<uint8_t> scratchBuf) noexcept
-        {
-            if (dstFd < 0)
-                return -1;
-            int pending = 0;
-            size_t payloadLen = 0;
-            if (srcFd >= 0 && ::ioctl(srcFd, FIONREAD, &pending) == 0 && pending > 0 && !scratchBuf.empty())
-            {
-                size_t toRead = std::min(static_cast<size_t>(pending), scratchBuf.size());
-                ssize_t n = ::read(srcFd, scratchBuf.data(), toRead);
-                if (n > 0)
-                {
-                    payloadLen = static_cast<size_t>(n);
-                }
-            }
-            if (payloadLen > 0)
-            {
-                return writePrefixed(dstFd, header, std::span<const uint8_t>(scratchBuf.data(), payloadLen));
-            }
-            return writePrefixed(dstFd, header, {});
-        }
-    };
-
     namespace detail
     {
         [[nodiscard]] inline SpliceResult splicePipes(int srcFd, int dstFd, int pipeWriteFd, int pipeReadFd,
-                                                      size_t maxBytes = 65536) noexcept
+                                                      size_t maxBytes, size_t *pipePending) noexcept
         {
             if (srcFd < 0 || dstFd < 0 || pipeWriteFd < 0 || pipeReadFd < 0)
             {
                 return {.bytesSpliced = -1, .eof = false, .err = EINVAL};
             }
 
+            size_t localPending = 0;
+            size_t &pending = (pipePending != nullptr) ? *pipePending : localPending;
+            size_t written = 0;
+
+            auto drainPipeOut = [&]() noexcept -> std::optional<SpliceResult>
+            {
+                while (pending > 0)
+                {
+                    const ssize_t sOut =
+                        ::splice(pipeReadFd, nullptr, dstFd, nullptr, pending, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                    if (sOut > 0)
+                    {
+                        written += static_cast<size_t>(sOut);
+                        pending -= static_cast<size_t>(sOut);
+                        continue;
+                    }
+                    if (sOut < 0)
+                    {
+                        if (errno == EINTR)
+                        {
+                            continue;
+                        }
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            return SpliceResult{
+                                .bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = EAGAIN};
+                        }
+                        return SpliceResult{.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = errno};
+                    }
+                    break;
+                }
+                return std::nullopt;
+            };
+
+            // 先排空上次因目的端 EAGAIN 遗留在管道内的字节，避免对端随后关闭时误判 EOF 丢数据
+            if (auto stopRes = drainPipeOut(); stopRes.has_value())
+            {
+                return *stopRes;
+            }
+
             // 1. 从源端摄入管道
-            const ssize_t sIn =
-                ::splice(srcFd, nullptr, pipeWriteFd, nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            ssize_t sIn = -1;
+            for (;;)
+            {
+                sIn = ::splice(srcFd, nullptr, pipeWriteFd, nullptr, maxBytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if (sIn < 0 && errno == EINTR)
+                {
+                    continue;
+                }
+                break;
+            }
             if (sIn < 0)
             {
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
                 {
-                    return {.bytesSpliced = 0, .eof = false, .err = EAGAIN};
+                    return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = EAGAIN};
                 }
-                return {.bytesSpliced = -1, .eof = false, .err = errno};
+                return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = errno};
             }
             if (sIn == 0)
             {
-                return {.bytesSpliced = 0, .eof = true, .err = 0};
+                return {.bytesSpliced = static_cast<ssize_t>(written), .eof = true, .err = 0};
             }
 
+            pending += static_cast<size_t>(sIn);
+
             // 2. 从管道刷出至目的端
-            size_t pending = static_cast<size_t>(sIn);
-            size_t written = 0;
-            while (pending > 0)
+            if (auto stopRes = drainPipeOut(); stopRes.has_value())
             {
-                const ssize_t sOut =
-                    ::splice(pipeReadFd, nullptr, dstFd, nullptr, pending, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                if (sOut > 0)
-                {
-                    written += static_cast<size_t>(sOut);
-                    pending -= static_cast<size_t>(sOut);
-                    continue;
-                }
-                if (sOut < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    {
-                        return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = EAGAIN};
-                    }
-                    return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = errno};
-                }
-                break;
+                return *stopRes;
             }
 
             return {.bytesSpliced = static_cast<ssize_t>(written), .eof = false, .err = 0};
         }
+
+        [[nodiscard]] inline SpliceResult splicePipes(int srcFd, int dstFd, int pipeWriteFd, int pipeReadFd,
+                                                      size_t maxBytes = 65536) noexcept
+        {
+            return splicePipes(srcFd, dstFd, pipeWriteFd, pipeReadFd, maxBytes, nullptr);
+        }
     } // namespace detail
+
+    /**
+     * @brief 转发会话挂接外部事件循环 (EventLoop) 的可选轻量回调钩子
+     */
+    class ForwarderStreamSession;
+
+    struct ForwarderLoopHooks
+    {
+        std::function<bool(int fd, uint32_t events, std::function<void(uint32_t)>)> addWatch{};
+        std::function<bool(int fd, uint32_t events)> modWatch{};
+        std::function<void(int fd)> delWatch{};
+        std::function<void(std::function<void()>)> postTask{};
+
+        // Proactor (io_uring) 原生异步接管钩子：存在时由引擎以 SQE/CQE 直接驱动 connect/recv/send/splice
+        bool deferOutboundConnect{false};
+        std::function<bool(const std::shared_ptr<ForwarderStreamSession> &session)> registerSession{};
+        std::function<void(uint64_t sessionId)> notifySession{};
+        std::function<bool(uint64_t sessionId, bool transferOutboundFdOwnership)> retireSession{};
+
+        [[nodiscard]] inline bool active() const noexcept
+        {
+            return (static_cast<bool>(addWatch) && static_cast<bool>(delWatch)) || hasAsyncRelay();
+        }
+        [[nodiscard]] inline bool hasAsyncRelay() const noexcept
+        {
+            return static_cast<bool>(registerSession) && static_cast<bool>(retireSession);
+        }
+    };
 
     /**
      * @brief 双向流式转发会话 (Stream Forwarding Session)
@@ -265,16 +282,72 @@ namespace mynet
         HandlerBase *outbound_{nullptr};
         std::unique_ptr<HandlerBase> ownedInbound_{nullptr};
         std::unique_ptr<HandlerBase> ownedOutbound_{nullptr};
+        std::shared_ptr<IStreamChannel> inboundChannel_{nullptr};
+        std::shared_ptr<IStreamChannel> outboundChannel_{nullptr};
         int inboundFd_{-1};
         int outboundFd_{-1};
         int sockmapFd_{-1};
         int pipeUp_[2]{-1, -1};
         int pipeDown_[2]{-1, -1};
         handler::ProxyAddress target_{};
+        std::string outboundTag_{};
+
+        struct PendingSlice
+        {
+            std::string data{};
+            size_t offset{0};
+
+            [[nodiscard]] inline bool empty() const noexcept { return offset >= data.size(); }
+            [[nodiscard]] inline std::string_view remaining() const noexcept
+            {
+                return empty() ? std::string_view{} : std::string_view(data).substr(offset);
+            }
+            inline void assign(std::string s, size_t start = 0) noexcept
+            {
+                data = std::move(s);
+                offset = start;
+                if (offset >= data.size())
+                {
+                    clear();
+                }
+            }
+            inline void advance(size_t n) noexcept
+            {
+                offset += n;
+                if (offset >= data.size())
+                {
+                    clear();
+                }
+            }
+            inline void clear() noexcept
+            {
+                data.clear();
+                offset = 0;
+            }
+        };
+
+        PendingSlice outboundPending_{};
+        PendingSlice inboundPending_{};
+        ForwarderLoopHooks loopHooks_{};
+        bool outboundWatched_{false};
+        bool ownsOutboundFd_{false};
+
+        sockaddr_in outboundTargetAddr_{};
+        bool outboundConnecting_{false};
+        bool outboundConnectDeferred_{false};
+        bool proactorManaged_{false};
+        std::string proactorSendBuf_{};
+        size_t proactorSendOffset_{0};
 
         bool inboundClosed_{false};
         bool outboundClosed_{false};
         bool sockmapPaused_{false};
+        size_t pipeUpPending_{0};
+        size_t pipeDownPending_{0};
+        bool disableOffloadForSession_{false};
+        bool disableSpliceForSession_{false};
+        uint64_t inDetachHookToken_{0};
+        uint64_t outDetachHookToken_{0};
 
         StateChangeCallback onStateChange_{nullptr};
         CloseCallback onClose_{nullptr};
@@ -305,13 +378,126 @@ namespace mynet
         [[nodiscard]] inline int inboundFd() const noexcept { return inboundFd_; }
         [[nodiscard]] inline int outboundFd() const noexcept { return outboundFd_; }
         [[nodiscard]] inline int sockmapFd() const noexcept { return sockmapFd_; }
+        [[nodiscard]] inline int pipeUpRead() const noexcept { return pipeUp_[0]; }
+        [[nodiscard]] inline int pipeUpWrite() const noexcept { return pipeUp_[1]; }
+        [[nodiscard]] inline int pipeDownRead() const noexcept { return pipeDown_[0]; }
+        [[nodiscard]] inline int pipeDownWrite() const noexcept { return pipeDown_[1]; }
+        [[nodiscard]] inline bool ownsOutboundFd() const noexcept { return ownsOutboundFd_; }
+        [[nodiscard]] inline bool proactorManaged() const noexcept { return proactorManaged_; }
+        [[nodiscard]] inline bool isOutboundConnecting() const noexcept { return outboundConnecting_; }
+        [[nodiscard]] inline bool isOutboundConnectDeferred() const noexcept { return outboundConnectDeferred_; }
+        [[nodiscard]] inline const sockaddr_in &outboundTargetAddr() const noexcept { return outboundTargetAddr_; }
+        [[nodiscard]] inline bool hasOutboundPendingToSend() const noexcept
+        {
+            return (proactorSendOffset_ < proactorSendBuf_.size()) || !outboundPending_.empty() ||
+                   (outbound_ != nullptr && outbound_->hasResponse());
+        }
+        [[nodiscard]] inline size_t outboundReadCredit() const noexcept
+        {
+            return outbound_ != nullptr ? outbound_->readCredit() : config_.bufferChunkSize;
+        }
         [[nodiscard]] inline HandlerBase *inbound() noexcept { return inbound_; }
         [[nodiscard]] inline HandlerBase *outbound() noexcept { return outbound_; }
         [[nodiscard]] inline const handler::ProxyAddress &target() const noexcept { return target_; }
+        [[nodiscard]] inline const std::string &outboundTag() const noexcept { return outboundTag_; }
 
         inline void setTarget(const handler::ProxyAddress &target) noexcept { target_ = target; }
+        inline void setOutboundTag(std::string tag) noexcept { outboundTag_ = std::move(tag); }
         inline void setInboundFd(int fd) noexcept { inboundFd_ = fd; }
         inline void setOutboundFd(int fd) noexcept { outboundFd_ = fd; }
+        inline void setOutboundConnectState(bool connecting, bool deferred, const sockaddr_in &targetAddr) noexcept
+        {
+            outboundConnecting_ = connecting;
+            outboundConnectDeferred_ = deferred;
+            outboundTargetAddr_ = targetAddr;
+        }
+        inline void setInboundChannel(std::shared_ptr<IStreamChannel> ch) noexcept
+        {
+            inboundChannel_ = std::move(ch);
+            if (inboundChannel_ != nullptr && inboundFd_ < 0)
+            {
+                inboundFd_ = inboundChannel_->fd();
+            }
+        }
+        inline void setOutboundChannel(std::shared_ptr<IStreamChannel> ch) noexcept
+        {
+            outboundChannel_ = std::move(ch);
+            if (outboundChannel_ != nullptr && outboundFd_ < 0)
+            {
+                outboundFd_ = outboundChannel_->fd();
+            }
+        }
+        inline void setLoopHooks(ForwarderLoopHooks hooks) noexcept { loopHooks_ = std::move(hooks); }
+        inline void setOwnsOutboundFd(bool owns) noexcept { ownsOutboundFd_ = owns; }
+
+        inline bool installOutboundWatch()
+        {
+            if (outboundWatched_ || proactorManaged_ || !loopHooks_.active() || outboundFd_ < 0 || outboundClosed_ ||
+                state_ == ForwardSessionState::CLOSED)
+            {
+                return false;
+            }
+            if (loopHooks_.hasAsyncRelay() && outboundChannel_ == nullptr)
+            {
+                proactorManaged_ = loopHooks_.registerSession(shared_from_this());
+                return proactorManaged_;
+            }
+            if (!loopHooks_.addWatch || !loopHooks_.delWatch)
+            {
+                return false;
+            }
+#if defined(__linux__)
+            std::weak_ptr<ForwarderStreamSession> weak = weak_from_this();
+            uint32_t evMask = EPOLLIN | EPOLLOUT | EPOLLET;
+#ifdef EPOLLRDHUP
+            evMask |= EPOLLRDHUP;
+#endif
+            outboundWatched_ = loopHooks_.addWatch(
+                outboundFd_, evMask,
+                [weak](uint32_t events)
+                {
+                    auto self = weak.lock();
+                    if (self == nullptr || self->isClosed())
+                    {
+                        return;
+                    }
+                    if (self->outboundConnecting_ && (events & EPOLLOUT))
+                    {
+                        int err = 0;
+                        socklen_t len = sizeof(err);
+                        if (::getsockopt(self->outboundFd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
+                        {
+                            err = (errno != 0) ? errno : ECONNREFUSED;
+                        }
+                        self->outboundConnecting_ = false;
+                        if (err != 0)
+                        {
+                            self->markOutboundClosed();
+                            self->close();
+                            return;
+                        }
+                        if (self->outbound_ != nullptr)
+                        {
+                            self->outbound_->handle();
+                        }
+                    }
+                    if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
+                    {
+                        self->markOutboundClosed();
+                    }
+                    else
+                    {
+                        (void)self->pump();
+                    }
+                    if (self->inboundClosed_ && self->outboundClosed_)
+                    {
+                        self->close();
+                    }
+                });
+#endif
+            return outboundWatched_;
+        }
+
         inline void setSockmapFd(int fd) noexcept { sockmapFd_ = fd; }
         inline void setOwnedInbound(std::unique_ptr<HandlerBase> in) noexcept
         {
@@ -360,10 +546,19 @@ namespace mynet
          */
         size_t attach(HandlerBase &in, HandlerBase &out, int inFd = -1, int outFd = -1, bool userSslActive = false)
         {
+            return attachChannels(in, nullptr, out, nullptr, inFd, outFd, userSslActive);
+        }
+
+        size_t attachChannels(HandlerBase &in, std::shared_ptr<IStreamChannel> inCh, HandlerBase &out,
+                              std::shared_ptr<IStreamChannel> outCh, int inFd = -1, int outFd = -1,
+                              bool userSslActive = false)
+        {
             inbound_ = &in;
             outbound_ = &out;
-            inboundFd_ = (inFd >= 0) ? inFd : in.fd();
-            outboundFd_ = (outFd >= 0) ? outFd : out.fd();
+            inboundChannel_ = std::move(inCh);
+            outboundChannel_ = std::move(outCh);
+            inboundFd_ = (inFd >= 0) ? inFd : (inboundChannel_ ? inboundChannel_->fd() : in.fd());
+            outboundFd_ = (outFd >= 0) ? outFd : (outboundChannel_ ? outboundChannel_->fd() : out.fd());
 
             if (in.targetAddress().has_value())
             {
@@ -376,12 +571,76 @@ namespace mynet
                 target_ = out.target();
             }
 
+            // 绑定入站 Handler 外部数据面联动钩子及双向安全摘除钩子，防止借用型 Handler 早于 Forwarder 析构导致悬空解引用
+            {
+                std::weak_ptr<ForwarderStreamSession> weak = weak_from_this();
+                const bool hasShared = !weak.expired();
+                in.setExternalDataPlane(
+                    [this, weak, hasShared]()
+                    {
+                        auto guard = hasShared ? weak.lock() : nullptr;
+                        if (hasShared && !guard)
+                        {
+                            return;
+                        }
+                        (void)pump();
+                    },
+                    [this, weak, hasShared](uint32_t events) -> int
+                    {
+                        auto guard = hasShared ? weak.lock() : nullptr;
+                        if (hasShared && !guard)
+                        {
+                            return 1;
+                        }
+                        return onReactorInboundEvent(events);
+                    },
+                    [this, weak, hasShared]() -> bool
+                    {
+                        auto guard = hasShared ? weak.lock() : nullptr;
+                        if (hasShared && !guard)
+                        {
+                            return false;
+                        }
+                        return activeMode_ == ForwardMode::KERNEL_SOCKMAP ||
+                               activeMode_ == ForwardMode::ZERO_COPY_SPLICE;
+                    });
+                inDetachHookToken_ = in.addExternalDetachHook(
+                    [this, weak, hasShared]()
+                    {
+                        auto guard = hasShared ? weak.lock() : nullptr;
+                        if (hasShared && !guard)
+                        {
+                            return;
+                        }
+                        inDetachHookToken_ = 0;
+                        inbound_ = nullptr;
+                        markInboundClosed();
+                        close(true);
+                    });
+                outDetachHookToken_ = out.addExternalDetachHook(
+                    [this, weak, hasShared]()
+                    {
+                        auto guard = hasShared ? weak.lock() : nullptr;
+                        if (hasShared && !guard)
+                        {
+                            return;
+                        }
+                        outDetachHookToken_ = 0;
+                        outbound_ = nullptr;
+                        markOutboundClosed();
+                        close(true);
+                    });
+            }
+
             // 1. 握手残余数据预冲刷：排空握手期间在用户态缓冲区堆积的早期业务载荷
             size_t preFlushed = flushPrebuffered();
 
             // 2. 冲刷已生成的出站与入站协议头/握手报文 (如 SOCKS5 Greeting, Trojan Header, VLESS Header, HTTP CONNECT
-            // 等)
-            flushOutboundResponses();
+            // 等)；若处于 Proactor 延迟异步建连阶段则等待 connect CQE 后再发
+            if (!outboundConnectDeferred_)
+            {
+                flushOutboundResponses();
+            }
             flushInboundResponses();
 
             // 3. 仅当出站协议已确立时，激活最优零拷贝转发通道
@@ -398,44 +657,161 @@ namespace mynet
             return preFlushed;
         }
 
-        inline void flushOutboundResponses() noexcept
+    private:
+        inline void flushSideResponses(HandlerBase *h, IStreamChannel *ch, int fd, PendingSlice &pending,
+                                       bool isOutbound) noexcept
         {
-            if (outbound_ != nullptr && outboundFd_ >= 0)
+            const bool &closedFlag = isOutbound ? outboundClosed_ : inboundClosed_;
+            if (h == nullptr || closedFlag || (fd < 0 && ch == nullptr))
             {
-                while (outbound_->hasResponse())
+                return;
+            }
+            if (isOutbound && (outboundConnectDeferred_ || proactorManaged_))
+            {
+                return;
+            }
+
+            // 当入站直接绑定在 Reactor/Proactor 管理的 Connection 上且非虚拟通道时，
+            // Proactor 模式下只推进队列至 writeQueue_ 交由 io_uring SEND 发送；Reactor 下则直接 pump+handleWrite
+            if (!isOutbound && ch == nullptr && h->connection() != nullptr && h->connection()->fd() == fd && fd >= 0)
+            {
+                Connection *conn = h->connection();
+                const size_t queued = h->responseBytes();
+                conn->pump();
+                if (proactorManaged_)
                 {
-                    std::string resp = outbound_->takeResponse();
-                    if (!resp.empty())
+                    if (queued > 0)
                     {
-                        ssize_t n = ::send(outboundFd_, resp.data(), resp.size(), MSG_NOSIGNAL);
-                        if (n > 0)
-                        {
-                            stats_.bytesUp += static_cast<size_t>(n);
-                            stats_.touch();
-                        }
+                        stats_.bytesDown += queued;
+                        stats_.touch();
                     }
+                    return;
+                }
+                if (conn->handleWrite() == IO_STATUS::CLOSE)
+                {
+                    markInboundClosed();
+                }
+                else if (queued > 0)
+                {
+                    stats_.bytesDown += queued;
+                    stats_.touch();
+                }
+                return;
+            }
+
+            auto tryWrite = [&](std::string_view sv) noexcept -> ssize_t
+            {
+                if (ch != nullptr)
+                {
+                    auto r = ch->writeBytes(
+                        std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(sv.data()), sv.size()));
+                    if (!r)
+                    {
+                        return -1;
+                    }
+                    return static_cast<ssize_t>(*r);
+                }
+                const ssize_t n = ::send(fd, sv.data(), sv.size(), MSG_NOSIGNAL);
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOTCONN))
+                {
+                    return 0;
+                }
+                return n;
+            };
+
+            auto recordBytes = [&](size_t bytes) noexcept
+            {
+                if (isOutbound)
+                {
+                    stats_.bytesUp += bytes;
+                }
+                else
+                {
+                    stats_.bytesDown += bytes;
+                }
+                stats_.touch();
+            };
+
+            auto markClosed = [&]() noexcept
+            {
+                if (isOutbound)
+                {
+                    markOutboundClosed();
+                }
+                else
+                {
+                    markInboundClosed();
+                }
+            };
+
+            if (!pending.empty())
+            {
+                const ssize_t n = tryWrite(pending.remaining());
+                if (n > 0)
+                {
+                    recordBytes(static_cast<size_t>(n));
+                    pending.advance(static_cast<size_t>(n));
+                }
+                else if (n < 0)
+                {
+                    markClosed();
+                    return;
+                }
+                if (!pending.empty())
+                {
+                    return;
+                }
+            }
+
+            while (h->hasResponse())
+            {
+                std::string resp = h->takeResponse();
+                if (resp.empty())
+                {
+                    continue;
+                }
+
+                const ssize_t n = tryWrite(resp);
+                if (n > 0)
+                {
+                    recordBytes(static_cast<size_t>(n));
+                    if (static_cast<size_t>(n) < resp.size())
+                    {
+                        pending.assign(std::move(resp), static_cast<size_t>(n));
+                        return;
+                    }
+                }
+                else if (n == 0)
+                {
+                    pending.assign(std::move(resp), 0);
+                    return;
+                }
+                else
+                {
+                    markClosed();
+                    return;
                 }
             }
         }
 
+    public:
+        inline void flushOutboundResponses() noexcept
+        {
+            flushSideResponses(outbound_, outboundChannel_.get(), outboundFd_, outboundPending_, true);
+        }
+
         inline void flushInboundResponses() noexcept
         {
-            if (inbound_ != nullptr && inboundFd_ >= 0)
-            {
-                while (inbound_->hasResponse())
-                {
-                    std::string resp = inbound_->takeResponse();
-                    if (!resp.empty())
-                    {
-                        ssize_t n = ::send(inboundFd_, resp.data(), resp.size(), MSG_NOSIGNAL);
-                        if (n > 0)
-                        {
-                            stats_.bytesDown += static_cast<size_t>(n);
-                            stats_.touch();
-                        }
-                    }
-                }
-            }
+            flushSideResponses(inbound_, inboundChannel_.get(), inboundFd_, inboundPending_, false);
+        }
+
+        [[nodiscard]] inline bool hasOutboundSink() const noexcept
+        {
+            return outboundFd_ >= 0 || outboundChannel_ != nullptr;
+        }
+        [[nodiscard]] inline bool hasInboundSink() const noexcept
+        {
+            return inboundFd_ >= 0 || inboundChannel_ != nullptr;
         }
 
         /**
@@ -446,45 +822,57 @@ namespace mynet
         size_t flushPrebuffered() noexcept
         {
             size_t total = 0;
-            // 上行预读数据冲刷：入站残余 -> 出站待发队列
+            // 上行预读数据冲刷：入站残余 -> 出站业务外发管线
             if (inbound_ != nullptr && outbound_ != nullptr && inbound_->requestBytes() > 0 && !outboundClosed_)
             {
                 const size_t n = inbound_->requestBytes();
                 std::string_view payload(inbound_->requestBegin(), n);
-                if (auto res = outbound_->pushResponse(payload); res)
+                if (auto res = outbound_->sendPayload(payload); res)
                 {
                     inbound_->requestConsume(n);
-                    stats_.bytesUp += n;
-                    ++stats_.packetsUp;
-                    stats_.touch();
+                    if (!hasOutboundSink())
+                    {
+                        stats_.bytesUp += n;
+                        ++stats_.packetsUp;
+                        stats_.touch();
+                    }
                     total += n;
                 }
             }
 
-            // 下行预读数据冲刷：出站残余 -> 入站待发队列
+            // 下行预读数据冲刷：出站残余 -> 入站业务外发管线
             if (outbound_ != nullptr && inbound_ != nullptr && outbound_->requestBytes() > 0 && !inboundClosed_)
             {
                 const size_t n = outbound_->requestBytes();
                 std::string_view payload(outbound_->requestBegin(), n);
-                if (auto res = inbound_->pushResponse(payload); res)
+                if (auto res = inbound_->sendPayload(payload); res)
                 {
                     outbound_->requestConsume(n);
-                    stats_.bytesDown += n;
-                    ++stats_.packetsDown;
-                    stats_.touch();
+                    if (!hasInboundSink())
+                    {
+                        stats_.bytesDown += n;
+                        ++stats_.packetsDown;
+                        stats_.touch();
+                    }
                     total += n;
                 }
             }
             return total;
         }
 
-        void ensurePipes() noexcept
+        bool ensurePipes() noexcept
         {
+            if (disableSpliceForSession_)
+            {
+                return false;
+            }
             if (pipeUp_[0] < 0)
             {
                 if (::pipe2(pipeUp_, O_NONBLOCK | O_CLOEXEC) < 0)
                 {
                     pipeUp_[0] = pipeUp_[1] = -1;
+                    disableSpliceForSession_ = true;
+                    return false;
                 }
             }
             if (pipeDown_[0] < 0)
@@ -492,8 +880,38 @@ namespace mynet
                 if (::pipe2(pipeDown_, O_NONBLOCK | O_CLOEXEC) < 0)
                 {
                     pipeDown_[0] = pipeDown_[1] = -1;
+                    closePipes();
+                    disableSpliceForSession_ = true;
+                    return false;
                 }
             }
+            return true;
+        }
+
+        void closePipes() noexcept
+        {
+            if (pipeUp_[0] >= 0)
+            {
+                ::close(pipeUp_[0]);
+                pipeUp_[0] = -1;
+            }
+            if (pipeUp_[1] >= 0)
+            {
+                ::close(pipeUp_[1]);
+                pipeUp_[1] = -1;
+            }
+            if (pipeDown_[0] >= 0)
+            {
+                ::close(pipeDown_[0]);
+                pipeDown_[0] = -1;
+            }
+            if (pipeDown_[1] >= 0)
+            {
+                ::close(pipeDown_[1]);
+                pipeDown_[1] = -1;
+            }
+            pipeUpPending_ = 0;
+            pipeDownPending_ = 0;
         }
 
         /**
@@ -502,25 +920,21 @@ namespace mynet
         bool activateSockmap() noexcept
         {
 #if defined(__linux__) && defined(__NR_bpf)
-            if (sockmapFd_ < 0 || inboundFd_ < 0 || outboundFd_ < 0)
+            if (disableOffloadForSession_ || disableSpliceForSession_ || sockmapFd_ < 0 || inboundFd_ < 0 ||
+                outboundFd_ < 0)
             {
                 return false;
             }
-            // 预先准备双向管道，确保在 Sockmap 遇到局部阻塞或用户态需要排空时具备零拷贝 splice 保底能力
-            ensurePipes();
+            // 预先准备双向管道，确保在 Sockmap 遇到局部阻塞或 SK_PASS 回退时具备零拷贝 splice 保底能力
+            if (!ensurePipes())
+            {
+                return false;
+            }
             if (!ebpf::EbpfEngine::attachPair(sockmapFd_, inboundFd_, outboundFd_))
             {
                 return false;
             }
             activeMode_ = ForwardMode::KERNEL_SOCKMAP;
-            if (inbound_ != nullptr)
-            {
-                inbound_->setSpliceTarget(outboundFd_);
-            }
-            if (outbound_ != nullptr)
-            {
-                outbound_->setSpliceTarget(inboundFd_);
-            }
             return true;
 #else
             return false;
@@ -532,13 +946,228 @@ namespace mynet
          */
         void deactivateSockmap() noexcept
         {
-            if (sockmapFd_ >= 0 && inboundFd_ >= 0)
+            if (sockmapFd_ >= 0 && (inboundFd_ >= 0 || outboundFd_ >= 0))
             {
-                ebpf::EbpfEngine::detachPair(sockmapFd_, inboundFd_);
+                ebpf::EbpfEngine::detachPair(sockmapFd_, inboundFd_, outboundFd_);
             }
         }
 
         [[nodiscard]] inline bool isSockmapPaused() const noexcept { return sockmapPaused_; }
+
+        /**
+         * @brief 运行期从 KERNEL_SOCKMAP 安全降级至 ZERO_COPY_SPLICE (如 SK_PASS 回流或发送积压背压)
+         */
+        void downgradeSockmapToSplice(bool dueToCongestion = false) noexcept
+        {
+            if (activeMode_ != ForwardMode::KERNEL_SOCKMAP && !dueToCongestion)
+            {
+                return;
+            }
+            deactivateSockmap();
+            if (dueToCongestion)
+            {
+                sockmapPaused_ = true;
+            }
+            else
+            {
+                disableOffloadForSession_ = true;
+                sockmapPaused_ = false;
+            }
+
+            if (!disableSpliceForSession_ && config_.enableSplice && configuredMode_ != ForwardMode::BUFFER_PUMP &&
+                ensurePipes())
+            {
+                activateSplice();
+            }
+            else
+            {
+                downgradeSpliceToBufferPump();
+            }
+        }
+
+        /**
+         * @brief 运行期从 ZERO_COPY_SPLICE/SOCKMAP 无损降级至 BUFFER_PUMP（排空管道残余字节后切回用户态泵送）
+         */
+        void downgradeSpliceToBufferPump() noexcept
+        {
+            disableOffloadForSession_ = true;
+            disableSpliceForSession_ = true;
+            sockmapPaused_ = false;
+            deactivateSockmap();
+
+            activeMode_ = ForwardMode::BUFFER_PUMP;
+            if (inbound_ != nullptr && inbound_->connection() != nullptr)
+            {
+                inbound_->connection()->resumeRead();
+            }
+
+            auto drainPipeToHandler = [&](int pipeRdFd, HandlerBase *dstHandler, uint64_t &bytesStat,
+                                          uint64_t &pktsStat, bool hasSink, bool closedFlag) noexcept
+            {
+                if (pipeRdFd < 0 || dstHandler == nullptr || closedFlag)
+                {
+                    return;
+                }
+                char buf[16384];
+                for (;;)
+                {
+                    const ssize_t n = ::read(pipeRdFd, buf, sizeof(buf));
+                    if (n > 0)
+                    {
+                        const size_t sz = static_cast<size_t>(n);
+                        if (auto res = dstHandler->sendPayload(std::string_view(buf, sz)); res)
+                        {
+                            if (!hasSink)
+                            {
+                                bytesStat += sz;
+                                ++pktsStat;
+                                stats_.touch();
+                            }
+                        }
+                        continue;
+                    }
+                    if (n < 0 && errno == EINTR)
+                    {
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            drainPipeToHandler(pipeUp_[0], outbound_, stats_.bytesUp, stats_.packetsUp, hasOutboundSink(),
+                               outboundClosed_);
+            drainPipeToHandler(pipeDown_[0], inbound_, stats_.bytesDown, stats_.packetsDown, hasInboundSink(),
+                               inboundClosed_);
+
+            closePipes();
+            flushOutboundResponses();
+            flushInboundResponses();
+
+            if (!proactorManaged_ && outboundFd_ >= 0 && !outboundClosed_ && loopHooks_.modWatch && outboundWatched_)
+            {
+                uint32_t evMask = EPOLLIN | EPOLLET;
+#ifdef EPOLLRDHUP
+                evMask |= EPOLLRDHUP;
+#endif
+                if (hasOutboundPendingToSend())
+                {
+                    evMask |= EPOLLOUT;
+                }
+                (void)loopHooks_.modWatch(outboundFd_, evMask);
+            }
+            if (loopHooks_.notifySession)
+            {
+                loopHooks_.notifySession(id_);
+            }
+        }
+
+        /**
+         * @brief 处理 Reactor 模式下入站 fd 的 EPOLL 事件（SOCKMAP/SPLICE 全权接管，BUFFER_PUMP 返回 -1 交由 Connection）
+         * @return -1: 交由 Connection::handleRead/Write 处理; 0: KEEP; 1: CLOSE
+         */
+        [[nodiscard]] int onReactorInboundEvent(uint32_t events) noexcept
+        {
+            if (proactorManaged_)
+            {
+                return -1;
+            }
+            if (state_ == ForwardSessionState::CLOSED || state_ == ForwardSessionState::ERROR)
+            {
+                return 1;
+            }
+            if (activeMode_ == ForwardMode::BUFFER_PUMP)
+            {
+                return -1;
+            }
+
+#if defined(__linux__)
+            if (activeMode_ == ForwardMode::KERNEL_SOCKMAP)
+            {
+                if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
+                {
+                    markInboundClosed();
+                    return 1;
+                }
+
+                if (events & EPOLLIN)
+                {
+                    char peekByte = 0;
+                    const ssize_t pk = ::recv(inboundFd_, &peekByte, 1, MSG_PEEK | MSG_DONTWAIT);
+                    if (pk == 0 || (pk < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                    {
+                        markInboundClosed();
+                        return 1;
+                    }
+                    if (pk > 0)
+                    {
+                        // 内核 verdict 返回 SK_PASS 使数据落回用户态接收队列 -> 降级为 SPLICE 接管
+                        downgradeSockmapToSplice(false);
+                    }
+                }
+#ifdef EPOLLRDHUP
+                if ((events & EPOLLRDHUP) && activeMode_ == ForwardMode::KERNEL_SOCKMAP)
+                {
+                    char peekByte = 0;
+                    if (::recv(inboundFd_, &peekByte, 1, MSG_PEEK | MSG_DONTWAIT) == 0)
+                    {
+                        markInboundClosed();
+                        return 1;
+                    }
+                }
+#endif
+                if (activeMode_ == ForwardMode::KERNEL_SOCKMAP)
+                {
+                    checkAndApplySockmapBackpressure();
+                    if (activeMode_ == ForwardMode::KERNEL_SOCKMAP)
+                    {
+                        if ((events & EPOLLOUT) && inbound_ != nullptr && inbound_->connection() != nullptr &&
+                            inbound_->connection()->hasQueuedWrite())
+                        {
+                            if (inbound_->connection()->handleWrite() == IO_STATUS::CLOSE)
+                            {
+                                markInboundClosed();
+                                return 1;
+                            }
+                        }
+                        return (inboundClosed_ || state_ == ForwardSessionState::CLOSED) ? 1 : 0;
+                    }
+                }
+            }
+
+            if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
+            {
+                markInboundClosed();
+                return 1;
+            }
+            if ((events & EPOLLOUT) && inbound_ != nullptr && inbound_->connection() != nullptr &&
+                (inbound_->hasResponse() || inbound_->connection()->hasQueuedWrite()))
+            {
+                if (inbound_->connection()->handleWrite() == IO_STATUS::CLOSE)
+                {
+                    markInboundClosed();
+                    return 1;
+                }
+            }
+            (void)pump();
+            if (activeMode_ == ForwardMode::BUFFER_PUMP && !inboundClosed_ && state_ != ForwardSessionState::CLOSED)
+            {
+                // 刚降级为 BUFFER_PUMP：交还 Connection 在本轮事件中立刻完成读取/发送
+                return -1;
+            }
+            if (inboundClosed_ || state_ == ForwardSessionState::CLOSED)
+            {
+                if (inboundClosed_ && outboundClosed_)
+                {
+                    close();
+                }
+                return 1;
+            }
+            return 0;
+#else
+            (void)events;
+            return -1;
+#endif
+        }
 
         /**
          * @brief 查询套接字当前内核发送缓冲区未确认/排队积压字节数
@@ -584,11 +1213,9 @@ namespace mynet
             {
                 // 检测到下游套接字发送缓冲区堆积超过既定高水位线，
                 // 主动暂停 Sockmap 内核流卸载，回退至 splice 管道与 Connection 用户态背压控流
-                deactivateSockmap();
-                activeMode_ = ForwardMode::ZERO_COPY_SPLICE;
-                sockmapPaused_ = true;
+                downgradeSockmapToSplice(true);
             }
-            else if (sockmapPaused_ && !congested)
+            else if (sockmapPaused_ && !disableOffloadForSession_ && !disableSpliceForSession_ && !congested)
             {
                 // 发送队列积压排空落回高水位线以内，恢复 Sockmap 内核极速直连
                 if (activateSockmap())
@@ -603,14 +1230,32 @@ namespace mynet
          */
         void activateAdaptiveMode(bool userSslActive = false) noexcept
         {
-            const bool inCanSplice = (inbound_ == nullptr) || inbound_->kEnableSplice;
-            const bool outCanSplice = (outbound_ == nullptr) || outbound_->kEnableSplice;
+            const bool readyForBypass =
+                !outboundConnecting_ && !outboundConnectDeferred_ &&
+                (inbound_ == nullptr || inbound_->requestBytes() == 0) &&
+                (outbound_ == nullptr || (outbound_->isEstablished() && outbound_->requestBytes() == 0)) &&
+                !hasOutboundPendingToSend() && inboundPending_.empty();
 
-            const bool canSplice = config_.enableSplice && (configuredMode_ != ForwardMode::BUFFER_PUMP) &&
-                                   !userSslActive && inCanSplice && outCanSplice && (inboundFd_ >= 0) &&
+            if (!readyForBypass)
+            {
+                activateBufferPump();
+                return;
+            }
+
+            const bool inCanSplice =
+                (inbound_ == nullptr) || (inbound_->canSplice() && inbound_->isPassthrough());
+            const bool outCanSplice =
+                (outbound_ == nullptr) || (outbound_->canSplice() && outbound_->isPassthrough());
+            const bool hasVirtualCh = (inboundChannel_ != nullptr && !inboundChannel_->isPassthrough()) ||
+                                      (outboundChannel_ != nullptr && !outboundChannel_->isPassthrough());
+
+            const bool canSplice = config_.enableSplice && !disableSpliceForSession_ &&
+                                   (configuredMode_ != ForwardMode::BUFFER_PUMP) && !userSslActive &&
+                                   !hasVirtualCh && inCanSplice && outCanSplice && (inboundFd_ >= 0) &&
                                    (outboundFd_ >= 0);
 
             const bool canOffload =
+                !disableOffloadForSession_ &&
                 (configuredMode_ == ForwardMode::AUTO || configuredMode_ == ForwardMode::KERNEL_SOCKMAP) &&
                 (sockmapFd_ >= 0) && canSplice;
 
@@ -618,7 +1263,7 @@ namespace mynet
             {
                 // Sockmap 挂载成功
             }
-            else if (canSplice)
+            else if (canSplice && ensurePipes())
             {
                 activateSplice();
             }
@@ -633,16 +1278,12 @@ namespace mynet
          */
         void activateSplice() noexcept
         {
+            if (disableSpliceForSession_ || !ensurePipes())
+            {
+                activateBufferPump();
+                return;
+            }
             activeMode_ = ForwardMode::ZERO_COPY_SPLICE;
-            if (inbound_ != nullptr && outboundFd_ >= 0)
-            {
-                inbound_->setSpliceTarget(outboundFd_);
-            }
-            if (outbound_ != nullptr && inboundFd_ >= 0)
-            {
-                outbound_->setSpliceTarget(inboundFd_);
-            }
-            ensurePipes();
         }
 
         /**
@@ -651,14 +1292,231 @@ namespace mynet
         void activateBufferPump() noexcept
         {
             activeMode_ = ForwardMode::BUFFER_PUMP;
-            if (inbound_ != nullptr)
+            if (inbound_ != nullptr && inbound_->connection() != nullptr)
             {
-                inbound_->disableSplice();
+                inbound_->connection()->resumeRead();
+            }
+        }
+
+        /**
+         * @brief 内存侧双向数据与协议状态桥接（Reactor::pump 与 Proactor CQE 完成回调共用）
+         */
+        inline PumpResult pumpMemoryBridging() noexcept
+        {
+            PumpResult result{};
+
+            // 1. 上行泵送：Inbound RequestBuffer -> Outbound sendPayload()
+            if (inbound_ != nullptr && outbound_ != nullptr && !outboundClosed_)
+            {
+                const size_t avail = inbound_->requestBytes();
+                if (avail > 0)
+                {
+                    const size_t toPump = std::min(avail, config_.bufferChunkSize);
+                    std::string_view chunk(inbound_->requestBegin(), toPump);
+                    if (auto res = outbound_->sendPayload(chunk); res)
+                    {
+                        inbound_->requestConsume(toPump);
+                        if (!hasOutboundSink())
+                        {
+                            stats_.bytesUp += toPump;
+                            ++stats_.packetsUp;
+                            stats_.touch();
+                        }
+                        result.bytesUp += toPump;
+                    }
+                }
+            }
+
+            // 2. 下行泵送：Outbound RequestBuffer -> Inbound sendPayload()
+            if (outbound_ != nullptr && inbound_ != nullptr && !inboundClosed_)
+            {
+                const size_t avail = outbound_->requestBytes();
+                if (avail > 0)
+                {
+                    const size_t toPump = std::min(avail, config_.bufferChunkSize);
+                    std::string_view chunk(outbound_->requestBegin(), toPump);
+                    if (auto res = inbound_->sendPayload(chunk); res)
+                    {
+                        outbound_->requestConsume(toPump);
+                        if (!hasInboundSink())
+                        {
+                            stats_.bytesDown += toPump;
+                            ++stats_.packetsDown;
+                            stats_.touch();
+                        }
+                        result.bytesDown += toPump;
+                    }
+                }
+            }
+
+            if (outbound_ != nullptr && outbound_->isEstablished() && activeMode_ == ForwardMode::BUFFER_PUMP &&
+                config_.enableSplice && !disableSpliceForSession_ && configuredMode_ != ForwardMode::BUFFER_PUMP &&
+                !hasOutboundPendingToSend())
+            {
+                activateAdaptiveMode(false);
+            }
+
+            return result;
+        }
+
+        // ---- Proactor (io_uring) 异步完成回调接口 ----
+        inline void onProactorConnectComplete(int err) noexcept
+        {
+            outboundConnecting_ = false;
+            outboundConnectDeferred_ = false;
+            if (err != 0)
+            {
+                markOutboundClosed();
+                return;
             }
             if (outbound_ != nullptr)
             {
-                outbound_->disableSplice();
+                outbound_->handle();
             }
+            (void)pumpMemoryBridging();
+            if (inbound_ != nullptr && inbound_->connection() != nullptr)
+            {
+                inbound_->connection()->pump();
+            }
+            if (outbound_ != nullptr && outbound_->isEstablished() && activeMode_ == ForwardMode::BUFFER_PUMP &&
+                config_.enableSplice && !disableSpliceForSession_ && configuredMode_ != ForwardMode::BUFFER_PUMP &&
+                !hasOutboundPendingToSend() && inbound_ != nullptr && outbound_->isPassthrough() &&
+                inbound_->isPassthrough() && inbound_->requestBytes() == 0 && outbound_->requestBytes() == 0)
+            {
+                activateAdaptiveMode(false);
+            }
+            checkCloseCascade();
+        }
+
+        inline void onProactorOutboundRecv(const char *data, ssize_t res) noexcept
+        {
+            if (res > 0)
+            {
+                if (outbound_ != nullptr && data != nullptr)
+                {
+                    [[maybe_unused]] auto _ = outbound_->appendRequest(data, res);
+                    [[maybe_unused]] auto _w = outbound_->processWireToApp();
+                    outbound_->drive();
+                }
+                (void)pumpMemoryBridging();
+                if (inbound_ != nullptr && inbound_->connection() != nullptr)
+                {
+                    inbound_->connection()->pump();
+                }
+                checkCloseCascade();
+            }
+            else if (res == 0)
+            {
+                markOutboundClosed();
+            }
+            else if (res != -EAGAIN && res != -EINTR)
+            {
+                markOutboundClosed();
+            }
+        }
+
+        [[nodiscard]] inline std::string_view beginProactorOutboundSend(size_t maxChunk) noexcept
+        {
+            if (proactorSendOffset_ < proactorSendBuf_.size())
+            {
+                return std::string_view(proactorSendBuf_).substr(proactorSendOffset_);
+            }
+            proactorSendBuf_.clear();
+            proactorSendOffset_ = 0;
+
+            if (!outboundPending_.empty())
+            {
+                if (outboundPending_.offset == 0 && outboundPending_.data.size() <= maxChunk)
+                {
+                    proactorSendBuf_.swap(outboundPending_.data);
+                    outboundPending_.clear();
+                }
+                else
+                {
+                    const auto rem = outboundPending_.remaining();
+                    const size_t take = std::min(rem.size(), maxChunk);
+                    proactorSendBuf_.assign(rem.data(), take);
+                    outboundPending_.advance(take);
+                }
+                return proactorSendBuf_;
+            }
+
+            while (outbound_ != nullptr && outbound_->hasResponse())
+            {
+                proactorSendBuf_ = outbound_->takeResponse();
+                if (!proactorSendBuf_.empty())
+                {
+                    return proactorSendBuf_;
+                }
+            }
+            return {};
+        }
+
+        inline bool finishProactorOutboundSend(ssize_t res) noexcept
+        {
+            if (res > 0)
+            {
+                const size_t sent = static_cast<size_t>(res);
+                stats_.bytesUp += sent;
+                ++stats_.packetsUp;
+                stats_.touch();
+                proactorSendOffset_ += sent;
+                if (proactorSendOffset_ >= proactorSendBuf_.size())
+                {
+                    proactorSendBuf_.clear();
+                    proactorSendOffset_ = 0;
+                }
+            }
+            else if (res < 0 && res != -EAGAIN && res != -EINTR)
+            {
+                proactorSendBuf_.clear();
+                proactorSendOffset_ = 0;
+                markOutboundClosed();
+                return false;
+            }
+            if (outbound_ != nullptr && outbound_->isEstablished() && activeMode_ == ForwardMode::BUFFER_PUMP &&
+                config_.enableSplice && !disableSpliceForSession_ && configuredMode_ != ForwardMode::BUFFER_PUMP &&
+                !hasOutboundPendingToSend() && inbound_ != nullptr && outbound_->isPassthrough() &&
+                inbound_->isPassthrough() && inbound_->requestBytes() == 0 && outbound_->requestBytes() == 0)
+            {
+                activateAdaptiveMode(false);
+            }
+            checkCloseCascade();
+            return hasOutboundPendingToSend();
+        }
+
+        inline void onProactorSpliceResult(bool isDown, ssize_t res) noexcept
+        {
+            if (res > 0)
+            {
+                const size_t bytes = static_cast<size_t>(res);
+                if (isDown)
+                {
+                    stats_.bytesDown += bytes;
+                }
+                else
+                {
+                    stats_.bytesUp += bytes;
+                }
+                stats_.touch();
+            }
+            else if (res < 0 && isSpliceUnsupportedErrno(static_cast<int>(-res)))
+            {
+                downgradeSpliceToBufferPump();
+                return;
+            }
+            else if (res == 0 || (res < 0 && res != -EAGAIN && res != -EINTR))
+            {
+                if (isDown)
+                {
+                    markOutboundClosed();
+                }
+                else
+                {
+                    markInboundClosed();
+                }
+            }
+            checkCloseCascade();
         }
 
         /**
@@ -673,102 +1531,242 @@ namespace mynet
                 return {};
             }
 
+            if (proactorManaged_)
+            {
+                if (activeMode_ == ForwardMode::BUFFER_PUMP && inbound_ != nullptr && inbound_->usesWireBuffer())
+                {
+                    inbound_->drive();
+                }
+                if (outbound_ != nullptr && !outbound_->isEstablished())
+                {
+                    [[maybe_unused]] auto _ = outbound_->processWireToApp();
+                    outbound_->drive();
+                }
+                PumpResult result = pumpMemoryBridging();
+                flushInboundResponses();
+                checkCloseCascade();
+                if (loopHooks_.notifySession)
+                {
+                    loopHooks_.notifySession(id_);
+                }
+                return result;
+            }
+
             PumpResult result{};
 
-            // 0. 若出站协议握手尚未建立完成 (如 SOCKS5 等待协商与回执、VLESS 等待响应等)：
-            if (outbound_ != nullptr && !outbound_->isEstablished() && !outboundClosed_ && outboundFd_ >= 0)
+            auto readSideAndDrive = [&](HandlerBase *h, IStreamChannel *ch, int fd, bool &closedFlag,
+                                        bool isOutbound) noexcept
             {
-                flushOutboundResponses();
-
-                char hbuf[4096];
-                ssize_t hn = ::read(outboundFd_, hbuf, sizeof(hbuf));
-                if (hn > 0)
+                if (h == nullptr || closedFlag)
                 {
-                    [[maybe_unused]] auto _ = outbound_->appendRequest(hbuf, hn);
-                    outbound_->handle();
-                    flushOutboundResponses();
+                    return;
+                }
+                auto markClosed = [&]() noexcept
+                {
+                    if (isOutbound)
+                        markOutboundClosed();
+                    else
+                        markInboundClosed();
+                };
 
-                    if (outbound_->isEstablished())
+                if (ch != nullptr || (fd >= 0 && isOutbound))
+                {
+                    for (int iter = 0; iter < 64 && !closedFlag; ++iter)
                     {
-                        activateAdaptiveMode(false);
+                        const size_t credit = h->readCredit();
+                        if (credit == 0)
+                        {
+                            break;
+                        }
+                        const size_t want = std::min(config_.bufferChunkSize, credit);
+                        auto prep = h->prepareRequestWritable(want);
+                        if (!prep)
+                        {
+                            markClosed();
+                            break;
+                        }
+                        const size_t cap = std::min(h->requestWritableBytes(), want);
+                        if (cap == 0)
+                        {
+                            break;
+                        }
+
+                        if (ch != nullptr)
+                        {
+                            auto r = ch->readBytes(std::span<uint8_t>(reinterpret_cast<uint8_t *>(*prep), cap));
+                            if (!r)
+                            {
+                                markClosed();
+                                break;
+                            }
+                            if (*r == 0)
+                            {
+                                break;
+                            }
+                            h->commitRequest(*r);
+                            [[maybe_unused]] auto _ = h->processWireToApp();
+                        }
+                        else
+                        {
+                            const ssize_t rn = ::read(fd, *prep, cap);
+                            if (rn > 0)
+                            {
+                                h->commitRequest(static_cast<size_t>(rn));
+                                [[maybe_unused]] auto _ = h->processWireToApp();
+                            }
+                            else if (rn == 0)
+                            {
+                                markClosed();
+                                break;
+                            }
+                            else if (errno == EINTR)
+                            {
+                                continue;
+                            }
+                            else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOTCONN)
+                            {
+                                break;
+                            }
+                            else
+                            {
+                                markClosed();
+                                break;
+                            }
+                        }
                     }
                 }
-                else if (hn == 0)
+                h->drive();
+            };
+
+            // 0. 推进未建连完成或处于用户态 BUFFER_PUMP 模式的通道读写与传输层状态机
+            const bool outHandshaking = (outbound_ != nullptr && !outbound_->isEstablished());
+            if (outHandshaking || activeMode_ == ForwardMode::BUFFER_PUMP)
+            {
+                if (outHandshaking)
                 {
-                    markOutboundClosed();
+                    flushOutboundResponses();
                 }
-                else if (errno != EAGAIN && errno != EWOULDBLOCK)
+                if (activeMode_ == ForwardMode::BUFFER_PUMP && inboundChannel_ != nullptr)
                 {
-                    markOutboundClosed();
+                    readSideAndDrive(inbound_, inboundChannel_.get(), inboundFd_, inboundClosed_, false);
+                }
+                else if (inbound_ != nullptr && inbound_->usesWireBuffer())
+                {
+                    inbound_->drive();
+                }
+
+                readSideAndDrive(outbound_, outboundChannel_.get(), outboundFd_, outboundClosed_, true);
+                if (outHandshaking)
+                {
+                    flushOutboundResponses();
                 }
             }
 
             flushOutboundResponses();
             flushInboundResponses();
 
-            // 1. 上行泵送：Inbound RequestBuffer -> Outbound ResponseQueue
-            if (inbound_ != nullptr && outbound_ != nullptr && !outboundClosed_)
+            PumpResult memRes = pumpMemoryBridging();
+            result.bytesUp += memRes.bytesUp;
+            result.bytesDown += memRes.bytesDown;
+
+            flushOutboundResponses();
+            flushInboundResponses();
+
+            if (activeMode_ == ForwardMode::BUFFER_PUMP && outbound_ != nullptr && outbound_->isEstablished() &&
+                config_.enableSplice && !disableSpliceForSession_ && configuredMode_ != ForwardMode::BUFFER_PUMP &&
+                !hasOutboundPendingToSend() && (inbound_ == nullptr || inbound_->requestBytes() == 0) &&
+                outbound_->requestBytes() == 0)
             {
-                const size_t avail = inbound_->requestBytes();
-                if (avail > 0)
-                {
-                    const size_t toPump = std::min(avail, config_.bufferChunkSize);
-                    std::string_view chunk(inbound_->requestBegin(), toPump);
-                    if (auto res = outbound_->pushResponse(chunk); res)
-                    {
-                        inbound_->requestConsume(toPump);
-                        stats_.bytesUp += toPump;
-                        ++stats_.packetsUp;
-                        stats_.touch();
-                        result.bytesUp += toPump;
-                    }
-                }
+                activateAdaptiveMode(false);
             }
 
-            // 2. 下行泵送：Outbound RequestBuffer -> Inbound ResponseQueue
-            if (outbound_ != nullptr && inbound_ != nullptr && !inboundClosed_)
-            {
-                const size_t avail = outbound_->requestBytes();
-                if (avail > 0)
-                {
-                    const size_t toPump = std::min(avail, config_.bufferChunkSize);
-                    std::string_view chunk(outbound_->requestBegin(), toPump);
-                    if (auto res = inbound_->pushResponse(chunk); res)
-                    {
-                        outbound_->requestConsume(toPump);
-                        stats_.bytesDown += toPump;
-                        ++stats_.packetsDown;
-                        stats_.touch();
-                        result.bytesDown += toPump;
-                    }
-                }
-            }
-
-            // 2.3 背压自愈与流控复用：当套接字队列积压超过 writeHighWaterMark 时自动触发背压保护
+            // 2.3 背压自愈与 SK_PASS 回流降级：若队列超限或 Sockmap 返回 SK_PASS 落回用户态，立刻切换至 SPLICE
             if (sockmapFd_ >= 0)
             {
                 checkAndApplySockmapBackpressure();
             }
 
-            // 2.5 若活跃于套接字直通/零拷贝通道，驱动双向管道传输
-            if (inboundFd_ >= 0 && outboundFd_ >= 0 && !outboundClosed_ && !inboundClosed_)
+            if (activeMode_ == ForwardMode::KERNEL_SOCKMAP && inboundFd_ >= 0 && outboundFd_ >= 0 &&
+                !inboundClosed_ && !outboundClosed_)
+            {
+                auto peekReadableOrEof = [&](int fd, bool isOutbound) noexcept -> bool
+                {
+                    char peekByte = 0;
+                    const ssize_t pk = ::recv(fd, &peekByte, 1, MSG_PEEK | MSG_DONTWAIT);
+                    if (pk > 0)
+                    {
+                        return true;
+                    }
+                    if (pk == 0 || (pk < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                    {
+                        if (isOutbound)
+                            markOutboundClosed();
+                        else
+                            markInboundClosed();
+                    }
+                    return false;
+                };
+                if (peekReadableOrEof(inboundFd_, false) || peekReadableOrEof(outboundFd_, true))
+                {
+                    downgradeSockmapToSplice(false);
+                }
+            }
+
+            // 2.5 若活跃于 splice 零拷贝管道模式，驱动双向管道传输（若底层不支持 splice 则无损降级为 BUFFER_PUMP）
+            if (activeMode_ == ForwardMode::ZERO_COPY_SPLICE && inboundFd_ >= 0 && outboundFd_ >= 0 &&
+                !outboundClosed_ && !inboundClosed_)
             {
                 const uint64_t upBefore = stats_.bytesUp;
                 const uint64_t downBefore = stats_.bytesDown;
 
-                auto trDown = transferOutboundToInbound();
-                if (trDown == TransferResult::ERROR || trDown == TransferResult::CLOSED)
+                auto drainSpliceLoop = [&](bool isDown) noexcept
                 {
-                    markOutboundClosed();
-                }
-                auto trUp = transferInboundToOutbound();
-                if (trUp == TransferResult::ERROR || trUp == TransferResult::CLOSED)
-                {
-                    markInboundClosed();
-                }
+                    for (int iter = 0; iter < 16; ++iter)
+                    {
+                        if (activeMode_ != ForwardMode::ZERO_COPY_SPLICE)
+                        {
+                            break;
+                        }
+                        auto tr = isDown ? transferOutboundToInbound() : transferInboundToOutbound();
+                        if (tr == TransferResult::UNSUPPORTED)
+                        {
+                            downgradeSpliceToBufferPump();
+                            break;
+                        }
+                        if (tr == TransferResult::ERROR || tr == TransferResult::CLOSED)
+                        {
+                            if (isDown)
+                                markOutboundClosed();
+                            else
+                                markInboundClosed();
+                            break;
+                        }
+                        if (tr != TransferResult::OK)
+                        {
+                            break;
+                        }
+                    }
+                };
+                drainSpliceLoop(true);
+                drainSpliceLoop(false);
 
                 result.bytesUp += static_cast<size_t>(stats_.bytesUp - upBefore);
                 result.bytesDown += static_cast<size_t>(stats_.bytesDown - downBefore);
+
+                // 若刚刚降级回 BUFFER_PUMP，立即补跑一轮内存读写以免本轮数据滞留
+                if (activeMode_ == ForwardMode::BUFFER_PUMP && !inboundClosed_ && !outboundClosed_)
+                {
+                    if (inboundChannel_ != nullptr)
+                    {
+                        readSideAndDrive(inbound_, inboundChannel_.get(), inboundFd_, inboundClosed_, false);
+                    }
+                    readSideAndDrive(outbound_, outboundChannel_.get(), outboundFd_, outboundClosed_, true);
+                    PumpResult fallbackMem = pumpMemoryBridging();
+                    result.bytesUp += fallbackMem.bytesUp;
+                    result.bytesDown += fallbackMem.bytesDown;
+                    flushOutboundResponses();
+                    flushInboundResponses();
+                }
             }
 
             // 3. 半关闭与全关闭状态检测与级联
@@ -795,6 +1793,7 @@ namespace mynet
          */
         inline void markOutboundClosed() noexcept
         {
+            LOG_WARN("markOutboundClosed: session {} outbound closed", id_);
             outboundClosed_ = true;
             if (config_.propagateClose && inbound_ != nullptr)
             {
@@ -816,9 +1815,15 @@ namespace mynet
             inboundClosed_ = true;
             outboundClosed_ = true;
 
+            const uint64_t inTok = inDetachHookToken_;
+            const uint64_t outTok = outDetachHookToken_;
+            inDetachHookToken_ = 0;
+            outDetachHookToken_ = 0;
+
             if (inbound_ != nullptr)
             {
-                inbound_->disableSplice();
+                inbound_->removeExternalDetachHook(inTok);
+                inbound_->clearExternalDataPlane();
                 if (force)
                 {
                     inbound_->setCloseAfterResponse(true);
@@ -826,39 +1831,49 @@ namespace mynet
             }
             if (outbound_ != nullptr)
             {
-                outbound_->disableSplice();
+                outbound_->removeExternalDetachHook(outTok);
                 if (force)
                 {
                     outbound_->setCloseAfterResponse(true);
                 }
             }
 
-            if (pipeUp_[0] >= 0)
+            closePipes();
+
+            if (proactorManaged_ && loopHooks_.retireSession)
             {
-                ::close(pipeUp_[0]);
-                pipeUp_[0] = -1;
+                if (loopHooks_.retireSession(id_, ownsOutboundFd_))
+                {
+                    ownsOutboundFd_ = false;
+                    outboundFd_ = -1;
+                }
+                proactorManaged_ = false;
             }
-            if (pipeUp_[1] >= 0)
+            else if (outboundWatched_ && loopHooks_.delWatch && outboundFd_ >= 0)
             {
-                ::close(pipeUp_[1]);
-                pipeUp_[1] = -1;
+                loopHooks_.delWatch(outboundFd_);
+                outboundWatched_ = false;
             }
-            if (pipeDown_[0] >= 0)
-            {
-                ::close(pipeDown_[0]);
-                pipeDown_[0] = -1;
-            }
-            if (pipeDown_[1] >= 0)
-            {
-                ::close(pipeDown_[1]);
-                pipeDown_[1] = -1;
-            }
+
+            proactorSendBuf_.clear();
+            proactorSendOffset_ = 0;
 
             if (activeMode_ == ForwardMode::KERNEL_SOCKMAP)
             {
                 deactivateSockmap();
             }
 
+            if (ownsOutboundFd_ && outboundFd_ >= 0)
+            {
+                ::close(outboundFd_);
+                outboundFd_ = -1;
+            }
+
+            outboundPending_.clear();
+            inboundPending_.clear();
+
+            inbound_ = nullptr;
+            outbound_ = nullptr;
             setState(ForwardSessionState::CLOSED);
 
             if (onClose_)
@@ -872,7 +1887,8 @@ namespace mynet
             OK = 0,
             AGAIN = 1,
             CLOSED = 2,
-            ERROR = 3
+            ERROR = 3,
+            UNSUPPORTED = 4
         };
 
         TransferResult transferInboundToOutbound() noexcept
@@ -882,56 +1898,37 @@ namespace mynet
                 return TransferResult::CLOSED;
             }
 
-            if ((activeMode_ == ForwardMode::ZERO_COPY_SPLICE || activeMode_ == ForwardMode::KERNEL_SOCKMAP) &&
-                pipeUp_[0] >= 0 && pipeUp_[1] >= 0)
+            if (pipeUp_[0] < 0 || pipeUp_[1] < 0)
             {
-                auto res =
-                    detail::splicePipes(inboundFd_, outboundFd_, pipeUp_[1], pipeUp_[0], config_.spliceChunkSize);
-                if (res.bytesSpliced > 0)
-                {
-                    stats_.bytesUp += static_cast<size_t>(res.bytesSpliced);
-                    stats_.touch();
-                }
-                if (res.eof)
-                {
-                    markInboundClosed();
-                    return TransferResult::CLOSED;
-                }
-                if (res.err == EAGAIN || res.err == EWOULDBLOCK)
-                {
-                    return TransferResult::AGAIN;
-                }
-                if (res.err != 0)
-                {
-                    markInboundClosed();
-                    return TransferResult::ERROR;
-                }
-                return TransferResult::OK;
+                return TransferResult::UNSUPPORTED;
             }
 
-            char buf[16384];
-            ssize_t n = ::read(inboundFd_, buf, sizeof(buf));
-            if (n > 0)
+            auto res = detail::splicePipes(inboundFd_, outboundFd_, pipeUp_[1], pipeUp_[0], config_.spliceChunkSize,
+                                           &pipeUpPending_);
+            if (res.bytesSpliced > 0)
             {
-                ssize_t w = ::write(outboundFd_, buf, static_cast<size_t>(n));
-                if (w > 0)
-                {
-                    stats_.bytesUp += static_cast<size_t>(w);
-                    stats_.touch();
-                    return TransferResult::OK;
-                }
+                stats_.bytesUp += static_cast<size_t>(res.bytesSpliced);
+                stats_.touch();
             }
-            else if (n == 0)
+            if (res.eof)
             {
                 markInboundClosed();
                 return TransferResult::CLOSED;
             }
-            else if (errno != EAGAIN && errno != EWOULDBLOCK)
+            if (res.err == EAGAIN || res.err == EWOULDBLOCK)
             {
+                return TransferResult::AGAIN;
+            }
+            if (res.err != 0)
+            {
+                if (isSpliceUnsupportedErrno(res.err))
+                {
+                    return TransferResult::UNSUPPORTED;
+                }
                 markInboundClosed();
                 return TransferResult::ERROR;
             }
-            return TransferResult::AGAIN;
+            return TransferResult::OK;
         }
 
         TransferResult transferOutboundToInbound() noexcept
@@ -941,56 +1938,37 @@ namespace mynet
                 return TransferResult::CLOSED;
             }
 
-            if ((activeMode_ == ForwardMode::ZERO_COPY_SPLICE || activeMode_ == ForwardMode::KERNEL_SOCKMAP) &&
-                pipeDown_[0] >= 0 && pipeDown_[1] >= 0)
+            if (pipeDown_[0] < 0 || pipeDown_[1] < 0)
             {
-                auto res =
-                    detail::splicePipes(outboundFd_, inboundFd_, pipeDown_[1], pipeDown_[0], config_.spliceChunkSize);
-                if (res.bytesSpliced > 0)
-                {
-                    stats_.bytesDown += static_cast<size_t>(res.bytesSpliced);
-                    stats_.touch();
-                }
-                if (res.eof)
-                {
-                    markOutboundClosed();
-                    return TransferResult::CLOSED;
-                }
-                if (res.err == EAGAIN || res.err == EWOULDBLOCK)
-                {
-                    return TransferResult::AGAIN;
-                }
-                if (res.err != 0)
-                {
-                    markOutboundClosed();
-                    return TransferResult::ERROR;
-                }
-                return TransferResult::OK;
+                return TransferResult::UNSUPPORTED;
             }
 
-            char buf[16384];
-            ssize_t n = ::read(outboundFd_, buf, sizeof(buf));
-            if (n > 0)
+            auto res = detail::splicePipes(outboundFd_, inboundFd_, pipeDown_[1], pipeDown_[0], config_.spliceChunkSize,
+                                           &pipeDownPending_);
+            if (res.bytesSpliced > 0)
             {
-                ssize_t w = ::write(inboundFd_, buf, static_cast<size_t>(n));
-                if (w > 0)
-                {
-                    stats_.bytesDown += static_cast<size_t>(w);
-                    stats_.touch();
-                    return TransferResult::OK;
-                }
+                stats_.bytesDown += static_cast<size_t>(res.bytesSpliced);
+                stats_.touch();
             }
-            else if (n == 0)
+            if (res.eof)
             {
                 markOutboundClosed();
                 return TransferResult::CLOSED;
             }
-            else if (errno != EAGAIN && errno != EWOULDBLOCK)
+            if (res.err == EAGAIN || res.err == EWOULDBLOCK)
             {
+                return TransferResult::AGAIN;
+            }
+            if (res.err != 0)
+            {
+                if (isSpliceUnsupportedErrno(res.err))
+                {
+                    return TransferResult::UNSUPPORTED;
+                }
                 markOutboundClosed();
                 return TransferResult::ERROR;
             }
-            return TransferResult::AGAIN;
+            return TransferResult::OK;
         }
 
     private:
@@ -1026,16 +2004,19 @@ namespace mynet
     };
 
     /**
-     * @brief 数据报/UDP 转发映射会话 (Datagram Forwarding Session)
+     * @brief 数据报/UDP 转发映射会话（直接复用 Datagram 端点管理出站 fd 与事件监听）
      */
-    class ForwarderDatagramSession
+    class ForwarderDatagramSession : public std::enable_shared_from_this<ForwarderDatagramSession>
     {
     private:
         uint64_t id_{0};
         sockaddr_in clientAddr_{};
         sockaddr_in remoteAddr_{};
-        int outboundFd_{-1};
+        Datagram outbound_{};
         ForwarderStats stats_{};
+        ForwarderLoopHooks loopHooks_{};
+        bool outboundWatched_{false};
+        std::function<void(const DatagramView &)> onReply_{nullptr};
 
     public:
         ForwarderDatagramSession(uint64_t id, const sockaddr_in &client, const sockaddr_in &remote,
@@ -1043,18 +2024,20 @@ namespace mynet
             : id_(id),
               clientAddr_(client),
               remoteAddr_(remote),
-              outboundFd_(outboundFd)
+              outbound_(outboundFd, outboundFd >= 0)
         {
         }
 
-        ~ForwarderDatagramSession() noexcept
+        ForwarderDatagramSession(uint64_t id, const sockaddr_in &client, const sockaddr_in &remote,
+                                 Datagram outbound) noexcept
+            : id_(id),
+              clientAddr_(client),
+              remoteAddr_(remote),
+              outbound_(std::move(outbound))
         {
-            if (outboundFd_ >= 0)
-            {
-                ::close(outboundFd_);
-                outboundFd_ = -1;
-            }
         }
+
+        ~ForwarderDatagramSession() noexcept { close(); }
 
         ForwarderDatagramSession(const ForwarderDatagramSession &) = delete;
         ForwarderDatagramSession &operator=(const ForwarderDatagramSession &) = delete;
@@ -1064,9 +2047,68 @@ namespace mynet
         [[nodiscard]] inline uint64_t id() const noexcept { return id_; }
         [[nodiscard]] inline const sockaddr_in &clientAddr() const noexcept { return clientAddr_; }
         [[nodiscard]] inline const sockaddr_in &remoteAddr() const noexcept { return remoteAddr_; }
-        [[nodiscard]] inline int outboundFd() const noexcept { return outboundFd_; }
+        [[nodiscard]] inline Datagram &outbound() noexcept { return outbound_; }
+        [[nodiscard]] inline const Datagram &outbound() const noexcept { return outbound_; }
+        [[nodiscard]] inline int outboundFd() const noexcept { return outbound_.fd(); }
         [[nodiscard]] inline const ForwarderStats &stats() const noexcept { return stats_; }
         [[nodiscard]] inline ForwarderStats &stats() noexcept { return stats_; }
+
+        inline void setOutboundFd(int fd, bool ownsFd = true) noexcept { outbound_.setFd(fd, ownsFd); }
+        inline void setOutboundDatagram(Datagram dgram) noexcept { outbound_ = std::move(dgram); }
+        inline void setLoopHooks(ForwarderLoopHooks hooks) noexcept { loopHooks_ = std::move(hooks); }
+
+        inline bool installOutboundWatch(std::function<void(const DatagramView &)> onReply)
+        {
+            if (outboundWatched_ || !outbound_.valid() || !loopHooks_.addWatch || !loopHooks_.delWatch || !onReply)
+            {
+                return false;
+            }
+            onReply_ = std::move(onReply);
+#if defined(__linux__)
+            std::weak_ptr<ForwarderDatagramSession> weak = weak_from_this();
+            const uint32_t mask = EPOLLIN | EPOLLET;
+            outboundWatched_ = loopHooks_.addWatch(
+                outbound_.fd(), mask,
+                [weak](uint32_t events)
+                {
+                    auto self = weak.lock();
+                    if (self == nullptr || !self->outbound_.valid())
+                    {
+                        return;
+                    }
+                    if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
+                    {
+                        self->close();
+                        return;
+                    }
+                    if (events & EPOLLIN)
+                    {
+                        (void)self->outbound_.drain(
+                            [&](const DatagramView &view)
+                            {
+                                if (self->onReply_)
+                                {
+                                    self->onReply_(view);
+                                }
+                            });
+                    }
+                });
+#endif
+            return outboundWatched_;
+        }
+
+        inline void close() noexcept
+        {
+            if (outboundWatched_ && loopHooks_.delWatch && outbound_.valid())
+            {
+                loopHooks_.delWatch(outbound_.fd());
+                outboundWatched_ = false;
+            }
+            onReply_ = nullptr;
+            outbound_.close();
+        }
+
+        inline void touch() noexcept { stats_.touch(); }
 
         inline void recordUp(size_t bytes) noexcept
         {
@@ -1105,12 +2147,40 @@ namespace mynet
 
         mutable std::mutex datagramMutex_{};
         std::unordered_map<uint64_t, std::shared_ptr<ForwarderDatagramSession>> datagramSessions_{};
+        std::unordered_map<DatagramSessionKey, std::shared_ptr<ForwarderDatagramSession>, DatagramSessionKeyHash>
+            datagramNat_{};
 
         std::atomic<uint64_t> totalBytesUp_{0};
         std::atomic<uint64_t> totalBytesDown_{0};
         std::atomic<uint64_t> totalPacketsUp_{0};
         std::atomic<uint64_t> totalPacketsDown_{0};
         int sockmapFd_{-1};
+        ForwarderLoopHooks loopHooks_{};
+
+        inline void recordAndStoreSession(const std::shared_ptr<ForwarderStreamSession> &session)
+        {
+            if (session->stats().bytesUp > 0)
+            {
+                totalBytesUp_.fetch_add(session->stats().bytesUp, std::memory_order_relaxed);
+                totalPacketsUp_.fetch_add(session->stats().packetsUp, std::memory_order_relaxed);
+            }
+            if (session->stats().bytesDown > 0)
+            {
+                totalBytesDown_.fetch_add(session->stats().bytesDown, std::memory_order_relaxed);
+                totalPacketsDown_.fetch_add(session->stats().packetsDown, std::memory_order_relaxed);
+            }
+
+            if (loopHooks_.active())
+            {
+                session->setLoopHooks(loopHooks_);
+                (void)session->installOutboundWatch();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(streamMutex_);
+                streamSessions_.emplace(session->id(), session);
+            }
+        }
 
     public:
         Forwarder() = default;
@@ -1130,6 +2200,19 @@ namespace mynet
         inline void setConfig(const ForwarderConfig &cfg) noexcept { defaultConfig_ = cfg; }
         [[nodiscard]] inline int sockmapFd() const noexcept { return sockmapFd_; }
         inline void setSockmapFd(int fd) noexcept { sockmapFd_ = fd; }
+        [[nodiscard]] inline const ForwarderLoopHooks &loopHooks() const noexcept { return loopHooks_; }
+        inline void setLoopHooks(ForwarderLoopHooks hooks) noexcept { loopHooks_ = std::move(hooks); }
+        inline void clearLoopHooks() noexcept { loopHooks_ = {}; }
+
+        inline bool activateLoopWatch(const std::shared_ptr<ForwarderStreamSession> &session)
+        {
+            if (session == nullptr || !loopHooks_.active())
+            {
+                return false;
+            }
+            session->setLoopHooks(loopHooks_);
+            return session->installOutboundWatch();
+        }
 
         /**
          * @brief 桥接入站流式处理器与出站流式处理器
@@ -1148,21 +2231,49 @@ namespace mynet
             session->setSockmapFd(sockmapFd_);
 
             [[maybe_unused]] auto preFlushed = session->attach(inbound, outbound, inbound.fd(), outbound.fd(), false);
-            if (session->stats().bytesUp > 0)
-            {
-                totalBytesUp_.fetch_add(session->stats().bytesUp, std::memory_order_relaxed);
-                totalPacketsUp_.fetch_add(session->stats().packetsUp, std::memory_order_relaxed);
-            }
-            if (session->stats().bytesDown > 0)
-            {
-                totalBytesDown_.fetch_add(session->stats().bytesDown, std::memory_order_relaxed);
-                totalPacketsDown_.fetch_add(session->stats().packetsDown, std::memory_order_relaxed);
-            }
+            recordAndStoreSession(session);
+            return session;
+        }
 
-            {
-                std::lock_guard<std::mutex> lock(streamMutex_);
-                streamSessions_.emplace(sid, session);
-            }
+        std::shared_ptr<ForwarderStreamSession> bridgeDispatched(
+            HandlerBase &inbound, std::unique_ptr<HandlerBase> outbound, int inFd, int outFd, bool ownsOutboundFd,
+            bool connecting, bool connectDeferred, const sockaddr_in &peerAddr, const handler::ProxyAddress &target,
+            std::string outboundTag, std::optional<ForwarderConfig> cfg = std::nullopt)
+        {
+            const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
+            const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
+            auto session = std::make_shared<ForwarderStreamSession>(sid, actualConfig);
+            session->setSockmapFd(sockmapFd_);
+            session->setOwnsOutboundFd(ownsOutboundFd);
+            session->setOutboundConnectState(connecting, connectDeferred, peerAddr);
+            session->setTarget(target);
+            session->setOutboundTag(std::move(outboundTag));
+            session->setOwnedOutbound(std::move(outbound));
+
+            HandlerBase *outPtr = session->outbound();
+            const int resolvedInFd = (inFd >= 0) ? inFd : inbound.fd();
+            [[maybe_unused]] auto preFlushed = session->attach(inbound, *outPtr, resolvedInFd, outFd, false);
+            recordAndStoreSession(session);
+            return session;
+        }
+
+        /**
+         * @brief 桥接基于 IStreamChannel 的通用异步流通道（支持 QUIC 流 / 内存管道 / 用户态多路复用子流等非 fd 流）
+         */
+        std::shared_ptr<ForwarderStreamSession> bridgeChannels(HandlerBase &inbound,
+                                                               std::shared_ptr<IStreamChannel> inCh,
+                                                               HandlerBase &outbound,
+                                                               std::shared_ptr<IStreamChannel> outCh,
+                                                               std::optional<ForwarderConfig> cfg = std::nullopt)
+        {
+            const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
+            const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
+            auto session = std::make_shared<ForwarderStreamSession>(sid, actualConfig);
+            session->setSockmapFd(sockmapFd_);
+
+            [[maybe_unused]] auto preFlushed =
+                session->attachChannels(inbound, std::move(inCh), outbound, std::move(outCh), -1, -1, false);
+            recordAndStoreSession(session);
             return session;
         }
 
@@ -1186,16 +2297,7 @@ namespace mynet
 
             [[maybe_unused]] auto preFlushed =
                 session->attach(*inHandler, *outHandler, inboundConn.fd(), outboundConn.fd(), userSsl);
-            if (session->stats().bytesUp > 0)
-            {
-                totalBytesUp_.fetch_add(session->stats().bytesUp, std::memory_order_relaxed);
-                totalPacketsUp_.fetch_add(session->stats().packetsUp, std::memory_order_relaxed);
-            }
-            if (session->stats().bytesDown > 0)
-            {
-                totalBytesDown_.fetch_add(session->stats().bytesDown, std::memory_order_relaxed);
-                totalPacketsDown_.fetch_add(session->stats().packetsDown, std::memory_order_relaxed);
-            }
+            recordAndStoreSession(session);
 
             // 若预摄入数据冲刷到了出站连接响应队列，驱动一次连接层 pump
             if (outHandler->hasResponse())
@@ -1209,10 +2311,6 @@ namespace mynet
                 inboundConn.setWantWrite(inboundConn.hasPendingWrite());
             }
 
-            {
-                std::lock_guard<std::mutex> lock(streamMutex_);
-                streamSessions_.emplace(sid, session);
-            }
             return session;
         }
 
@@ -1233,10 +2331,7 @@ namespace mynet
             session->activateAdaptiveMode();
             session->setState(ForwardSessionState::STREAMING);
 
-            {
-                std::lock_guard<std::mutex> lock(streamMutex_);
-                streamSessions_.emplace(sid, session);
-            }
+            recordAndStoreSession(session);
             return session;
         }
 
@@ -1386,21 +2481,93 @@ namespace mynet
         // =====================================================================
 
         /**
-         * @brief 获取或创建关联的 UDP 数据报转发会话
+         * @brief 按五元组复用或新建 UDP 数据报转发会话（复用 DatagramSessionKey 与 Datagram 端点）
          */
         std::shared_ptr<ForwarderDatagramSession>
         getOrCreateDatagramSession(const sockaddr_in &client, const sockaddr_in &remote, int outboundFd = -1)
         {
-            const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
-            auto session = std::make_shared<ForwarderDatagramSession>(sid, client, remote, outboundFd);
+            const DatagramSessionKey key{.client = client, .remote = remote};
+            int duplicateFdToClose = -1;
+            std::shared_ptr<ForwarderDatagramSession> result;
 
+            {
+                std::lock_guard<std::mutex> lock(datagramMutex_);
+                auto it = datagramNat_.find(key);
+                if (it != datagramNat_.end() && it->second != nullptr)
+                {
+                    result = it->second;
+                    result->touch();
+                    if (outboundFd >= 0)
+                    {
+                        if (result->outboundFd() < 0)
+                        {
+                            result->setOutboundFd(outboundFd, true);
+                        }
+                        else if (outboundFd != result->outboundFd())
+                        {
+                            duplicateFdToClose = outboundFd;
+                        }
+                    }
+                }
+                else
+                {
+                    const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
+                    result = std::make_shared<ForwarderDatagramSession>(sid, client, remote, outboundFd);
+                    datagramSessions_.emplace(sid, result);
+                    datagramNat_.emplace(key, result);
+                }
+            }
+            if (duplicateFdToClose >= 0)
+            {
+                ::close(duplicateFdToClose);
+            }
+            return result;
+        }
+
+        [[nodiscard]] std::shared_ptr<ForwarderDatagramSession> findDatagramSession(const sockaddr_in &client,
+                                                                                    const sockaddr_in &remote) const
+        {
+            const DatagramSessionKey key{.client = client, .remote = remote};
             std::lock_guard<std::mutex> lock(datagramMutex_);
-            datagramSessions_.emplace(sid, session);
-            return session;
+            auto it = datagramNat_.find(key);
+            if (it != datagramNat_.end() && it->second != nullptr)
+            {
+                it->second->touch();
+                return it->second;
+            }
+            return nullptr;
+        }
+
+        inline bool activateDatagramWatch(const std::shared_ptr<ForwarderDatagramSession> &session,
+                                          HandlerBase &inbound)
+        {
+            if (session == nullptr || !loopHooks_.active() || !session->outbound().valid())
+            {
+                return false;
+            }
+            session->setLoopHooks(loopHooks_);
+            std::weak_ptr<ForwarderDatagramSession> weakSess = session;
+            return session->installOutboundWatch(
+                [this, weakSess, &inbound](const DatagramView &view)
+                {
+                    auto sess = weakSess.lock();
+                    if (sess == nullptr)
+                    {
+                        return;
+                    }
+                    const std::string_view payload(reinterpret_cast<const char *>(view.payload.data()),
+                                                   view.payload.size());
+                    [[maybe_unused]] auto _ = forwardDatagramToClient(inbound, sess->clientAddr(), payload, sess.get());
+                    if (inbound.fd() >= 0)
+                    {
+                        Datagram inDgram(inbound.fd(), /*ownsFd=*/false);
+                        inbound::flushDatagramOutgoing(inDgram, inbound, sess->clientAddr());
+                    }
+                });
         }
 
         /**
-         * @brief 向远端上游服务器转发来自客户端的 UDP 载荷
+         * @brief 通过 Datagram::sendTo 向远端上游转发来自客户端的 UDP 载荷
          */
         [[nodiscard]] Result<size_t> forwardDatagramToRemote(int outboundFd, const sockaddr_in &remote,
                                                              std::string_view payload,
@@ -1411,26 +2578,31 @@ namespace mynet
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
 
-            const ssize_t sent = ::sendto(outboundFd, payload.data(), payload.size(), MSG_NOSIGNAL,
-                                          reinterpret_cast<const sockaddr *>(&remote), sizeof(remote));
-            if (sent < 0)
+            Datagram endpoint(outboundFd, /*ownsFd=*/false);
+            auto sentRes = endpoint.sendTo(remote, payload);
+            if (!sentRes)
             {
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                {
-                    return 0;
-                }
-                LOG_WARN("forwardDatagramToRemote: sendto() failed: {}", errnoText(errno));
-                return std::unexpected(ERR::SOCKET_FAILED);
+                LOG_WARN("forwardDatagramToRemote: sendTo() failed: {}", toString(sentRes.error()));
+                return std::unexpected(sentRes.error());
             }
 
-            const size_t n = static_cast<size_t>(sent);
-            if (session != nullptr)
+            const size_t n = *sentRes;
+            if (n > 0)
             {
-                session->recordUp(n);
+                if (session != nullptr)
+                {
+                    session->recordUp(n);
+                }
+                totalBytesUp_.fetch_add(n, std::memory_order_relaxed);
+                totalPacketsUp_.fetch_add(1, std::memory_order_relaxed);
             }
-            totalBytesUp_.fetch_add(n, std::memory_order_relaxed);
-            totalPacketsUp_.fetch_add(1, std::memory_order_relaxed);
             return n;
+        }
+
+        [[nodiscard]] Result<size_t> forwardDatagramToRemote(ForwarderDatagramSession &session,
+                                                             std::string_view payload) noexcept
+        {
+            return forwardDatagramToRemote(session.outboundFd(), session.remoteAddr(), payload, &session);
         }
 
         /**
@@ -1457,7 +2629,7 @@ namespace mynet
         }
 
         /**
-         * @brief 排空超时的 UDP 会话
+         * @brief 排空超时的 UDP 会话（同步清理会话表与 NAT 映射表并关断 watch）
          */
         size_t sweepIdleDatagramSessions(std::optional<std::chrono::seconds> timeout = std::nullopt)
         {
@@ -1472,6 +2644,9 @@ namespace mynet
                     if (it->second->isExpired(now, maxIdle))
                     {
                         toRemove.push_back(it->second);
+                        datagramNat_.erase(DatagramSessionKey{
+                            .client = it->second->clientAddr(),
+                            .remote = it->second->remoteAddr()});
                         it = datagramSessions_.erase(it);
                     }
                     else
@@ -1481,51 +2656,31 @@ namespace mynet
                 }
             }
 
-            return toRemove.size();
-        }
-
-        // =====================================================================
-        // 静态独立零拷贝直通工具 (Standalone Splice Utilities)
-        // =====================================================================
-
-        /**
-         * @brief 使用显式管道在两个描述符之间执行一次非阻塞内核零拷贝拼接 (splice)
-         *
-         * 拓扑：srcFd -> pipeWriteFd | pipeReadFd -> dstFd
-         *
-         * @param srcFd 源套接字描述符
-         * @param dstFd 目的套接字描述符
-         * @param pipeWriteFd 管道写入端描述符 (pipeFd[1])
-         * @param pipeReadFd 管道读取端描述符 (pipeFd[0])
-         * @param maxBytes 单次拼接最大字节数
-         * @return SpliceResult 拼接状态与字节数
-         */
-        [[nodiscard]] static SpliceResult splicePipes(int srcFd, int dstFd, int pipeWriteFd, int pipeReadFd,
-                                                      size_t maxBytes = 65536) noexcept
-        {
-            return detail::splicePipes(srcFd, dstFd, pipeWriteFd, pipeReadFd, maxBytes);
-        }
-
-        /**
-         * @brief 在两个套接字描述符间单次自建临时管道执行零拷贝转发 (一次性便利函数)
-         */
-        [[nodiscard]] static SpliceResult spliceDirect(int srcFd, int dstFd, size_t maxBytes = 65536) noexcept
-        {
-            int pipeFds[2] = {-1, -1};
-            if (::pipe2(pipeFds, O_NONBLOCK | O_CLOEXEC) < 0)
+            for (auto &sess : toRemove)
             {
-                return {.bytesSpliced = -1, .eof = false, .err = errno};
+                if (sess != nullptr)
+                {
+                    sess->close();
+                }
             }
-
-            SpliceResult res = splicePipes(srcFd, dstFd, pipeFds[1], pipeFds[0], maxBytes);
-            ::close(pipeFds[0]);
-            ::close(pipeFds[1]);
-            return res;
+            return toRemove.size();
         }
 
         // =====================================================================
         // 全局聚合监控指标
         // =====================================================================
+
+        [[nodiscard]] inline std::vector<std::shared_ptr<ForwarderStreamSession>> streamSessions() const
+        {
+            std::lock_guard<std::mutex> lock(streamMutex_);
+            std::vector<std::shared_ptr<ForwarderStreamSession>> list;
+            list.reserve(streamSessions_.size());
+            for (const auto &pair : streamSessions_)
+            {
+                list.push_back(pair.second);
+            }
+            return list;
+        }
 
         [[nodiscard]] inline size_t activeStreamSessions() const noexcept
         {
@@ -1574,6 +2729,7 @@ namespace mynet
             {
                 std::lock_guard<std::mutex> lock(datagramMutex_);
                 dgrams = std::move(datagramSessions_);
+                datagramNat_.clear();
             }
 
             for (auto &pair : streams)
@@ -1581,6 +2737,13 @@ namespace mynet
                 if (pair.second != nullptr)
                 {
                     pair.second->close(true);
+                }
+            }
+            for (auto &pair : dgrams)
+            {
+                if (pair.second != nullptr)
+                {
+                    pair.second->close();
                 }
             }
             dgrams.clear();

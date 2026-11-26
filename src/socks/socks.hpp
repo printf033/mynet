@@ -25,22 +25,24 @@ namespace mynet::handler
      * - 0x04: 路由至 SOCKS4 / SOCKS4a 处理逻辑
      * - 0x05: 路由至 SOCKS5 (RFC 1928 / RFC 1929) 处理逻辑
      */
-    class HandlerInboundSocks : public HandlerInboundConnectionBase
+    class HandlerInboundSocks : public MuxInboundHandler<HandlerInboundSocks4, HandlerInboundSocks5>
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
 
     private:
         SocksProtocolVersion version_{SocksProtocolVersion::UNKNOWN};
-        HandlerInboundSocks4 s4_{};
-        HandlerInboundSocks5 s5_{};
+        ProxyConfig proxyCfg_{};
+        bool hasCustomProxyCfg_{false};
         AuthCallback authCallback_{nullptr};
+        HandlerInboundSocks4 *s4Ptr_{nullptr};
+        HandlerInboundSocks5 *s5Ptr_{nullptr};
 
     public:
         HandlerInboundSocks() noexcept = default;
         explicit HandlerInboundSocks(const ProxyConfig &cfg) noexcept
-            : s4_(cfg),
-              s5_(cfg)
+            : proxyCfg_(cfg),
+              hasCustomProxyCfg_(true)
         {
         }
         ~HandlerInboundSocks() noexcept override = default;
@@ -52,47 +54,50 @@ namespace mynet::handler
 
         void setAuthenticator(AuthCallback cb) noexcept
         {
-            authCallback_ = cb;
-            s5_.setAuthenticator(cb);
-            s4_.setAuthenticator([cb](std::string_view uid) { return cb(uid, ""); });
+            authCallback_ = std::move(cb);
+            if (s5Ptr_ != nullptr)
+            {
+                s5Ptr_->setAuthenticator(authCallback_);
+            }
+            if (s4Ptr_ != nullptr && authCallback_)
+            {
+                auto fn = authCallback_;
+                s4Ptr_->setAuthenticator([fn](std::string_view uid) { return fn(uid, ""); });
+            }
         }
 
         [[nodiscard]] SocksProtocolVersion version() const noexcept { return version_; }
-        [[nodiscard]] bool isEstablished() const noexcept
-        {
-            return (version_ == SocksProtocolVersion::SOCKS4 && s4_.isEstablished()) ||
-                   (version_ == SocksProtocolVersion::SOCKS5 && s5_.isEstablished());
-        }
 
         [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept
         {
-            if (version_ == SocksProtocolVersion::SOCKS4)
+            if (s4Ptr_ != nullptr)
             {
-                return s4_.targetAddress();
+                return s4Ptr_->targetAddress();
             }
-            if (version_ == SocksProtocolVersion::SOCKS5)
+            if (s5Ptr_ != nullptr)
             {
-                return s5_.targetAddress();
+                return s5Ptr_->targetAddress();
             }
             return targetAddress_;
         }
 
         void configure(const ProxyConfig &cfg) noexcept
         {
-            s4_.configure(cfg);
-            s5_.configure(cfg);
+            proxyCfg_ = cfg;
+            hasCustomProxyCfg_ = true;
+            if (s4Ptr_ != nullptr)
+                s4Ptr_->configure(cfg);
+            if (s5Ptr_ != nullptr)
+                s5Ptr_->configure(cfg);
         }
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            MuxInboundHandler::reset();
             version_ = SocksProtocolVersion::UNKNOWN;
-            s4_.reset();
-            s5_.reset();
+            s4Ptr_ = nullptr;
+            s5Ptr_ = nullptr;
         }
-
-        void onMessageComplete() noexcept {}
-        void onParseError(const char *reason) noexcept { (void)reason; }
 
         void handle() override
         {
@@ -106,10 +111,23 @@ namespace mynet::handler
                 if (firstByte == socks4::kVersion)
                 {
                     version_ = SocksProtocolVersion::SOCKS4;
+                    s4Ptr_ = hasCustomProxyCfg_ ? &emplaceChild<HandlerInboundSocks4>(proxyCfg_)
+                                                : &emplaceChild<HandlerInboundSocks4>();
+                    if (authCallback_)
+                    {
+                        auto fn = authCallback_;
+                        s4Ptr_->setAuthenticator([fn](std::string_view uid) { return fn(uid, ""); });
+                    }
                 }
                 else if (firstByte == socks5::kVersion)
                 {
                     version_ = SocksProtocolVersion::SOCKS5;
+                    s5Ptr_ = hasCustomProxyCfg_ ? &emplaceChild<HandlerInboundSocks5>(proxyCfg_)
+                                                : &emplaceChild<HandlerInboundSocks5>();
+                    if (authCallback_)
+                    {
+                        s5Ptr_->setAuthenticator(authCallback_);
+                    }
                 }
                 else
                 {
@@ -119,66 +137,9 @@ namespace mynet::handler
                 }
             }
 
-            if (version_ == SocksProtocolVersion::SOCKS4)
+            if (Handler *child = activeChild(); child != nullptr)
             {
-                syncToChild(s4_);
-                s4_.handle();
-                syncFromChild(s4_);
-                if (s4_.isEstablished())
-                {
-                    setStage(InboundStage::STREAMING);
-                    targetAddress_ = s4_.targetAddress();
-                    command_ = s4_.command();
-                }
-            }
-            else if (version_ == SocksProtocolVersion::SOCKS5)
-            {
-                syncToChild(s5_);
-                s5_.handle();
-                syncFromChild(s5_);
-                if (s5_.isEstablished())
-                {
-                    setStage(InboundStage::STREAMING);
-                    targetAddress_ = s5_.targetAddress();
-                    command_ = s5_.command();
-                }
-            }
-        }
-
-    private:
-        void syncToChild(HandlerConnection &child)
-        {
-            const size_t avail = requestBytes();
-            if (avail > child.requestBytes())
-            {
-                const size_t diff = avail - child.requestBytes();
-                const char *p = requestBegin() + child.requestBytes();
-                [[maybe_unused]] auto _ = child.appendRequest(p, static_cast<ssize_t>(diff));
-            }
-        }
-
-        void syncFromChild(HandlerConnection &child)
-        {
-            const size_t childAvail = child.requestBytes();
-            if (requestBytes() > childAvail)
-            {
-                requestConsume(requestBytes() - childAvail);
-            }
-
-            while (child.hasResponse())
-            {
-                std::string resp = child.takeResponse();
-                [[maybe_unused]] auto _ = pushResponse(resp);
-            }
-
-            if (child.closeAfterResponse())
-            {
-                setCloseAfterResponse(true);
-            }
-
-            if (child.isSpliceActive())
-            {
-                setSpliceTarget(child.spliceTarget());
+                driveChild(*child);
             }
         }
     };

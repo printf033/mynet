@@ -1,5 +1,11 @@
+#include "acceptor.hpp"
 #include "config/tls.hpp"
 #include "connection.hpp"
+#include "dialer.hpp"
+#include "socks/inbound.hpp"
+#include "socks/outbound.hpp"
+#include "tls/transport.hpp"
+#include "websocket/websocket.hpp"
 #include <filesystem>
 #include <gtest/gtest.h>
 
@@ -23,10 +29,6 @@ namespace
         return {};
     }
 
-    struct SpliceTestHandler : public HandlerConnection
-    {
-        static constexpr bool kEnableSplice = true;
-    };
 } // namespace
 
 TEST(TlsOptions, AppliesProtocolRangeAndCipherPolicies)
@@ -217,16 +219,168 @@ TEST(SniCertificateManager, HotReloadReplacesExistingContext)
 TEST(ConnectionTls, TracksKtlsOffloadStateAndSpliceStatus)
 {
     ConnectionBase conn;
-    SpliceTestHandler handler;
+    HandlerConnection handler;
     conn.setHandler(&handler);
     EXPECT_FALSE(conn.ktlsRxActive());
     EXPECT_FALSE(conn.ktlsTxActive());
     EXPECT_EQ(conn.ssl(), nullptr);
+    EXPECT_TRUE(handler.canSplice());
+}
 
-    // 默认未开启 splice target 时为 false
-    EXPECT_FALSE(conn.isSpliceEnabled());
+TEST(ConnectionTls, TlsTransportHandshakeDisablesSpliceAndRelaysEncryptedData)
+{
+    auto [cert, key] = findTestCerts();
+    if (cert.empty())
+    {
+        GTEST_SKIP() << "certs/ser.crt not reachable";
+    }
 
-    // 开启 splice target
-    handler.setSpliceTarget(3);
-    EXPECT_TRUE(conn.isSpliceEnabled());
+    auto srvTls = mynet::tls::TlsTransport::createServer(cert.c_str(), key.c_str());
+    ASSERT_TRUE(srvTls.has_value());
+    auto cliTls = mynet::tls::TlsTransport::createClient("localhost");
+    ASSERT_TRUE(cliTls.has_value());
+
+    Handler serverHandler;
+    Handler clientHandler;
+    serverHandler.addTransportLayer(std::move(*srvTls));
+    clientHandler.addTransportLayer(std::move(*cliTls));
+
+    Connection serverConn;
+    serverConn.setHandler(&serverHandler);
+    // TlsTransport 激活后 isPassthrough() 为假，严禁内核明文 splice
+    EXPECT_NE(serverConn.ssl(), nullptr);
+    EXPECT_FALSE(serverHandler.canSplice());
+
+    ASSERT_TRUE(clientHandler.startTransportHandshake().has_value());
+
+    auto pumpPair = [&]()
+    {
+        for (int round = 0; round < 16; ++round)
+        {
+            bool progressed = false;
+            while (clientHandler.hasResponse())
+            {
+                std::string wire = clientHandler.takeResponse();
+                ASSERT_TRUE(serverHandler.appendRequest(wire.data(), static_cast<ssize_t>(wire.size())).has_value());
+                progressed = true;
+            }
+            serverHandler.drive();
+            while (serverHandler.hasResponse())
+            {
+                std::string wire = serverHandler.takeResponse();
+                ASSERT_TRUE(clientHandler.appendRequest(wire.data(), static_cast<ssize_t>(wire.size())).has_value());
+                progressed = true;
+            }
+            clientHandler.drive();
+            if (!progressed && serverHandler.isTransportReady() && clientHandler.isTransportReady())
+            {
+                break;
+            }
+        }
+    };
+
+    pumpPair();
+    ASSERT_TRUE(serverHandler.isTransportReady());
+    ASSERT_TRUE(clientHandler.isTransportReady());
+
+    ASSERT_TRUE(clientHandler.sendPayload("hello-over-tls").has_value());
+    pumpPair();
+    EXPECT_EQ(std::string_view(serverHandler.requestBegin(), serverHandler.requestBytes()), "hello-over-tls");
+
+    ASSERT_TRUE(serverHandler.sendPayload("tls-server-ack").has_value());
+    pumpPair();
+    EXPECT_EQ(std::string_view(clientHandler.requestBegin(), clientHandler.requestBytes()), "tls-server-ack");
+}
+
+TEST(ConnectionTls, StackedTlsWebSocketSocks5EndToEndAndAcceptorContextReuse)
+{
+    auto [cert, key] = findTestCerts();
+    if (cert.empty())
+    {
+        GTEST_SKIP() << "certs/ser.crt not reachable";
+    }
+
+    mynet::transport::TransportConfig srvCfg;
+    srvCfg.type = mynet::transport::TransportType::WEBSOCKET;
+    srvCfg.enableTls = true;
+    srvCfg.certFile = cert;
+    srvCfg.keyFile = key;
+    srvCfg.path = "/socks";
+    srvCfg.host = "localhost";
+
+    AcceptorSocks5 acceptor("s5-ws-tls", "127.0.0.1", 0);
+    ASSERT_TRUE(acceptor.setTransportConfig(srvCfg).has_value());
+    EXPECT_NE(acceptor.sslContext(), nullptr);
+
+    auto serverHandlerA = acceptor.buildConfiguredHandler();
+    auto serverHandlerB = acceptor.buildConfiguredHandler();
+    ASSERT_NE(serverHandlerA, nullptr);
+    ASSERT_NE(serverHandlerB, nullptr);
+
+    Handler clientHandler;
+    auto cliTls = mynet::tls::TlsTransport::createClient("localhost");
+    ASSERT_TRUE(cliTls.has_value());
+    clientHandler.addTransportLayer(std::move(*cliTls));
+    clientHandler.addTransportLayer(
+        std::make_unique<mynet::websocket::WebSocketSession>(false, "/socks", "localhost"));
+    ASSERT_TRUE(clientHandler.startTransportHandshake().has_value());
+
+    // 预先推送 SOCKS5 方法协商：在 TLS+WS 就绪前应缓存在 pendingAppTx_ 中并在握手就绪后自动封包发出
+    const std::string s5Methods("\x05\x01\x00", 3);
+    ASSERT_TRUE(clientHandler.sendPayload(s5Methods).has_value());
+
+    auto exchangeWire = [&]()
+    {
+        for (int round = 0; round < 24; ++round)
+        {
+            bool moved = false;
+            while (clientHandler.hasResponse())
+            {
+                std::string w = clientHandler.takeResponse();
+                ASSERT_TRUE(serverHandlerA->appendRequest(w.data(), static_cast<ssize_t>(w.size())).has_value());
+                moved = true;
+            }
+            serverHandlerA->drive();
+            while (serverHandlerA->hasResponse())
+            {
+                std::string w = serverHandlerA->takeResponse();
+                ASSERT_TRUE(clientHandler.appendRequest(w.data(), static_cast<ssize_t>(w.size())).has_value());
+                moved = true;
+            }
+            clientHandler.drive();
+            if (!moved)
+            {
+                break;
+            }
+        }
+    };
+
+    exchangeWire();
+    ASSERT_TRUE(clientHandler.isTransportReady());
+    ASSERT_TRUE(serverHandlerA->isTransportReady());
+    ASSERT_EQ(std::string_view(clientHandler.requestBegin(), clientHandler.requestBytes()),
+              std::string_view("\x05\x00", 2));
+    clientHandler.requestConsume(2);
+
+    // 发送 SOCKS5 CONNECT 请求 (example.com:443)
+    std::string connectReq("\x05\x01\x00\x03\x0b", 5);
+    connectReq.append("example.com");
+    connectReq.push_back('\x01');
+    connectReq.push_back(static_cast<char>(0xBB));
+    ASSERT_TRUE(clientHandler.sendPayload(connectReq).has_value());
+
+    exchangeWire();
+    EXPECT_TRUE(serverHandlerA->isEstablished());
+    EXPECT_EQ(serverHandlerA->target().host, "example.com");
+    EXPECT_EQ(serverHandlerA->target().port, 443);
+    EXPECT_GE(clientHandler.requestBytes(), 10u);
+    clientHandler.requestClear();
+
+    // 验证 Dialer 配置 TLS 后 dialStreamHelper 自动触发 ClientHello
+    mynet::transport::TransportConfig cliCfg;
+    cliCfg.enableTls = true;
+    cliCfg.sni = "localhost";
+    DialerSocks5 dialer("s5-out", "127.0.0.1", 1080);
+    dialer.setTransportConfig(cliCfg);
+    EXPECT_TRUE(dialer.transportConfig().enableTls);
 }

@@ -1,3 +1,9 @@
 build/
 
 .codewhale/
+
+/.gradle/
+/scratch/
+/build_apk/lib/
+/nekobox-mynetd.apk
+/nekobox-mynetd.apk.idsig

@@ -11,9 +11,9 @@ namespace mynet
 {
 
     /**
-     * @brief SOCKS5 二级代理出站端点 (OutboundSocks5)
+     * @brief SOCKS5 二级代理拨号器 (DialerSocks5 / OutboundSocks5)
      */
-    class OutboundSocks5 : public OutboundBase
+    class DialerSocks5 : public Dialer
     {
     private:
         std::string serverHost_{};
@@ -22,9 +22,9 @@ namespace mynet
         std::string password_{};
 
     public:
-        OutboundSocks5(std::string tag, std::string serverHost, uint16_t serverPort, std::string username = "",
-                       std::string password = "", DialerOptions options = {})
-            : OutboundBase(std::move(tag), "socks5", std::move(options)),
+        DialerSocks5(std::string tag, std::string serverHost, uint16_t serverPort, std::string username = "",
+                     std::string password = "", DialerOptions options = {})
+            : Dialer(std::move(tag), "socks5", std::move(options)),
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort),
               username_(std::move(username)),
@@ -49,6 +49,6 @@ namespace mynet
         }
     };
 
-    using DialerSocks5 = OutboundSocks5;
+    using OutboundSocks5 = DialerSocks5;
 
 } // namespace mynet

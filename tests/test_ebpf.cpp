@@ -164,26 +164,6 @@ TEST(EbpfTest, GeoIpRuleSync)
 }
 
 // =============================================================================
-// 6. 内核 eBPF C 源码动态生成测试
-// =============================================================================
-
-TEST(EbpfTest, GenerateBpfSource)
-{
-    std::string bpfSrc = EbpfManager::generateBpfSource();
-    EXPECT_FALSE(bpfSrc.empty());
-    EXPECT_NE(bpfSrc.find("BPF_MAP_TYPE_LPM_TRIE"), std::string::npos);
-    EXPECT_NE(bpfSrc.find("BPF_MAP_TYPE_HASH"), std::string::npos);
-    EXPECT_NE(bpfSrc.find("BPF_MAP_TYPE_ARRAY"), std::string::npos);
-    EXPECT_TRUE(bpfSrc.find("BPF_MAP_TYPE_SOCKHASH") != std::string::npos ||
-                bpfSrc.find("BPF_MAP_TYPE_SOCKMAP") != std::string::npos);
-    EXPECT_TRUE(bpfSrc.find("SEC(\"tc\")") != std::string::npos ||
-                bpfSrc.find("SEC(\"tc_ingress\")") != std::string::npos);
-    EXPECT_NE(bpfSrc.find("mynet_tc_filter"), std::string::npos);
-    EXPECT_NE(bpfSrc.find("TC_ACT_OK"), std::string::npos);
-    EXPECT_NE(bpfSrc.find("TC_ACT_SHOT"), std::string::npos);
-}
-
-// =============================================================================
 // 7. Core 与 eBPF 统一纳管分发集成测试
 // =============================================================================
 
@@ -224,25 +204,11 @@ TEST(EbpfTest, CoreEbpfIntegration)
 // 8. SockMap 内核套接字流卸载与 Splice 双模回退测试
 // =============================================================================
 
-TEST(EbpfTest, SockmapLifecycleAndSpliceFallback)
+TEST(EbpfTest, SockmapLifecycleAndNegativeValidation)
 {
     bool supported = EbpfManager::isSockmapSupported();
     (void)supported;
 
-    int sv[2] = {-1, -1};
-    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sv), 0);
-
-    handler::HandlerInboundDirect handler;
-    bool ok = EbpfManager::enableOffloadOrSplice(handler, sv[0], sv[1], -1);
-    EXPECT_TRUE(ok);
-    EXPECT_TRUE(handler.isSpliceActive());
-    EXPECT_EQ(handler.spliceTarget(), sv[1]);
-
-    handler.reset();
-    ::close(sv[0]);
-    ::close(sv[1]);
-
-    EXPECT_FALSE(EbpfManager::enableOffloadOrSplice(handler, -1, -1, -1));
     EXPECT_FALSE(EbpfManager::attachPair(-1, 0, 1));
     EXPECT_FALSE(EbpfManager::detachPair(-1, 0, 1));
 }
@@ -1153,69 +1119,88 @@ TEST(EbpfTest, SweepConnStateNtpClockSkewTolerance)
 }
 
 // =============================================================================
-// 36. 短生命周期 UDP 端口判定测试 (机制 65: is_short_lived_udp_traffic)
+// 39. Sockmap Gate 与三层完整运行时降级阶梯 (SOCKMAP -> SPLICE -> BUFFER_PUMP)
 // =============================================================================
 
-TEST(EbpfTest, ShortLivedUdpBypass)
+TEST(EbpfTest, SockMapFdGatedByVerdictAttached)
 {
-    EXPECT_TRUE(ebpf::isShortLivedUdp(53, 12345));
-    EXPECT_TRUE(ebpf::isShortLivedUdp(54321, 53));
-    EXPECT_TRUE(ebpf::isShortLivedUdp(53, 53));
+    EbpfEngine engine;
+    EXPECT_FALSE(engine.isVerdictAttached());
+    // 未真实挂载 sk_skb/stream_verdict 前，sockMapFd() 必须返回 -1 以免误判开启内核卸载
+    EXPECT_EQ(engine.sockMapFd(), -1);
 
-    EXPECT_FALSE(ebpf::isShortLivedUdp(443, 12345));
-    EXPECT_FALSE(ebpf::isShortLivedUdp(80, 8080));
-    EXPECT_FALSE(ebpf::isShortLivedUdp(12345, 54321));
+    EbpfConfig cfg;
+    cfg.enabled = false;
+    EXPECT_TRUE(engine.init(cfg));
+    EXPECT_FALSE(engine.isVerdictAttached());
+    EXPECT_EQ(engine.sockMapFd(), -1);
 }
 
-// =============================================================================
-// 37. 局域网 ICMP 重定向内核双节点路径验证测试 (机制 77: SendRedirectsController)
-// =============================================================================
-
-TEST(EbpfTest, SendRedirectsControllerSysctls)
+TEST(EbpfTest, SockmapToSpliceToBufferPumpFullFallbackLadder)
 {
-    auto paths = SendRedirectsController::sendRedirectsSysctls("eth0");
-    ASSERT_EQ(paths.size(), 2u);
-    EXPECT_EQ(paths[0], "/proc/sys/net/ipv4/conf/all/send_redirects");
-    EXPECT_EQ(paths[1], "/proc/sys/net/ipv4/conf/eth0/send_redirects");
+    int spIn[2] = {-1, -1};
+    int spOut[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, spIn), 0);
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, spOut), 0);
 
-    auto pathsAll = SendRedirectsController::sendRedirectsSysctls("all");
-    ASSERT_EQ(pathsAll.size(), 1u);
-    EXPECT_EQ(pathsAll[0], "/proc/sys/net/ipv4/conf/all/send_redirects");
-}
+    handler::HandlerInboundDirect in;
+    handler::HandlerOutboundDirect out;
+    in.onConnect(spIn[1]);
+    out.onConnect(spOut[0]);
+    Forwarder forwarder;
+    auto session = forwarder.bridge(in, out);
+    ASSERT_NE(session, nullptr);
+    EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
 
-// =============================================================================
-// 38. BPF 连接跟踪回收步调自适应切换测试 (机制 87: JanitorCadenceController)
-// =============================================================================
+    // 1. 强行模拟 downgradeSockmapToSplice 路径后保持 splice 可用
+    session->downgradeSockmapToSplice(false);
+    EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
 
-TEST(EbpfTest, JanitorCadenceControllerAdaptiveSteps)
-{
-    JanitorCadenceController janitor;
-    EXPECT_FALSE(janitor.inPressureMode());
+    // 2. 向 pipeUp_ 注入数据后触发无损降级至 BUFFER_PUMP
+    constexpr std::string_view kInPipe = "in-pipe-before-downgrade|";
+    ASSERT_EQ(::write(session->pipeUpWrite(), kInPipe.data(), kInPipe.size()),
+              static_cast<ssize_t>(kInPipe.size()));
+    constexpr std::string_view kFromClient = "from-client-after-downgrade";
+    ASSERT_EQ(::send(spIn[0], kFromClient.data(), kFromClient.size(), 0), static_cast<ssize_t>(kFromClient.size()));
 
-    // 1. 低压力稳态 (100 / 1000 = 10%)
-    EXPECT_EQ(janitor.step(100, 1000), JanitorCadenceController::STEADY_INTERVAL);
-    EXPECT_FALSE(janitor.inPressureMode());
+    session->downgradeSpliceToBufferPump();
+    EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
+    EXPECT_EQ(session->pipeUpRead(), -1);
+    EXPECT_EQ(session->pipeDownRead(), -1);
+    EXPECT_FALSE(in.shouldSuppressConnRecv());
 
-    // 2. 达到 70% 压力门限 (700 / 1000 = 70%)，进入加速压力模式 (1s)
-    EXPECT_EQ(janitor.step(700, 1000), JanitorCadenceController::PRESSURE_INTERVAL);
-    EXPECT_TRUE(janitor.inPressureMode());
+    // 降级过程中管道残留已由 outbound_ 推出，再模拟 inbound Connection 收包唤醒 BUFFER_PUMP
+    char tmp[128]{};
+    const ssize_t rn = ::recv(spIn[1], tmp, sizeof(tmp), 0);
+    ASSERT_EQ(rn, static_cast<ssize_t>(kFromClient.size()));
+    ASSERT_TRUE(in.appendRequest(tmp, rn).has_value());
+    in.notifyExternalData();
 
-    // 3. 仍在压力区 (600 / 1000 = 60% >= 50%)，维持 1s
-    EXPECT_EQ(janitor.step(600, 1000), JanitorCadenceController::PRESSURE_INTERVAL);
-    EXPECT_TRUE(janitor.inPressureMode());
+    // 出站对端应无损收到：管道遗留 + 降级后的新增数据
+    std::string collected;
+    for (int i = 0; i < 16; ++i)
+    {
+        char rbuf[128]{};
+        const ssize_t n = ::recv(spOut[1], rbuf, sizeof(rbuf), 0);
+        if (n > 0)
+        {
+            collected.append(rbuf, static_cast<size_t>(n));
+        }
+        if (collected.size() >= kInPipe.size() + kFromClient.size())
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    EXPECT_EQ(collected, std::string(kInPipe) + std::string(kFromClient));
 
-    // 4. 降至 40% (< 50%)：第 1 轮平静，仍需维持以防抖
-    EXPECT_EQ(janitor.step(400, 1000), JanitorCadenceController::PRESSURE_INTERVAL);
-    EXPECT_TRUE(janitor.inPressureMode());
+    // 单调降级保护：已降级至 BUFFER_PUMP 的会话再次调用 activateAdaptiveMode 不得反弹回 SPLICE/SOCKMAP
+    session->activateAdaptiveMode();
+    EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
 
-    // 5. 第 2 轮平静
-    EXPECT_EQ(janitor.step(300, 1000), JanitorCadenceController::PRESSURE_INTERVAL);
-    EXPECT_TRUE(janitor.inPressureMode());
-
-    // 6. 第 3 轮平静：满足 3 轮退出防抖条件，退出压力模式回到稳态 5s
-    EXPECT_EQ(janitor.step(200, 1000), JanitorCadenceController::STEADY_INTERVAL);
-    EXPECT_FALSE(janitor.inPressureMode());
-
-    // 7. 完全空闲 (0 条目)，退避至 MAX_INTERVAL (30s)
-    EXPECT_EQ(janitor.step(0, 1000), JanitorCadenceController::MAX_INTERVAL);
+    session->close(true);
+    ::close(spIn[0]);
+    ::close(spIn[1]);
+    ::close(spOut[0]);
+    ::close(spOut[1]);
 }

@@ -11,9 +11,9 @@ namespace mynet
 {
 
     /**
-     * @brief Shadowsocks AEAD 协议出站端点 (OutboundShadowsocks)
+     * @brief Shadowsocks AEAD 协议拨号器 (DialerShadowsocks / OutboundShadowsocks)
      */
-    class OutboundShadowsocks : public OutboundBase
+    class DialerShadowsocks : public Dialer
     {
     private:
         std::string serverHost_{};
@@ -22,9 +22,9 @@ namespace mynet
         std::string password_{};
 
     public:
-        OutboundShadowsocks(std::string tag, std::string serverHost, uint16_t serverPort, std::string method,
-                            std::string password, DialerOptions options = {})
-            : OutboundBase(std::move(tag), "shadowsocks", std::move(options)),
+        DialerShadowsocks(std::string tag, std::string serverHost, uint16_t serverPort, std::string method,
+                          std::string password, DialerOptions options = {})
+            : Dialer(std::move(tag), "shadowsocks", std::move(options)),
               serverHost_(std::move(serverHost)),
               serverPort_(serverPort),
               method_(std::move(method)),
@@ -50,6 +50,6 @@ namespace mynet
         }
     };
 
-    using DialerShadowsocks = OutboundShadowsocks;
+    using OutboundShadowsocks = DialerShadowsocks;
 
 } // namespace mynet
