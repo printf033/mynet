@@ -3,9 +3,9 @@
 #include "compat.hpp"
 #include "transport.hpp"
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -17,19 +17,40 @@ namespace mynet
     /**
      * @brief 线程安全配置容器（发布者）
      *
-     * 采用版本代次（Generation Counter）与 RCU 智能指针生命周期闭环机制。
-     * 配置写入（发布）由互斥锁保护，原子替换内部 std::shared_ptr<const T> 指针，并通过 release 内存序递增代次；
+     * 采用 C++20 `std::atomic<std::shared_ptr<const T>>`、版本代次（Generation Counter）与 RCU 智能指针生命周期闭环机制。
+     * 配置写入（发布）通过原子 `store(release)` 替换内部指针并递增代次，读写全路径无互斥锁；
      * 配合 ConfigSnapshot 与 Connection 会话生命周期绑定，存量连接自然持有旧代配置共享指针，
-     * 当存量会话全部结束退出后，引用计数归零，旧配置自动触发优雅排空与安全析构，实现真正的零锁、零拷贝与 RCU 安全退役。
+     * 当存量会话全部结束退出后，引用计数归零，旧配置自动触发优雅排空与安全析构，实现全路径无锁、零拷贝与 RCU 安全退役。
      *
      * @tparam T 配置对象类型
      */
     template <typename T>
     class ConfigHolder
     {
-        mutable std::mutex mtx_;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        std::atomic<std::shared_ptr<const T>> ptr_{std::make_shared<const T>()};
+#else
         std::shared_ptr<const T> ptr_{std::make_shared<const T>()};
+#endif
         std::atomic<uint32_t> generation_{1};
+
+        [[nodiscard]] std::shared_ptr<const T> loadPtr() const noexcept
+        {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+            return ptr_.load(std::memory_order_acquire);
+#else
+            return std::atomic_load_explicit(&ptr_, std::memory_order_acquire);
+#endif
+        }
+
+        void storePtr(std::shared_ptr<const T> newPtr) noexcept
+        {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+            ptr_.store(std::move(newPtr), std::memory_order_release);
+#else
+            std::atomic_store_explicit(&ptr_, std::move(newPtr), std::memory_order_release);
+#endif
+        }
 
     public:
         ConfigHolder() = default;
@@ -45,9 +66,10 @@ namespace mynet
         ConfigHolder &operator=(const ConfigHolder &) = delete;
 
         /**
-         * @brief 发布新配置并递增版本代次 (RCU 安全原子发布)
+         * @brief 发布新配置并递增版本代次 (RCU 全路径无锁原子发布)
          *
-         * 在互斥锁保护下原子替换内部共享配置指针，并通过 release 内存序递增代次。
+         * 通过 std::atomic<std::shared_ptr<const T>>::store(release) 原子替换内部共享配置指针，
+         * 并通过 release 内存序递增代次。
          * 旧配置资源不会被立即就地销毁，而是由已持有该代配置的存量会话/快照安全持有；
          * 随着存量会话全部退出，引用计数归零后自动触发优雅排空与安全析构。
          *
@@ -64,33 +86,26 @@ namespace mynet
             {
                 newPtr = std::make_shared<const T>();
             }
-            {
-                std::lock_guard<std::mutex> lock(mtx_);
-                ptr_ = std::move(newPtr);
-            }
+            storePtr(std::move(newPtr));
             generation_.fetch_add(1, std::memory_order_release);
         }
 
         /**
-         * @brief 获取当前配置的 RCU 共享只读指针 (O(1) 零深拷贝，生命周期自动维系)
+         * @brief 获取当前配置的 RCU 共享只读指针 (O(1) 无锁零深拷贝，生命周期自动维系)
          */
-        [[nodiscard]] std::shared_ptr<const T> currentConfig() const noexcept
-        {
-            std::lock_guard<std::mutex> lock(mtx_);
-            return ptr_;
-        }
+        [[nodiscard]] std::shared_ptr<const T> currentConfig() const noexcept { return loadPtr(); }
 
         /**
          * @brief 复制当前配置实例 (向前兼容)
          *
-         * 在互斥锁保护下读取当前配置对象的完整副本，供快照同步或外部查询使用。
+         * 无锁原子加载当前配置共享指针并拷贝其完整副本，供快照同步或外部查询使用。
          *
          * @return T 当前配置对象的完整副本
          */
         [[nodiscard]] T duplicate() const
         {
-            std::lock_guard<std::mutex> lock(mtx_);
-            return ptr_ ? *ptr_ : T{};
+            auto p = loadPtr();
+            return p ? *p : T{};
         }
 
         /**
@@ -107,8 +122,8 @@ namespace mynet
          */
         [[nodiscard]] long currentActiveReferences() const noexcept
         {
-            std::lock_guard<std::mutex> lock(mtx_);
-            return ptr_ ? ptr_.use_count() : 0;
+            auto p = loadPtr();
+            return p ? (p.use_count() - 1) : 0;
         }
     };
 
@@ -427,6 +442,22 @@ namespace mynet
     };
 
     /**
+     * @brief 统一出站拨号选项策略 (Dialer Options)
+     */
+    struct DialerOptions
+    {
+        uint32_t fwmark{0};                      ///< Linux SO_MARK 策略路由打标（防止回环死锁）
+        std::string bindInterface{};             ///< SO_BINDTODEVICE 绑定出口网卡 (例如 eth0, wan1)
+        std::string bindAddress{};               ///< 绑定本地特定出口 IP 地址
+        bool tcpFastOpen{false};                 ///< 是否启用 TCP Fast Open (MSG_FASTOPEN)
+        bool transparent{false};                 ///< Linux IP_TRANSPARENT 支持（绑定原始源 IP）
+        uint8_t dscp{0};                         ///< DSCP 服务质量标记 (借鉴 dae dscp)
+        bool enableMptcp{false};                 ///< 是否启用 Multipath TCP (MPTCP)
+        std::vector<uint8_t> tcpPrefix{};        ///< TCP 前置注入前缀 (借鉴 sing-box tcp_prefix)
+        std::chrono::milliseconds timeout{5000}; ///< 拨号超时
+    };
+
+    /**
      * @brief 出站落地节点配置规范
      */
     struct OutboundConfig
@@ -447,6 +478,7 @@ namespace mynet
         uint32_t intervalSecs = 300;                               ///< 测速周期 (秒, UrlTest 专用)
         uint32_t toleranceMs = 50;                                 ///< 延迟抖动容差 (毫秒, UrlTest 专用)
         transport::TransportConfig transport{};                    ///< 可叠加传输层配置 (TLS / WebSocket / gRPC)
+        DialerOptions dialer{};                                    ///< 底层出站拨号策略 (fwmark / bindInterface / TFO / MPTCP)
     };
 
     /**

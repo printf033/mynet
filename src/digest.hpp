@@ -123,7 +123,3 @@ namespace mynet::digest
 
 } // namespace mynet::digest
 
-namespace mynet::handler
-{
-    namespace digest = mynet::digest;
-}

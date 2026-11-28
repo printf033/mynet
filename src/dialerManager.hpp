@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file outboundManager.hpp
+ * @file dialerManager.hpp
  * @brief 拨号器管理器 (DialerManager) 与出站调度节点。
  *
  * 与 AcceptorManager 形成严格对称的架构设计：
@@ -97,8 +97,8 @@ namespace mynet
             return Dialer::start();
         }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override;
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override;
+        Result<int> dialDatagram(const Address &target) override;
     };
 
     /**
@@ -320,8 +320,8 @@ namespace mynet
 
         Result<> start() noexcept override { return Dialer::start(); }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override;
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override;
+        Result<int> dialDatagram(const Address &target) override;
     };
 
     /**
@@ -346,8 +346,8 @@ namespace mynet
 
         Result<> start() noexcept override { return Dialer::start(); }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override;
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override;
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override;
+        Result<int> dialDatagram(const Address &target) override;
     };
 
 } // namespace mynet
@@ -525,9 +525,9 @@ namespace mynet
         }
 
         /**
-         * @brief 根据出站标签与目标地址发起流式出站建连
+         * @brief 根据出站标签与目标地址发起转发向出站建连（交付 OutboundDialResult 给 Forwarder）
          */
-        Result<OutboundDialResult> dialStream(std::string_view tag, const handler::ProxyAddress &target)
+        Result<OutboundDialResult> dialForwarder(std::string_view tag, const Address &target, DialContext ctx = {})
         {
             std::shared_ptr<Dialer> dl = get(tag);
             if (dl == nullptr)
@@ -538,13 +538,31 @@ namespace mynet
             {
                 return std::unexpected(ERR::CONNECT_FAILED);
             }
-            return dl->dialStream(target);
+            return dl->dialForwarder(target, ctx);
+        }
+
+        /**
+         * @brief 根据出站标签与目标地址发起独立连接拨号（返回装配好的 Connection 实例）
+         */
+        Result<std::unique_ptr<Connection>> dialConnection(std::string_view tag, const Address &target,
+                                                           DialContext ctx = {})
+        {
+            std::shared_ptr<Dialer> dl = get(tag);
+            if (dl == nullptr)
+            {
+                dl = get(defaultTag_);
+            }
+            if (dl == nullptr)
+            {
+                return std::unexpected(ERR::CONNECT_FAILED);
+            }
+            return dl->dialConnection(target, ctx);
         }
 
         /**
          * @brief 根据出站标签与目标地址发起数据报出站建连
          */
-        Result<int> dialDatagram(std::string_view tag, const handler::ProxyAddress &target)
+        Result<int> dialDatagram(std::string_view tag, const Address &target)
         {
             std::shared_ptr<Dialer> dl = get(tag);
             if (dl == nullptr)
@@ -560,16 +578,16 @@ namespace mynet
     };
 
     // DialerSelector 延迟实现
-    inline Result<OutboundDialResult> DialerSelector::dialStream(const handler::ProxyAddress &target)
+    inline Result<OutboundDialResult> DialerSelector::dialForwarder(const Address &target, DialContext ctx)
     {
         if (manager_ == nullptr || selectedTag_.empty())
         {
             return std::unexpected(ERR::CONNECT_FAILED);
         }
-        return manager_->dialStream(selectedTag_, target);
+        return manager_->dialForwarder(selectedTag_, target, ctx);
     }
 
-    inline Result<int> DialerSelector::dialDatagram(const handler::ProxyAddress &target)
+    inline Result<int> DialerSelector::dialDatagram(const Address &target)
     {
         if (manager_ == nullptr || selectedTag_.empty())
         {
@@ -579,7 +597,7 @@ namespace mynet
     }
 
     // DialerUrlTest 延迟实现
-    inline Result<OutboundDialResult> DialerUrlTest::dialStream(const handler::ProxyAddress &target)
+    inline Result<OutboundDialResult> DialerUrlTest::dialForwarder(const Address &target, DialContext ctx)
     {
         if (manager_ == nullptr)
         {
@@ -590,10 +608,10 @@ namespace mynet
         {
             return std::unexpected(ERR::CONNECT_FAILED);
         }
-        return manager_->dialStream(best, target);
+        return manager_->dialForwarder(best, target, ctx);
     }
 
-    inline Result<int> DialerUrlTest::dialDatagram(const handler::ProxyAddress &target)
+    inline Result<int> DialerUrlTest::dialDatagram(const Address &target)
     {
         if (manager_ == nullptr)
         {
@@ -626,13 +644,13 @@ namespace mynet
             return 9999;
         }
 
-        handler::ProxyAddress probeTarget;
-        probeTarget.type = handler::AddressType::DOMAIN;
+        Address probeTarget;
+        probeTarget.type = AddressType::DOMAIN;
         probeTarget.host = "127.0.0.1";
         probeTarget.port = 80;
 
         const auto tStart = std::chrono::steady_clock::now();
-        auto dialRes = outbound->dialStream(probeTarget);
+        auto dialRes = outbound->dialForwarder(probeTarget);
         if (!dialRes)
         {
             setRtt(tag, 9999);
@@ -675,7 +693,7 @@ namespace mynet
     }
 
     // DialerFallback 延迟实现
-    inline Result<OutboundDialResult> DialerFallback::dialStream(const handler::ProxyAddress &target)
+    inline Result<OutboundDialResult> DialerFallback::dialForwarder(const Address &target, DialContext ctx)
     {
         if (manager_ == nullptr || candidateTags_.empty())
         {
@@ -683,7 +701,7 @@ namespace mynet
         }
         for (const auto &tag : candidateTags_)
         {
-            auto res = manager_->dialStream(tag, target);
+            auto res = manager_->dialForwarder(tag, target, ctx);
             if (res.has_value())
             {
                 return res;
@@ -692,7 +710,7 @@ namespace mynet
         return std::unexpected(ERR::CONNECT_FAILED);
     }
 
-    inline Result<int> DialerFallback::dialDatagram(const handler::ProxyAddress &target)
+    inline Result<int> DialerFallback::dialDatagram(const Address &target)
     {
         if (manager_ == nullptr || candidateTags_.empty())
         {

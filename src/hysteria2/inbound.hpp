@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../inboundManager.hpp"
+#include "../acceptorManager.hpp"
 #include "hysteria2.hpp"
 #include <memory>
 #include <string>
@@ -33,6 +33,5 @@ namespace mynet
         }
     };
 
-    using InboundHysteria2 = AcceptorHysteria2;
 
 } // namespace mynet

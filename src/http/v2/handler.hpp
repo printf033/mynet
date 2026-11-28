@@ -91,9 +91,9 @@ namespace mynet
      *
      * @tparam StreamHandler 每条独立流所实例化的协议处理器类型。
      */
-    template <typename StreamHandler = HandlerConnection>
+    template <typename StreamHandler = Handler>
         requires MandatoryMethodConnection<StreamHandler>
-    class HandlerHttp2 : public HandlerConnection
+    class HandlerHttp2 : public Handler
     {
     public:
         using Stream = StreamHandler;
@@ -144,7 +144,7 @@ namespace mynet
          */
         inline void setMaxRequestBytes(size_t n) noexcept
         {
-            HandlerConnection::setMaxRequestBytes(n);
+            Handler::setMaxRequestBytes(n);
             if (!streams_.ready())
             {
                 return;
@@ -217,7 +217,7 @@ namespace mynet
          */
         void reset() noexcept override
         {
-            HandlerConnection::reset();
+            Handler::reset();
             streams_.clear(
                 [this]([[maybe_unused]] const uint32_t id, StreamSlot &slot)
                 {
@@ -265,7 +265,7 @@ namespace mynet
 
         void onConnect(int fd) noexcept override
         {
-            HandlerConnection::onConnect(fd);
+            Handler::onConnect(fd);
             applyHttp2Config();
         }
 

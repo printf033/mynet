@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../inboundManager.hpp"
+#include "../acceptorManager.hpp"
 #include "shadowsocks.hpp"
 #include <memory>
 #include <string>
@@ -37,6 +37,5 @@ namespace mynet
         }
     };
 
-    using InboundShadowsocks = AcceptorShadowsocks;
 
 } // namespace mynet

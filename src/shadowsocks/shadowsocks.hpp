@@ -271,7 +271,7 @@ namespace mynet::handler
     /**
      * @brief Shadowsocks AEAD 协议入站状态机处理器
      */
-    class HandlerInboundShadowsocks : public HandlerInboundConnectionBase
+    class HandlerInboundShadowsocks : public HandlerInbound
     {
     public:
         [[nodiscard]] bool canSplice() const noexcept override { return false; }
@@ -306,7 +306,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             codec_.reset();
             setCodecMode(codec_.cipherType != ShadowsocksCipher::NONE);
             targetResolved_ = false;
@@ -334,7 +334,7 @@ namespace mynet::handler
                     if (!targetResolved_)
                     {
                         size_t addrConsumed = 0;
-                        auto target = ProxyAddress::decodeSocks5(plainPayload, addrConsumed);
+                        auto target = Address::decodeSocks5(plainPayload, addrConsumed);
                         if (!target.has_value())
                         {
                             onParseError("Shadowsocks: Failed to decode initial destination address");
@@ -421,7 +421,7 @@ namespace mynet::handler
                 }
                 const auto *data = reinterpret_cast<const uint8_t *>(src.readableBegin());
                 size_t consumed = 0;
-                auto target = ProxyAddress::decodeSocks5(std::span<const uint8_t>(data, avail), consumed);
+                auto target = Address::decodeSocks5(std::span<const uint8_t>(data, avail), consumed);
                 if (!target.has_value())
                 {
                     return {};
@@ -450,7 +450,7 @@ namespace mynet::handler
     /**
      * @brief Shadowsocks AEAD 客户端出站状态机处理器
      */
-    class HandlerOutboundShadowsocks : public HandlerOutboundConnectionBase
+    class HandlerOutboundShadowsocks : public HandlerOutbound
     {
     public:
         [[nodiscard]] bool canSplice() const noexcept override { return false; }
@@ -461,8 +461,8 @@ namespace mynet::handler
 
     public:
         HandlerOutboundShadowsocks() noexcept { setMethod("aes-128-gcm", "password"); }
-        HandlerOutboundShadowsocks(std::string_view method, std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target)
+        HandlerOutboundShadowsocks(std::string_view method, std::string_view password, const Address &target)
+            : HandlerOutbound(target)
         {
             setMethod(method, password);
         }
@@ -478,7 +478,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             handshakeSent_ = false;
             codec_.reset();
             setCodecMode(codec_.cipherType != ShadowsocksCipher::NONE);

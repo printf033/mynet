@@ -19,7 +19,7 @@
 #include "config/log.hpp"
 #include "configHolder.hpp"
 #include "connection.hpp"
-#include "datagramCore.hpp"
+#include "datagram.hpp"
 #include "dialer.hpp"
 #include "ebpf.hpp"
 #include "error.hpp"
@@ -259,6 +259,110 @@ namespace mynet
     };
 
     /**
+     * @brief 传输层无关字节流通道抽象 (IStreamChannel)
+     *
+     * 将数据平面的读取/写入能力从内核 `int fd` 解耦，使得 Socket、TLS 内存流、WebSocket 流、
+     * HTTP/2 逻辑流与 HTTP/3 QUIC 流都能通过同一套接口交由 Forwarder 桥接与中继。
+     */
+    class IStreamChannel
+    {
+    public:
+        virtual ~IStreamChannel() noexcept = default;
+
+        [[nodiscard]] virtual int fd() const noexcept { return -1; }
+        [[nodiscard]] virtual bool isOpen() const noexcept = 0;
+        [[nodiscard]] virtual bool isPassthrough() const noexcept { return false; }
+        [[nodiscard]] virtual Result<size_t> readBytes(std::span<uint8_t> dst) noexcept = 0;
+        [[nodiscard]] virtual Result<size_t> writeBytes(std::span<const uint8_t> src) noexcept = 0;
+        virtual void closeChannel() noexcept = 0;
+    };
+
+    /**
+     * @brief 基于 POSIX 非阻塞描述符的 IStreamChannel 实现
+     */
+    class SocketStreamChannel final : public IStreamChannel
+    {
+    private:
+        int fd_{-1};
+        bool ownsFd_{false};
+        bool closed_{false};
+
+    public:
+        explicit SocketStreamChannel(int fd = -1, bool ownsFd = false) noexcept
+            : fd_(fd),
+              ownsFd_(ownsFd),
+              closed_(fd < 0)
+        {
+        }
+
+        ~SocketStreamChannel() noexcept override
+        {
+            if (ownsFd_ && fd_ >= 0)
+            {
+                ::close(fd_);
+            }
+            fd_ = -1;
+        }
+
+        [[nodiscard]] int fd() const noexcept override { return fd_; }
+        [[nodiscard]] bool isOpen() const noexcept override { return !closed_ && fd_ >= 0; }
+        [[nodiscard]] bool isPassthrough() const noexcept override { return isOpen(); }
+
+        [[nodiscard]] Result<size_t> readBytes(std::span<uint8_t> dst) noexcept override
+        {
+            if (fd_ < 0 || closed_ || dst.empty())
+            {
+                return size_t{0};
+            }
+            const ssize_t n = ::read(fd_, dst.data(), dst.size());
+            if (n > 0)
+            {
+                return static_cast<size_t>(n);
+            }
+            if (n == 0)
+            {
+                closed_ = true;
+                return std::unexpected(ERR::CONNECT_FAILED);
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOTCONN)
+            {
+                return size_t{0};
+            }
+            closed_ = true;
+            return std::unexpected(ERR::CONNECT_FAILED);
+        }
+
+        [[nodiscard]] Result<size_t> writeBytes(std::span<const uint8_t> src) noexcept override
+        {
+            if (fd_ < 0 || closed_ || src.empty())
+            {
+                return size_t{0};
+            }
+            const ssize_t n = ::send(fd_, src.data(), src.size(), MSG_NOSIGNAL);
+            if (n >= 0)
+            {
+                return static_cast<size_t>(n);
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOTCONN)
+            {
+                return size_t{0};
+            }
+            closed_ = true;
+            return std::unexpected(ERR::CONNECT_FAILED);
+        }
+
+        void closeChannel() noexcept override
+        {
+            closed_ = true;
+            if (ownsFd_ && fd_ >= 0)
+            {
+                ::close(fd_);
+                fd_ = -1;
+            }
+        }
+    };
+
+    /**
      * @brief 双向流式转发会话 (Stream Forwarding Session)
      *
      * 封装一对关联的入站处理器 (Inbound) 与出站处理器 (Outbound)，
@@ -278,18 +382,17 @@ namespace mynet
         ForwarderConfig config_{};
         ForwarderStats stats_{};
 
-        HandlerBase *inbound_{nullptr};
-        HandlerBase *outbound_{nullptr};
-        std::unique_ptr<HandlerBase> ownedInbound_{nullptr};
-        std::unique_ptr<HandlerBase> ownedOutbound_{nullptr};
+        Handler *inbound_{nullptr};
+        Handler *outbound_{nullptr};
+        std::unique_ptr<Handler> ownedInbound_{nullptr};
+        std::unique_ptr<Handler> ownedOutbound_{nullptr};
         std::shared_ptr<IStreamChannel> inboundChannel_{nullptr};
         std::shared_ptr<IStreamChannel> outboundChannel_{nullptr};
-        int inboundFd_{-1};
-        int outboundFd_{-1};
+        bool inboundChannelDriven_{false};
         int sockmapFd_{-1};
         int pipeUp_[2]{-1, -1};
         int pipeDown_[2]{-1, -1};
-        handler::ProxyAddress target_{};
+        Address target_{};
         std::string outboundTag_{};
 
         struct PendingSlice
@@ -375,8 +478,8 @@ namespace mynet
         [[nodiscard]] inline const ForwarderStats &stats() const noexcept { return stats_; }
         [[nodiscard]] inline ForwarderStats &stats() noexcept { return stats_; }
 
-        [[nodiscard]] inline int inboundFd() const noexcept { return inboundFd_; }
-        [[nodiscard]] inline int outboundFd() const noexcept { return outboundFd_; }
+        [[nodiscard]] inline int inboundFd() const noexcept { return inboundChannel_ ? inboundChannel_->fd() : -1; }
+        [[nodiscard]] inline int outboundFd() const noexcept { return outboundChannel_ ? outboundChannel_->fd() : -1; }
         [[nodiscard]] inline int sockmapFd() const noexcept { return sockmapFd_; }
         [[nodiscard]] inline int pipeUpRead() const noexcept { return pipeUp_[0]; }
         [[nodiscard]] inline int pipeUpWrite() const noexcept { return pipeUp_[1]; }
@@ -396,15 +499,22 @@ namespace mynet
         {
             return outbound_ != nullptr ? outbound_->readCredit() : config_.bufferChunkSize;
         }
-        [[nodiscard]] inline HandlerBase *inbound() noexcept { return inbound_; }
-        [[nodiscard]] inline HandlerBase *outbound() noexcept { return outbound_; }
-        [[nodiscard]] inline const handler::ProxyAddress &target() const noexcept { return target_; }
+        [[nodiscard]] inline Handler *inbound() noexcept { return inbound_; }
+        [[nodiscard]] inline Handler *outbound() noexcept { return outbound_; }
+        [[nodiscard]] inline const Address &target() const noexcept { return target_; }
         [[nodiscard]] inline const std::string &outboundTag() const noexcept { return outboundTag_; }
 
-        inline void setTarget(const handler::ProxyAddress &target) noexcept { target_ = target; }
+        inline void setTarget(const Address &target) noexcept { target_ = target; }
         inline void setOutboundTag(std::string tag) noexcept { outboundTag_ = std::move(tag); }
-        inline void setInboundFd(int fd) noexcept { inboundFd_ = fd; }
-        inline void setOutboundFd(int fd) noexcept { outboundFd_ = fd; }
+        inline void setInboundFd(int fd) noexcept
+        {
+            inboundChannel_ = (fd >= 0) ? std::make_shared<SocketStreamChannel>(fd, false) : nullptr;
+            inboundChannelDriven_ = false;
+        }
+        inline void setOutboundFd(int fd) noexcept
+        {
+            outboundChannel_ = (fd >= 0) ? std::make_shared<SocketStreamChannel>(fd, false) : nullptr;
+        }
         inline void setOutboundConnectState(bool connecting, bool deferred, const sockaddr_in &targetAddr) noexcept
         {
             outboundConnecting_ = connecting;
@@ -414,30 +524,21 @@ namespace mynet
         inline void setInboundChannel(std::shared_ptr<IStreamChannel> ch) noexcept
         {
             inboundChannel_ = std::move(ch);
-            if (inboundChannel_ != nullptr && inboundFd_ < 0)
-            {
-                inboundFd_ = inboundChannel_->fd();
-            }
+            inboundChannelDriven_ = (inboundChannel_ != nullptr);
         }
-        inline void setOutboundChannel(std::shared_ptr<IStreamChannel> ch) noexcept
-        {
-            outboundChannel_ = std::move(ch);
-            if (outboundChannel_ != nullptr && outboundFd_ < 0)
-            {
-                outboundFd_ = outboundChannel_->fd();
-            }
-        }
+        inline void setOutboundChannel(std::shared_ptr<IStreamChannel> ch) noexcept { outboundChannel_ = std::move(ch); }
         inline void setLoopHooks(ForwarderLoopHooks hooks) noexcept { loopHooks_ = std::move(hooks); }
         inline void setOwnsOutboundFd(bool owns) noexcept { ownsOutboundFd_ = owns; }
 
         inline bool installOutboundWatch()
         {
-            if (outboundWatched_ || proactorManaged_ || !loopHooks_.active() || outboundFd_ < 0 || outboundClosed_ ||
+            const int outFd = outboundFd();
+            if (outboundWatched_ || proactorManaged_ || !loopHooks_.active() || outFd < 0 || outboundClosed_ ||
                 state_ == ForwardSessionState::CLOSED)
             {
                 return false;
             }
-            if (loopHooks_.hasAsyncRelay() && outboundChannel_ == nullptr)
+            if (loopHooks_.hasAsyncRelay() && outboundChannel_ != nullptr && outboundChannel_->isPassthrough())
             {
                 proactorManaged_ = loopHooks_.registerSession(shared_from_this());
                 return proactorManaged_;
@@ -452,59 +553,60 @@ namespace mynet
 #ifdef EPOLLRDHUP
             evMask |= EPOLLRDHUP;
 #endif
-            outboundWatched_ = loopHooks_.addWatch(
-                outboundFd_, evMask,
-                [weak](uint32_t events)
-                {
-                    auto self = weak.lock();
-                    if (self == nullptr || self->isClosed())
-                    {
-                        return;
-                    }
-                    if (self->outboundConnecting_ && (events & EPOLLOUT))
-                    {
-                        int err = 0;
-                        socklen_t len = sizeof(err);
-                        if (::getsockopt(self->outboundFd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
-                        {
-                            err = (errno != 0) ? errno : ECONNREFUSED;
-                        }
-                        self->outboundConnecting_ = false;
-                        if (err != 0)
-                        {
-                            self->markOutboundClosed();
-                            self->close();
-                            return;
-                        }
-                        if (self->outbound_ != nullptr)
-                        {
-                            self->outbound_->handle();
-                        }
-                    }
-                    if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
-                    {
-                        self->markOutboundClosed();
-                    }
-                    else
-                    {
-                        (void)self->pump();
-                    }
-                    if (self->inboundClosed_ && self->outboundClosed_)
-                    {
-                        self->close();
-                    }
-                });
+            outboundWatched_ =
+                loopHooks_.addWatch(outFd, evMask,
+                                    [weak](uint32_t events)
+                                    {
+                                        auto self = weak.lock();
+                                        if (self == nullptr || self->isClosed())
+                                        {
+                                            return;
+                                        }
+                                        const int fd = self->outboundFd();
+                                        if (self->outboundConnecting_ && (events & EPOLLOUT) && fd >= 0)
+                                        {
+                                            int err = 0;
+                                            socklen_t len = sizeof(err);
+                                            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
+                                            {
+                                                err = (errno != 0) ? errno : ECONNREFUSED;
+                                            }
+                                            self->outboundConnecting_ = false;
+                                            if (err != 0)
+                                            {
+                                                self->markOutboundClosed();
+                                                self->close();
+                                                return;
+                                            }
+                                            if (self->outbound_ != nullptr)
+                                            {
+                                                self->outbound_->handle();
+                                            }
+                                        }
+                                        if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
+                                        {
+                                            self->markOutboundClosed();
+                                        }
+                                        else
+                                        {
+                                            (void)self->pump();
+                                        }
+                                        if (self->inboundClosed_ && self->outboundClosed_)
+                                        {
+                                            self->close();
+                                        }
+                                    });
 #endif
             return outboundWatched_;
         }
 
         inline void setSockmapFd(int fd) noexcept { sockmapFd_ = fd; }
-        inline void setOwnedInbound(std::unique_ptr<HandlerBase> in) noexcept
+        inline void setOwnedInbound(std::unique_ptr<Handler> in) noexcept
         {
             ownedInbound_ = std::move(in);
             inbound_ = ownedInbound_.get();
         }
-        inline void setOwnedOutbound(std::unique_ptr<HandlerBase> out) noexcept
+        inline void setOwnedOutbound(std::unique_ptr<Handler> out) noexcept
         {
             ownedOutbound_ = std::move(out);
             outbound_ = ownedOutbound_.get();
@@ -544,34 +646,51 @@ namespace mynet
          * @param userSslActive 是否存在用户态 SSL（若为 true 则禁止 splice 强制走用户态缓冲）
          * @return size_t 桥接初始化阶段预排空摄入的残余字节数
          */
-        size_t attach(HandlerBase &in, HandlerBase &out, int inFd = -1, int outFd = -1, bool userSslActive = false)
+        size_t attach(Handler &in, Handler &out, int inFd = -1, int outFd = -1, bool userSslActive = false)
         {
             return attachChannels(in, nullptr, out, nullptr, inFd, outFd, userSslActive);
         }
 
-        size_t attachChannels(HandlerBase &in, std::shared_ptr<IStreamChannel> inCh, HandlerBase &out,
+        size_t attachChannels(Handler &in, std::shared_ptr<IStreamChannel> inCh, Handler &out,
                               std::shared_ptr<IStreamChannel> outCh, int inFd = -1, int outFd = -1,
                               bool userSslActive = false)
         {
             inbound_ = &in;
             outbound_ = &out;
-            inboundChannel_ = std::move(inCh);
-            outboundChannel_ = std::move(outCh);
-            inboundFd_ = (inFd >= 0) ? inFd : (inboundChannel_ ? inboundChannel_->fd() : in.fd());
-            outboundFd_ = (outFd >= 0) ? outFd : (outboundChannel_ ? outboundChannel_->fd() : out.fd());
+            inboundChannelDriven_ = (inCh != nullptr);
+            if (inCh != nullptr)
+            {
+                inboundChannel_ = std::move(inCh);
+            }
+            else
+            {
+                const int resolvedInFd = (inFd >= 0) ? inFd : in.fd();
+                inboundChannel_ =
+                    (resolvedInFd >= 0) ? std::make_shared<SocketStreamChannel>(resolvedInFd, false) : nullptr;
+            }
+            if (outCh != nullptr)
+            {
+                outboundChannel_ = std::move(outCh);
+            }
+            else
+            {
+                const int resolvedOutFd = (outFd >= 0) ? outFd : out.fd();
+                outboundChannel_ =
+                    (resolvedOutFd >= 0) ? std::make_shared<SocketStreamChannel>(resolvedOutFd, false) : nullptr;
+            }
 
             if (in.targetAddress().has_value())
             {
                 target_ = *in.targetAddress();
             }
-            else if (out.target().type == handler::AddressType::IPV4 ||
-                     out.target().type == handler::AddressType::DOMAIN ||
-                     out.target().type == handler::AddressType::IPV6)
+            else if (out.target().type == AddressType::IPV4 || out.target().type == AddressType::DOMAIN ||
+                     out.target().type == AddressType::IPV6)
             {
                 target_ = out.target();
             }
 
-            // 绑定入站 Handler 外部数据面联动钩子及双向安全摘除钩子，防止借用型 Handler 早于 Forwarder 析构导致悬空解引用
+            // 绑定入站 Handler 外部数据面联动钩子及双向安全摘除钩子，防止借用型 Handler 早于 Forwarder
+            // 析构导致悬空解引用
             {
                 std::weak_ptr<ForwarderStreamSession> weak = weak_from_this();
                 const bool hasShared = !weak.expired();
@@ -658,11 +777,10 @@ namespace mynet
         }
 
     private:
-        inline void flushSideResponses(HandlerBase *h, IStreamChannel *ch, int fd, PendingSlice &pending,
-                                       bool isOutbound) noexcept
+        inline void flushSideResponses(Handler *h, IStreamChannel *ch, PendingSlice &pending, bool isOutbound) noexcept
         {
             const bool &closedFlag = isOutbound ? outboundClosed_ : inboundClosed_;
-            if (h == nullptr || closedFlag || (fd < 0 && ch == nullptr))
+            if (h == nullptr || closedFlag || ch == nullptr)
             {
                 return;
             }
@@ -673,7 +791,9 @@ namespace mynet
 
             // 当入站直接绑定在 Reactor/Proactor 管理的 Connection 上且非虚拟通道时，
             // Proactor 模式下只推进队列至 writeQueue_ 交由 io_uring SEND 发送；Reactor 下则直接 pump+handleWrite
-            if (!isOutbound && ch == nullptr && h->connection() != nullptr && h->connection()->fd() == fd && fd >= 0)
+            const int fd = ch->fd();
+            if (!isOutbound && !inboundChannelDriven_ && h->connection() != nullptr && h->connection()->fd() == fd &&
+                fd >= 0)
             {
                 Connection *conn = h->connection();
                 const size_t queued = h->responseBytes();
@@ -701,22 +821,13 @@ namespace mynet
 
             auto tryWrite = [&](std::string_view sv) noexcept -> ssize_t
             {
-                if (ch != nullptr)
+                auto r =
+                    ch->writeBytes(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(sv.data()), sv.size()));
+                if (!r)
                 {
-                    auto r = ch->writeBytes(
-                        std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(sv.data()), sv.size()));
-                    if (!r)
-                    {
-                        return -1;
-                    }
-                    return static_cast<ssize_t>(*r);
+                    return -1;
                 }
-                const ssize_t n = ::send(fd, sv.data(), sv.size(), MSG_NOSIGNAL);
-                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOTCONN))
-                {
-                    return 0;
-                }
-                return n;
+                return static_cast<ssize_t>(*r);
             };
 
             auto recordBytes = [&](size_t bytes) noexcept
@@ -797,22 +908,16 @@ namespace mynet
     public:
         inline void flushOutboundResponses() noexcept
         {
-            flushSideResponses(outbound_, outboundChannel_.get(), outboundFd_, outboundPending_, true);
+            flushSideResponses(outbound_, outboundChannel_.get(), outboundPending_, true);
         }
 
         inline void flushInboundResponses() noexcept
         {
-            flushSideResponses(inbound_, inboundChannel_.get(), inboundFd_, inboundPending_, false);
+            flushSideResponses(inbound_, inboundChannel_.get(), inboundPending_, false);
         }
 
-        [[nodiscard]] inline bool hasOutboundSink() const noexcept
-        {
-            return outboundFd_ >= 0 || outboundChannel_ != nullptr;
-        }
-        [[nodiscard]] inline bool hasInboundSink() const noexcept
-        {
-            return inboundFd_ >= 0 || inboundChannel_ != nullptr;
-        }
+        [[nodiscard]] inline bool hasOutboundSink() const noexcept { return outboundChannel_ != nullptr; }
+        [[nodiscard]] inline bool hasInboundSink() const noexcept { return inboundChannel_ != nullptr; }
 
         /**
          * @brief 冲刷双端在建立转发前已摄入用户态缓冲区的早期数据
@@ -920,8 +1025,9 @@ namespace mynet
         bool activateSockmap() noexcept
         {
 #if defined(__linux__) && defined(__NR_bpf)
-            if (disableOffloadForSession_ || disableSpliceForSession_ || sockmapFd_ < 0 || inboundFd_ < 0 ||
-                outboundFd_ < 0)
+            const int inFd = inboundFd();
+            const int outFd = outboundFd();
+            if (disableOffloadForSession_ || disableSpliceForSession_ || sockmapFd_ < 0 || inFd < 0 || outFd < 0)
             {
                 return false;
             }
@@ -930,7 +1036,7 @@ namespace mynet
             {
                 return false;
             }
-            if (!ebpf::EbpfEngine::attachPair(sockmapFd_, inboundFd_, outboundFd_))
+            if (!ebpf::EbpfEngine::attachPair(sockmapFd_, inFd, outFd))
             {
                 return false;
             }
@@ -946,9 +1052,11 @@ namespace mynet
          */
         void deactivateSockmap() noexcept
         {
-            if (sockmapFd_ >= 0 && (inboundFd_ >= 0 || outboundFd_ >= 0))
+            const int inFd = inboundFd();
+            const int outFd = outboundFd();
+            if (sockmapFd_ >= 0 && (inFd >= 0 || outFd >= 0))
             {
-                ebpf::EbpfEngine::detachPair(sockmapFd_, inboundFd_, outboundFd_);
+                ebpf::EbpfEngine::detachPair(sockmapFd_, inFd, outFd);
             }
         }
 
@@ -1001,8 +1109,8 @@ namespace mynet
                 inbound_->connection()->resumeRead();
             }
 
-            auto drainPipeToHandler = [&](int pipeRdFd, HandlerBase *dstHandler, uint64_t &bytesStat,
-                                          uint64_t &pktsStat, bool hasSink, bool closedFlag) noexcept
+            auto drainPipeToHandler = [&](int pipeRdFd, Handler *dstHandler, uint64_t &bytesStat, uint64_t &pktsStat,
+                                          bool hasSink, bool closedFlag) noexcept
             {
                 if (pipeRdFd < 0 || dstHandler == nullptr || closedFlag)
                 {
@@ -1043,7 +1151,8 @@ namespace mynet
             flushOutboundResponses();
             flushInboundResponses();
 
-            if (!proactorManaged_ && outboundFd_ >= 0 && !outboundClosed_ && loopHooks_.modWatch && outboundWatched_)
+            const int outFd = outboundFd();
+            if (!proactorManaged_ && outFd >= 0 && !outboundClosed_ && loopHooks_.modWatch && outboundWatched_)
             {
                 uint32_t evMask = EPOLLIN | EPOLLET;
 #ifdef EPOLLRDHUP
@@ -1053,7 +1162,7 @@ namespace mynet
                 {
                     evMask |= EPOLLOUT;
                 }
-                (void)loopHooks_.modWatch(outboundFd_, evMask);
+                (void)loopHooks_.modWatch(outFd, evMask);
             }
             if (loopHooks_.notifySession)
             {
@@ -1062,7 +1171,8 @@ namespace mynet
         }
 
         /**
-         * @brief 处理 Reactor 模式下入站 fd 的 EPOLL 事件（SOCKMAP/SPLICE 全权接管，BUFFER_PUMP 返回 -1 交由 Connection）
+         * @brief 处理 Reactor 模式下入站 fd 的 EPOLL 事件（SOCKMAP/SPLICE 全权接管，BUFFER_PUMP 返回 -1 交由
+         * Connection）
          * @return -1: 交由 Connection::handleRead/Write 处理; 0: KEEP; 1: CLOSE
          */
         [[nodiscard]] int onReactorInboundEvent(uint32_t events) noexcept
@@ -1092,7 +1202,8 @@ namespace mynet
                 if (events & EPOLLIN)
                 {
                     char peekByte = 0;
-                    const ssize_t pk = ::recv(inboundFd_, &peekByte, 1, MSG_PEEK | MSG_DONTWAIT);
+                    const int inFd = inboundFd();
+                    const ssize_t pk = (inFd >= 0) ? ::recv(inFd, &peekByte, 1, MSG_PEEK | MSG_DONTWAIT) : -1;
                     if (pk == 0 || (pk < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
                     {
                         markInboundClosed();
@@ -1108,7 +1219,8 @@ namespace mynet
                 if ((events & EPOLLRDHUP) && activeMode_ == ForwardMode::KERNEL_SOCKMAP)
                 {
                     char peekByte = 0;
-                    if (::recv(inboundFd_, &peekByte, 1, MSG_PEEK | MSG_DONTWAIT) == 0)
+                    const int inFd = inboundFd();
+                    if (inFd < 0 || ::recv(inFd, &peekByte, 1, MSG_PEEK | MSG_DONTWAIT) == 0)
                     {
                         markInboundClosed();
                         return 1;
@@ -1192,11 +1304,13 @@ namespace mynet
         [[nodiscard]] bool isBackpressured() const noexcept
         {
             const size_t highWater = getConnectionConfig().writeHighWaterMark;
-            if (outboundFd_ >= 0 && getSocketPendingOutBytes(outboundFd_) > highWater)
+            const int outFd = outboundFd();
+            if (outFd >= 0 && getSocketPendingOutBytes(outFd) > highWater)
             {
                 return true;
             }
-            if (inboundFd_ >= 0 && getSocketPendingOutBytes(inboundFd_) > highWater)
+            const int inFd = inboundFd();
+            if (inFd >= 0 && getSocketPendingOutBytes(inFd) > highWater)
             {
                 return true;
             }
@@ -1242,17 +1356,14 @@ namespace mynet
                 return;
             }
 
-            const bool inCanSplice =
-                (inbound_ == nullptr) || (inbound_->canSplice() && inbound_->isPassthrough());
-            const bool outCanSplice =
-                (outbound_ == nullptr) || (outbound_->canSplice() && outbound_->isPassthrough());
+            const bool inCanSplice = (inbound_ == nullptr) || (inbound_->canSplice() && inbound_->isPassthrough());
+            const bool outCanSplice = (outbound_ == nullptr) || (outbound_->canSplice() && outbound_->isPassthrough());
             const bool hasVirtualCh = (inboundChannel_ != nullptr && !inboundChannel_->isPassthrough()) ||
                                       (outboundChannel_ != nullptr && !outboundChannel_->isPassthrough());
 
             const bool canSplice = config_.enableSplice && !disableSpliceForSession_ &&
-                                   (configuredMode_ != ForwardMode::BUFFER_PUMP) && !userSslActive &&
-                                   !hasVirtualCh && inCanSplice && outCanSplice && (inboundFd_ >= 0) &&
-                                   (outboundFd_ >= 0);
+                                   (configuredMode_ != ForwardMode::BUFFER_PUMP) && !userSslActive && !hasVirtualCh &&
+                                   inCanSplice && outCanSplice && (inboundFd() >= 0) && (outboundFd() >= 0);
 
             const bool canOffload =
                 !disableOffloadForSession_ &&
@@ -1554,8 +1665,7 @@ namespace mynet
 
             PumpResult result{};
 
-            auto readSideAndDrive = [&](HandlerBase *h, IStreamChannel *ch, int fd, bool &closedFlag,
-                                        bool isOutbound) noexcept
+            auto readSideAndDrive = [&](Handler *h, IStreamChannel *ch, bool &closedFlag, bool isOutbound) noexcept
             {
                 if (h == nullptr || closedFlag)
                 {
@@ -1569,7 +1679,7 @@ namespace mynet
                         markInboundClosed();
                 };
 
-                if (ch != nullptr || (fd >= 0 && isOutbound))
+                if (ch != nullptr && (isOutbound || inboundChannelDriven_))
                 {
                     for (int iter = 0; iter < 64 && !closedFlag; ++iter)
                     {
@@ -1591,48 +1701,18 @@ namespace mynet
                             break;
                         }
 
-                        if (ch != nullptr)
+                        auto r = ch->readBytes(std::span<uint8_t>(reinterpret_cast<uint8_t *>(*prep), cap));
+                        if (!r)
                         {
-                            auto r = ch->readBytes(std::span<uint8_t>(reinterpret_cast<uint8_t *>(*prep), cap));
-                            if (!r)
-                            {
-                                markClosed();
-                                break;
-                            }
-                            if (*r == 0)
-                            {
-                                break;
-                            }
-                            h->commitRequest(*r);
-                            [[maybe_unused]] auto _ = h->processWireToApp();
+                            markClosed();
+                            break;
                         }
-                        else
+                        if (*r == 0)
                         {
-                            const ssize_t rn = ::read(fd, *prep, cap);
-                            if (rn > 0)
-                            {
-                                h->commitRequest(static_cast<size_t>(rn));
-                                [[maybe_unused]] auto _ = h->processWireToApp();
-                            }
-                            else if (rn == 0)
-                            {
-                                markClosed();
-                                break;
-                            }
-                            else if (errno == EINTR)
-                            {
-                                continue;
-                            }
-                            else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOTCONN)
-                            {
-                                break;
-                            }
-                            else
-                            {
-                                markClosed();
-                                break;
-                            }
+                            break;
                         }
+                        h->commitRequest(*r);
+                        [[maybe_unused]] auto _ = h->processWireToApp();
                     }
                 }
                 h->drive();
@@ -1646,16 +1726,16 @@ namespace mynet
                 {
                     flushOutboundResponses();
                 }
-                if (activeMode_ == ForwardMode::BUFFER_PUMP && inboundChannel_ != nullptr)
+                if (activeMode_ == ForwardMode::BUFFER_PUMP && inboundChannelDriven_)
                 {
-                    readSideAndDrive(inbound_, inboundChannel_.get(), inboundFd_, inboundClosed_, false);
+                    readSideAndDrive(inbound_, inboundChannel_.get(), inboundClosed_, false);
                 }
                 else if (inbound_ != nullptr && inbound_->usesWireBuffer())
                 {
                     inbound_->drive();
                 }
 
-                readSideAndDrive(outbound_, outboundChannel_.get(), outboundFd_, outboundClosed_, true);
+                readSideAndDrive(outbound_, outboundChannel_.get(), outboundClosed_, true);
                 if (outHandshaking)
                 {
                     flushOutboundResponses();
@@ -1686,8 +1766,8 @@ namespace mynet
                 checkAndApplySockmapBackpressure();
             }
 
-            if (activeMode_ == ForwardMode::KERNEL_SOCKMAP && inboundFd_ >= 0 && outboundFd_ >= 0 &&
-                !inboundClosed_ && !outboundClosed_)
+            if (activeMode_ == ForwardMode::KERNEL_SOCKMAP && inboundFd() >= 0 && outboundFd() >= 0 && !inboundClosed_ &&
+                !outboundClosed_)
             {
                 auto peekReadableOrEof = [&](int fd, bool isOutbound) noexcept -> bool
                 {
@@ -1706,14 +1786,14 @@ namespace mynet
                     }
                     return false;
                 };
-                if (peekReadableOrEof(inboundFd_, false) || peekReadableOrEof(outboundFd_, true))
+                if (peekReadableOrEof(inboundFd(), false) || peekReadableOrEof(outboundFd(), true))
                 {
                     downgradeSockmapToSplice(false);
                 }
             }
 
             // 2.5 若活跃于 splice 零拷贝管道模式，驱动双向管道传输（若底层不支持 splice 则无损降级为 BUFFER_PUMP）
-            if (activeMode_ == ForwardMode::ZERO_COPY_SPLICE && inboundFd_ >= 0 && outboundFd_ >= 0 &&
+            if (activeMode_ == ForwardMode::ZERO_COPY_SPLICE && inboundFd() >= 0 && outboundFd() >= 0 &&
                 !outboundClosed_ && !inboundClosed_)
             {
                 const uint64_t upBefore = stats_.bytesUp;
@@ -1756,11 +1836,11 @@ namespace mynet
                 // 若刚刚降级回 BUFFER_PUMP，立即补跑一轮内存读写以免本轮数据滞留
                 if (activeMode_ == ForwardMode::BUFFER_PUMP && !inboundClosed_ && !outboundClosed_)
                 {
-                    if (inboundChannel_ != nullptr)
+                    if (inboundChannelDriven_)
                     {
-                        readSideAndDrive(inbound_, inboundChannel_.get(), inboundFd_, inboundClosed_, false);
+                        readSideAndDrive(inbound_, inboundChannel_.get(), inboundClosed_, false);
                     }
-                    readSideAndDrive(outbound_, outboundChannel_.get(), outboundFd_, outboundClosed_, true);
+                    readSideAndDrive(outbound_, outboundChannel_.get(), outboundClosed_, true);
                     PumpResult fallbackMem = pumpMemoryBridging();
                     result.bytesUp += fallbackMem.bytesUp;
                     result.bytesDown += fallbackMem.bytesDown;
@@ -1840,18 +1920,19 @@ namespace mynet
 
             closePipes();
 
+            const int outFd = outboundFd();
             if (proactorManaged_ && loopHooks_.retireSession)
             {
                 if (loopHooks_.retireSession(id_, ownsOutboundFd_))
                 {
                     ownsOutboundFd_ = false;
-                    outboundFd_ = -1;
+                    outboundChannel_.reset();
                 }
                 proactorManaged_ = false;
             }
-            else if (outboundWatched_ && loopHooks_.delWatch && outboundFd_ >= 0)
+            else if (outboundWatched_ && loopHooks_.delWatch && outFd >= 0)
             {
-                loopHooks_.delWatch(outboundFd_);
+                loopHooks_.delWatch(outFd);
                 outboundWatched_ = false;
             }
 
@@ -1863,10 +1944,15 @@ namespace mynet
                 deactivateSockmap();
             }
 
-            if (ownsOutboundFd_ && outboundFd_ >= 0)
+            if (ownsOutboundFd_ && outboundFd() >= 0)
             {
-                ::close(outboundFd_);
-                outboundFd_ = -1;
+                ::close(outboundFd());
+                ownsOutboundFd_ = false;
+                outboundChannel_.reset();
+            }
+            else if (outboundChannel_ != nullptr && !outboundChannel_->isPassthrough())
+            {
+                outboundChannel_->closeChannel();
             }
 
             outboundPending_.clear();
@@ -1893,7 +1979,9 @@ namespace mynet
 
         TransferResult transferInboundToOutbound() noexcept
         {
-            if (inboundClosed_ || inboundFd_ < 0 || outboundFd_ < 0)
+            const int inFd = inboundFd();
+            const int outFd = outboundFd();
+            if (inboundClosed_ || inFd < 0 || outFd < 0)
             {
                 return TransferResult::CLOSED;
             }
@@ -1903,8 +1991,8 @@ namespace mynet
                 return TransferResult::UNSUPPORTED;
             }
 
-            auto res = detail::splicePipes(inboundFd_, outboundFd_, pipeUp_[1], pipeUp_[0], config_.spliceChunkSize,
-                                           &pipeUpPending_);
+            auto res =
+                detail::splicePipes(inFd, outFd, pipeUp_[1], pipeUp_[0], config_.spliceChunkSize, &pipeUpPending_);
             if (res.bytesSpliced > 0)
             {
                 stats_.bytesUp += static_cast<size_t>(res.bytesSpliced);
@@ -1933,7 +2021,9 @@ namespace mynet
 
         TransferResult transferOutboundToInbound() noexcept
         {
-            if (outboundClosed_ || inboundFd_ < 0 || outboundFd_ < 0)
+            const int inFd = inboundFd();
+            const int outFd = outboundFd();
+            if (outboundClosed_ || inFd < 0 || outFd < 0)
             {
                 return TransferResult::CLOSED;
             }
@@ -1943,8 +2033,8 @@ namespace mynet
                 return TransferResult::UNSUPPORTED;
             }
 
-            auto res = detail::splicePipes(outboundFd_, inboundFd_, pipeDown_[1], pipeDown_[0], config_.spliceChunkSize,
-                                           &pipeDownPending_);
+            auto res =
+                detail::splicePipes(outFd, inFd, pipeDown_[1], pipeDown_[0], config_.spliceChunkSize, &pipeDownPending_);
             if (res.bytesSpliced > 0)
             {
                 stats_.bytesDown += static_cast<size_t>(res.bytesSpliced);
@@ -2000,6 +2090,28 @@ namespace mynet
             {
                 setState(ForwardSessionState::DRAINING);
             }
+        }
+    };
+
+    struct DatagramSessionKey
+    {
+        sockaddr_in client{};
+        sockaddr_in remote{};
+
+        bool operator==(const DatagramSessionKey &other) const noexcept
+        {
+            return client.sin_addr.s_addr == other.client.sin_addr.s_addr && client.sin_port == other.client.sin_port &&
+                   remote.sin_addr.s_addr == other.remote.sin_addr.s_addr && remote.sin_port == other.remote.sin_port;
+        }
+    };
+
+    struct DatagramSessionKeyHash
+    {
+        size_t operator()(const DatagramSessionKey &k) const noexcept
+        {
+            const uint64_t c = (static_cast<uint64_t>(k.client.sin_addr.s_addr) << 16) | ntohs(k.client.sin_port);
+            const uint64_t r = (static_cast<uint64_t>(k.remote.sin_addr.s_addr) << 16) | ntohs(k.remote.sin_port);
+            return std::hash<uint64_t>{}(c ^ (r + 0x9e3779b97f4a7c15ULL + (c << 6) + (c >> 2)));
         }
     };
 
@@ -2067,32 +2179,31 @@ namespace mynet
 #if defined(__linux__)
             std::weak_ptr<ForwarderDatagramSession> weak = weak_from_this();
             const uint32_t mask = EPOLLIN | EPOLLET;
-            outboundWatched_ = loopHooks_.addWatch(
-                outbound_.fd(), mask,
-                [weak](uint32_t events)
-                {
-                    auto self = weak.lock();
-                    if (self == nullptr || !self->outbound_.valid())
-                    {
-                        return;
-                    }
-                    if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
-                    {
-                        self->close();
-                        return;
-                    }
-                    if (events & EPOLLIN)
-                    {
-                        (void)self->outbound_.drain(
-                            [&](const DatagramView &view)
-                            {
-                                if (self->onReply_)
-                                {
-                                    self->onReply_(view);
-                                }
-                            });
-                    }
-                });
+            outboundWatched_ = loopHooks_.addWatch(outbound_.fd(), mask,
+                                                   [weak](uint32_t events)
+                                                   {
+                                                       auto self = weak.lock();
+                                                       if (self == nullptr || !self->outbound_.valid())
+                                                       {
+                                                           return;
+                                                       }
+                                                       if ((events & (EPOLLERR | EPOLLHUP)) && !(events & EPOLLIN))
+                                                       {
+                                                           self->close();
+                                                           return;
+                                                       }
+                                                       if (events & EPOLLIN)
+                                                       {
+                                                           (void)self->outbound_.drain(
+                                                               [&](const DatagramView &view)
+                                                               {
+                                                                   if (self->onReply_)
+                                                                   {
+                                                                       self->onReply_(view);
+                                                                   }
+                                                               });
+                                                       }
+                                                   });
 #endif
             return outboundWatched_;
         }
@@ -2146,9 +2257,8 @@ namespace mynet
         std::unordered_map<uint64_t, std::shared_ptr<ForwarderStreamSession>> streamSessions_{};
 
         mutable std::mutex datagramMutex_{};
-        std::unordered_map<uint64_t, std::shared_ptr<ForwarderDatagramSession>> datagramSessions_{};
         std::unordered_map<DatagramSessionKey, std::shared_ptr<ForwarderDatagramSession>, DatagramSessionKeyHash>
-            datagramNat_{};
+            datagramSessions_{};
 
         std::atomic<uint64_t> totalBytesUp_{0};
         std::atomic<uint64_t> totalBytesDown_{0};
@@ -2222,7 +2332,7 @@ namespace mynet
          * @param cfg 显式转发配置覆盖（可选）
          * @return std::shared_ptr<ForwarderStreamSession> 转发会话句柄
          */
-        std::shared_ptr<ForwarderStreamSession> bridge(HandlerBase &inbound, HandlerBase &outbound,
+        std::shared_ptr<ForwarderStreamSession> bridge(Handler &inbound, Handler &outbound,
                                                        std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
@@ -2235,10 +2345,10 @@ namespace mynet
             return session;
         }
 
-        std::shared_ptr<ForwarderStreamSession> bridgeDispatched(
-            HandlerBase &inbound, std::unique_ptr<HandlerBase> outbound, int inFd, int outFd, bool ownsOutboundFd,
-            bool connecting, bool connectDeferred, const sockaddr_in &peerAddr, const handler::ProxyAddress &target,
-            std::string outboundTag, std::optional<ForwarderConfig> cfg = std::nullopt)
+        std::shared_ptr<ForwarderStreamSession>
+        bridgeDispatched(Handler &inbound, std::unique_ptr<Handler> outbound, int inFd, int outFd, bool ownsOutboundFd,
+                         bool connecting, bool connectDeferred, const sockaddr_in &peerAddr, const Address &target,
+                         std::string outboundTag, std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
             const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
@@ -2250,7 +2360,7 @@ namespace mynet
             session->setOutboundTag(std::move(outboundTag));
             session->setOwnedOutbound(std::move(outbound));
 
-            HandlerBase *outPtr = session->outbound();
+            Handler *outPtr = session->outbound();
             const int resolvedInFd = (inFd >= 0) ? inFd : inbound.fd();
             [[maybe_unused]] auto preFlushed = session->attach(inbound, *outPtr, resolvedInFd, outFd, false);
             recordAndStoreSession(session);
@@ -2260,10 +2370,8 @@ namespace mynet
         /**
          * @brief 桥接基于 IStreamChannel 的通用异步流通道（支持 QUIC 流 / 内存管道 / 用户态多路复用子流等非 fd 流）
          */
-        std::shared_ptr<ForwarderStreamSession> bridgeChannels(HandlerBase &inbound,
-                                                               std::shared_ptr<IStreamChannel> inCh,
-                                                               HandlerBase &outbound,
-                                                               std::shared_ptr<IStreamChannel> outCh,
+        std::shared_ptr<ForwarderStreamSession> bridgeChannels(Handler &inbound, std::shared_ptr<IStreamChannel> inCh,
+                                                               Handler &outbound, std::shared_ptr<IStreamChannel> outCh,
                                                                std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
@@ -2282,7 +2390,7 @@ namespace mynet
          *
          * 自动检查双端是否启用 SSL，自动提取套接字描述符并装配零拷贝 splice 或用户态泵送。
          */
-        std::shared_ptr<ForwarderStreamSession> bridge(ConnectionBase &inboundConn, ConnectionBase &outboundConn,
+        std::shared_ptr<ForwarderStreamSession> bridge(Connection &inboundConn, Connection &outboundConn,
                                                        std::optional<ForwarderConfig> cfg = std::nullopt)
         {
             const ForwarderConfig actualConfig = cfg.value_or(defaultConfig_);
@@ -2290,7 +2398,11 @@ namespace mynet
             auto session = std::make_shared<ForwarderStreamSession>(sid, actualConfig);
             session->setSockmapFd(sockmapFd_);
 
-            const bool userSsl = (inboundConn.ssl() != nullptr || outboundConn.ssl() != nullptr);
+            const bool inUserSsl =
+                (inboundConn.ssl() != nullptr) && !(inboundConn.ktlsRxActive() && inboundConn.ktlsTxActive());
+            const bool outUserSsl =
+                (outboundConn.ssl() != nullptr) && !(outboundConn.ktlsRxActive() && outboundConn.ktlsTxActive());
+            const bool userSsl = inUserSsl || outUserSsl;
             auto *inHandler = inboundConn.handler();
             auto *outHandler = outboundConn.handler();
             contract_assert(inHandler != nullptr && outHandler != nullptr);
@@ -2492,8 +2604,8 @@ namespace mynet
 
             {
                 std::lock_guard<std::mutex> lock(datagramMutex_);
-                auto it = datagramNat_.find(key);
-                if (it != datagramNat_.end() && it->second != nullptr)
+                auto it = datagramSessions_.find(key);
+                if (it != datagramSessions_.end() && it->second != nullptr)
                 {
                     result = it->second;
                     result->touch();
@@ -2513,8 +2625,7 @@ namespace mynet
                 {
                     const uint64_t sid = nextSessionId_.fetch_add(1, std::memory_order_relaxed);
                     result = std::make_shared<ForwarderDatagramSession>(sid, client, remote, outboundFd);
-                    datagramSessions_.emplace(sid, result);
-                    datagramNat_.emplace(key, result);
+                    datagramSessions_.emplace(key, result);
                 }
             }
             if (duplicateFdToClose >= 0)
@@ -2529,8 +2640,8 @@ namespace mynet
         {
             const DatagramSessionKey key{.client = client, .remote = remote};
             std::lock_guard<std::mutex> lock(datagramMutex_);
-            auto it = datagramNat_.find(key);
-            if (it != datagramNat_.end() && it->second != nullptr)
+            auto it = datagramSessions_.find(key);
+            if (it != datagramSessions_.end() && it->second != nullptr)
             {
                 it->second->touch();
                 return it->second;
@@ -2538,8 +2649,7 @@ namespace mynet
             return nullptr;
         }
 
-        inline bool activateDatagramWatch(const std::shared_ptr<ForwarderDatagramSession> &session,
-                                          HandlerBase &inbound)
+        inline bool activateDatagramWatch(const std::shared_ptr<ForwarderDatagramSession> &session, Handler &inbound)
         {
             if (session == nullptr || !loopHooks_.active() || !session->outbound().valid())
             {
@@ -2558,10 +2668,11 @@ namespace mynet
                     const std::string_view payload(reinterpret_cast<const char *>(view.payload.data()),
                                                    view.payload.size());
                     [[maybe_unused]] auto _ = forwardDatagramToClient(inbound, sess->clientAddr(), payload, sess.get());
-                    if (inbound.fd() >= 0)
+                    if (inbound.fd() >= 0 && inbound.hasOutgoing())
                     {
                         Datagram inDgram(inbound.fd(), /*ownsFd=*/false);
-                        inbound::flushDatagramOutgoing(inDgram, inbound, sess->clientAddr());
+                        auto batch = inbound.takeAllOutgoing();
+                        inDgram.sendPackets(batch, sess->clientAddr());
                     }
                 });
         }
@@ -2608,7 +2719,7 @@ namespace mynet
         /**
          * @brief 将上游响应的数据报封装并回传给客户端
          */
-        [[nodiscard]] Result<size_t> forwardDatagramToClient(HandlerBase &inbound, const sockaddr_in &client,
+        [[nodiscard]] Result<size_t> forwardDatagramToClient(Handler &inbound, const sockaddr_in &client,
                                                              std::string_view payload,
                                                              ForwarderDatagramSession *session = nullptr) noexcept
         {
@@ -2644,9 +2755,6 @@ namespace mynet
                     if (it->second->isExpired(now, maxIdle))
                     {
                         toRemove.push_back(it->second);
-                        datagramNat_.erase(DatagramSessionKey{
-                            .client = it->second->clientAddr(),
-                            .remote = it->second->remoteAddr()});
                         it = datagramSessions_.erase(it);
                     }
                     else
@@ -2720,7 +2828,8 @@ namespace mynet
         void closeAll() noexcept
         {
             std::unordered_map<uint64_t, std::shared_ptr<ForwarderStreamSession>> streams;
-            std::unordered_map<uint64_t, std::shared_ptr<ForwarderDatagramSession>> dgrams;
+            std::unordered_map<DatagramSessionKey, std::shared_ptr<ForwarderDatagramSession>, DatagramSessionKeyHash>
+                dgrams;
 
             {
                 std::lock_guard<std::mutex> lock(streamMutex_);
@@ -2729,7 +2838,6 @@ namespace mynet
             {
                 std::lock_guard<std::mutex> lock(datagramMutex_);
                 dgrams = std::move(datagramSessions_);
-                datagramNat_.clear();
             }
 
             for (auto &pair : streams)

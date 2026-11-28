@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../outboundManager.hpp"
+#include "../dialerManager.hpp"
 #include "trojan.hpp"
 #include <memory>
 #include <string>
@@ -34,18 +34,18 @@ namespace mynet
         [[nodiscard]] uint16_t serverPort() const noexcept override { return serverPort_; }
         [[nodiscard]] const std::string &password() const noexcept { return password_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundTrojan>(serverHost_, serverPort_, target, password_);
+            return dialForwarderHelper<handler::HandlerOutboundTrojan>(serverHost_, serverPort_, target, ctx,
+                                                                       password_);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundTrojan = DialerTrojan;
 
 } // namespace mynet

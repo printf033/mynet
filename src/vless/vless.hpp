@@ -34,7 +34,7 @@ namespace mynet::handler
     /**
      * @brief VLESS (v0) 入站协议状态机处理器
      */
-    class HandlerInboundVless : public HandlerInboundConnectionBase
+    class HandlerInboundVless : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &uuid)>;
@@ -86,7 +86,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             std::memset(clientUuid_.data(), 0, 16);
             visionContext_.reset();
         }
@@ -186,7 +186,7 @@ namespace mynet::handler
 
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
-            auto target = ProxyAddress::decodeVlessAddress(atyp, addrSpan, port, addrConsumed);
+            auto target = Address::decodeVlessAddress(atyp, addrSpan, port, addrConsumed);
             if (!target.has_value())
             {
                 return false; // 地址尚未完整
@@ -221,7 +221,7 @@ namespace mynet::handler
      * [Version 0x00][UUID 16B][AddonLen 0x00][CMD 0x01][Port 2B BE][Address ATYP + Body]
      * 接收 2 字节回执 [0x00, 0x00] 后进入 STREAMING 阶段。
      */
-    class HandlerOutboundVless : public HandlerOutboundConnectionBase
+    class HandlerOutboundVless : public HandlerOutbound
     {
     private:
         std::array<uint8_t, 16> uuid_{};
@@ -231,8 +231,8 @@ namespace mynet::handler
 
     public:
         HandlerOutboundVless() noexcept = default;
-        HandlerOutboundVless(const std::array<uint8_t, 16> &uuid, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target),
+        HandlerOutboundVless(const std::array<uint8_t, 16> &uuid, const Address &target)
+            : HandlerOutbound(target),
               uuid_(uuid),
               visionContext_(uuid)
         {
@@ -267,7 +267,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             headerSent_ = false;
             visionContext_.reset();
         }

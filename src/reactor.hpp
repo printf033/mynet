@@ -60,7 +60,7 @@ namespace mynet
             {
                 return std::type_identity<U>{};
             }
-            else if constexpr (std::derived_from<U, mynet::HandlerBase>)
+            else if constexpr (std::derived_from<U, mynet::Handler>)
             {
                 return std::type_identity<TypedAcceptor<U>>{};
             }
@@ -82,7 +82,7 @@ namespace mynet
         template <typename U>
         static auto checkConnection(int) -> typename U::Connection;
         template <typename U>
-        static auto checkConnection(...) -> ConnectionBase;
+        static auto checkConnection(...) -> Connection;
 
     public:
         using Acceptor = typename decltype(resolveAcceptor<T>())::type;
@@ -360,7 +360,7 @@ namespace mynet
     namespace detail
     {
         template <size_t... Is, typename TupleT>
-        inline void dispatchProtocolTcpClientImpl(int clientFd, ConnectionBase *&conn, size_t listenerIdx,
+        inline void dispatchProtocolTcpClientImpl(int clientFd, Connection *&conn, size_t listenerIdx,
                                                   const std::array<size_t, sizeof...(Is)> &listenerIndices,
                                                   TupleT &acceptors, std::index_sequence<Is...>)
         {
@@ -401,7 +401,7 @@ namespace mynet
         }
 
         template <typename... Protocols, typename TupleT>
-        inline void dispatchProtocolTcpClient(int clientFd, ConnectionBase *&conn, size_t listenerIdx, TupleT &acceptors)
+        inline void dispatchProtocolTcpClient(int clientFd, Connection *&conn, size_t listenerIdx, TupleT &acceptors)
         {
             if constexpr (sizeof...(Protocols) > 0)
             {
@@ -415,59 +415,79 @@ namespace mynet
         }
 
         template <typename... Protocols, typename TupleT, typename HandlerArrayT>
-        inline void drainProtocolUdp(Listener &listener, size_t listenerIdx, HandlerBase *externalUdpHandler,
+        inline void drainProtocolUdp(Listener &listener, size_t listenerIdx, Handler *externalUdpHandler,
                                      HandlerArrayT &udpHandlers, TupleT &acceptors)
         {
-            inbound::drainDatagramSocket(
-                listener.fd(),
-                [&](std::span<const uint8_t> bytes) -> HandlerBase *
+            const int udpFd = listener.fd();
+            if (udpFd < 0)
+            {
+                return;
+            }
+            Datagram dgram(udpFd, /*ownsFd=*/false);
+            (void)dgram.drain(
+                [&](const DatagramView &view)
                 {
-                    if (externalUdpHandler != nullptr)
+                    auto resolveHandler = [&](std::span<const uint8_t> bytes) -> Handler *
                     {
-                        return externalUdpHandler;
-                    }
-                    if constexpr (sizeof...(Protocols) > 0)
-                    {
-                        HandlerBase *selected = nullptr;
-                        [&]<size_t... Is>(std::index_sequence<Is...>)
+                        if (externalUdpHandler != nullptr)
                         {
-                            constexpr auto listenerIndices = std::array<size_t, sizeof...(Protocols)>{
-                                getListenerIndexForProtocol<Is, Protocols...>()...};
-
-                            size_t matchedIdx = sizeof...(Protocols);
-                            (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors).match(bytes))
-                                  ? (matchedIdx = Is, true)
-                                  : false) ||
-                             ...);
-
-                            if (matchedIdx == sizeof...(Protocols))
+                            return externalUdpHandler;
+                        }
+                        if constexpr (sizeof...(Protocols) > 0)
+                        {
+                            Handler *selected = nullptr;
+                            [&]<size_t... Is>(std::index_sequence<Is...>)
                             {
-                                ((listenerIndices[Is] == listenerIdx ? (matchedIdx = Is, true) : false) || ...);
-                            }
+                                constexpr auto listenerIndices = std::array<size_t, sizeof...(Protocols)>{
+                                    getListenerIndexForProtocol<Is, Protocols...>()...};
 
-                            if (matchedIdx < sizeof...(Protocols))
-                            {
-                                auto pickSlot = [&](auto &acc, size_t idx)
+                                size_t matchedIdx = sizeof...(Protocols);
+                                (((listenerIndices[Is] == listenerIdx && std::get<Is>(acceptors).match(bytes))
+                                      ? (matchedIdx = Is, true)
+                                      : false) ||
+                                 ...);
+
+                                if (matchedIdx == sizeof...(Protocols))
                                 {
-                                    if (udpHandlers[idx] == nullptr)
+                                    ((listenerIndices[Is] == listenerIdx ? (matchedIdx = Is, true) : false) || ...);
+                                }
+
+                                if (matchedIdx < sizeof...(Protocols))
+                                {
+                                    auto pickSlot = [&](auto &acc, size_t idx)
                                     {
-                                        udpHandlers[idx] = acc.buildConfiguredHandler();
+                                        if (udpHandlers[idx] == nullptr)
+                                        {
+                                            udpHandlers[idx] = acc.buildConfiguredHandler();
+                                            if (udpHandlers[idx] != nullptr)
+                                            {
+                                                udpHandlers[idx]->onConnect(udpFd);
+                                            }
+                                        }
                                         if (udpHandlers[idx] != nullptr)
                                         {
-                                            udpHandlers[idx]->onConnect(listener.fd());
+                                            selected = udpHandlers[idx].get();
                                         }
-                                    }
-                                    if (udpHandlers[idx] != nullptr)
-                                    {
-                                        selected = udpHandlers[idx].get();
-                                    }
-                                };
-                                ((Is == matchedIdx ? (pickSlot(std::get<Is>(acceptors), Is), true) : false) || ...);
-                            }
-                        }(std::make_index_sequence<sizeof...(Protocols)>{});
-                        return selected;
+                                    };
+                                    ((Is == matchedIdx ? (pickSlot(std::get<Is>(acceptors), Is), true) : false) || ...);
+                                }
+                            }(std::make_index_sequence<sizeof...(Protocols)>{});
+                            return selected;
+                        }
+                        return nullptr;
+                    };
+
+                    if (Handler *h = resolveHandler(view.payload); h != nullptr)
+                    {
+                        h->onDatagram(view.peer, reinterpret_cast<const char *>(view.payload.data()),
+                                      view.payload.size());
+                        h->drive();
+                        if (h->hasOutgoing())
+                        {
+                            auto batch = h->takeAllOutgoing();
+                            dgram.sendPackets(batch, view.peer);
+                        }
                     }
-                    return nullptr;
                 });
         }
     } // namespace detail
@@ -1236,8 +1256,8 @@ namespace mynet
         {
             struct UdpHandlerGuard
             {
-                HandlerBase *&slot;
-                explicit UdpHandlerGuard(HandlerBase *&s, HandlerBase *h) noexcept : slot(s) { slot = h; }
+                Handler *&slot;
+                explicit UdpHandlerGuard(Handler *&s, Handler *h) noexcept : slot(s) { slot = h; }
                 ~UdpHandlerGuard() noexcept { slot = nullptr; }
             } guard(externalUdpHandler_, &handler);
             return runUdp(ip, port, getServerConfig(), reactor);
@@ -1294,7 +1314,7 @@ namespace mynet
 
         inline void runInLoop(EventLoop::Task task) { loop_.runInLoop(std::move(task)); }
 
-        inline void runOnConnection(int fd, std::function<void(ConnectionBase &)> task)
+        inline void runOnConnection(int fd, std::function<void(Connection &)> task)
         {
             loop_.runInLoop(
                 [this, fd, task = std::move(task)]
@@ -1304,12 +1324,12 @@ namespace mynet
                     {
                         return;
                     }
-                    ConnectionBase *conn = it->second;
+                    Connection *conn = it->second;
                     task(*conn);
                 });
         }
 
-        [[nodiscard]] inline ConnectionBase *find(int fd) noexcept
+        [[nodiscard]] inline Connection *find(int fd) noexcept
         {
             auto it = connections_.find(fd);
             return it == connections_.end() ? nullptr : it->second;
@@ -1358,7 +1378,7 @@ namespace mynet
         /**
          * @brief 将外部 Acceptor（如 TProxy / 多端口入站）创建的 Connection 纳入 Reactor 事件循环托管
          */
-        inline bool adoptConnection(ConnectionBase *conn)
+        inline bool adoptConnection(Connection *conn)
         {
             if (conn == nullptr || conn->fd() < 0) [[unlikely]]
             {
@@ -1404,7 +1424,7 @@ namespace mynet
                 return;
             }
 
-            auto *conn = static_cast<ConnectionBase *>(ptr);
+            auto *conn = static_cast<Connection *>(ptr);
             onConnection(conn, events);
         }
 
@@ -1436,7 +1456,7 @@ namespace mynet
 
         inline void dispatchClient(int clientFd, const sockaddr_in &clientAddr, size_t listenerIdx)
         {
-            ConnectionBase *conn = nullptr;
+            Connection *conn = nullptr;
 
             if constexpr (sizeof...(Protocols) == 0)
             {
@@ -1449,7 +1469,7 @@ namespace mynet
                 if (conn == nullptr)
                 {
                     LOG_WARN("Reactor: dispatchClientToAcceptors left conn == nullptr for fd {}", clientFd);
-                    conn = new ConnectionBase();
+                    conn = new Connection();
                 }
                 else
                 {
@@ -1472,7 +1492,7 @@ namespace mynet
             }
         }
 
-        inline void dispatchClientToAcceptors(int clientFd, ConnectionBase *&conn, size_t listenerIdx)
+        inline void dispatchClientToAcceptors(int clientFd, Connection *&conn, size_t listenerIdx)
         {
             detail::dispatchProtocolTcpClient<Protocols...>(clientFd, conn, listenerIdx, acceptors_);
         }
@@ -1482,7 +1502,7 @@ namespace mynet
             detail::drainProtocolUdp<Protocols...>(listener, listenerIdx, externalUdpHandler_, udpHandlers_, acceptors_);
         }
 
-        inline void onConnection(ConnectionBase *conn, uint32_t events)
+        inline void onConnection(Connection *conn, uint32_t events)
         {
             if (conn == nullptr || conn->fd() < 0) [[unlikely]]
             {
@@ -1525,7 +1545,7 @@ namespace mynet
             }
         }
 
-        inline void closeConn(ConnectionBase *conn)
+        inline void closeConn(Connection *conn)
         {
             if (conn == nullptr)
                 return;
@@ -1546,7 +1566,7 @@ namespace mynet
                 return;
             }
             const auto now = std::chrono::steady_clock::now();
-            std::vector<ConnectionBase *> expired;
+            std::vector<Connection *> expired;
             for (const auto &[fd, conn] : connections_)
             {
                 if (conn != nullptr && (now - conn->lastActive()) > idleTimeout_)
@@ -1554,7 +1574,7 @@ namespace mynet
                     expired.push_back(conn);
                 }
             }
-            for (ConnectionBase *conn : expired)
+            for (Connection *conn : expired)
             {
                 closeConn(conn);
             }
@@ -1565,8 +1585,8 @@ namespace mynet
         std::tuple<typename ProtocolTraits<Protocols>::Acceptor...> acceptors_{};
         std::tuple<typename ProtocolTraits<Protocols>::Dialer...> dialers_{};
         std::array<std::unique_ptr<Handler>, (kProtocolCount > 0 ? kProtocolCount : 1)> udpHandlers_{};
-        HandlerBase *externalUdpHandler_{nullptr};
-        std::unordered_map<int, ConnectionBase *> connections_{};
+        Handler *externalUdpHandler_{nullptr};
+        std::unordered_map<int, Connection *> connections_{};
         size_t maxConnections_{1024};
 
         EventLoop loop_{};

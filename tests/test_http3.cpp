@@ -701,7 +701,7 @@ TEST(Http3Frame, ZeroCopyFrameViewDecodesDirectlyFromBuffer)
     EXPECT_EQ(owningFrame.view().payload, fv.payload);
 }
 
-class TrackingHttp3Stream : public HandlerConnection
+class TrackingHttp3Stream : public Handler
 {
 public:
     size_t handleCount = 0;
@@ -783,5 +783,76 @@ TEST(HandlerHttp3, CustomStreamHandlerAndLifecycleHooksDispatched)
 
     // 流处理完成后流从表中清除，StreamHandler 归还对象池
     EXPECT_EQ(handler.openStreams(), 0u);
+    EXPECT_TRUE(handler.hasOutgoing());
+}
+
+TEST(QuicPrimitives, FramesAckRttGuardAndHttp3Reuse)
+{
+    // 1. ACK / RESET_STREAM / STOP_SENDING / MAX_DATA / CONNECTION_CLOSE 编解码
+    std::string wire;
+    appendAckFrame(wire, AckFrame{.largestAcked = 42, .ackDelay = 5, .ackRangeCount = 0, .firstAckRange = 3});
+    appendResetStreamFrame(wire, ResetStreamFrame{.streamId = 4, .errorCode = 0x100, .finalSize = 512});
+    appendStopSendingFrame(wire, StopSendingFrame{.streamId = 8, .errorCode = 0x101});
+    appendMaxDataFrame(wire, 1048576);
+    appendMaxStreamDataFrame(wire, 4, 65536);
+
+    const auto *p = reinterpret_cast<const uint8_t *>(wire.data());
+    size_t rem = wire.size();
+    auto ack = parseAckFrame(p, rem);
+    ASSERT_TRUE(ack.has_value());
+    EXPECT_EQ(ack->largestAcked, 42u);
+    auto rst = parseResetStreamFrame(p, rem);
+    ASSERT_TRUE(rst.has_value());
+    EXPECT_EQ(rst->streamId, 4u);
+    EXPECT_EQ(rst->finalSize, 512u);
+    auto ss = parseStopSendingFrame(p, rem);
+    ASSERT_TRUE(ss.has_value());
+    EXPECT_EQ(ss->streamId, 8u);
+    EXPECT_TRUE(skipFrame(p, rem)); // MAX_DATA
+    EXPECT_TRUE(skipFrame(p, rem)); // MAX_STREAM_DATA
+    EXPECT_EQ(rem, 0u);
+
+    // 2. AntiAmplificationGuard / AckTracker / RttEstimator
+    AntiAmplificationGuard guard;
+    guard.recordReceived(100);
+    EXPECT_TRUE(guard.canSend(300));
+    EXPECT_FALSE(guard.canSend(301));
+    guard.markValidated();
+    EXPECT_TRUE(guard.canSend(10000));
+
+    AckTracker ackTracker;
+    ackTracker.onPacketReceived(7, true);
+    auto pendingAck = ackTracker.consumeAckPending(2);
+    ASSERT_TRUE(pendingAck.has_value());
+    EXPECT_EQ(pendingAck->largestAcked, 7u);
+    EXPECT_FALSE(ackTracker.consumeAckPending().has_value());
+
+    RttEstimator rtt;
+    rtt.update(20000);
+    rtt.update(24000, 1000);
+    EXPECT_GT(rtt.ptoUs(), 20000u);
+
+    // 3. HandlerHttp3 在同一个 QUIC 短首部包内先遇到 ACK 帧，仍可正确跳过并解析后续 STREAM 帧
+    HandlerHttp3 handler;
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(55555);
+    inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+
+    std::vector<Header> reqHeaders = {{":method", "GET"}, {":path", "/ack-then-stream"}};
+    std::string h3Hdr;
+    encodeHeaders(h3Hdr, reqHeaders);
+    std::string h3Frames;
+    http::v3::appendFrame(h3Frames, std::to_underlying(FRAME_TYPE::HEADERS), h3Hdr);
+
+    std::string quicPayload;
+    appendAckFrame(quicPayload, AckFrame{.largestAcked = 1, .ackDelay = 0, .ackRangeCount = 0, .firstAckRange = 0});
+    appendStreamFrame(quicPayload, 0, 0, h3Frames, true);
+
+    std::string pkt;
+    auto dcid = ConnectionId::fromBytes("12345678", 8);
+    appendShortHeaderPacket(pkt, dcid, 10, quicPayload);
+
+    handler.onDatagram(peer, pkt.data(), pkt.size());
     EXPECT_TRUE(handler.hasOutgoing());
 }

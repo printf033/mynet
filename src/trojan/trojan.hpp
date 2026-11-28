@@ -31,7 +31,7 @@ namespace mynet::handler
     /**
      * @brief Trojan 协议入站状态机处理器
      */
-    class HandlerInboundTrojan : public HandlerInboundConnectionBase
+    class HandlerInboundTrojan : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(std::string_view hexHash)>;
@@ -69,7 +69,7 @@ namespace mynet::handler
          */
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
 
-        void reset() noexcept override { HandlerInboundConnectionBase::reset(); }
+        void reset() noexcept override { HandlerInbound::reset(); }
 
         void handle() override
         {
@@ -137,7 +137,7 @@ namespace mynet::handler
             const size_t addrOffset = trojan::kKeyLength + 2 + 1;
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
-            auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
+            auto target = Address::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
                 return false; // 地址不完整
@@ -179,7 +179,7 @@ namespace mynet::handler
      * 建立四元组连接后，在流首部自动填充并推送 Trojan 鉴权报文头：
      * [SHA-224 Hex Key (56B)][CRLF][CMD (0x01)][SOCKS5 Target Address][CRLF]
      */
-    class HandlerOutboundTrojan : public HandlerOutboundConnectionBase
+    class HandlerOutboundTrojan : public HandlerOutbound
     {
     private:
         std::string hexKey_{};
@@ -187,8 +187,8 @@ namespace mynet::handler
 
     public:
         HandlerOutboundTrojan() noexcept = default;
-        HandlerOutboundTrojan(std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target),
+        HandlerOutboundTrojan(std::string_view password, const Address &target)
+            : HandlerOutbound(target),
               hexKey_(digest::sha224Hex(password))
         {
         }
@@ -197,7 +197,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             headerSent_ = false;
         }
 

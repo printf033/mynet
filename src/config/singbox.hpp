@@ -2,7 +2,7 @@
 
 /**
  * @file config/singbox.hpp
- * @brief sing-box / Throne 标准 JSON 配置到 MynetConfig 的动态转换与加载引擎。
+ * @brief sing-box / NekoBox 标准 JSON 配置到 MynetConfig 的动态转换与加载引擎。
  *
  * 核心对标特性：
  * 1. inbounds (mixed, socks, http, trojan, vless, hysteria2, shadowsocks, tun)；
@@ -13,7 +13,7 @@
  */
 
 #include "../configHolder.hpp"
-#include "../tunPacket.hpp"
+#include "../tun/packet.hpp"
 #include "json.hpp"
 #include <cctype>
 #include <charconv>
@@ -426,6 +426,52 @@ namespace mynet::config::singbox
                     }
 
                     parseSingBoxTransport(outObj, outCfg.transport);
+
+                    if (outObj.contains("routing_mark"))
+                    {
+                        outCfg.dialer.fwmark = static_cast<uint32_t>(outObj["routing_mark"].asInt(0));
+                    }
+                    else if (outObj.contains("fwmark"))
+                    {
+                        outCfg.dialer.fwmark = static_cast<uint32_t>(outObj["fwmark"].asInt(0));
+                    }
+                    if (outObj.contains("bind_interface"))
+                    {
+                        outCfg.dialer.bindInterface = outObj["bind_interface"].asString();
+                    }
+                    if (outObj.contains("inet4_bind_address"))
+                    {
+                        outCfg.dialer.bindAddress = outObj["inet4_bind_address"].asString();
+                    }
+                    else if (outObj.contains("bind_address"))
+                    {
+                        outCfg.dialer.bindAddress = outObj["bind_address"].asString();
+                    }
+                    if (outObj.contains("tcp_fast_open"))
+                    {
+                        outCfg.dialer.tcpFastOpen = outObj["tcp_fast_open"].asBool(false);
+                    }
+                    if (outObj.contains("dscp"))
+                    {
+                        outCfg.dialer.dscp = static_cast<uint8_t>(outObj["dscp"].asInt(0));
+                    }
+                    if (outObj.contains("mptcp"))
+                    {
+                        outCfg.dialer.enableMptcp = outObj["mptcp"].asBool(false);
+                    }
+                    if (outObj.contains("connect_timeout"))
+                    {
+                        const auto &ct = outObj["connect_timeout"];
+                        if (ct.isString())
+                        {
+                            outCfg.dialer.timeout = std::chrono::seconds(parseDurationSeconds(ct.asString(), 5));
+                        }
+                        else if (ct.isNumber())
+                        {
+                            outCfg.dialer.timeout = std::chrono::milliseconds(ct.asInt(5000));
+                        }
+                    }
+
                     cfg.outbounds.push_back(std::move(outCfg));
                 }
             }

@@ -47,7 +47,7 @@ namespace mynet::handler
     /**
      * @brief SOCKS4 / SOCKS4a 协议入站状态机处理器
      */
-    class HandlerInboundSocks4 : public HandlerInboundConnectionBase
+    class HandlerInboundSocks4 : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(std::string_view userId)>;
@@ -84,7 +84,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             socks4Stage_ = Socks4Stage::REQUEST;
             userId_.clear();
             autoReplyConnectSuccess_ = getProxyConfig().autoReplyConnectSuccess;
@@ -196,11 +196,11 @@ namespace mynet::handler
             // 构造地址
             if (isSocks4a)
             {
-                targetAddress_ = ProxyAddress::fromDomain(domain, port);
+                targetAddress_ = Address::fromDomain(domain, port);
             }
             else
             {
-                targetAddress_ = ProxyAddress::fromIPv4(ipBe, port);
+                targetAddress_ = Address::fromIPv4(ipBe, port);
             }
 
             command_ = cmd;

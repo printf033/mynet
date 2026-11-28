@@ -15,5 +15,4 @@ namespace mynet::hysteria2
         using Connection::Connection;
     };
 
-    using Hysteria2Connection = ConnectionHysteria2;
 } // namespace mynet::hysteria2

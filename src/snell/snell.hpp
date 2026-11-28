@@ -26,7 +26,7 @@ namespace mynet::handler
     /**
      * @brief Snell 协议入站状态机处理器
      */
-    class HandlerInboundSnell : public HandlerInboundConnectionBase
+    class HandlerInboundSnell : public HandlerInbound
     {
     private:
         uint8_t version_{2};
@@ -49,7 +49,7 @@ namespace mynet::handler
         void setVersion(uint8_t ver) noexcept { version_ = ver; }
         void setPsk(std::string_view psk) { psk_ = std::string(psk); }
 
-        void reset() noexcept override { HandlerInboundConnectionBase::reset(); }
+        void reset() noexcept override { HandlerInbound::reset(); }
 
         void handle() override
         {
@@ -94,7 +94,7 @@ namespace mynet::handler
 
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + 2, avail - 2);
-            auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
+            auto target = Address::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
                 return false;

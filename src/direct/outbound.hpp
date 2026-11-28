@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../datagram.hpp"
 #include "../dialer.hpp"
 #include "direct.hpp"
 #include <memory>
@@ -20,17 +21,17 @@ namespace mynet
         {
         }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            Result<DialTcpResult> res;
+            Result<ConnectResult> res;
 
             if (auto sin = target.toSockAddrIn(); sin.has_value())
             {
-                res = dialTcp(*sin);
+                res = dialTcp(*sin, nullptr, ctx);
             }
             else
             {
-                res = dialTcp(target.host, target.port);
+                res = dialTcp(target.host, target.port, nullptr, ctx);
             }
 
             if (!res)
@@ -49,7 +50,7 @@ namespace mynet
             return outRes;
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             auto dgramRes = createConfiguredDatagram();
@@ -61,6 +62,34 @@ namespace mynet
         }
     };
 
-    using OutboundDirect = DialerDirect;
+    /**
+     * @brief 数据报出站拨号器 (DialerDatagram)
+     *
+     * 复用 Dialer::createConfiguredDatagram 创建与打标无状态 UDP 报文通道。
+     */
+    class DialerDatagram : public Dialer
+    {
+    public:
+        explicit DialerDatagram(std::string tag = "datagram", DialerOptions options = {})
+            : Dialer(std::move(tag), "datagram", std::move(options))
+        {
+        }
+
+        Result<int> dialDatagram(const Address &target) override
+        {
+            (void)target;
+            auto dgramRes = createConfiguredDatagram();
+            if (!dgramRes)
+                return std::unexpected(dgramRes.error());
+            return dgramRes->release();
+        }
+
+        Result<Datagram> dialDatagramEndpoint(const Address &target)
+        {
+            (void)target;
+            return createConfiguredDatagram();
+        }
+    };
+
 
 } // namespace mynet

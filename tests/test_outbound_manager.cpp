@@ -1,6 +1,6 @@
 #include "address.hpp"
 #include "cipher.hpp"
-#include "outboundManager.hpp"
+#include "dialerManager.hpp"
 #include "shadowsocks/outbound.hpp"
 #include <gtest/gtest.h>
 #include <netinet/in.h>
@@ -43,9 +43,9 @@ TEST(OutboundManagerTest, DefaultOutbounds)
 TEST(OutboundManagerTest, OutboundBlockBehavior)
 {
     DialerManager mgr;
-    auto target = ProxyAddress::fromDomain("evil-malware.com", 80);
+    auto target = Address::fromDomain("evil-malware.com", 80);
 
-    auto res = mgr.dialStream("block", target);
+    auto res = mgr.dialForwarder("block", target);
     ASSERT_TRUE(res.has_value());
     EXPECT_EQ(res->outboundTag, "block");
     EXPECT_EQ(res->fd, -1);
@@ -82,9 +82,9 @@ TEST(OutboundManagerTest, OutboundDirectLocalhost)
 
     // 使用 DialerManager 直连出站
     DialerManager mgr;
-    auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), port);
+    auto target = Address::fromIPv4(htonl(INADDR_LOOPBACK), port);
 
-    auto res = mgr.dialStream("direct", target);
+    auto res = mgr.dialForwarder("direct", target);
     ASSERT_TRUE(res.has_value());
     EXPECT_GE(res->fd, 0);
     EXPECT_EQ(res->outboundTag, "direct");
@@ -120,13 +120,13 @@ TEST(OutboundManagerTest, OutboundSelectorSwitch)
     EXPECT_TRUE(mgr.has("proxy_group"));
     EXPECT_EQ(selector->selected(), "direct");
 
-    auto target = ProxyAddress::fromDomain("test.com", 80);
+    auto target = Address::fromDomain("test.com", 80);
 
     // 切换到 block 节点
     EXPECT_TRUE(selector->setSelected("block"));
     EXPECT_EQ(selector->selected(), "block");
 
-    auto res = mgr.dialStream("proxy_group", target);
+    auto res = mgr.dialForwarder("proxy_group", target);
     ASSERT_TRUE(res.has_value());
     EXPECT_EQ(res->outboundTag, "block");
     EXPECT_TRUE(res->handler->closeAfterResponse());
@@ -140,12 +140,12 @@ TEST(OutboundManagerTest, ProtocolOutboundRegistration)
 {
     DialerManager mgr;
 
-    auto s5 = std::make_shared<OutboundSocks5>("my_socks5", "192.168.1.100", 1080, "user", "pass");
+    auto s5 = std::make_shared<DialerSocks5>("my_socks5", "192.168.1.100", 1080, "user", "pass");
     EXPECT_EQ(s5->serverHost(), "192.168.1.100");
     EXPECT_EQ(s5->serverPort(), 1080);
     mgr.registerDialer(s5);
 
-    auto trojan = std::make_shared<OutboundTrojan>("my_trojan", "trojan.node.com", 443, "password123");
+    auto trojan = std::make_shared<DialerTrojan>("my_trojan", "trojan.node.com", 443, "password123");
     EXPECT_EQ(trojan->serverHost(), "trojan.node.com");
     EXPECT_EQ(trojan->serverPort(), 443);
     mgr.registerDialer(trojan);
@@ -153,7 +153,7 @@ TEST(OutboundManagerTest, ProtocolOutboundRegistration)
     DialerOptions ssOpt;
     ssOpt.fwmark = 0x100;
     ssOpt.tcpFastOpen = true;
-    auto ss = std::make_shared<OutboundShadowsocks>("my_ss", "ss.node.com", 8388, "aes-128-gcm", "secret_key", ssOpt);
+    auto ss = std::make_shared<DialerShadowsocks>("my_ss", "ss.node.com", 8388, "aes-128-gcm", "secret_key", ssOpt);
     EXPECT_EQ(ss->serverHost(), "ss.node.com");
     EXPECT_EQ(ss->serverPort(), 8388);
     EXPECT_EQ(ss->options().fwmark, 0x100);

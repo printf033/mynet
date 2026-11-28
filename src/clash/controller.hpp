@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file controller.hpp
+ * @file clash/controller.hpp
  * @brief Clash / sing-box 兼容 RESTful 控制平面 API 服务 (Controller Server)。
  *
  * 为外部图形化仪表盘 (Yacd, Metacubexd, Clash Verge 等) 提供标准 RESTful HTTP 接口：
@@ -17,9 +17,11 @@
  * 10. 全面支持 HTTP OPTIONS 预检请求与 CORS 跨域通信 (Access-Control-Allow-Origin: *)。
  */
 
-#include "config/log.hpp"
-#include "connection.hpp"
-#include "core.hpp"
+#include "../config/log.hpp"
+#include "../connection.hpp"
+#include "../core.hpp"
+#include "../http/common.hpp"
+#include "../http/v1/handler.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <cstdint>
@@ -27,7 +29,6 @@
 #include <fcntl.h>
 #include <memory>
 #include <netinet/in.h>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -35,7 +36,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace mynet
+namespace mynet::clash
 {
 
     class Controller
@@ -45,7 +46,7 @@ namespace mynet
         std::string listenHost_{"127.0.0.1"};
         uint16_t listenPort_{9090};
         std::string secret_{};
-        SocketEndpoint socket_{};
+        Listener socket_{};
         std::atomic<bool> running_{false};
         std::unique_ptr<std::thread> workerThread_{nullptr};
 
@@ -70,7 +71,7 @@ namespace mynet
         Controller(Controller &&) = delete;
         Controller &operator=(Controller &&) = delete;
 
-        [[nodiscard]] inline int listenFd() const noexcept { return socket_.fd; }
+        [[nodiscard]] inline int listenFd() const noexcept { return socket_.fd(); }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_.load(std::memory_order_acquire); }
         [[nodiscard]] inline const std::string &host() const noexcept { return listenHost_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return listenPort_; }
@@ -88,7 +89,7 @@ namespace mynet
 
             if (listenPort_ == 0)
             {
-                listenPort_ = ntohs(socket_.addr.sin_port);
+                listenPort_ = ntohs(socket_.addr().sin_port);
             }
 
             running_.store(true, std::memory_order_release);
@@ -145,38 +146,36 @@ namespace mynet
 
         void handleClient(int clientFd)
         {
+            timeval tv{2, 0};
+            ::setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            HttpRequestParser parser;
             char buf[8192];
-            ssize_t n = ::recv(clientFd, buf, sizeof(buf) - 1, 0);
-            if (n <= 0)
+            while (!parser.completed() && !parser.parseError())
             {
-                ::close(clientFd);
-                return;
-            }
-            buf[n] = '\0';
-            std::string_view req(buf, static_cast<size_t>(n));
-
-            // 解析 HTTP 方法与请求路径
-            auto lineEnd = req.find("\r\n");
-            if (lineEnd == std::string_view::npos)
-            {
-                sendResponse(clientFd, 400, "text/plain", "Bad Request");
-                ::close(clientFd);
-                return;
+                const ssize_t n = ::recv(clientFd, buf, sizeof(buf), 0);
+                if (n <= 0)
+                {
+                    break;
+                }
+                if (!parser.appendRequest(buf, n))
+                {
+                    sendHttpResponse(clientFd, parser, 413, "text/plain", "Payload Too Large");
+                    ::close(clientFd);
+                    return;
+                }
+                parser.handle();
             }
 
-            std::string_view firstLine = req.substr(0, lineEnd);
-            auto space1 = firstLine.find(' ');
-            if (space1 == std::string_view::npos)
+            if (parser.parseError() || !parser.completed())
             {
-                sendResponse(clientFd, 400, "text/plain", "Bad Request");
+                sendHttpResponse(clientFd, parser, 400, "text/plain", "Bad Request");
                 ::close(clientFd);
                 return;
             }
-            std::string_view method = firstLine.substr(0, space1);
-            auto space2 = firstLine.find(' ', space1 + 1);
-            if (space2 == std::string_view::npos)
-                space2 = firstLine.size();
-            std::string_view fullPath = firstLine.substr(space1 + 1, space2 - (space1 + 1));
+
+            const std::string_view method = parser.methodName() != nullptr ? parser.methodName() : "";
+            const std::string_view fullPath = parser.url();
 
             // 分离路径与查询参数
             std::string_view path = fullPath;
@@ -188,48 +187,48 @@ namespace mynet
             }
 
             // CORS 预检请求 (OPTIONS)
-            if (method == "OPTIONS")
+            if (method == http::method::kOptions)
             {
-                std::string resp = "HTTP/1.1 204 No Content\r\n"
-                                   "Access-Control-Allow-Origin: *\r\n"
-                                   "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-                                   "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-                                   "Access-Control-Max-Age: 86400\r\n"
-                                   "Content-Length: 0\r\n"
-                                   "Connection: close\r\n\r\n";
-                ::send(clientFd, resp.data(), resp.size(), MSG_NOSIGNAL);
+                sendHttpResponse(clientFd, parser, 204, "text/plain", "");
                 ::close(clientFd);
                 return;
             }
 
-            // 提取 Body（针对 PUT / POST）
-            std::string_view body = "";
-            auto bodyPos = req.find("\r\n\r\n");
-            if (bodyPos != std::string_view::npos)
+            // Clash API Bearer Secret 鉴权
+            if (!secret_.empty())
             {
-                body = req.substr(bodyPos + 4);
+                const std::string_view auth = parser.headerValue("Authorization");
+                constexpr std::string_view kBearerPrefix = "Bearer ";
+                if (!auth.starts_with(kBearerPrefix) || auth.substr(kBearerPrefix.size()) != secret_)
+                {
+                    sendHttpResponse(clientFd, parser, 401, "application/json", R"({"error":"Unauthorized"})");
+                    ::close(clientFd);
+                    return;
+                }
             }
+
+            const std::string_view body = parser.body();
 
             // 路由调度
             if (path == "/version")
             {
-                sendResponse(clientFd, 200, "application/json", handleVersion());
+                sendHttpResponse(clientFd, parser, 200, "application/json", handleVersion());
             }
             else if (path == "/configs")
             {
-                sendResponse(clientFd, 200, "application/json", handleConfigs());
+                sendHttpResponse(clientFd, parser, 200, "application/json", handleConfigs());
             }
             else if (path == "/traffic")
             {
-                sendResponse(clientFd, 200, "application/json", handleTraffic());
+                sendHttpResponse(clientFd, parser, 200, "application/json", handleTraffic());
             }
             else if (path == "/rules")
             {
-                sendResponse(clientFd, 200, "application/json", handleRules());
+                sendHttpResponse(clientFd, parser, 200, "application/json", handleRules());
             }
             else if (path == "/proxies")
             {
-                sendResponse(clientFd, 200, "application/json", handleProxies());
+                sendHttpResponse(clientFd, parser, 200, "application/json", handleProxies());
             }
             else if (path.starts_with("/proxies/"))
             {
@@ -237,60 +236,82 @@ namespace mynet
                 if (sub.ends_with("/delay"))
                 {
                     std::string nodeName(sub.substr(0, sub.size() - 6));
-                    sendResponse(clientFd, 200, "application/json", handleProxyDelay(nodeName, query));
+                    sendHttpResponse(clientFd, parser, 200, "application/json", handleProxyDelay(nodeName, query));
                 }
-                else if (method == "PUT")
+                else if (method == http::method::kPut)
                 {
                     std::string nodeName(sub);
                     if (handleSelectProxy(nodeName, body))
                     {
-                        sendResponse(clientFd, 204, "application/json", "");
+                        sendHttpResponse(clientFd, parser, 204, "application/json", "");
                     }
                     else
                     {
-                        sendResponse(clientFd, 400, "application/json", R"({"error":"Invalid proxy or candidate"})");
+                        sendHttpResponse(clientFd, parser, 400, "application/json",
+                                         R"({"error":"Invalid proxy or candidate"})");
                     }
                 }
                 else
                 {
                     std::string nodeName(sub);
-                    sendResponse(clientFd, 200, "application/json", handleSingleProxy(nodeName));
+                    sendHttpResponse(clientFd, parser, 200, "application/json", handleSingleProxy(nodeName));
                 }
             }
             else if (path == "/connections")
             {
-                sendResponse(clientFd, 200, "application/json", handleConnections());
+                sendHttpResponse(clientFd, parser, 200, "application/json", handleConnections());
             }
             else
             {
-                sendResponse(clientFd, 404, "application/json", R"({"error":"Not Found"})");
+                sendHttpResponse(clientFd, parser, 404, "application/json", R"({"error":"Not Found"})");
             }
 
             ::close(clientFd);
         }
 
     private:
-        void sendResponse(int fd, int code, std::string_view contentType, std::string_view body)
+        class HttpRequestParser final : public http::v1::HandlerHttp<http::v1::HTTP_MODE::REQUEST>
         {
-            std::string statusText = (code == 200)   ? "OK"
-                                     : (code == 204) ? "No Content"
-                                     : (code == 400) ? "Bad Request"
-                                     : (code == 404) ? "Not Found"
-                                                     : "Internal Server Error";
-            std::ostringstream ss;
-            ss << "HTTP/1.1 " << code << " " << statusText << "\r\n";
-            ss << "Content-Type: " << contentType << "\r\n";
-            ss << "Content-Length: " << body.size() << "\r\n";
-            ss << "Access-Control-Allow-Origin: *\r\n";
-            ss << "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n";
-            ss << "Access-Control-Allow-Headers: Content-Type, Authorization\r\n";
-            ss << "Connection: close\r\n\r\n";
-            if (!body.empty())
+        private:
+            bool completed_{false};
+            bool parseError_{false};
+
+        public:
+            [[nodiscard]] bool completed() const noexcept { return completed_; }
+            [[nodiscard]] bool parseError() const noexcept { return parseError_; }
+
+            void onMessageComplete() noexcept override { completed_ = true; }
+            void onParseError([[maybe_unused]] const char *reason) noexcept override { parseError_ = true; }
+        };
+
+        static void sendHttpResponse(int fd, HttpRequestParser &parser, int code, std::string_view contentType,
+                                     std::string_view body)
+        {
+            std::vector<std::pair<std::string, std::string>> headers = {
+                {"Content-Type", std::string(contentType)},
+                {"Access-Control-Allow-Origin", "*"},
+                {"Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"},
+                {"Access-Control-Allow-Headers", "Content-Type, Authorization"},
+                {"Access-Control-Max-Age", "86400"},
+            };
+            if (!parser.sendResponse(code, "", headers, body))
             {
-                ss << body;
+                return;
             }
-            std::string data = ss.str();
-            ::send(fd, data.data(), data.size(), MSG_NOSIGNAL);
+            while (parser.hasResponse())
+            {
+                std::string chunk = parser.takeResponse();
+                size_t sent = 0;
+                while (sent < chunk.size())
+                {
+                    const ssize_t w = ::send(fd, chunk.data() + sent, chunk.size() - sent, MSG_NOSIGNAL);
+                    if (w <= 0)
+                    {
+                        return;
+                    }
+                    sent += static_cast<size_t>(w);
+                }
+            }
         }
 
         [[nodiscard]] std::string handleVersion() const { return R"({"version":"1.0.0","premium":false})"; }
@@ -526,4 +547,4 @@ namespace mynet
         }
     };
 
-} // namespace mynet
+} // namespace mynet::clash

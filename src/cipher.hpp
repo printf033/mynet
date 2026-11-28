@@ -357,7 +357,3 @@ namespace mynet::cipher
 
 } // namespace mynet::cipher
 
-namespace mynet::handler
-{
-    namespace cipher = mynet::cipher;
-}

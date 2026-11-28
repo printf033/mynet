@@ -18,10 +18,10 @@ namespace mynet::handler
     /**
      * @brief 广义代理协议：直连入站直通处理器 (Direct Inbound Proxy Handler)
      */
-    class HandlerInboundDirect : public HandlerInboundConnectionBase
+    class HandlerInboundDirect : public HandlerInbound
     {
     public:
-        using DirectRequestCallback = std::function<void(const ProxyAddress &target)>;
+        using DirectRequestCallback = std::function<void(const Address &target)>;
 
     private:
         DirectRequestCallback directCallback_{nullptr};
@@ -30,7 +30,7 @@ namespace mynet::handler
     public:
         HandlerInboundDirect() noexcept { setStage(InboundStage::STREAMING); }
 
-        explicit HandlerInboundDirect(const ProxyAddress &target) noexcept
+        explicit HandlerInboundDirect(const Address &target) noexcept
         {
             targetAddress_ = target;
             setStage(InboundStage::STREAMING);
@@ -43,14 +43,14 @@ namespace mynet::handler
         HandlerInboundDirect(HandlerInboundDirect &&) = delete;
         HandlerInboundDirect &operator=(HandlerInboundDirect &&) = delete;
 
-        void setTarget(const ProxyAddress &target) { targetAddress_ = target; }
+        void setTarget(const Address &target) { targetAddress_ = target; }
         void setOnDirectRequest(DirectRequestCallback cb) noexcept { directCallback_ = std::move(cb); }
         void setOnRequest(DirectRequestCallback cb) noexcept { directCallback_ = std::move(cb); }
-        using HandlerInboundConnectionBase::setOnRequest;
+        using HandlerInbound::setOnRequest;
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             setStage(InboundStage::STREAMING);
             triggered_ = false;
         }
@@ -78,20 +78,20 @@ namespace mynet::handler
      *
      * 初始即处于 STREAMING 状态，建连后可直接通过 Linux splice 桥接入站。
      */
-    class HandlerOutboundDirect : public HandlerOutboundConnectionBase
+    class HandlerOutboundDirect : public HandlerOutbound
     {
     public:
         HandlerOutboundDirect() noexcept { setStage(OutboundStage::STREAMING); }
 
-        explicit HandlerOutboundDirect(const ProxyAddress &target) noexcept
-            : HandlerOutboundConnectionBase(target)
+        explicit HandlerOutboundDirect(const Address &target) noexcept
+            : HandlerOutbound(target)
         {
             setStage(OutboundStage::STREAMING);
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             setStage(OutboundStage::STREAMING);
         }
 

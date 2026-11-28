@@ -99,27 +99,27 @@ TEST(GeoTest, RouterIntegrationWithGeoRules)
     RouteContext ctx1;
     in_addr localIp{};
     ::inet_pton(AF_INET, "192.168.1.100", &localIp);
-    ctx1.target = handler::ProxyAddress::fromIPv4(localIp.s_addr, 80);
+    ctx1.target = Address::fromIPv4(localIp.s_addr, 80);
     EXPECT_EQ(router.match(ctx1), "direct");
 
     // Case 2: 百度域名命中 geosite:cn 直连
     RouteContext ctx2;
-    ctx2.target = handler::ProxyAddress::fromDomain("www.baidu.com", 443);
+    ctx2.target = Address::fromDomain("www.baidu.com", 443);
     EXPECT_EQ(router.match(ctx2), "direct");
 
     // Case 3: 广告域名命中 block
     RouteContext ctx3;
-    ctx3.target = handler::ProxyAddress::fromDomain("adservice.google.com", 443);
+    ctx3.target = Address::fromDomain("adservice.google.com", 443);
     EXPECT_EQ(router.match(ctx3), "block");
 
     // Case 4: Google 域名未命中上述白名单/黑名单，回退到默认出站 proxy
     RouteContext ctx4;
-    ctx4.target = handler::ProxyAddress::fromDomain("www.google.com", 443);
+    ctx4.target = Address::fromDomain("www.google.com", 443);
     EXPECT_EQ(router.match(ctx4), "proxy");
 
     // Case 5: 进程名匹配
     RouteContext ctx5;
     ctx5.processName = "curl";
-    ctx5.target = handler::ProxyAddress::fromDomain("anywhere.org", 80);
+    ctx5.target = Address::fromDomain("anywhere.org", 80);
     EXPECT_EQ(router.match(ctx5), "direct");
 }

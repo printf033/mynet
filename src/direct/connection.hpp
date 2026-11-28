@@ -15,5 +15,4 @@ namespace mynet::direct
         using Connection::Connection;
     };
 
-    using DirectConnection = ConnectionDirect;
 } // namespace mynet::direct

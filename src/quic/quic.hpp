@@ -304,4 +304,426 @@ namespace mynet::quic
         return shp;
     }
 
+    // =========================================================================
+    // RFC 9000 Section 2.1: 流 ID 分类原语
+    // =========================================================================
+
+    [[nodiscard]] constexpr bool isUnidirectionalStream(uint64_t streamId) noexcept { return (streamId & 0x02u) != 0; }
+
+    [[nodiscard]] constexpr bool isServerInitiatedStream(uint64_t streamId) noexcept { return (streamId & 0x01u) != 0; }
+
+    [[nodiscard]] constexpr bool isClientInitiatedStream(uint64_t streamId) noexcept { return (streamId & 0x01u) == 0; }
+
+    [[nodiscard]] constexpr bool isClientBidirectionalStream(uint64_t streamId) noexcept
+    {
+        return (streamId & 0x03u) == 0;
+    }
+
+    // =========================================================================
+    // RFC 9000 Section 19: 补齐常用传输帧编解码与通用跳过
+    // =========================================================================
+
+    struct AckFrame
+    {
+        uint64_t largestAcked = 0;
+        uint64_t ackDelay = 0;
+        uint64_t ackRangeCount = 0;
+        uint64_t firstAckRange = 0;
+    };
+
+    inline void appendAckFrame(std::string &out, const AckFrame &ack)
+    {
+        appendVarint(out, std::to_underlying(QUIC_FRAME_TYPE::ACK));
+        appendVarint(out, ack.largestAcked);
+        appendVarint(out, ack.ackDelay);
+        appendVarint(out, 0); // ackRangeCount = 0
+        appendVarint(out, ack.firstAckRange);
+    }
+
+    [[nodiscard]] inline std::expected<AckFrame, QUIC_ERROR> parseAckFrame(const uint8_t *&ptr, size_t &rem) noexcept
+    {
+        auto typeOpt = readVarint(ptr, rem);
+        if (!typeOpt || (*typeOpt != 0x02 && *typeOpt != 0x03))
+        {
+            return std::unexpected(QUIC_ERROR::INVALID_FRAME_TYPE);
+        }
+        auto largest = readVarint(ptr, rem);
+        auto delay = readVarint(ptr, rem);
+        auto rangeCnt = readVarint(ptr, rem);
+        auto firstRange = readVarint(ptr, rem);
+        if (!largest || !delay || !rangeCnt || !firstRange)
+        {
+            return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+        }
+        for (uint64_t i = 0; i < *rangeCnt; ++i)
+        {
+            if (!readVarint(ptr, rem) || !readVarint(ptr, rem))
+            {
+                return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+            }
+        }
+        if (*typeOpt == 0x03)
+        {
+            if (!readVarint(ptr, rem) || !readVarint(ptr, rem) || !readVarint(ptr, rem))
+            {
+                return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+            }
+        }
+        return AckFrame{*largest, *delay, *rangeCnt, *firstRange};
+    }
+
+    struct ResetStreamFrame
+    {
+        uint64_t streamId = 0;
+        uint64_t errorCode = 0;
+        uint64_t finalSize = 0;
+    };
+
+    inline void appendResetStreamFrame(std::string &out, const ResetStreamFrame &f)
+    {
+        appendVarint(out, std::to_underlying(QUIC_FRAME_TYPE::RESET_STREAM));
+        appendVarint(out, f.streamId);
+        appendVarint(out, f.errorCode);
+        appendVarint(out, f.finalSize);
+    }
+
+    [[nodiscard]] inline std::expected<ResetStreamFrame, QUIC_ERROR> parseResetStreamFrame(const uint8_t *&ptr,
+                                                                                           size_t &rem) noexcept
+    {
+        auto typeOpt = readVarint(ptr, rem);
+        if (!typeOpt || *typeOpt != 0x04)
+        {
+            return std::unexpected(QUIC_ERROR::INVALID_FRAME_TYPE);
+        }
+        auto sid = readVarint(ptr, rem);
+        auto err = readVarint(ptr, rem);
+        auto sz = readVarint(ptr, rem);
+        if (!sid || !err || !sz)
+        {
+            return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+        }
+        return ResetStreamFrame{*sid, *err, *sz};
+    }
+
+    struct StopSendingFrame
+    {
+        uint64_t streamId = 0;
+        uint64_t errorCode = 0;
+    };
+
+    inline void appendStopSendingFrame(std::string &out, const StopSendingFrame &f)
+    {
+        appendVarint(out, std::to_underlying(QUIC_FRAME_TYPE::STOP_SENDING));
+        appendVarint(out, f.streamId);
+        appendVarint(out, f.errorCode);
+    }
+
+    [[nodiscard]] inline std::expected<StopSendingFrame, QUIC_ERROR> parseStopSendingFrame(const uint8_t *&ptr,
+                                                                                           size_t &rem) noexcept
+    {
+        auto typeOpt = readVarint(ptr, rem);
+        if (!typeOpt || *typeOpt != 0x05)
+        {
+            return std::unexpected(QUIC_ERROR::INVALID_FRAME_TYPE);
+        }
+        auto sid = readVarint(ptr, rem);
+        auto err = readVarint(ptr, rem);
+        if (!sid || !err)
+        {
+            return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+        }
+        return StopSendingFrame{*sid, *err};
+    }
+
+    inline void appendMaxDataFrame(std::string &out, uint64_t maxData)
+    {
+        appendVarint(out, std::to_underlying(QUIC_FRAME_TYPE::MAX_DATA));
+        appendVarint(out, maxData);
+    }
+
+    inline void appendMaxStreamDataFrame(std::string &out, uint64_t streamId, uint64_t maxStreamData)
+    {
+        appendVarint(out, std::to_underlying(QUIC_FRAME_TYPE::MAX_STREAM_DATA));
+        appendVarint(out, streamId);
+        appendVarint(out, maxStreamData);
+    }
+
+    struct ConnectionCloseFrame
+    {
+        bool isApplication = false;
+        uint64_t errorCode = 0;
+        uint64_t frameType = 0;
+        std::string_view reason{};
+    };
+
+    [[nodiscard]] inline std::expected<ConnectionCloseFrame, QUIC_ERROR>
+    parseConnectionCloseFrame(const uint8_t *&ptr, size_t &rem) noexcept
+    {
+        auto typeOpt = readVarint(ptr, rem);
+        if (!typeOpt || (*typeOpt != 0x1c && *typeOpt != 0x1d))
+        {
+            return std::unexpected(QUIC_ERROR::INVALID_FRAME_TYPE);
+        }
+        ConnectionCloseFrame f{};
+        f.isApplication = (*typeOpt == 0x1d);
+        auto err = readVarint(ptr, rem);
+        if (!err)
+        {
+            return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+        }
+        f.errorCode = *err;
+        if (!f.isApplication)
+        {
+            auto ft = readVarint(ptr, rem);
+            if (!ft)
+            {
+                return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+            }
+            f.frameType = *ft;
+        }
+        auto rlen = readVarint(ptr, rem);
+        if (!rlen || rem < *rlen)
+        {
+            return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+        }
+        f.reason = std::string_view(reinterpret_cast<const char *>(ptr), *rlen);
+        ptr += *rlen;
+        rem -= *rlen;
+        return f;
+    }
+
+    /**
+     * @brief 跳过单个非 STREAM 传输帧，保证后续同一报文内的 STREAM 帧不被误截断
+     */
+    [[nodiscard]] inline bool skipFrame(const uint8_t *&ptr, size_t &rem) noexcept
+    {
+        if (rem == 0)
+        {
+            return false;
+        }
+        const uint8_t t = *ptr;
+        if (t == 0x00 || t == 0x01 || t == 0x1e) // PADDING, PING, HANDSHAKE_DONE
+        {
+            ++ptr;
+            --rem;
+            return true;
+        }
+        if (t == 0x02 || t == 0x03)
+        {
+            return parseAckFrame(ptr, rem).has_value();
+        }
+        if (t == 0x04)
+        {
+            return parseResetStreamFrame(ptr, rem).has_value();
+        }
+        if (t == 0x05)
+        {
+            return parseStopSendingFrame(ptr, rem).has_value();
+        }
+        if (t == 0x06) // CRYPTO: offset + len + bytes
+        {
+            ++ptr;
+            --rem;
+            auto off = readVarint(ptr, rem);
+            auto len = readVarint(ptr, rem);
+            if (!off || !len || rem < *len)
+            {
+                return false;
+            }
+            ptr += *len;
+            rem -= *len;
+            return true;
+        }
+        if (t == 0x07) // NEW_TOKEN: len + bytes
+        {
+            ++ptr;
+            --rem;
+            auto len = readVarint(ptr, rem);
+            if (!len || rem < *len)
+            {
+                return false;
+            }
+            ptr += *len;
+            rem -= *len;
+            return true;
+        }
+        if (t == 0x10 || t == 0x12 || t == 0x13 || t == 0x14) // 1 varint arg
+        {
+            ++ptr;
+            --rem;
+            return readVarint(ptr, rem).has_value();
+        }
+        if (t == 0x11 || t == 0x15) // 2 varint args
+        {
+            ++ptr;
+            --rem;
+            return readVarint(ptr, rem).has_value() && readVarint(ptr, rem).has_value();
+        }
+        if (t == 0x1c || t == 0x1d)
+        {
+            return parseConnectionCloseFrame(ptr, rem).has_value();
+        }
+        return false;
+    }
+
+    // =========================================================================
+    // RFC 9000 Section 8.1 & RFC 9002: 抗放大守卫、ACK 追踪与 RTT 估算器
+    // =========================================================================
+
+    struct AntiAmplificationGuard
+    {
+        size_t bytesReceived = 0;
+        size_t bytesSent = 0;
+        bool addressValidated = false;
+
+        inline void recordReceived(size_t n) noexcept { bytesReceived += n; }
+        inline void markValidated() noexcept { addressValidated = true; }
+
+        [[nodiscard]] inline bool canSend(size_t n) const noexcept
+        {
+            return addressValidated || (bytesSent + n <= 3 * bytesReceived);
+        }
+
+        inline void recordSent(size_t n) noexcept { bytesSent += n; }
+
+        inline void reset() noexcept
+        {
+            bytesReceived = 0;
+            bytesSent = 0;
+            addressValidated = false;
+        }
+    };
+
+    struct AckTracker
+    {
+        uint64_t largestReceived = 0;
+        bool hasReceived = false;
+        bool ackPending = false;
+
+        inline void onPacketReceived(uint64_t pn, bool ackEliciting = true) noexcept
+        {
+            if (!hasReceived || pn > largestReceived)
+            {
+                largestReceived = pn;
+                hasReceived = true;
+            }
+            if (ackEliciting)
+            {
+                ackPending = true;
+            }
+        }
+
+        [[nodiscard]] inline std::optional<AckFrame> consumeAckPending(uint64_t ackDelay = 0) noexcept
+        {
+            if (!ackPending || !hasReceived)
+            {
+                return std::nullopt;
+            }
+            ackPending = false;
+            return AckFrame{.largestAcked = largestReceived, .ackDelay = ackDelay, .ackRangeCount = 0, .firstAckRange = 0};
+        }
+
+        inline void reset() noexcept
+        {
+            largestReceived = 0;
+            hasReceived = false;
+            ackPending = false;
+        }
+    };
+
+    struct RttEstimator
+    {
+        uint64_t smoothedRttUs = 333000; // RFC 9002 初始 RTT = 333ms
+        uint64_t rttVarUs = 166500;
+        uint64_t minRttUs = 0;
+        uint64_t latestRttUs = 0;
+        bool hasSample = false;
+
+        inline void update(uint64_t latestUs, uint64_t ackDelayUs = 0) noexcept
+        {
+            latestRttUs = latestUs;
+            if (!hasSample)
+            {
+                minRttUs = latestUs;
+                smoothedRttUs = latestUs;
+                rttVarUs = latestUs / 2;
+                hasSample = true;
+                return;
+            }
+            if (latestUs < minRttUs)
+            {
+                minRttUs = latestUs;
+            }
+            uint64_t adjusted = latestUs;
+            if (adjusted > minRttUs + ackDelayUs)
+            {
+                adjusted -= ackDelayUs;
+            }
+            const uint64_t diff = (smoothedRttUs > adjusted) ? (smoothedRttUs - adjusted) : (adjusted - smoothedRttUs);
+            rttVarUs = (3 * rttVarUs + diff) / 4;
+            smoothedRttUs = (7 * smoothedRttUs + adjusted) / 8;
+        }
+
+        [[nodiscard]] inline uint64_t ptoUs(uint64_t maxAckDelayUs = 25000) const noexcept
+        {
+            return smoothedRttUs + std::max<uint64_t>(4 * rttVarUs, 1000) + maxAckDelayUs;
+        }
+    };
+
+    // =========================================================================
+    // RFC 9000 Section 17.2: Long Header 报文解析与构造
+    // =========================================================================
+
+    enum class LongPacketType : uint8_t
+    {
+        INITIAL = 0x00,
+        ZERO_RTT = 0x01,
+        HANDSHAKE = 0x02,
+        RETRY = 0x03
+    };
+
+    struct LongHeaderPacket
+    {
+        LongPacketType type = LongPacketType::INITIAL;
+        uint32_t version = 1;
+        ConnectionId dcid{};
+        ConnectionId scid{};
+        std::string_view payload{};
+    };
+
+    [[nodiscard]] inline std::expected<LongHeaderPacket, QUIC_ERROR> parseLongHeaderPacket(std::string_view pkt) noexcept
+    {
+        if (pkt.size() < 7) [[unlikely]]
+        {
+            return std::unexpected(QUIC_ERROR::BUFFER_TOO_SHORT);
+        }
+        const auto *ptr = reinterpret_cast<const uint8_t *>(pkt.data());
+        const uint8_t b0 = ptr[0];
+        if ((b0 & 0x80u) == 0 || (b0 & 0x40u) == 0) [[unlikely]]
+        {
+            return std::unexpected(QUIC_ERROR::INVALID_PACKET_HEADER);
+        }
+        LongHeaderPacket lhp{};
+        lhp.type = static_cast<LongPacketType>((b0 & 0x30u) >> 4);
+        lhp.version = (static_cast<uint32_t>(ptr[1]) << 24) | (static_cast<uint32_t>(ptr[2]) << 16) |
+                      (static_cast<uint32_t>(ptr[3]) << 8) | static_cast<uint32_t>(ptr[4]);
+        size_t off = 5;
+        const uint8_t dcidLen = ptr[off++];
+        if (dcidLen > ConnectionId::kMaxLen || off + dcidLen >= pkt.size())
+        {
+            return std::unexpected(QUIC_ERROR::INVALID_PACKET_HEADER);
+        }
+        lhp.dcid = ConnectionId::fromBytes(ptr + off, dcidLen);
+        off += dcidLen;
+        const uint8_t scidLen = ptr[off++];
+        if (scidLen > ConnectionId::kMaxLen || off + scidLen > pkt.size())
+        {
+            return std::unexpected(QUIC_ERROR::INVALID_PACKET_HEADER);
+        }
+        lhp.scid = ConnectionId::fromBytes(ptr + off, scidLen);
+        off += scidLen;
+        lhp.payload = pkt.substr(off);
+        return lhp;
+    }
+
 } // namespace mynet::quic

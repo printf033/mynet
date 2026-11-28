@@ -110,7 +110,7 @@ TEST(TlsOptions, RejectsMalformedClientAlpnList)
 
 TEST(TlsFactory, CreateServerContextRejectsInvalidPaths)
 {
-    TlsOptions options;
+    SecurityConfig options;
     auto res = detail::createServerContext("nonexistent_cert.crt", "nonexistent_key.key", options);
     EXPECT_FALSE(res.has_value());
     EXPECT_EQ(res.error(), ERR::SSL_CERT_FAILED);
@@ -122,7 +122,7 @@ TEST(TlsFactory, CreateServerContextRejectsInvalidPaths)
 
 TEST(TlsOptions, ConfiguresSessionResumptionAndTickets)
 {
-    TlsOptions options;
+    SecurityConfig options;
     options.sessionTimeout = 7200;
     options.enableSessionTickets = true;
     options.numTickets = 3;
@@ -133,7 +133,7 @@ TEST(TlsOptions, ConfiguresSessionResumptionAndTickets)
     EXPECT_EQ(SSL_CTX_get_timeout(ctx), 7200);
 
     // 验证禁用 Ticket
-    TlsOptions noTicketOpt;
+    SecurityConfig noTicketOpt;
     noTicketOpt.enableSessionTickets = false;
     EXPECT_TRUE(detail::configureTlsContext(ctx, noTicketOpt, true));
     EXPECT_TRUE(SSL_CTX_get_options(ctx) & SSL_OP_NO_TICKET);
@@ -148,7 +148,7 @@ TEST(TlsFactory, CreateQuicServerContext)
     {
         GTEST_SKIP() << "certs/ser.crt not reachable";
     }
-    TlsOptions options;
+    SecurityConfig options;
     auto res = detail::createServerContext(cert.c_str(), key.c_str(), options, TlsProtocolType::DatagramQuic);
     ASSERT_TRUE(res.has_value());
     SSL_CTX *ctx = *res;
@@ -165,7 +165,7 @@ TEST(SniCertificateManager, DispatchesExactAndWildcardDomains)
         GTEST_SKIP() << "certs/ser.crt not reachable";
     }
     SniCertificateManager manager;
-    TlsOptions opt;
+    SecurityConfig opt;
 
     auto defRes = detail::createServerContext(cert.c_str(), key.c_str(), opt);
     ASSERT_TRUE(defRes.has_value());
@@ -198,7 +198,7 @@ TEST(SniCertificateManager, HotReloadReplacesExistingContext)
         GTEST_SKIP() << "certs/ser.crt not reachable";
     }
     SniCertificateManager manager;
-    TlsOptions opt;
+    SecurityConfig opt;
 
     auto defRes = detail::createServerContext(cert.c_str(), key.c_str(), opt);
     ASSERT_TRUE(defRes.has_value());
@@ -218,9 +218,10 @@ TEST(SniCertificateManager, HotReloadReplacesExistingContext)
 
 TEST(ConnectionTls, TracksKtlsOffloadStateAndSpliceStatus)
 {
-    ConnectionBase conn;
-    HandlerConnection handler;
-    conn.setHandler(&handler);
+    Connection conn;
+    auto handlerPtr = std::make_unique<Handler>();
+    auto &handler = *handlerPtr;
+    conn.setHandler(std::move(handlerPtr));
     EXPECT_FALSE(conn.ktlsRxActive());
     EXPECT_FALSE(conn.ktlsTxActive());
     EXPECT_EQ(conn.ssl(), nullptr);
@@ -240,13 +241,14 @@ TEST(ConnectionTls, TlsTransportHandshakeDisablesSpliceAndRelaysEncryptedData)
     auto cliTls = mynet::tls::TlsTransport::createClient("localhost");
     ASSERT_TRUE(cliTls.has_value());
 
-    Handler serverHandler;
+    auto serverHandlerPtr = std::make_unique<Handler>();
+    auto &serverHandler = *serverHandlerPtr;
     Handler clientHandler;
     serverHandler.addTransportLayer(std::move(*srvTls));
     clientHandler.addTransportLayer(std::move(*cliTls));
 
     Connection serverConn;
-    serverConn.setHandler(&serverHandler);
+    serverConn.setHandler(std::move(serverHandlerPtr));
     // TlsTransport 激活后 isPassthrough() 为假，严禁内核明文 splice
     EXPECT_NE(serverConn.ssl(), nullptr);
     EXPECT_FALSE(serverHandler.canSplice());
@@ -376,7 +378,7 @@ TEST(ConnectionTls, StackedTlsWebSocketSocks5EndToEndAndAcceptorContextReuse)
     EXPECT_GE(clientHandler.requestBytes(), 10u);
     clientHandler.requestClear();
 
-    // 验证 Dialer 配置 TLS 后 dialStreamHelper 自动触发 ClientHello
+    // 验证 Dialer 配置 TLS 后 dialForwarderHelper 自动触发 ClientHello
     mynet::transport::TransportConfig cliCfg;
     cliCfg.enableTls = true;
     cliCfg.sni = "localhost";

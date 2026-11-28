@@ -37,17 +37,17 @@ namespace mynet::handler
     /**
      * @brief ShadowTLS 服务端入站处理器
      */
-    class HandlerInboundShadowTls : public HandlerInboundConnectionBase
+    class HandlerInboundShadowTls : public HandlerInbound
     {
     public:
-        using ShadowTlsRequestCallback = std::function<void(bool authenticated, const ProxyAddress &target)>;
+        using ShadowTlsRequestCallback = std::function<void(bool authenticated, const Address &target)>;
 
     private:
         ShadowTlsStage shadowTlsStage_{ShadowTlsStage::INSPECT_CLIENT_HELLO};
         ShadowTlsVersion version_{ShadowTlsVersion::V3};
         std::string password_{};
-        ProxyAddress detourTarget_{};   ///< 鉴权成功时的内部代理目标
-        ProxyAddress fallbackTarget_{}; ///< 鉴权失败/普通探测时的回落目标 (如 google.com:443)
+        Address detourTarget_{};   ///< 鉴权成功时的内部代理目标
+        Address fallbackTarget_{}; ///< 鉴权失败/普通探测时的回落目标 (如 google.com:443)
         ShadowTlsRequestCallback shadowTlsCallback_{nullptr};
 
         bool clientAuthenticated_{false};
@@ -56,12 +56,12 @@ namespace mynet::handler
     public:
         HandlerInboundShadowTls() noexcept
         {
-            detourTarget_ = ProxyAddress::fromHostPort("127.0.0.1", 1080);
-            fallbackTarget_ = ProxyAddress::fromHostPort("google.com", 443);
+            detourTarget_ = Address::fromHostPort("127.0.0.1", 1080);
+            fallbackTarget_ = Address::fromHostPort("google.com", 443);
         }
 
-        HandlerInboundShadowTls(ShadowTlsVersion ver, std::string_view password, const ProxyAddress &detour,
-                                const ProxyAddress &fallback)
+        HandlerInboundShadowTls(ShadowTlsVersion ver, std::string_view password, const Address &detour,
+                                const Address &fallback)
             : version_(ver),
               password_(password),
               detourTarget_(detour),
@@ -78,8 +78,8 @@ namespace mynet::handler
 
         void setVersion(ShadowTlsVersion ver) noexcept { version_ = ver; }
         void setPassword(std::string_view pass) { password_ = std::string(pass); }
-        void setDetourTarget(const ProxyAddress &addr) { detourTarget_ = addr; }
-        void setFallbackTarget(const ProxyAddress &addr) { fallbackTarget_ = addr; }
+        void setDetourTarget(const Address &addr) { detourTarget_ = addr; }
+        void setFallbackTarget(const Address &addr) { fallbackTarget_ = addr; }
         void setOnShadowTlsRequest(ShadowTlsRequestCallback cb) noexcept { shadowTlsCallback_ = std::move(cb); }
 
         [[nodiscard]] ShadowTlsStage stage() const noexcept { return shadowTlsStage_; }
@@ -88,7 +88,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             shadowTlsStage_ = ShadowTlsStage::INSPECT_CLIENT_HELLO;
             clientAuthenticated_ = false;
             sni_.clear();
@@ -233,7 +233,7 @@ namespace mynet::handler
                 // 回落到真实 SNI 服务器或配置的 fallbackTarget
                 if (!sni_.empty())
                 {
-                    targetAddress_ = ProxyAddress::fromDomain(sni_, 443);
+                    targetAddress_ = Address::fromDomain(sni_, 443);
                 }
                 else
                 {

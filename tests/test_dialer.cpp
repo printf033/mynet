@@ -16,7 +16,7 @@
 
 using namespace mynet;
 using namespace mynet::handler;
-using namespace mynet::handler::dns;
+using namespace mynet::dns;
 
 // =============================================================================
 // 1. DnsResolver 单元测试
@@ -105,7 +105,7 @@ TEST(DnsResolverTest, DecodeResponseAndCache)
 
 TEST(DialerTest, LifecycleAndReset)
 {
-    DialerBase<HandlerConnection> dialer;
+    DialerBase<Handler> dialer;
 
     // 拨号非法 IP 格式失败
     auto res = dialer.dialTcp("not_an_ip", 80);
@@ -128,7 +128,7 @@ TEST(DialerTest, LifecycleAndReset)
 
 TEST(HandlerOutboundTest, OutboundDirect)
 {
-    auto target = ProxyAddress::fromDomain("example.com", 443);
+    auto target = Address::fromDomain("example.com", 443);
     HandlerOutboundDirect direct(target);
 
     EXPECT_TRUE(direct.isEstablished());
@@ -138,7 +138,7 @@ TEST(HandlerOutboundTest, OutboundDirect)
 
 TEST(HandlerOutboundTest, OutboundTrojan)
 {
-    auto target = ProxyAddress::fromDomain("example.com", 443);
+    auto target = Address::fromDomain("example.com", 443);
     HandlerOutboundTrojan trojan("password123", target);
 
     EXPECT_FALSE(trojan.isEstablished());
@@ -159,7 +159,7 @@ TEST(HandlerOutboundTest, OutboundTrojan)
 
 TEST(HandlerOutboundTest, OutboundVless)
 {
-    auto target = ProxyAddress::fromDomain("vless.test", 8443);
+    auto target = Address::fromDomain("vless.test", 8443);
     std::array<uint8_t, 16> uuid = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
     HandlerOutboundVless vless(uuid, target);
 
@@ -184,7 +184,7 @@ TEST(HandlerOutboundTest, OutboundVless)
 
 TEST(HandlerOutboundTest, OutboundSocks5)
 {
-    auto target = ProxyAddress::fromDomain("target.org", 80);
+    auto target = Address::fromDomain("target.org", 80);
     HandlerOutboundSocks5 s5(target);
 
     // Step 1: 发送 greeting [0x05, 0x01, 0x00]
@@ -223,7 +223,7 @@ TEST(HandlerOutboundTest, OutboundBlock)
 
 TEST(HandlerOutboundTest, OutboundHysteria2)
 {
-    auto target = ProxyAddress::fromDomain("hysteria.test", 443);
+    auto target = Address::fromDomain("hysteria.test", 443);
     HandlerOutboundHysteria2 hy2("mypassword", target);
 
     EXPECT_FALSE(hy2.isEstablished());
@@ -400,7 +400,7 @@ TEST(HandlerDnsTest, OutboundDatagramDnsClient)
 
 TEST(DialerTest, StrategyRoutingOptionsFwmarkAndTransparent)
 {
-    struct DummyHandler : HandlerConnection
+    struct DummyHandler : Handler
     {
         void handle() {}
     };
@@ -418,7 +418,7 @@ TEST(DialerTest, StrategyRoutingOptionsFwmarkAndTransparent)
     dialer.reset();
 }
 
-TEST(DialerTest, ScopedDeferTcpConnectAndPrepareTcpSocket)
+TEST(DialerTest, DialContextDeferConnectAndPrepareTcpSocket)
 {
     DialerOptions opts;
     opts.dscp = 4;
@@ -429,23 +429,90 @@ TEST(DialerTest, ScopedDeferTcpConnectAndPrepareTcpSocket)
     target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     target.sin_port = htons(1);
 
-    {
-        ScopedDeferTcpConnect deferGuard(true);
-        auto res = dialer.dialTcp(target);
-        ASSERT_TRUE(res.has_value());
-        EXPECT_GE(res->fd, 0);
-        EXPECT_FALSE(res->immediateConnected);
-        EXPECT_TRUE(res->connectDeferred);
-        EXPECT_EQ(res->peerAddr.sin_port, target.sin_port);
-        EXPECT_EQ(res->peerAddr.sin_addr.s_addr, target.sin_addr.s_addr);
-        ::close(res->fd);
-    }
+    auto res = dialer.dialTcp(target, nullptr, DialContext{.deferConnect = true});
+    ASSERT_TRUE(res.has_value());
+    EXPECT_GE(res->fd, 0);
+    EXPECT_FALSE(res->immediateConnected);
+    EXPECT_TRUE(res->connectDeferred);
+    EXPECT_EQ(res->peerAddr.sin_port, target.sin_port);
+    EXPECT_EQ(res->peerAddr.sin_addr.s_addr, target.sin_addr.s_addr);
+    ::close(res->fd);
 
-    // 离开作用域后必须自动恢复默认即时建连行为
+    // 默认 DialContext{} 保持即时建连行为
     auto syncRes = dialer.dialTcp(target);
     if (syncRes.has_value())
     {
         EXPECT_FALSE(syncRes->connectDeferred);
         ::close(syncRes->fd);
     }
+}
+
+TEST(DialerTest, StickyIpCacheIntegrationAndEviction)
+{
+    auto &cache = StickyIpCache::instance();
+    cache.clear();
+
+    DialerDirect dialer("sticky-direct");
+    const DialContext deferCtx{.deferConnect = true};
+
+    // 1. 纯 IPv4 字面量不应写入粘性缓存
+    auto litRes = dialer.dialTcp(std::string_view("127.0.0.1"), 8080, nullptr, deferCtx);
+    ASSERT_TRUE(litRes.has_value());
+    ::close(litRes->fd);
+    EXPECT_FALSE(cache.get("127.0.0.1").has_value());
+
+    // 2. 命中粘性缓存时应跳过 DNS 解析直接返回缓存 IP
+    cache.recordSuccess("sticky.invalid.test", "127.0.0.1");
+    auto cachedRes = dialer.dialTcp(std::string_view("sticky.invalid.test"), 8080, nullptr, deferCtx);
+    ASSERT_TRUE(cachedRes.has_value());
+    EXPECT_EQ(ntohs(cachedRes->peerAddr.sin_port), 8080);
+    EXPECT_EQ(cachedRes->peerAddr.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
+    ::close(cachedRes->fd);
+
+    // 3. 连续失败 3 次自动淘汰粘性缓存
+    cache.recordFailure("sticky.invalid.test");
+    EXPECT_TRUE(cache.get("sticky.invalid.test").has_value());
+    cache.recordFailure("sticky.invalid.test");
+    EXPECT_TRUE(cache.get("sticky.invalid.test").has_value());
+    cache.recordFailure("sticky.invalid.test");
+    EXPECT_FALSE(cache.get("sticky.invalid.test").has_value());
+
+    cache.clear();
+}
+
+TEST(DialerTest, DialConnectionAssemblesConnectionAndHandler)
+{
+    int listenFd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    ASSERT_GE(listenFd, 0);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    ASSERT_EQ(::bind(listenFd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)), 0);
+    ASSERT_EQ(::listen(listenFd, 4), 0);
+
+    socklen_t len = sizeof(addr);
+    ASSERT_EQ(::getsockname(listenFd, reinterpret_cast<sockaddr *>(&addr), &len), 0);
+    uint16_t port = ntohs(addr.sin_port);
+
+    DialerDirect dialer;
+    ASSERT_TRUE(dialer.start().has_value());
+
+    Address target = Address::fromIPv4(htonl(INADDR_LOOPBACK), port);
+    auto connRes = dialer.dialConnection(target);
+    ASSERT_TRUE(connRes.has_value());
+
+    auto &conn = *connRes;
+    ASSERT_NE(conn, nullptr);
+    EXPECT_GE(conn->fd(), 0);
+    EXPECT_TRUE(conn->hasHandler());
+    EXPECT_NE(conn->handler(), nullptr);
+    EXPECT_EQ(ntohs(conn->peerAddr().sin_port), port);
+    EXPECT_EQ(conn->peerAddr().sin_addr.s_addr, htonl(INADDR_LOOPBACK));
+
+    int acceptedFd = ::accept4(listenFd, nullptr, nullptr, SOCK_CLOEXEC);
+    if (acceptedFd >= 0)
+        ::close(acceptedFd);
+    ::close(listenFd);
 }

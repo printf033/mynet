@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../outboundManager.hpp"
+#include "../dialerManager.hpp"
 #include "vless.hpp"
 #include <array>
 #include <memory>
@@ -38,18 +38,17 @@ namespace mynet
         [[nodiscard]] uint16_t serverPort() const noexcept override { return serverPort_; }
         [[nodiscard]] const std::array<uint8_t, 16> &uuid() const noexcept { return uuid_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundVless>(serverHost_, serverPort_, target, uuid_);
+            return dialForwarderHelper<handler::HandlerOutboundVless>(serverHost_, serverPort_, target, ctx, uuid_);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundVless = DialerVless;
 
 } // namespace mynet

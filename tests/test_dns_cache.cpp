@@ -5,8 +5,8 @@
 #include <thread>
 #include <vector>
 
-using namespace mynet::handler;
-using namespace mynet::handler::dns;
+using namespace mynet;
+using namespace mynet::dns;
 
 TEST(DnsReverseCacheTest, InsertAndLookupIpv4)
 {
@@ -49,7 +49,7 @@ TEST(DnsReverseCacheTest, LookupProxyAddress)
     ASSERT_EQ(::inet_pton(AF_INET, "104.16.132.229", &ip), 1);
     cache.insert(ip, "cloudflare.com", 300);
 
-    auto proxyAddr = ProxyAddress::fromIPv4(ip.s_addr, 443);
+    auto proxyAddr = Address::fromIPv4(ip.s_addr, 443);
     auto upgraded = cache.lookup(proxyAddr);
     ASSERT_TRUE(upgraded.has_value());
     EXPECT_EQ(upgraded->type, AddressType::DOMAIN);
@@ -395,7 +395,7 @@ TEST(DnsReverseCacheTest, TruncateDnsResponse)
 
 TEST(DnsReverseCacheTest, PreferenceWaitRegistry)
 {
-    PreferenceWaitRegistry waitReg;
+    DnsPreferencePacer waitReg;
     waitReg.setPreferredQtype(28); // 偏好 IPv6 (AAAA)
 
     EXPECT_TRUE(waitReg.startWait("dual.example.com", 1, std::chrono::milliseconds(50)));

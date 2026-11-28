@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file tunPacket.hpp
+ * @file tun/packet.hpp
  * @brief 高性能零拷贝 Linux TUN L3/L4 报文解析器、校验和计算与数据报构建引擎。
  *
  * 遵循标准 RFC 规范：
@@ -90,6 +90,23 @@ namespace mynet::tun
     {
         uint32_t pSum = ipv4PseudoHeaderSum(srcIpBytes, dstIpBytes, 17, static_cast<uint16_t>(udpSegment.size()));
         uint16_t csum = calculateChecksum(udpSegment, pSum);
+        return (csum == 0) ? 0xFFFF : csum;
+    }
+
+    /**
+     * @brief 基于 IPv4 地址、端口与负载直接计算 UDP 校验和 (RFC 768: 若结果为 0 则映射为 0xFFFF)
+     */
+    [[nodiscard]] inline uint16_t calculateUdp4Checksum(uint32_t saddr, uint32_t daddr, uint16_t sport, uint16_t dport,
+                                                        std::span<const uint8_t> payload) noexcept
+    {
+        const uint16_t udpLen = static_cast<uint16_t>(8 + payload.size());
+        uint32_t sum = ((saddr >> 16) & 0xffff) + (saddr & 0xffff) + ((daddr >> 16) & 0xffff) + (daddr & 0xffff);
+        sum += ::htons(IPPROTO_UDP);
+        sum += ::htons(udpLen);
+        sum += ::htons(sport);
+        sum += ::htons(dport);
+        sum += ::htons(udpLen);
+        const uint16_t csum = calculateChecksum(payload, sum);
         return (csum == 0) ? 0xFFFF : csum;
     }
 

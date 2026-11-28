@@ -6,7 +6,7 @@
  */
 
 #include "../connection.hpp"
-#include "../inboundManager.hpp"
+#include "../acceptorManager.hpp"
 #include "vmess.hpp"
 #include <cstdint>
 #include <memory>
@@ -38,6 +38,5 @@ namespace mynet
         }
     };
 
-    using InboundVmess = AcceptorVmess;
 
 } // namespace mynet

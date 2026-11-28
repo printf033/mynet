@@ -105,6 +105,9 @@ namespace mynet::tls
             {
                 return false;
             }
+#if defined(MYNET_HAVE_KTLS) && defined(SSL_OP_ENABLE_KTLS)
+            SSL_set_options(ssl_, SSL_OP_ENABLE_KTLS);
+#endif
             rbio_ = BIO_new(BIO_s_mem());
             wbio_ = BIO_new(BIO_s_mem());
             if (rbio_ == nullptr || wbio_ == nullptr)
@@ -239,6 +242,11 @@ namespace mynet::tls
         [[nodiscard]] bool isReady() const noexcept override
         {
             return state_ == mynet::transport::TransportState::STREAMING;
+        }
+
+        [[nodiscard]] bool isPassthrough() const noexcept override
+        {
+            return state_ == mynet::transport::TransportState::STREAMING && ktlsRxActive() && ktlsTxActive();
         }
 
         [[nodiscard]] void *nativeSslHandle() const noexcept override { return ssl_; }

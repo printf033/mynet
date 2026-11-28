@@ -16,6 +16,7 @@
  * 4. 零堆分配高性能匹配：提供纳秒级规则判定与路由协同。
  */
 
+#include "address.hpp"
 #include "error.hpp"
 #include "uvarint.hpp"
 #include <algorithm>
@@ -32,6 +33,44 @@
 #include <utility>
 #include <vector>
 #include <zlib.h>
+
+namespace mynet
+{
+    /**
+     * @brief 通用域名规则匹配（精确、后缀、关键字），供 RouteRule 与 SrsRule 复用
+     */
+    [[nodiscard]] inline bool matchDomainRules(std::string_view domain, std::span<const std::string> domains,
+                                               std::span<const std::string> domainSuffixes,
+                                               std::span<const std::string> domainKeywords) noexcept
+    {
+        for (const auto &d : domains)
+        {
+            if (d == domain)
+            {
+                return true;
+            }
+        }
+        for (const auto &sfx : domainSuffixes)
+        {
+            if (domain.ends_with(sfx))
+            {
+                if (domain.size() == sfx.size() || sfx.starts_with('.') ||
+                    domain[domain.size() - sfx.size() - 1] == '.')
+                {
+                    return true;
+                }
+            }
+        }
+        for (const auto &kw : domainKeywords)
+        {
+            if (domain.find(kw) != std::string_view::npos)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+} // namespace mynet
 
 namespace mynet::ruleset
 {
@@ -110,14 +149,6 @@ namespace mynet::ruleset
         {
             return std::memcmp(ip.data(), from.data(), 16) >= 0 && std::memcmp(ip.data(), to.data(), 16) <= 0;
         }
-    };
-
-    struct PortRange
-    {
-        uint16_t from{0};
-        uint16_t to{0};
-
-        [[nodiscard]] constexpr bool contains(uint16_t port) const noexcept { return port >= from && port <= to; }
     };
 
     namespace detail
@@ -276,7 +307,7 @@ namespace mynet::ruleset
         std::vector<IpRange4> sourceIpRanges4{};
         std::vector<IpRange6> sourceIpRanges6{};
         std::vector<uint16_t> ports{};
-        std::vector<PortRange> portRanges{};
+        std::vector<mynet::PortRange> portRanges{};
         std::vector<std::string> networks{}; // "tcp", "udp"
         std::vector<std::string> processNames{};
 
@@ -366,7 +397,7 @@ namespace mynet::ruleset
                 bool rangeMatched = false;
                 for (const auto &pr : portRanges)
                 {
-                    if (pr.contains(dstPort))
+                    if (pr.matches(dstPort))
                     {
                         rangeMatched = true;
                         break;
@@ -387,43 +418,7 @@ namespace mynet::ruleset
                 bool addrMatched = false;
                 if (!domain.empty() && hasDomainCond)
                 {
-                    // 精确匹配
-                    for (const auto &d : domains)
-                    {
-                        if (d == domain)
-                        {
-                            addrMatched = true;
-                            break;
-                        }
-                    }
-                    // 后缀匹配
-                    if (!addrMatched)
-                    {
-                        for (const auto &sfx : domainSuffixes)
-                        {
-                            if (domain.ends_with(sfx))
-                            {
-                                if (domain.size() == sfx.size() || sfx.starts_with('.') ||
-                                    domain[domain.size() - sfx.size() - 1] == '.')
-                                {
-                                    addrMatched = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    // 关键字匹配
-                    if (!addrMatched)
-                    {
-                        for (const auto &kw : domainKeywords)
-                        {
-                            if (domain.find(kw) != std::string_view::npos)
-                            {
-                                addrMatched = true;
-                                break;
-                            }
-                        }
-                    }
+                    addrMatched = mynet::matchDomainRules(domain, domains, domainSuffixes, domainKeywords);
                 }
 
                 if (!addrMatched && dstAddr != nullptr && !ipRanges4.empty())
@@ -675,7 +670,7 @@ namespace mynet::ruleset
                             {
                                 uint16_t from = static_cast<uint16_t>(std::stoul(rStr.substr(0, colon)));
                                 uint16_t to = static_cast<uint16_t>(std::stoul(rStr.substr(colon + 1)));
-                                rule.portRanges.push_back({from, to});
+                                rule.portRanges.push_back(mynet::PortRange{from, to});
                             }
                         }
                         offset += nLen;
@@ -812,7 +807,7 @@ namespace mynet::ruleset
                 detail::appendUvarint(buf, rule.portRanges.size());
                 for (const auto &pr : rule.portRanges)
                 {
-                    std::string prStr = std::to_string(pr.from) + ":" + std::to_string(pr.to);
+                    std::string prStr = std::to_string(pr.start) + ":" + std::to_string(pr.end);
                     detail::appendUvarint(buf, prStr.size());
                     buf.insert(buf.end(), prStr.begin(), prStr.end());
                 }

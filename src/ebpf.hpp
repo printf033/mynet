@@ -61,7 +61,7 @@
 #include <sys/vfs.h>
 
 #if defined(MYNET_HAVE_LIBBPF)
-#include "mynet_kernel_bpf_embedded.hpp"
+#include "ebpfEmbedded.hpp"
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #endif
@@ -235,7 +235,7 @@ namespace mynet::ebpf
     };
 
     /**
-     * @brief 内核异步事件通知结构 (对齐 mynet_kernel.bpf.c mynet_event)
+     * @brief 内核异步事件通知结构 (对齐 ebpf.bpf.c mynet_event)
      */
     enum class BpfEventType : uint32_t
     {
@@ -1236,7 +1236,7 @@ namespace mynet::ebpf
 
         bool addLpmCidrLocked(std::string_view cidrStr, Action action, int epochSlot = -1)
         {
-            auto cidr = handler::IpCidr::parse(cidrStr);
+            auto cidr = IpCidr::parse(cidrStr);
             if (!cidr)
                 return false;
             return addLpmCidrLocked(cidr->networkBe, cidr->prefix(), action, epochSlot);
@@ -1253,7 +1253,7 @@ namespace mynet::ebpf
 
         bool addLpmCidrIpv6Locked(std::string_view cidrStr, Action action, int epochSlot = -1)
         {
-            auto cidr6 = handler::Ip6Cidr::parse(cidrStr);
+            auto cidr6 = Ip6Cidr::parse(cidrStr);
             if (!cidr6)
                 return false;
 
@@ -3204,6 +3204,5 @@ namespace mynet::ebpf
     };
 
     /// 别名统一过渡
-    using EbpfManager = EbpfEngine;
 
 } // namespace mynet::ebpf

@@ -31,7 +31,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace mynet::handler::dns
+namespace mynet::dns
 {
 
     struct In6Hash
@@ -246,20 +246,20 @@ namespace mynet::handler::dns
          * @param addr 包含裸 IP 的目标地址
          * @return 若命中且有效，返回 AddressType::DOMAIN 的升级版 ProxyAddress；否则返回 nullopt
          */
-        [[nodiscard]] std::optional<ProxyAddress> lookup(const ProxyAddress &addr) const
+        [[nodiscard]] std::optional<Address> lookup(const Address &addr) const
         {
             if (addr.type == AddressType::IPV4)
             {
                 if (auto domain = lookup(addr.ipv4_); domain.has_value())
                 {
-                    return ProxyAddress::fromDomain(*domain, addr.port);
+                    return Address::fromDomain(*domain, addr.port);
                 }
             }
             else if (addr.type == AddressType::IPV6)
             {
                 if (auto domain = lookup(addr.ipv6_); domain.has_value())
                 {
-                    return ProxyAddress::fromDomain(*domain, addr.port);
+                    return Address::fromDomain(*domain, addr.port);
                 }
             }
             return std::nullopt;
@@ -352,21 +352,21 @@ namespace mynet::handler::dns
         /**
          * @brief RFC 8767 弹性乐观查询：根据 ProxyAddress 逆向还原为域名目标地址
          */
-        [[nodiscard]] std::optional<ProxyAddress> lookupOptimistic(const ProxyAddress &addr, bool *outStale = nullptr,
+        [[nodiscard]] std::optional<Address> lookupOptimistic(const Address &addr, bool *outStale = nullptr,
                                                                    bool *outNeedsRefresh = nullptr) const
         {
             if (addr.type == AddressType::IPV4)
             {
                 if (auto domain = lookupOptimistic(addr.ipv4_, outStale, outNeedsRefresh); domain.has_value())
                 {
-                    return ProxyAddress::fromDomain(*domain, addr.port);
+                    return Address::fromDomain(*domain, addr.port);
                 }
             }
             else if (addr.type == AddressType::IPV6)
             {
                 if (auto domain = lookupOptimistic(addr.ipv6_, outStale, outNeedsRefresh); domain.has_value())
                 {
-                    return ProxyAddress::fromDomain(*domain, addr.port);
+                    return Address::fromDomain(*domain, addr.port);
                 }
             }
             return std::nullopt;
@@ -571,7 +571,6 @@ namespace mynet::handler::dns
         }
     };
 
-    using PreferenceWaitRegistry = DnsPreferencePacer;
 
     /**
      * @brief DNS 解析域名分流规则位图内核投影追踪器 (借鉴 dae domain_routing_tracker)
@@ -1052,4 +1051,4 @@ namespace mynet::handler::dns
         return truncated;
     }
 
-} // namespace mynet::handler::dns
+} // namespace mynet::dns

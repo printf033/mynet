@@ -62,7 +62,7 @@ namespace mynet
             std::string c(country);
             std::transform(c.begin(), c.end(), c.begin(), ::tolower);
 
-            auto parsed = handler::IpCidr::parse(cidrStr);
+            auto parsed = IpCidr::parse(cidrStr);
             if (!parsed)
                 return;
 
@@ -105,7 +105,7 @@ namespace mynet
             }
         }
 
-        [[nodiscard]] bool isPrivate(in_addr ip) const noexcept { return handler::isPrivateAddress(ip); }
+        [[nodiscard]] bool isPrivate(in_addr ip) const noexcept { return isPrivateAddress(ip); }
 
         [[nodiscard]] bool matches(in_addr ip, std::string_view country) const noexcept
         {

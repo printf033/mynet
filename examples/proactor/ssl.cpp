@@ -28,7 +28,7 @@ int main(int argc, char *argv[])
     LOG_INFO("listening on {} (tls, proactor)", listen.text);
 
     using namespace mynet;
-    Proactor<AcceptorBase<HandlerConnection>> server;
+    Proactor<AcceptorBase<Handler>> server;
     if (auto tlsRes = server.acceptor().configureTls(crt, key); !tlsRes)
     {
         LOG_ERROR("mynet: TLS configure failed ({})", toString(tlsRes.error()));

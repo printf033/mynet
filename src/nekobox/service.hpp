@@ -1,12 +1,12 @@
 #pragma once
 
 /**
- * @file throne/service.hpp
- * @brief Throne (NekoRay/NekoBox) UDS RPC 服务端守护服务。
+ * @file nekobox/service.hpp
+ * @brief NekoBox (NekoRay/Throne) UDS RPC 服务端守护服务。
  *
  * 核心特性：
- * 1. 自动检测并主动连接至环境变量 `THRONE_CORE_SOCKET` 指定的 Unix 域套接字；
- * 2. 高性能双向解析 Throne 二进制 RPC 请求帧并分发执行对应服务；
+ * 1. 自动检测并主动连接至环境变量 `NEKOBOX_CORE_SOCKET`（兼容 `THRONE_CORE_SOCKET`）指定的 Unix 域套接字；
+ * 2. 高性能双向解析 NekoBox 二进制 RPC 请求帧并分发执行对应服务；
  * 3. 响应 IsPrivileged、Start、Stop、CheckConfig、QueryStats、GetDefaultInterface 等关键调用；
  * 4. 深度联动 mynet::Core，实现零开销状态同步、会话监控与流量回传。
  */
@@ -30,10 +30,10 @@
 #include <unistd.h>
 #include <vector>
 
-namespace mynet::throne
+namespace mynet::nekobox
 {
 
-    class ThroneIpcService
+    class NekoBoxIpcService
     {
     public:
         using StartCallback = std::function<std::string(const proto::LoadConfigReq &req)>;
@@ -51,18 +51,18 @@ namespace mynet::throne
         StopCallback onStop_{nullptr};
 
     public:
-        ThroneIpcService() noexcept = default;
-        explicit ThroneIpcService(std::shared_ptr<Core> core) noexcept : core_(std::move(core)) {}
+        NekoBoxIpcService() noexcept = default;
+        explicit NekoBoxIpcService(std::shared_ptr<Core> core) noexcept : core_(std::move(core)) {}
 
-        ~ThroneIpcService() noexcept
+        ~NekoBoxIpcService() noexcept
         {
             stop();
         }
 
-        ThroneIpcService(const ThroneIpcService &) = delete;
-        ThroneIpcService &operator=(const ThroneIpcService &) = delete;
-        ThroneIpcService(ThroneIpcService &&) = delete;
-        ThroneIpcService &operator=(ThroneIpcService &&) = delete;
+        NekoBoxIpcService(const NekoBoxIpcService &) = delete;
+        NekoBoxIpcService &operator=(const NekoBoxIpcService &) = delete;
+        NekoBoxIpcService(NekoBoxIpcService &&) = delete;
+        NekoBoxIpcService &operator=(NekoBoxIpcService &&) = delete;
 
         void setCore(std::shared_ptr<Core> core) noexcept { core_ = std::move(core); }
         void setOnStart(StartCallback cb) noexcept { onStart_ = std::move(cb); }
@@ -73,11 +73,15 @@ namespace mynet::throne
         [[nodiscard]] inline int socketFd() const noexcept { return socketFd_; }
 
         /**
-         * @brief 检查环境变量 THRONE_CORE_SOCKET 是否配置
+         * @brief 检查环境变量 NEKOBOX_CORE_SOCKET（兼容 THRONE_CORE_SOCKET）是否配置
          */
         [[nodiscard]] static std::string getSocketPathFromEnv()
         {
-            const char *env = std::getenv("THRONE_CORE_SOCKET");
+            const char *env = std::getenv("NEKOBOX_CORE_SOCKET");
+            if (env == nullptr || std::strlen(env) == 0)
+            {
+                env = std::getenv("THRONE_CORE_SOCKET");
+            }
             if (env != nullptr && std::strlen(env) > 0)
             {
                 return std::string(env);
@@ -231,7 +235,7 @@ namespace mynet::throne
                             m.download = static_cast<int64_t>(sess->stats().bytesDown);
                             m.dest = sess->target().host + ":" + std::to_string(sess->target().port);
                             m.network = "tcp";
-                            if (sess->target().type == handler::AddressType::DOMAIN)
+                            if (sess->target().type == AddressType::DOMAIN)
                             {
                                 m.domain = sess->target().host;
                             }
@@ -333,7 +337,7 @@ namespace mynet::throne
                 const ssize_t n = ::recv(fd, tempBuf, sizeof(tempBuf), 0);
                 if (n <= 0)
                 {
-                    LOG_INFO("Throne IPC socket disconnected or closed (n={})", n);
+                    LOG_INFO("NekoBox IPC socket disconnected or closed (n={})", n);
                     break;
                 }
 
@@ -374,7 +378,7 @@ namespace mynet::throne
         }
 
         /**
-         * @brief 同步阻塞运行 IPC 服务 (适用于被 Throne 以子进程直接拉起托管的主循环)
+         * @brief 同步阻塞运行 IPC 服务 (适用于被 NekoBox/Throne 以子进程直接拉起托管的主循环)
          */
         bool runSync(std::string socketPath)
         {
@@ -443,7 +447,7 @@ namespace mynet::throne
 
                 if (::connect(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) == 0)
                 {
-                    LOG_INFO("Throne IPC connected successfully to {}", socketPath_);
+                    LOG_INFO("NekoBox IPC connected successfully to {}", socketPath_);
                     break;
                 }
 
@@ -454,7 +458,7 @@ namespace mynet::throne
 
             if (fd < 0)
             {
-                LOG_ERROR("Throne IPC failed to connect to {}", socketPath_);
+                LOG_ERROR("NekoBox IPC failed to connect to {}", socketPath_);
                 running_.store(false, std::memory_order_release);
                 return;
             }
@@ -469,4 +473,4 @@ namespace mynet::throne
         }
     };
 
-} // namespace mynet::throne
+} // namespace mynet::nekobox

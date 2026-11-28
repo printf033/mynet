@@ -33,7 +33,6 @@ namespace mynet
      *
      * 统一收拢至 configHolder.hpp 中的 SecurityConfig，消除重复定义。
      */
-    using TlsOptions = SecurityConfig;
 
     namespace detail
     {

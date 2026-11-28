@@ -24,8 +24,6 @@
 
 namespace mynet
 {
-    namespace dns = handler::dns;
-
     /**
      * @brief DNS 解析缓存记录
      */
@@ -101,7 +99,7 @@ namespace mynet
         /**
          * @brief 查询缓存中是否存在未过期的解析结果
          */
-        [[nodiscard]] std::optional<handler::ProxyAddress> lookupCache(std::string_view domain, uint16_t port) const
+        [[nodiscard]] std::optional<Address> lookupCache(std::string_view domain, uint16_t port) const
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = cache_.find(std::string(domain));
@@ -115,11 +113,11 @@ namespace mynet
             }
             if (!it->second.ipv4.empty())
             {
-                return handler::ProxyAddress::fromIPv4(it->second.ipv4.front().s_addr, port);
+                return Address::fromIPv4(it->second.ipv4.front().s_addr, port);
             }
             if (!it->second.ipv6.empty())
             {
-                return handler::ProxyAddress::fromIPv6(reinterpret_cast<const uint8_t *>(&it->second.ipv6.front()),
+                return Address::fromIPv6(reinterpret_cast<const uint8_t *>(&it->second.ipv6.front()),
                                                        port);
             }
             return std::nullopt;
@@ -144,10 +142,10 @@ namespace mynet
         /**
          * @brief 同步/直解域名（若已是 IP 字面量或缓存命中直接返回，避免任何阻塞；未命中时可回退系统解析）
          */
-        [[nodiscard]] std::optional<handler::ProxyAddress> resolveFast(std::string_view host, uint16_t port) const
+        [[nodiscard]] std::optional<Address> resolveFast(std::string_view host, uint16_t port) const
         {
             // 1. 若本身即为合法 IPv4 / IPv6 字面量，直接解析返回
-            if (auto addr = handler::ProxyAddress::fromHostPort(host, port); addr.type != handler::AddressType::DOMAIN)
+            if (auto addr = Address::fromHostPort(host, port); addr.type != AddressType::DOMAIN)
             {
                 return addr;
             }

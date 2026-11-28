@@ -43,7 +43,7 @@ namespace mynet::handler
     /**
      * @brief HTTP 代理协议服务端入站状态机处理器
      */
-    class HandlerInboundHttpProxy : public HandlerInboundConnectionBase
+    class HandlerInboundHttpProxy : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
@@ -72,7 +72,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             httpStage_ = HttpProxyStage::REQUEST;
             isConnectMethod_ = false;
             method_.clear();
@@ -278,7 +278,7 @@ namespace mynet::handler
         }
 
     public:
-        static std::optional<ProxyAddress> parseHostPort(std::string_view hostPortStr, uint16_t defaultPort)
+        static std::optional<Address> parseHostPort(std::string_view hostPortStr, uint16_t defaultPort)
         {
             if (hostPortStr.empty())
             {
@@ -300,7 +300,7 @@ namespace mynet::handler
                     std::string pStr(hostPortStr.substr(closeBracket + 2));
                     port = static_cast<uint16_t>(std::atoi(pStr.c_str()));
                 }
-                return ProxyAddress::fromHostPort(ip, port);
+                return Address::fromHostPort(ip, port);
             }
 
             size_t colon = hostPortStr.rfind(':');
@@ -309,13 +309,13 @@ namespace mynet::handler
                 std::string_view host = hostPortStr.substr(0, colon);
                 std::string pStr(hostPortStr.substr(colon + 1));
                 uint16_t port = static_cast<uint16_t>(std::atoi(pStr.c_str()));
-                return ProxyAddress::fromHostPort(host, port);
+                return Address::fromHostPort(host, port);
             }
 
-            return ProxyAddress::fromHostPort(hostPortStr, defaultPort);
+            return Address::fromHostPort(hostPortStr, defaultPort);
         }
 
-        static std::optional<ProxyAddress> parseUriAddress(std::string_view uri)
+        static std::optional<Address> parseUriAddress(std::string_view uri)
         {
             // 例如 "http://example.com:8080/foo" 或 "http://127.0.0.1/bar"
             static constexpr std::string_view kHttp = "http://";
@@ -341,7 +341,7 @@ namespace mynet::handler
             return parseHostPort(authority, defPort);
         }
 
-        static std::optional<ProxyAddress> extractHostHeader(std::string_view headers)
+        static std::optional<Address> extractHostHeader(std::string_view headers)
         {
             static constexpr std::string_view kHost = "host:";
             size_t pos = 0;
@@ -374,7 +374,7 @@ namespace mynet::handler
      *
      * 自动向上游 HTTP 代理服务器发送 CONNECT 隧道建连指令，并等待 HTTP/1.x 200 响应。
      */
-    class HandlerOutboundHttp : public HandlerOutboundConnectionBase
+    class HandlerOutboundHttp : public HandlerOutbound
     {
     private:
         enum class Step : uint8_t
@@ -389,20 +389,20 @@ namespace mynet::handler
 
     public:
         HandlerOutboundHttp() noexcept = default;
-        HandlerOutboundHttp(std::string_view username, std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target),
+        HandlerOutboundHttp(std::string_view username, std::string_view password, const Address &target)
+            : HandlerOutbound(target),
               username_(username),
               password_(password)
         {
         }
-        explicit HandlerOutboundHttp(const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target)
+        explicit HandlerOutboundHttp(const Address &target)
+            : HandlerOutbound(target)
         {
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             step_ = Step::SEND_CONNECT;
         }
 
@@ -468,7 +468,7 @@ namespace mynet::handler
      * 发送 HTTP/2 客户端连接前言与 SETTINGS 帧，并基于 Stream 1 发送 HEADERS (CONNECT 目标)，
      * 等待服务端返回 :status = 200 后进入 STREAMING 状态。
      */
-    class HandlerOutboundHttp2 : public HandlerOutboundConnectionBase
+    class HandlerOutboundHttp2 : public HandlerOutbound
     {
     public:
         [[nodiscard]] bool canSplice() const noexcept override { return false; }
@@ -487,20 +487,20 @@ namespace mynet::handler
 
     public:
         HandlerOutboundHttp2() noexcept = default;
-        HandlerOutboundHttp2(std::string_view username, std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target),
+        HandlerOutboundHttp2(std::string_view username, std::string_view password, const Address &target)
+            : HandlerOutbound(target),
               username_(username),
               password_(password)
         {
         }
-        explicit HandlerOutboundHttp2(const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target)
+        explicit HandlerOutboundHttp2(const Address &target)
+            : HandlerOutbound(target)
         {
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             step_ = Step::SEND_PREFACE_AND_HEADERS;
             streamId_ = 1;
         }
@@ -607,7 +607,7 @@ namespace mynet::handler
      * 接收客户端的 HTTP/2 连接前言与 SETTINGS 帧，并解析 Stream 上的 :method=CONNECT 请求，
      * 提取目标 ProxyAddress，完成鉴权与 200 响应后进入 STREAMING 状态。
      */
-    class HandlerInboundHttp2Proxy : public HandlerInboundConnectionBase
+    class HandlerInboundHttp2Proxy : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(std::string_view user, std::string_view pass)>;
@@ -633,7 +633,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             step_ = Step::PREFACE;
             activeStreamId_ = 1;
         }
@@ -803,7 +803,7 @@ namespace mynet::handler
      * 基于 RFC 9114 / RFC 9298 发送 HTTP/3 控制帧与 CONNECT 请求，
      * 并在收到 200 响应后进入 STREAMING 状态。
      */
-    class HandlerOutboundHttp3 : public HandlerOutboundConnectionBase
+    class HandlerOutboundHttp3 : public HandlerOutbound
     {
     public:
         [[nodiscard]] bool canSplice() const noexcept override { return false; }
@@ -819,14 +819,14 @@ namespace mynet::handler
 
     public:
         HandlerOutboundHttp3() noexcept = default;
-        explicit HandlerOutboundHttp3(const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target)
+        explicit HandlerOutboundHttp3(const Address &target)
+            : HandlerOutbound(target)
         {
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             step_ = Step::SEND_CONNECT;
         }
 
@@ -904,7 +904,7 @@ namespace mynet::handler
      * 接收客户端的 HTTP/3 CONNECT / CONNECT-UDP 隧道建立请求，
      * 解析目标 ProxyAddress，并回复 200 响应后进入 STREAMING 状态。
      */
-    class HandlerInboundHttp3Proxy : public HandlerInboundConnectionBase
+    class HandlerInboundHttp3Proxy : public HandlerInbound
     {
     public:
         [[nodiscard]] bool canSplice() const noexcept override { return false; }
@@ -924,7 +924,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             step_ = Step::REQUEST;
         }
 

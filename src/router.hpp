@@ -63,96 +63,18 @@ namespace mynet
     }
 
     /**
-     * @brief 端口与端口范围过滤抽象
-     */
-    struct PortRange
-    {
-        uint16_t start{0};
-        uint16_t end{0};
-
-        PortRange() noexcept = default;
-        constexpr explicit PortRange(uint16_t port) noexcept
-            : start(port),
-              end(port)
-        {
-        }
-        constexpr PortRange(uint16_t s, uint16_t e) noexcept
-            : start(s),
-              end(e)
-        {
-        }
-
-        [[nodiscard]] constexpr bool matches(uint16_t port) const noexcept { return port >= start && port <= end; }
-
-        /**
-         * @brief 解析单端口或端口段文本（如 "80", "443", "8000-8080", "1000..2000"）
-         */
-        static std::optional<PortRange> parse(std::string_view str) noexcept
-        {
-            if (str.empty())
-            {
-                return std::nullopt;
-            }
-
-            size_t delim = str.find('-');
-            size_t delimLen = 1;
-            if (delim == std::string_view::npos)
-            {
-                delim = str.find("..");
-                delimLen = 2;
-            }
-
-            if (delim == std::string_view::npos)
-            {
-                // 单端口
-                uint32_t val = 0;
-                for (char c : str)
-                {
-                    if (c < '0' || c > '9')
-                        return std::nullopt;
-                    val = val * 10 + static_cast<uint32_t>(c - '0');
-                    if (val > 65535)
-                        return std::nullopt;
-                }
-                return PortRange(static_cast<uint16_t>(val));
-            }
-
-            // 范围
-            std::string_view s1 = str.substr(0, delim);
-            std::string_view s2 = str.substr(delim + delimLen);
-            auto p1 = parse(s1);
-            auto p2 = parse(s2);
-            if (!p1 || !p2)
-            {
-                return std::nullopt;
-            }
-            uint16_t startPort = p1->start;
-            uint16_t endPort = p2->start;
-            if (startPort > endPort)
-            {
-                std::swap(startPort, endPort);
-            }
-            return PortRange(startPort, endPort);
-        }
-    };
-
-    /// 复用 address.hpp 单一真实源 (Single Source of Truth)
-    using IpCidr = handler::IpCidr;
-    using Ip6Cidr = handler::Ip6Cidr;
-
-    /**
      * @brief 待路由决断的上下文特征包 (Route Context)
      */
     struct RouteContext
     {
-        NetworkType network{NetworkType::TCP};          ///< 传输协议 (TCP / UDP)
-        std::string_view inboundTag{};                  ///< 接收流量的入站标签 (如 "socks-in")
-        sockaddr_in clientAddr{};                       ///< 客户端源端点四元组信息
-        handler::ProxyAddress target{};                 ///< 目标端点地址 (IP 或域名 + 端口)
-        std::string_view sniffedDomain{};               ///< 嗅探提取的真实域名 (SNI / HTTP Host)
-        std::string_view processName{};                 ///< 客户端发起进程名 (如 "curl", "chrome")
-        handler::sniffing::ProtocolType sniffedProtocol{///< 嗅探识别的应用层协议
-                                                        handler::sniffing::ProtocolType::UNKNOWN};
+        NetworkType network{NetworkType::TCP}; ///< 传输协议 (TCP / UDP)
+        std::string_view inboundTag{};         ///< 接收流量的入站标签 (如 "socks-in")
+        sockaddr_in clientAddr{};              ///< 客户端源端点四元组信息
+        Address target{};                      ///< 目标端点地址 (IP 或域名 + 端口)
+        std::string_view sniffedDomain{};      ///< 嗅探提取的真实域名 (SNI / HTTP Host)
+        std::string_view processName{};        ///< 客户端发起进程名 (如 "curl", "chrome")
+        ProtocolType sniffedProtocol{          ///< 嗅探识别的应用层协议
+                                     ProtocolType::UNKNOWN};
         uint8_t dscp{0};            ///< L3/L4 DSCP 优先级代码
         bool decisionLocked{false}; ///< 路由决策是否已被 must 规则锁定
 
@@ -436,7 +358,7 @@ namespace mynet
             if (!protocols.empty())
             {
                 bool matched = false;
-                std::string_view pName = handler::sniffing::protocolName(ctx.sniffedProtocol);
+                std::string_view pName = protocolName(ctx.sniffedProtocol);
                 for (const auto &p : protocols)
                 {
                     if (p == pName)
@@ -459,7 +381,7 @@ namespace mynet
                 {
                     matched = matchDomainString(ctx.sniffedDomain);
                 }
-                if (!matched && !ctx.target.host.empty() && ctx.target.type == handler::AddressType::DOMAIN)
+                if (!matched && !ctx.target.host.empty() && ctx.target.type == AddressType::DOMAIN)
                 {
                     matched = matchDomainString(ctx.target.host);
                 }
@@ -471,7 +393,7 @@ namespace mynet
             if (!ipCidrs.empty())
             {
                 bool matched = false;
-                if (ctx.target.type == handler::AddressType::IPV4)
+                if (ctx.target.type == AddressType::IPV4)
                 {
                     for (const auto &cidr : ipCidrs)
                     {
@@ -490,7 +412,7 @@ namespace mynet
             if (!geoIps.empty())
             {
                 bool matched = false;
-                if (ctx.target.type == handler::AddressType::IPV4 && ctx.target.ipv4_.s_addr != 0)
+                if (ctx.target.type == AddressType::IPV4 && ctx.target.ipv4_.s_addr != 0)
                 {
                     for (const auto &gip : geoIps)
                     {
@@ -540,7 +462,7 @@ namespace mynet
                 bool matched = false;
                 std::string_view dom = !ctx.sniffedDomain.empty() ? ctx.sniffedDomain : ctx.target.host;
                 sockaddr_in targetAddr{};
-                if (ctx.target.type == handler::AddressType::IPV4)
+                if (ctx.target.type == AddressType::IPV4)
                 {
                     targetAddr.sin_family = AF_INET;
                     targetAddr.sin_addr = ctx.target.ipv4_;
@@ -551,7 +473,7 @@ namespace mynet
                 {
                     if (rs != nullptr)
                     {
-                        if (rs->match(dom, ctx.target.type == handler::AddressType::IPV4 ? &targetAddr : nullptr,
+                        if (rs->match(dom, ctx.target.type == AddressType::IPV4 ? &targetAddr : nullptr,
                                       ctx.target.port, netStr))
                         {
                             matched = true;
@@ -576,45 +498,7 @@ namespace mynet
         [[nodiscard]] bool matchDomainString(std::string_view rawDomain) const noexcept
         {
             std::string d = normalizeString(rawDomain);
-
-            // 精确域名
-            for (const auto &exact : domains)
-            {
-                if (exact == d)
-                    return true;
-            }
-
-            // 域名后缀匹配 (如 "google.com" 匹配 "google.com" 与 "*.google.com")
-            for (const auto &suffix : domainSuffixes)
-            {
-                if (d == suffix)
-                {
-                    return true;
-                }
-                if (suffix.starts_with('.'))
-                {
-                    if (d.ends_with(suffix))
-                        return true;
-                }
-                else
-                {
-                    if (d.size() > suffix.size() && d[d.size() - suffix.size() - 1] == '.' && d.ends_with(suffix))
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            // 域名关键字匹配
-            for (const auto &kw : domainKeywords)
-            {
-                if (d.find(kw) != std::string::npos)
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            return mynet::matchDomainRules(d, domains, domainSuffixes, domainKeywords);
         }
 
         [[nodiscard]] static std::string normalizeString(std::string_view sv)
@@ -640,6 +524,7 @@ namespace mynet
         std::string defaultOutbound_{"direct"};
         mutable std::mutex mutex_{};
         std::vector<RouteRule> rules_{};
+        std::atomic<bool> hasProcessRules_{false};
         std::unordered_map<std::string, std::shared_ptr<ruleset::RuleSetSrs>> ruleSets_{};
         struct DomainCacheEntry
         {
@@ -705,6 +590,10 @@ namespace mynet
         {
             std::lock_guard<std::mutex> lock(mutex_);
             domainMatchCache_.clear();
+            if (!rule.processName.empty())
+            {
+                hasProcessRules_.store(true, std::memory_order_release);
+            }
             for (const auto &tag : rule.ruleSets)
             {
                 auto it = ruleSets_.find(tag);
@@ -724,6 +613,12 @@ namespace mynet
             std::lock_guard<std::mutex> lock(mutex_);
             domainMatchCache_.clear();
             rules_.clear();
+            hasProcessRules_.store(false, std::memory_order_release);
+        }
+
+        [[nodiscard]] inline bool hasProcessRules() const noexcept
+        {
+            return hasProcessRules_.load(std::memory_order_acquire);
         }
 
         [[nodiscard]] inline size_t ruleCount() const noexcept
@@ -806,7 +701,7 @@ namespace mynet
             std::string_view domainKey =
                 !ctx.sniffedDomain.empty()
                     ? ctx.sniffedDomain
-                    : (ctx.target.type == handler::AddressType::DOMAIN ? std::string_view(ctx.target.host) : "");
+                    : (ctx.target.type == AddressType::DOMAIN ? std::string_view(ctx.target.host) : "");
             if (!domainKey.empty() && ctx.clientAddr.sin_addr.s_addr == 0 && ctx.dscp == 0)
             {
                 auto it = domainMatchCache_.find(std::string(domainKey));

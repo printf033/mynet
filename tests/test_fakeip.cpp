@@ -106,14 +106,14 @@ TEST(FakeIPTest, CoreDispatchAutoRestoresDomainFromFakeIp)
     ASSERT_TRUE(core.start().has_value());
 
     // 客户端向 FakeIP:443 发起连接（入站未嗅探，仅持有目标 FakeIP）
-    auto target = handler::ProxyAddress::fromIPv4(fakeIp.s_addr, 443);
+    auto target = Address::fromIPv4(fakeIp.s_addr, 443);
     handler::HandlerInboundDirect inbound(target);
 
     // Core 分发：应当识别 FakeIP 并自动还原出原始域名 "api.openai.com"，从而精准命中 block 出站
     auto res = core.dispatch(inbound, -1, "tproxy-in", false);
     EXPECT_EQ(res.status, CoreDispatchStatus::BLOCKED);
     EXPECT_EQ(res.outboundTag, "block");
-    EXPECT_EQ(res.target.type, handler::AddressType::DOMAIN);
+    EXPECT_EQ(res.target.type, AddressType::DOMAIN);
     EXPECT_EQ(res.target.host, "api.openai.com");
     EXPECT_EQ(res.sniffedDomain, "api.openai.com");
 

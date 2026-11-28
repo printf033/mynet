@@ -1,15 +1,14 @@
 #pragma once
 
 /**
- * @file handler/address.hpp
- * @brief 通用代理目标网络地址抽象，兼容 SOCKS5 / Trojan / VLESS 规范。
+ * @file address.hpp
+ * @brief 通用网络地址、CIDR 与端口范围抽象，兼容 SOCKS5 / Trojan / VLESS 规范。
  */
 
 #include "encoding.hpp"
 #include <arpa/inet.h>
 #include <cstdint>
 #include <cstring>
-#include <linux/netfilter_ipv4.h>
 #include <netinet/in.h>
 #include <optional>
 #include <span>
@@ -18,14 +17,7 @@
 #include <sys/socket.h>
 #include <vector>
 
-#ifndef SO_ORIGINAL_DST
-#define SO_ORIGINAL_DST 80
-#endif
-#ifndef IP6T_SO_ORIGINAL_DST
-#define IP6T_SO_ORIGINAL_DST 80
-#endif
-
-namespace mynet::handler
+namespace mynet
 {
 
     /**
@@ -248,11 +240,92 @@ namespace mynet::handler
     };
 
     /**
-     * @brief 代理通用目标网络地址
-     *
-     * 支持表示 IPv4、IPv6 与域名地址，并提供与 RFC 1928 兼容的二进制反序列化与序列化。
+     * @brief 端口与端口范围过滤抽象
      */
-    class ProxyAddress
+    struct PortRange
+    {
+        uint16_t start{0};
+        uint16_t end{0};
+
+        PortRange() noexcept = default;
+        constexpr explicit PortRange(uint16_t port) noexcept
+            : start(port),
+              end(port)
+        {
+        }
+        constexpr PortRange(uint16_t s, uint16_t e) noexcept
+            : start(s),
+              end(e)
+        {
+        }
+
+        [[nodiscard]] constexpr bool matches(uint16_t port) const noexcept { return port >= start && port <= end; }
+
+        /**
+         * @brief 解析单端口或端口段文本（如 "80", "443", "8000-8080", "1000..2000"）
+         */
+        static std::optional<PortRange> parse(std::string_view str) noexcept
+        {
+            if (str.empty())
+            {
+                return std::nullopt;
+            }
+
+            size_t delim = str.find('-');
+            size_t delimLen = 1;
+            if (delim == std::string_view::npos)
+            {
+                delim = str.find("..");
+                delimLen = 2;
+            }
+
+            if (delim == std::string_view::npos)
+            {
+                uint32_t val = 0;
+                for (char c : str)
+                {
+                    if (c < '0' || c > '9')
+                        return std::nullopt;
+                    val = val * 10 + static_cast<uint32_t>(c - '0');
+                    if (val > 65535)
+                        return std::nullopt;
+                }
+                return PortRange(static_cast<uint16_t>(val));
+            }
+
+            std::string_view sPart = str.substr(0, delim);
+            std::string_view ePart = str.substr(delim + delimLen);
+            if (sPart.empty() || ePart.empty())
+                return std::nullopt;
+
+            auto parseU16 = [](std::string_view sv) noexcept -> std::optional<uint16_t> {
+                uint32_t val = 0;
+                for (char c : sv)
+                {
+                    if (c < '0' || c > '9')
+                        return std::nullopt;
+                    val = val * 10 + static_cast<uint32_t>(c - '0');
+                    if (val > 65535)
+                        return std::nullopt;
+                }
+                return static_cast<uint16_t>(val);
+            };
+
+            auto sOpt = parseU16(sPart);
+            auto eOpt = parseU16(ePart);
+            if (!sOpt || !eOpt || *sOpt > *eOpt)
+                return std::nullopt;
+
+            return PortRange(*sOpt, *eOpt);
+        }
+    };
+
+    /**
+     * @brief 通用网络端点地址（支持 IPv4 / IPv6 / 域名 + 端口）
+     *
+     * 提供与 RFC 1928 (SOCKS5) 兼容的二进制反序列化与序列化。
+     */
+    class Address
     {
     public:
         AddressType type{AddressType::IPV4};
@@ -262,7 +335,7 @@ namespace mynet::handler
         in_addr ipv4_{};
         in6_addr ipv6_{};
 
-        ProxyAddress() noexcept
+        Address() noexcept
         {
             std::memset(&ipv4_, 0, sizeof(ipv4_));
             std::memset(&ipv6_, 0, sizeof(ipv6_));
@@ -271,9 +344,9 @@ namespace mynet::handler
         /**
          * @brief 从 IPv4 二进制网络字节序构造
          */
-        static ProxyAddress fromIPv4(uint32_t be32, uint16_t port) noexcept
+        static Address fromIPv4(uint32_t be32, uint16_t port) noexcept
         {
-            ProxyAddress addr;
+            Address addr;
             addr.type = AddressType::IPV4;
             addr.ipv4_.s_addr = be32;
             addr.port = port;
@@ -289,9 +362,9 @@ namespace mynet::handler
         /**
          * @brief 从 IPv4 文本和端口构造
          */
-        static std::optional<ProxyAddress> fromIPv4String(std::string_view ipStr, uint16_t port) noexcept
+        static std::optional<Address> fromIPv4String(std::string_view ipStr, uint16_t port) noexcept
         {
-            ProxyAddress addr;
+            Address addr;
             addr.type = AddressType::IPV4;
             addr.port = port;
             std::string tmp(ipStr);
@@ -306,9 +379,9 @@ namespace mynet::handler
         /**
          * @brief 从域名与端口构造
          */
-        static ProxyAddress fromDomain(std::string_view domain, uint16_t port)
+        static Address fromDomain(std::string_view domain, uint16_t port)
         {
-            ProxyAddress addr;
+            Address addr;
             addr.type = AddressType::DOMAIN;
             addr.host = domain;
             addr.port = port;
@@ -318,9 +391,9 @@ namespace mynet::handler
         /**
          * @brief 从 IPv6 16字节网络字节序构造
          */
-        static ProxyAddress fromIPv6(const uint8_t *be128, uint16_t port) noexcept
+        static Address fromIPv6(const uint8_t *be128, uint16_t port) noexcept
         {
-            ProxyAddress addr;
+            Address addr;
             addr.type = AddressType::IPV6;
             std::memcpy(&addr.ipv6_, be128, 16);
             addr.port = port;
@@ -345,7 +418,7 @@ namespace mynet::handler
          * @param consumed 成功时回填实际消费的字节数
          * @return std::optional<ProxyAddress> 成功返回地址，缓冲区不足或非法返回 nullopt
          */
-        static std::optional<ProxyAddress> decodeSocks5(std::span<const uint8_t> bytes, size_t &consumed)
+        static std::optional<Address> decodeSocks5(std::span<const uint8_t> bytes, size_t &consumed)
         {
             if (bytes.empty())
             {
@@ -466,7 +539,7 @@ namespace mynet::handler
         /**
          * @brief 从主机名/IP字符串与端口自适应构造
          */
-        static ProxyAddress fromHostPort(std::string_view hostStr, uint16_t port)
+        static Address fromHostPort(std::string_view hostStr, uint16_t port)
         {
             if (hostStr.empty())
             {
@@ -508,7 +581,7 @@ namespace mynet::handler
          * @param port 预先解析到的端口
          * @param consumed 成功时回填地址占用的字节数
          */
-        static std::optional<ProxyAddress> decodeVlessAddress(uint8_t atyp, std::span<const uint8_t> bytes,
+        static std::optional<Address> decodeVlessAddress(uint8_t atyp, std::span<const uint8_t> bytes,
                                                               uint16_t port, size_t &consumed)
         {
             switch (atyp)
@@ -590,7 +663,7 @@ namespace mynet::handler
         /**
          * @brief 从 UoT 格式二进制解析目标地址：[ATYP (0x00=IPv4, 0x01=IPv6, 0x02=Domain)][Addr][Port 2B BE]
          */
-        static std::optional<ProxyAddress> decodeUot(std::span<const uint8_t> bytes, size_t &consumed)
+        static std::optional<Address> decodeUot(std::span<const uint8_t> bytes, size_t &consumed)
         {
             if (bytes.empty())
             {
@@ -680,80 +753,7 @@ namespace mynet::handler
             out.push_back(static_cast<uint8_t>(port & 0xFF));
         }
 
-        /**
-         * @brief 从已连接套接字提取透明代理原始目的地址 (Linux Netfilter SO_ORIGINAL_DST)
-         *
-         * @param fd 套接字描述符
-         * @return std::optional<ProxyAddress> 提取成功返回目的地址，未重定向或失败返回 nullopt
-         */
-        static std::optional<ProxyAddress> fromOriginalDst(int fd) noexcept
-        {
-            if (fd < 0)
-            {
-                return std::nullopt;
-            }
-
-            sockaddr_in sin{};
-            socklen_t slen = sizeof(sin);
-            if (::getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &sin, &slen) == 0 && sin.sin_family == AF_INET)
-            {
-                const uint16_t port = ntohs(sin.sin_port);
-                return fromIPv4(sin.sin_addr.s_addr, port);
-            }
-
-            sockaddr_in6 sin6{};
-            socklen_t slen6 = sizeof(sin6);
-            if (::getsockopt(fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST, &sin6, &slen6) == 0 && sin6.sin6_family == AF_INET6)
-            {
-                const uint16_t port = ntohs(sin6.sin6_port);
-                return fromIPv6(reinterpret_cast<const uint8_t *>(&sin6.sin6_addr), port);
-            }
-
-            return std::nullopt;
-        }
-
-        /**
-         * @brief 从已连接套接字提取 Linux TProxy 原始目的地址 (getsockname 或 SO_ORIGINAL_DST 回落)
-         */
-        static std::optional<ProxyAddress> fromTProxyDst(int fd) noexcept
-        {
-            if (fd < 0)
-            {
-                return std::nullopt;
-            }
-
-            sockaddr_storage ss{};
-            socklen_t slen = sizeof(ss);
-            if (::getsockname(fd, reinterpret_cast<sockaddr *>(&ss), &slen) == 0)
-            {
-                if (ss.ss_family == AF_INET)
-                {
-                    const auto *sin = reinterpret_cast<const sockaddr_in *>(&ss);
-                    if (sin->sin_addr.s_addr != INADDR_ANY)
-                    {
-                        return fromIPv4(sin->sin_addr.s_addr, ntohs(sin->sin_port));
-                    }
-                }
-                else if (ss.ss_family == AF_INET6)
-                {
-                    const auto *sin6 = reinterpret_cast<const sockaddr_in6 *>(&ss);
-                    if (!IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr))
-                    {
-                        return fromIPv6(reinterpret_cast<const uint8_t *>(&sin6->sin6_addr), ntohs(sin6->sin6_port));
-                    }
-                }
-            }
-
-            return fromOriginalDst(fd);
-        }
     };
-
-} // namespace mynet::handler
-
-namespace mynet
-{
-    using MacAddress = handler::MacAddress;
-    using ProxyAddress = handler::ProxyAddress;
 
     /**
      * @brief 格式化 IPv4 对端套接字地址文本 ("192.0.2.7:5353")
@@ -770,9 +770,5 @@ namespace mynet
         }
         return std::string(host) + ":" + std::to_string(::ntohs(peer.sin_port));
     }
-} // namespace mynet
 
-namespace mynet::handler
-{
-    using mynet::datagramPeerText;
-} // namespace mynet::handler
+} // namespace mynet

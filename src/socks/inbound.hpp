@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../http/http.hpp"
-#include "../inboundManager.hpp"
+#include "../acceptorManager.hpp"
 #include "socks.hpp"
 #include "socks5.hpp"
 #include <memory>
@@ -54,7 +54,6 @@ namespace mynet
         }
     };
 
-    using InboundSocks5 = AcceptorSocks5;
 
     namespace handler
     {
@@ -172,6 +171,5 @@ namespace mynet
         }
     };
 
-    using InboundMixed = AcceptorMixed;
 
 } // namespace mynet

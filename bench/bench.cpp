@@ -234,13 +234,13 @@ namespace
     void benchObjectPool()
     {
         constexpr size_t kSlots = 128;
-        ObjectPool<HandlerConnection> pool;
+        ObjectPool<Handler> pool;
         if (!pool.init(kSlots))
         {
             std::fprintf(stderr, "bench: pool init failed\n");
             std::exit(1);
         }
-        std::vector<HandlerConnection *> held(kSlots, nullptr);
+        std::vector<Handler *> held(kSlots, nullptr);
         const Sample sample = run(
             [&](size_t iterations)
             {
@@ -265,7 +265,7 @@ namespace
 
     void benchHandlerQueue()
     {
-        class EchoBenchHandler : public HandlerConnection
+        class EchoBenchHandler : public Handler
         {
         public:
             void handle()
@@ -293,7 +293,7 @@ namespace
                 }
                 g_sink += sink;
             });
-        report("HandlerConnection::pushResponse+takeResponse (1KiB)", pushTake, static_cast<double>(1 << 10));
+        report("Handler::pushResponse+takeResponse (1KiB)", pushTake, static_cast<double>(1 << 10));
 
         const Sample echo = run(
             [&](size_t iterations)
@@ -314,7 +314,7 @@ namespace
 
     void benchHttp2RoundTrip()
     {
-        class NoopMux : public HandlerHttp2<HandlerConnection>
+        class NoopMux : public HandlerHttp2<Handler>
         {
         };
         constexpr size_t kStreams = 64;

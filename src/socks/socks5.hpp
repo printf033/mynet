@@ -67,7 +67,7 @@ namespace mynet::handler
      *
      * 派生自 HandlerInboundConnectionBase，满足 HandlerConstraint 与 MandatoryMethodConnection。
      */
-    class HandlerInboundSocks5 : public HandlerInboundConnectionBase
+    class HandlerInboundSocks5 : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(std::string_view username, std::string_view password)>;
@@ -104,7 +104,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             socks5Stage_ = Socks5Stage::METHOD_SELECT;
             selectedMethod_ = socks5::kMethodNoAcceptable;
         }
@@ -146,7 +146,7 @@ namespace mynet::handler
          *
          * 格式：VER(0x05) | REP | RSV(0x00) | ATYP(0x01) | BND.ADDR(0.0.0.0) | BND.PORT(0)
          */
-        void sendReply(uint8_t replyCode, const ProxyAddress *bindAddr = nullptr)
+        void sendReply(uint8_t replyCode, const Address *bindAddr = nullptr)
         {
             std::vector<uint8_t> frame;
             frame.reserve(32);
@@ -354,7 +354,7 @@ namespace mynet::handler
 
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + 3, avail - 3);
-            auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
+            auto target = Address::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
                 return false;
@@ -396,7 +396,7 @@ namespace mynet::handler
      *
      * 自动处理与上游 SOCKS5 代理服务器的握手与 CONNECT 建连指令。
      */
-    class HandlerOutboundSocks5 : public HandlerOutboundConnectionBase
+    class HandlerOutboundSocks5 : public HandlerOutbound
     {
     private:
         enum class Step : uint8_t
@@ -410,14 +410,14 @@ namespace mynet::handler
 
     public:
         HandlerOutboundSocks5() noexcept = default;
-        explicit HandlerOutboundSocks5(const ProxyAddress &target) noexcept
-            : HandlerOutboundConnectionBase(target)
+        explicit HandlerOutboundSocks5(const Address &target) noexcept
+            : HandlerOutbound(target)
         {
         }
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             step_ = Step::SEND_GREETING;
         }
 
@@ -473,7 +473,7 @@ namespace mynet::handler
 
                 size_t consumed = 0;
                 auto boundAddr =
-                    ProxyAddress::decodeSocks5(std::span<const uint8_t>(data + 3, requestBytes() - 3), consumed);
+                    Address::decodeSocks5(std::span<const uint8_t>(data + 3, requestBytes() - 3), consumed);
                 if (!boundAddr.has_value())
                 {
                     return; // 数据尚不足

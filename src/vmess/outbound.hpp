@@ -6,7 +6,7 @@
  */
 
 #include "../connection.hpp"
-#include "../outboundManager.hpp"
+#include "../dialerManager.hpp"
 #include "vmess.hpp"
 #include <cstdint>
 #include <string>
@@ -39,17 +39,17 @@ namespace mynet
         [[nodiscard]] std::string_view uuid() const noexcept { return uuid_; }
         [[nodiscard]] std::string_view security() const noexcept { return security_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundVmess>(serverHost_, serverPort_, target, uuid_, security_);
+            return dialForwarderHelper<handler::HandlerOutboundVmess>(serverHost_, serverPort_, target, ctx, uuid_,
+                                                                      security_);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &) override
+        Result<int> dialDatagram(const Address &) override
         {
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundVmess = DialerVmess;
 
 } // namespace mynet

@@ -17,8 +17,8 @@
 using namespace mynet;
 
 // 入口头文件的转发必须与实现指向同一实体，且默认模板实参可用（HandlerHttp2<>）。
-static_assert(std::same_as<mynet::HandlerHttp2<HandlerConnection>, mynet::http::v2::HandlerHttp2<HandlerConnection>>);
-static_assert(std::same_as<HandlerHttp2<>, HandlerHttp2<HandlerConnection>>);
+static_assert(std::same_as<mynet::HandlerHttp2<Handler>, mynet::http::v2::HandlerHttp2<Handler>>);
+static_assert(std::same_as<HandlerHttp2<>, HandlerHttp2<Handler>>);
 
 namespace
 {
@@ -59,7 +59,7 @@ namespace
                (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
     }
 
-    class EchoTestHandler : public HandlerConnection
+    class EchoTestHandler : public Handler
     {
     public:
         void handle()
@@ -75,7 +75,7 @@ namespace
 
     // 记录上层协议前端可重写的钩子函数，
     // 以便测试能针对通知上层的事件进行断言，而非侵入内部实现。
-    class TwoPartHandler : public HandlerConnection
+    class TwoPartHandler : public Handler
     {
     public:
         void handle()
@@ -133,11 +133,11 @@ namespace
 
     // 用于验证 initialWindowSize 配置真的落到协议状态上：
     // SETTINGS 宣告、连接级 WINDOW_UPDATE 抬升、流级接收窗口初值。
-    class WindowMux : public HandlerHttp2<HandlerConnection>
+    class WindowMux : public HandlerHttp2<Handler>
     {
     public:
-        using HandlerHttp2<HandlerConnection>::connRecvWindow_;
-        using HandlerHttp2<HandlerConnection>::stream;
+        using HandlerHttp2<Handler>::connRecvWindow_;
+        using HandlerHttp2<Handler>::stream;
 
         void push(const Frame &frame)
         {
@@ -1252,7 +1252,7 @@ TEST(HandlerHttp2, GoawayClosesStreamsAboveLastStreamId)
 
 // handle() 一次性产出 128KiB 响应：超出对端默认发送窗口（65535），
 // 迫使出站数据驻留在流槽位（pending / handler 队列）中，模拟慢读对端。
-class BigReplyHandler : public HandlerConnection
+class BigReplyHandler : public Handler
 {
 public:
     void handle()
@@ -1641,7 +1641,7 @@ TEST(HandlerHttp2, SmallInitialWindowDoesNotRejectCompliantPeerDataFrames)
 namespace
 {
     // 不自动回显的流处理器：请求体留在 RequestBuffer 中由 onStreamEnd 统一响应。
-    class QuietStream : public HandlerConnection
+    class QuietStream : public Handler
     {
     public:
         void handle() noexcept {}
@@ -1946,7 +1946,7 @@ TEST(HandlerHttp2, SmallAdvertisedWindowStillGrantsCredit)
 }
 
 // 2 MiB 响应：足以让连续 WINDOW_UPDATE 每次都推进出站发送。
-class LargeReplyHandler : public HandlerConnection
+class LargeReplyHandler : public Handler
 {
 public:
     void handle()
@@ -2239,7 +2239,7 @@ TEST(HandlerHttp2, ASecondHeadersMustEndTheStreamAsTrailers)
 
 TEST(HandlerHttp2, TrailersEndTheStreamWithoutLookingLikeASecondRequest)
 {
-    class TrailerMux : public HandlerHttp2<HandlerConnection>
+    class TrailerMux : public HandlerHttp2<Handler>
     {
     public:
         size_t requests = 0;

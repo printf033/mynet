@@ -16,7 +16,7 @@ namespace mynet::handler
     /**
      * @brief 广义代理协议：拦截阻断入站处理器 (Block Inbound Proxy Handler)
      */
-    class HandlerInboundBlock : public HandlerInboundConnectionBase
+    class HandlerInboundBlock : public HandlerInbound
     {
     public:
         [[nodiscard]] bool canSplice() const noexcept override { return false; }
@@ -36,7 +36,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             setCloseAfterResponse(true);
             setStage(InboundStage::ERROR);
         }
@@ -54,7 +54,7 @@ namespace mynet::handler
     /**
      * @brief 广义代理协议：拦截阻断出站处理器 (Block Outbound Proxy Handler)
      */
-    class HandlerOutboundBlock : public HandlerOutboundConnectionBase
+    class HandlerOutboundBlock : public HandlerOutbound
     {
     public:
         [[nodiscard]] bool canSplice() const noexcept override { return false; }
@@ -67,7 +67,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             setCloseAfterResponse(true);
             setStage(OutboundStage::ERROR);
         }

@@ -103,36 +103,36 @@ TEST(RouterTest, DomainRules)
     router.addRule(RouteRule::to("block").domainKeyword("adservice"));
 
     RouteContext ctx1;
-    ctx1.target = ProxyAddress::fromDomain("example.com", 80);
+    ctx1.target = Address::fromDomain("example.com", 80);
     EXPECT_EQ(router.match(ctx1), "direct");
 
     // "sub.example.com" 不精确匹配 example.com，且无后缀规则，回落 default
     RouteContext ctxSub;
-    ctxSub.target = ProxyAddress::fromDomain("sub.example.com", 80);
+    ctxSub.target = Address::fromDomain("sub.example.com", 80);
     EXPECT_EQ(router.match(ctxSub), "direct");
 
     // "google.com" 与 "mail.google.com" 命中后缀规则 -> proxy
     RouteContext ctxGoogle;
-    ctxGoogle.target = ProxyAddress::fromDomain("google.com", 443);
+    ctxGoogle.target = Address::fromDomain("google.com", 443);
     EXPECT_EQ(router.match(ctxGoogle), "proxy");
 
     RouteContext ctxMailGoogle;
-    ctxMailGoogle.target = ProxyAddress::fromDomain("mail.google.com", 443);
+    ctxMailGoogle.target = Address::fromDomain("mail.google.com", 443);
     EXPECT_EQ(router.match(ctxMailGoogle), "proxy");
 
     // "mygoogle.com" 不是 ".google.com" 子域，不应命中后缀规则
     RouteContext ctxMyGoogle;
-    ctxMyGoogle.target = ProxyAddress::fromDomain("mygoogle.com", 443);
+    ctxMyGoogle.target = Address::fromDomain("mygoogle.com", 443);
     EXPECT_EQ(router.match(ctxMyGoogle), "direct");
 
     // 关键字匹配
     RouteContext ctxAd;
-    ctxAd.target = ProxyAddress::fromDomain("api.adservice.traffic.net", 80);
+    ctxAd.target = Address::fromDomain("api.adservice.traffic.net", 80);
     EXPECT_EQ(router.match(ctxAd), "block");
 
     // 大小写不敏感测试
     RouteContext ctxCase;
-    ctxCase.target = ProxyAddress::fromDomain("WWW.GOOGLE.COM", 443);
+    ctxCase.target = Address::fromDomain("WWW.GOOGLE.COM", 443);
     EXPECT_EQ(router.match(ctxCase), "proxy");
 }
 
@@ -154,7 +154,7 @@ TEST(RouterTest, SniffingAssistedRoute)
     RouteContext ctxTls;
     in_addr netflixIp{};
     ::inet_pton(AF_INET, "198.51.100.2", &netflixIp);
-    ctxTls.target = ProxyAddress::fromIPv4(netflixIp.s_addr, 443);
+    ctxTls.target = Address::fromIPv4(netflixIp.s_addr, 443);
     ctxTls.sniffedDomain = "www.netflix.com";
     ctxTls.sniffedProtocol = ProtocolType::TLS;
 
@@ -164,7 +164,7 @@ TEST(RouterTest, SniffingAssistedRoute)
     RouteContext ctxBt;
     in_addr btIp{};
     ::inet_pton(AF_INET, "203.0.113.5", &btIp);
-    ctxBt.target = ProxyAddress::fromIPv4(btIp.s_addr, 6881);
+    ctxBt.target = Address::fromIPv4(btIp.s_addr, 6881);
     ctxBt.sniffedProtocol = ProtocolType::BITTORRENT;
 
     EXPECT_EQ(router.match(ctxBt), "block");
@@ -202,7 +202,7 @@ TEST(RouterTest, CombinedAndInboundFilters)
     RouteContext ctxLan;
     in_addr lanIp{};
     ::inet_pton(AF_INET, "192.168.1.10", &lanIp);
-    ctxLan.target = ProxyAddress::fromIPv4(lanIp.s_addr, 80);
+    ctxLan.target = Address::fromIPv4(lanIp.s_addr, 80);
     EXPECT_EQ(router.match(ctxLan), "direct");
 }
 
@@ -221,7 +221,7 @@ TEST(RouterTest, HitCounterAndPriority)
     EXPECT_EQ(router.ruleCount(), 2u);
 
     RouteContext ctx;
-    ctx.target = ProxyAddress::fromDomain("test.example.com", 80);
+    ctx.target = Address::fromDomain("test.example.com", 80);
 
     for (int i = 0; i < 5; ++i)
     {
@@ -271,7 +271,7 @@ TEST(RouterTest, MustRuleLocking)
     RouteContext ctx;
     in_addr dnsIp{};
     ::inet_pton(AF_INET, "223.5.5.5", &dnsIp);
-    ctx.target = ProxyAddress::fromIPv4(dnsIp.s_addr, 53);
+    ctx.target = Address::fromIPv4(dnsIp.s_addr, 53);
 
     auto dec = router.matchWithDecision(ctx);
     EXPECT_EQ(dec.outboundTag, "direct");
@@ -280,7 +280,7 @@ TEST(RouterTest, MustRuleLocking)
     // 针对普通 8.8.8.8:53，未命中 must 规则，命中规则 2，不锁定
     in_addr googleDns{};
     ::inet_pton(AF_INET, "8.8.8.8", &googleDns);
-    ctx.target = ProxyAddress::fromIPv4(googleDns.s_addr, 53);
+    ctx.target = Address::fromIPv4(googleDns.s_addr, 53);
 
     auto dec2 = router.matchWithDecision(ctx);
     EXPECT_EQ(dec2.outboundTag, "proxy");

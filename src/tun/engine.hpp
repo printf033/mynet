@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file tun.hpp
+ * @file tun/engine.hpp
  * @brief Linux TUN 虚拟网卡用户态 L3/L4 报文转发引擎 (TunEngine)。
  *
  * 核心架构与职责：
@@ -13,10 +13,10 @@
  * 5. 零异常 (-fno-exceptions)，完备 RAII 资源回收与空闲会话超时排空。
  */
 
-#include "tunPacket.hpp"
-#include "address.hpp"
-#include "config/log.hpp"
-#include "sniffer.hpp"
+#include "packet.hpp"
+#include "../address.hpp"
+#include "../config/log.hpp"
+#include "../sniffer.hpp"
 #include <atomic>
 #include <cerrno>
 #include <chrono>

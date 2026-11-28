@@ -20,8 +20,9 @@ namespace mynet
         {
         }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
+            (void)ctx;
             OutboundDialResult res;
             res.fd = -1;
             res.handler = std::make_unique<handler::HandlerOutboundBlock>();
@@ -31,13 +32,12 @@ namespace mynet
             return res;
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundBlock = DialerBlock;
 
 } // namespace mynet

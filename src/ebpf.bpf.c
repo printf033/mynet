@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /**
- * @file mynet_kernel.bpf.c
+ * @file ebpf.bpf.c
  * @brief 真实 Linux 内核态 eBPF TC 分流、SOCKHASH 流卸载、双 Epoch 热重载、旁路由非对称 MAC 改写与 cgroup 感知驱动
  */
 

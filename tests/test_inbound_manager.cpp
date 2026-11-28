@@ -1,4 +1,4 @@
-#include "inboundManager.hpp"
+#include "acceptorManager.hpp"
 #include "reactor.hpp"
 #if defined(MYNET_ENABLE_URING)
 #include "proactor.hpp"
@@ -23,27 +23,27 @@ TEST(InboundManagerTest, RegistryAndTypes)
     AcceptorManager mgr;
     EXPECT_EQ(mgr.size(), 0u);
 
-    auto vless = std::make_shared<InboundVless>("vless-in", "127.0.0.1", 1080, "de04add9-5c1a-4b08-8e65-244e45cf5483");
+    auto vless = std::make_shared<AcceptorVless>("vless-in", "127.0.0.1", 1080, "de04add9-5c1a-4b08-8e65-244e45cf5483");
     EXPECT_EQ(vless->tag(), "vless-in");
     EXPECT_EQ(vless->type(), "vless");
     EXPECT_EQ(vless->host(), "127.0.0.1");
     EXPECT_EQ(vless->port(), 1080);
     EXPECT_TRUE(vless->isSniffingEnabled());
 
-    auto socks = std::make_shared<InboundSocks5>("socks-in", "127.0.0.1", 1081, "admin", "pass123");
+    auto socks = std::make_shared<AcceptorSocks5>("socks-in", "127.0.0.1", 1081, "admin", "pass123");
     EXPECT_EQ(socks->tag(), "socks-in");
     EXPECT_EQ(socks->type(), "socks5");
 
-    auto http = std::make_shared<InboundHttp>("http-in", "127.0.0.1", 8080);
+    auto http = std::make_shared<AcceptorHttp>("http-in", "127.0.0.1", 8080);
     EXPECT_EQ(http->type(), "http");
 
-    auto trojan = std::make_shared<InboundTrojan>("trojan-in", "0.0.0.0", 443, "trojan_secret");
+    auto trojan = std::make_shared<AcceptorTrojan>("trojan-in", "0.0.0.0", 443, "trojan_secret");
     EXPECT_EQ(trojan->type(), "trojan");
 
-    auto direct = std::make_shared<InboundDirect>("direct-in", "127.0.0.1", 9000);
+    auto direct = std::make_shared<AcceptorDirect>("direct-in", "127.0.0.1", 9000);
     EXPECT_EQ(direct->type(), "direct");
 
-    auto ss = std::make_shared<InboundShadowsocks>("ss-in", "127.0.0.1", 8388, "aes-128-gcm", "password");
+    auto ss = std::make_shared<AcceptorShadowsocks>("ss-in", "127.0.0.1", 8388, "aes-128-gcm", "password");
     EXPECT_EQ(ss->tag(), "ss-in");
     EXPECT_EQ(ss->type(), "shadowsocks");
 
@@ -76,29 +76,29 @@ TEST(InboundManagerTest, RegistryAndTypes)
 
 TEST(InboundManagerTest, HandlerFactoryProduction)
 {
-    InboundSocks5 socks("s5", "127.0.0.1", 1080, "admin", "secret");
+    AcceptorSocks5 socks("s5", "127.0.0.1", 1080, "admin", "secret");
     auto hSocks = socks.createHandler();
     ASSERT_NE(hSocks, nullptr);
     EXPECT_EQ(hSocks->stage(), InboundStage::HANDSHAKE);
 
-    InboundVless vless("vless", "127.0.0.1", 1080, "de04add9-5c1a-4b08-8e65-244e45cf5483");
+    AcceptorVless vless("vless", "127.0.0.1", 1080, "de04add9-5c1a-4b08-8e65-244e45cf5483");
     auto hVless = vless.createHandler();
     ASSERT_NE(hVless, nullptr);
 
-    InboundHttp http("http", "127.0.0.1", 8080);
+    AcceptorHttp http("http", "127.0.0.1", 8080);
     auto hHttp = http.createHandler();
     ASSERT_NE(hHttp, nullptr);
 
-    InboundTrojan trojan("trojan", "127.0.0.1", 443, "pwd");
+    AcceptorTrojan trojan("trojan", "127.0.0.1", 443, "pwd");
     auto hTrojan = trojan.createHandler();
     ASSERT_NE(hTrojan, nullptr);
 
-    InboundDirect direct("direct", "127.0.0.1", 9000);
+    AcceptorDirect direct("direct", "127.0.0.1", 9000);
     auto hDirect = direct.createHandler();
     ASSERT_NE(hDirect, nullptr);
     EXPECT_EQ(hDirect->stage(), InboundStage::STREAMING);
 
-    InboundShadowsocks ssIn("ss", "127.0.0.1", 8388, "aes-128-gcm", "pass");
+    AcceptorShadowsocks ssIn("ss", "127.0.0.1", 8388, "aes-128-gcm", "pass");
     auto hSs = ssIn.createHandler();
     ASSERT_NE(hSs, nullptr);
     EXPECT_EQ(hSs->stage(), InboundStage::HANDSHAKE);
@@ -111,7 +111,7 @@ TEST(InboundManagerTest, HandlerFactoryProduction)
 TEST(InboundManagerTest, ListenAndAcceptOne)
 {
     // 监听在 127.0.0.1 端口 0 (动态空闲端口)
-    InboundSocks5 inbound("socks-ephemeral", "127.0.0.1", 0);
+    AcceptorSocks5 inbound("socks-ephemeral", "127.0.0.1", 0);
     EXPECT_FALSE(inbound.isRunning());
     EXPECT_EQ(inbound.listenFd(), -1);
 
@@ -165,8 +165,8 @@ TEST(InboundManagerTest, BatchStartAllAndStopAll)
 {
     AcceptorManager mgr;
 
-    auto in1 = std::make_shared<InboundSocks5>("in-1", "127.0.0.1", 0);
-    auto in2 = std::make_shared<InboundHttp>("in-2", "127.0.0.1", 0);
+    auto in1 = std::make_shared<AcceptorSocks5>("in-1", "127.0.0.1", 0);
+    auto in2 = std::make_shared<AcceptorHttp>("in-2", "127.0.0.1", 0);
 
     mgr.registerAcceptor(in1);
     mgr.registerAcceptor(in2);
@@ -195,7 +195,7 @@ TEST(InboundManagerTest, BatchStartAllAndStopAll)
 
 TEST(InboundManagerTest, ReactorDrivesAcceptor)
 {
-    using Server = Reactor<AcceptorBase<HandlerConnection>>;
+    using Server = Reactor<AcceptorBase<Handler>>;
     Server reactor;
 
     auto listenRes = reactor.listenTcp("127.0.0.1", 0);
@@ -249,7 +249,7 @@ TEST(InboundManagerTest, ReactorDrivesAcceptor)
 
 TEST(InboundManagerTest, ProactorDrivesAcceptor)
 {
-    using Server = Proactor<AcceptorBase<HandlerConnection>>;
+    using Server = Proactor<AcceptorBase<Handler>>;
     Server proactor;
 
     auto listenRes = proactor.listenTcp("127.0.0.1", 0);
@@ -264,7 +264,7 @@ TEST(InboundManagerTest, ProactorDrivesAcceptor)
 
 TEST(InboundManagerTest, ProactorServeTcpAcceptAndStop)
 {
-    using Server = Proactor<AcceptorBase<HandlerConnection>>;
+    using Server = Proactor<AcceptorBase<Handler>>;
     Server proactor;
 
     ASSERT_TRUE(proactor.listenTcp("127.0.0.1", 0).has_value());

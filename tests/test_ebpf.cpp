@@ -22,7 +22,7 @@ TEST(EbpfTest, LifecycleAndConfig)
                    .enableLpmGeoIp = true,
                    .dropQuic = true};
 
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
     EXPECT_EQ(mgr.config().wanInterface, "eth1");
     EXPECT_EQ(mgr.config().tproxyPort, 7893);
     EXPECT_EQ(mgr.config().fwmark, 0x4321);
@@ -48,7 +48,7 @@ TEST(EbpfTest, LifecycleAndConfig)
 
 TEST(EbpfTest, LpmTriePrefixMatching)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     // 注入自定义 CIDR 规则
     EXPECT_TRUE(mgr.addLpmCidr("198.51.100.0/24", Action::DIRECT));
@@ -86,7 +86,7 @@ TEST(EbpfTest, LpmTriePrefixMatching)
 
 TEST(EbpfTest, DirectIpFastPath)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     in_addr targetIp{};
     ::inet_pton(AF_INET, "1.1.1.1", &targetIp);
@@ -116,7 +116,7 @@ TEST(EbpfTest, DropQuicPolicy)
 {
     EbpfConfig cfg{};
     cfg.dropQuic = true;
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
 
     PacketMetadata quicPkt{};
     ::inet_pton(AF_INET, "142.250.190.46", &quicPkt.dstIp); // Google
@@ -143,7 +143,7 @@ TEST(EbpfTest, DropQuicPolicy)
 
 TEST(EbpfTest, GeoIpRuleSync)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
     GeoIpMatcher geo;
 
     mgr.syncGeoIp(geo, "cn", Action::DIRECT);
@@ -192,7 +192,7 @@ TEST(EbpfTest, CoreEbpfIntegration)
     EXPECT_EQ(mgr->classify(pkt), Action::BLOCK);
 
     // 3. 用户态 Core::dispatch 由单一中枢 Router 决断，优雅返回 BLOCKED
-    auto target = handler::ProxyAddress::fromIPv4(pkt.dstIp.s_addr, 80);
+    auto target = Address::fromIPv4(pkt.dstIp.s_addr, 80);
     handler::HandlerInboundDirect inbound(target);
 
     auto res = core.dispatch(inbound, -1, "test-ebpf-in");
@@ -206,11 +206,11 @@ TEST(EbpfTest, CoreEbpfIntegration)
 
 TEST(EbpfTest, SockmapLifecycleAndNegativeValidation)
 {
-    bool supported = EbpfManager::isSockmapSupported();
+    bool supported = EbpfEngine::isSockmapSupported();
     (void)supported;
 
-    EXPECT_FALSE(EbpfManager::attachPair(-1, 0, 1));
-    EXPECT_FALSE(EbpfManager::detachPair(-1, 0, 1));
+    EXPECT_FALSE(EbpfEngine::attachPair(-1, 0, 1));
+    EXPECT_FALSE(EbpfEngine::detachPair(-1, 0, 1));
 }
 
 // =============================================================================
@@ -255,7 +255,7 @@ TEST(EbpfTest, ForwarderAdaptiveLadder)
 
 TEST(EbpfTest, Ipv6LpmPrefixMatching)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     EXPECT_TRUE(mgr.addLpmCidrIpv6("2001:db8::/32", Action::DIRECT));
     EXPECT_TRUE(mgr.addLpmCidrIpv6("2001:db8:abcd::/48", Action::BLOCK));
@@ -286,7 +286,7 @@ TEST(EbpfTest, Ipv6LpmPrefixMatching)
 
 TEST(EbpfTest, FlowCacheAccelerationAndInvalidation)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
     EXPECT_TRUE(mgr.addLpmCidr("192.0.2.0/24", Action::DIRECT));
 
     PacketMetadata pkt{};
@@ -391,7 +391,7 @@ TEST(EbpfTest, DoubleEpochZeroDowntimeHotReload)
 {
     EbpfConfig cfg{};
     cfg.enableDoubleEpoch = true;
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
 
     // 初始活跃槽位应为 0
     EXPECT_EQ(mgr.activeEpoch(), 0);
@@ -461,7 +461,7 @@ TEST(EbpfTest, AsymmetricGatewayMacRewrite)
     cfg.asymmetricGateway = true;
     cfg.gatewayMac = "00:11:22:33:44:55";
     cfg.wanMac = "aa:bb:cc:dd:ee:ff";
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
 
     mgr.addLpmCidr("192.0.2.0/24", Action::DIRECT);
     mgr.addLpmCidr("203.0.113.0/24", Action::BLOCK);
@@ -520,7 +520,7 @@ TEST(EbpfTest, BpfMapPinningLifecycle)
 
 TEST(EbpfTest, UdpConnStateTrackingAndJanitorSweep)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     TuplesKey key1{.saddr = 0x0100007f, // 127.0.0.1
                    .daddr = 0x01010101, // 1.1.1.1
@@ -569,7 +569,7 @@ TEST(EbpfTest, UnconnectedUdpProcessAttribution)
 {
     EbpfConfig cfg{};
     cfg.enableUnconnectedUdpAttribution = true;
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
 
     const uint64_t mockCookie = 0xdeadbeef1234ULL;
     const uint32_t mockPid = 9876;
@@ -596,7 +596,7 @@ TEST(EbpfTest, InKernelDirectSocketAssignment)
     EbpfConfig cfg{};
     cfg.enableSkAssign = true;
     cfg.fwmark = 0x100;
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
 
     int spTcp[2] = {-1, -1};
     int spUdp[2] = {-1, -1};
@@ -619,13 +619,13 @@ TEST(EbpfTest, InKernelDirectSocketAssignment)
     pktTcp.protocol = IPPROTO_TCP;
     pktTcp.isIpv6 = false;
     auto resTcp = mgr.evaluateProxyDispatch(pktTcp);
-    EXPECT_EQ(resTcp.mode, EbpfManager::ProxyDispatchResult::Mode::SK_ASSIGN);
+    EXPECT_EQ(resTcp.mode, EbpfEngine::ProxyDispatchResult::Mode::SK_ASSIGN);
     EXPECT_EQ(resTcp.assignedFd, tcp4Fd);
 
     PacketMetadata pktUdp{};
     pktUdp.protocol = IPPROTO_UDP;
     auto resUdp = mgr.evaluateProxyDispatch(pktUdp);
-    EXPECT_EQ(resUdp.mode, EbpfManager::ProxyDispatchResult::Mode::SK_ASSIGN);
+    EXPECT_EQ(resUdp.mode, EbpfEngine::ProxyDispatchResult::Mode::SK_ASSIGN);
     EXPECT_EQ(resUdp.assignedFd, udpFd);
 
     ::close(spTcp[0]);
@@ -640,7 +640,7 @@ TEST(EbpfTest, InKernelDirectSocketAssignment)
 
 TEST(EbpfTest, NonLinearSkbPullDataSafety)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
     mgr.addLpmCidr("192.0.2.0/24", Action::DIRECT);
 
     // 模拟 64KB 超级聚合大包 (GRO/GSO)
@@ -660,7 +660,7 @@ TEST(EbpfTest, NonLinearSkbPullDataSafety)
 
 TEST(EbpfTest, KernelAdaptiveBlockRateLimiting)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     const uint32_t bucketKey = 1;
     const uint16_t windowMs = 50; // 50毫秒测试窗口
@@ -693,7 +693,7 @@ TEST(EbpfTest, IsolatedVirtualInterfaceRedirect)
     EbpfConfig cfg{};
     cfg.enableSkAssign = false; // 关闭直接套接字指定
     cfg.virtualInterface = "mynet0";
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
 
     PacketMetadata pkt{};
     pkt.protocol = IPPROTO_TCP;
@@ -702,13 +702,13 @@ TEST(EbpfTest, IsolatedVirtualInterfaceRedirect)
     auto res = mgr.evaluateProxyDispatch(pkt);
     if (mgr.virtualIfIndex() > 0)
     {
-        EXPECT_EQ(res.mode, EbpfManager::ProxyDispatchResult::Mode::REDIRECT);
+        EXPECT_EQ(res.mode, EbpfEngine::ProxyDispatchResult::Mode::REDIRECT);
         EXPECT_EQ(res.redirectIfIndex, mgr.virtualIfIndex());
     }
     else
     {
         // 虚拟网卡在测试环境中若不存在，优雅回退至 FWMARK 模式
-        EXPECT_EQ(res.mode, EbpfManager::ProxyDispatchResult::Mode::FWMARK);
+        EXPECT_EQ(res.mode, EbpfEngine::ProxyDispatchResult::Mode::FWMARK);
         EXPECT_EQ(res.fwmark, cfg.fwmark);
     }
 }
@@ -719,7 +719,7 @@ TEST(EbpfTest, IsolatedVirtualInterfaceRedirect)
 
 TEST(EbpfTest, MulticastAndBroadcastDirectImmunity)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     // IPv4 组播 (224.0.0.1, 239.255.255.250 SSDP)
     PacketMetadata ssdpPkt{};
@@ -750,7 +750,7 @@ TEST(EbpfTest, MulticastAndBroadcastDirectImmunity)
 
 TEST(EbpfTest, TcpFlowStateTrackingFastPath)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     TuplesKey tcpKey{.saddr = 0x0100007f, // 127.0.0.1
                      .daddr = 0x02020202, // 2.2.2.2
@@ -782,7 +782,7 @@ TEST(EbpfTest, TcpFlowStateTrackingFastPath)
 
 TEST(EbpfTest, SockmapBacklogFuseOffloadPause)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     TuplesKey flowKey{
         .saddr = 0x0a000001, .daddr = 0x0a000002, .sport = htons(1111), .dport = htons(2222), .proto = IPPROTO_TCP};
@@ -805,7 +805,7 @@ TEST(EbpfTest, SockmapBacklogFuseOffloadPause)
 
 TEST(EbpfTest, OutboundConnectivityHealthSensing)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
 
     const uint32_t outboundId = 5;
     const uint32_t domainTcp = 0;
@@ -841,7 +841,7 @@ TEST(EbpfTest, BridgeSlaveMemberInterfaceDiscovery)
     EXPECT_TRUE(nonExistent.empty());
 
     // 2. 模拟网桥挂载与接口追踪
-    EbpfManager mgr;
+    EbpfEngine mgr;
     mgr.attachTcFilter("lo");
     auto attached = mgr.getAttachedInterfaces();
     ASSERT_FALSE(attached.empty());
@@ -878,7 +878,7 @@ TEST(EbpfTest, SysctlManagerGatewaySafeguards)
     EbpfConfig cfg;
     cfg.lanInterface = "eth0";
     cfg.wanInterface = "eth1";
-    EbpfManager mgr(cfg);
+    EbpfEngine mgr(cfg);
     [[maybe_unused]] bool tuned = mgr.tuneGatewaySysctls();
 }
 
@@ -888,7 +888,7 @@ TEST(EbpfTest, SysctlManagerGatewaySafeguards)
 
 TEST(EbpfTest, DirectTrafficObserverStats)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
     auto initialStats = mgr.getDirectTrafficStats();
     EXPECT_EQ(initialStats.directBytes, 0u);
 
@@ -969,7 +969,7 @@ TEST(EbpfTest, BpfStatsAndMynetEventStructure)
     EXPECT_EQ(sizeof(ev), 32u);
 
     // 验证引擎诊断统计
-    EbpfManager mgr;
+    EbpfEngine mgr;
     mgr.recordBpfStat(0, 10); // MYNET_STAT_DIRECT_PACKETS += 10
     mgr.recordBpfStat(3, 5);  // MYNET_STAT_L3_PACKETS += 5
 
@@ -988,14 +988,14 @@ TEST(EbpfTest, DualRoleSingleNicMode)
     EbpfConfig cfgDualNic;
     cfgDualNic.lanInterface = "eth0";
     cfgDualNic.wanInterface = "eth1";
-    EbpfManager mgrDual(cfgDualNic);
+    EbpfEngine mgrDual(cfgDualNic);
     EXPECT_FALSE(mgrDual.isDualRole());
 
     // 2. 单网卡双角色模式 (WAN == LAN, 典型旁路由/树莓派设备)
     EbpfConfig cfgSingleNic;
     cfgSingleNic.lanInterface = "eth0";
     cfgSingleNic.wanInterface = "eth0";
-    EbpfManager mgrSingle(cfgSingleNic);
+    EbpfEngine mgrSingle(cfgSingleNic);
     EXPECT_TRUE(mgrSingle.isDualRole());
 }
 
@@ -1005,7 +1005,7 @@ TEST(EbpfTest, DualRoleSingleNicMode)
 
 TEST(EbpfTest, RedirectTrackSingleWriterProtection)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
     mgr.setRedirectRebindStaleNs(5'000'000'000ULL); // 5s 判定窗口
 
     TuplesKey key{};
@@ -1070,7 +1070,7 @@ TEST(EbpfTest, DeleteBatchResilient)
 
     // 待删除列表中包含不存在的 key 99 与 100
     std::vector<uint32_t> keysToDelete = {1, 99, 3, 100};
-    size_t deleted = EbpfManager::deleteBatchResilientMock(mockMap, std::span<const uint32_t>(keysToDelete));
+    size_t deleted = EbpfEngine::deleteBatchResilientMock(mockMap, std::span<const uint32_t>(keysToDelete));
 
     EXPECT_EQ(deleted, 2u);
     EXPECT_EQ(mockMap.size(), 1u);
@@ -1085,7 +1085,7 @@ TEST(EbpfTest, DeleteBatchResilient)
 
 TEST(EbpfTest, SweepConnStateNtpClockSkewTolerance)
 {
-    EbpfManager mgr;
+    EbpfEngine mgr;
     const uint64_t nowNs = ebpf::getMonotonicTimeNs();
 
     TuplesKey kNormal{};

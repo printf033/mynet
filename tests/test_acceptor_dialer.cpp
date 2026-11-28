@@ -3,8 +3,8 @@
 #include "core.hpp"
 #include "dialer.hpp"
 #include "http/connection.hpp"
-#include "inboundManager.hpp"
-#include "outboundManager.hpp"
+#include "acceptorManager.hpp"
+#include "dialerManager.hpp"
 #include "reactor.hpp"
 #include <atomic>
 #include <chrono>
@@ -250,7 +250,7 @@ TEST(AcceptorDialerTest, HttpCoreConfiguration)
 
 TEST(AcceptorDialerTest, Http2ProxyHandshake)
 {
-    handler::ProxyAddress target = handler::ProxyAddress::fromDomain("example.com", 443);
+    Address target = Address::fromDomain("example.com", 443);
 
     handler::HandlerOutboundHttp2 outboundClient("admin", "secret", target);
     handler::HandlerInboundHttp2Proxy inboundServer;
@@ -293,7 +293,7 @@ TEST(AcceptorDialerTest, Http2ProxyHandshake)
 
 TEST(AcceptorDialerTest, Http3ProxyHandshake)
 {
-    handler::ProxyAddress target = handler::ProxyAddress::fromDomain("quic.example.org", 8443);
+    Address target = Address::fromDomain("quic.example.org", 8443);
 
     handler::HandlerOutboundHttp3 outboundClient(target);
     handler::HandlerInboundHttp3Proxy inboundServer;
@@ -365,7 +365,7 @@ TEST(AcceptorDialerTest, DialerManagerVirtualSetManagerAndClear)
     mgr.registerDialer(sel);
     EXPECT_TRUE(mgr.has("sel"));
 
-    auto res = sel->dialStream(handler::ProxyAddress::fromHostPort("127.0.0.1", 1));
+    auto res = sel->dialForwarder(Address::fromHostPort("127.0.0.1", 1));
     // 能正确通过 virtual setManager 路由至 direct-sub（无论连接成败都不应返回因 manager_ 为空导致的参数缺失）
     (void)res;
 

@@ -36,7 +36,7 @@ namespace mynet
          * 支持完整的 HTTP 请求与响应解析、Keep-Alive 自动推断、流水线边界识别与自动 400 Bad Request 错误自愈。
          */
         template <HTTP_MODE Mode>
-        class HandlerHttp : public HandlerConnection
+        class HandlerHttp : public Handler
         {
         public:
             HandlerHttp() noexcept { init(); }
@@ -74,10 +74,10 @@ namespace mynet
                 currentValue_.clear();
                 totalHeaderBytes_ = 0;
                 streamedBodyBytes_ = 0;
-                HandlerConnection::reset();
+                Handler::reset();
             }
 
-            void onConnect(int fd) noexcept override { HandlerConnection::onConnect(fd); }
+            void onConnect(int fd) noexcept override { Handler::onConnect(fd); }
 
             /**
              * @brief 开启或关闭流式 Body 零拷贝直通模式

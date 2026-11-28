@@ -89,13 +89,13 @@ static_assert(MandatoryMethodConnection<HandlerInboundBlock>,
 
 namespace
 {
-    void feed(HandlerConnection &h, const std::vector<uint8_t> &bytes)
+    void feed(Handler &h, const std::vector<uint8_t> &bytes)
     {
         [[maybe_unused]] auto _ =
             h.appendRequest(reinterpret_cast<const char *>(bytes.data()), static_cast<ssize_t>(bytes.size()));
     }
 
-    void feed(HandlerConnection &h, std::string_view str)
+    void feed(Handler &h, std::string_view str)
     {
         [[maybe_unused]] auto _ = h.appendRequest(str.data(), static_cast<ssize_t>(str.size()));
     }
@@ -110,7 +110,7 @@ TEST(HandlerSocks4Test, IPv4ConnectSuccess)
     HandlerInboundSocks4 handler;
     bool requestCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             requestCalled = true;
             EXPECT_EQ(cmd, socks4::kCmdConnect);
@@ -142,7 +142,7 @@ TEST(HandlerSocks4Test, Socks4aDomainConnect)
 {
     HandlerInboundSocks4 handler;
     handler.setOnRequest(
-        [](uint8_t cmd, const ProxyAddress &target)
+        [](uint8_t cmd, const Address &target)
         {
             EXPECT_EQ(cmd, socks4::kCmdConnect);
             EXPECT_EQ(target.type, AddressType::DOMAIN);
@@ -228,7 +228,7 @@ TEST(HandlerHttpProxyTest, ConnectTunneling)
     HandlerInboundHttpProxy handler;
     bool requestCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             requestCalled = true;
             EXPECT_EQ(cmd, http_proxy::kCmdConnect);
@@ -254,7 +254,7 @@ TEST(HandlerHttpProxyTest, PlainHttpForwardProxy)
 {
     HandlerInboundHttpProxy handler;
     handler.setOnRequest(
-        [](uint8_t cmd, const ProxyAddress &target)
+        [](uint8_t cmd, const Address &target)
         {
             EXPECT_EQ(cmd, http_proxy::kCmdPlain);
             EXPECT_EQ(target.host, "example.org");
@@ -313,7 +313,7 @@ TEST(HandlerTrojanTest, Sha224KeyHandshake)
     HandlerInboundTrojan handler(pass);
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(cmd, trojan::kCmdConnect);
@@ -330,7 +330,7 @@ TEST(HandlerTrojanTest, Sha224KeyHandshake)
     req.push_back(trojan::kCmdConnect);
 
     // 1.1.1.1:853 -> ATYP(0x01), 1,1,1,1, Port(0x03, 0x55)
-    ProxyAddress target = ProxyAddress::fromIPv4(htonl(0x01010101), 853);
+    Address target = Address::fromIPv4(htonl(0x01010101), 853);
     target.encodeSocks5(req);
 
     req.push_back('\r');
@@ -363,7 +363,7 @@ TEST(HandlerTrojanTest, WrongPasswordRejected)
     req.push_back('\r');
     req.push_back('\n');
     req.push_back(trojan::kCmdConnect);
-    ProxyAddress::fromIPv4(htonl(0x7F000001), 80).encodeSocks5(req);
+    Address::fromIPv4(htonl(0x7F000001), 80).encodeSocks5(req);
     req.push_back('\r');
     req.push_back('\n');
 
@@ -387,7 +387,7 @@ TEST(HandlerVlessTest, UuidConnectHandshake)
     HandlerInboundVless handler(uuidStr);
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(cmd, vless::kCmdTcp);
@@ -443,7 +443,7 @@ TEST(HandlerVmessTest, AuthAndHeaderDecode)
 
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(cmd, vmess::kCmdTcp);
@@ -469,7 +469,7 @@ TEST(HandlerVmessTest, AuthAndHeaderDecode)
     req.push_back(80);
 
     // SOCKS5 目标地址
-    ProxyAddress::fromIPv4(htonl(0x0A000001), 80).encodeSocks5(req);
+    Address::fromIPv4(htonl(0x0A000001), 80).encodeSocks5(req);
 
     feed(handler, req);
     handler.handle();
@@ -487,7 +487,7 @@ TEST(HandlerShadowsocksTest, NoneCipherDirectCodec)
     HandlerInboundShadowsocks handler("none", "");
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t, const ProxyAddress &target)
+        [&](uint8_t, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(target.host, "127.0.0.1");
@@ -495,7 +495,7 @@ TEST(HandlerShadowsocksTest, NoneCipherDirectCodec)
         });
 
     std::vector<uint8_t> req;
-    ProxyAddress::fromIPv4(htonl(0x7F000001), 9000).encodeSocks5(req);
+    Address::fromIPv4(htonl(0x7F000001), 9000).encodeSocks5(req);
     feed(handler, req);
     handler.handle();
 
@@ -510,7 +510,7 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
 
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t, const ProxyAddress &target)
+        [&](uint8_t, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(target.host, "1.1.1.1");
@@ -533,7 +533,7 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
 
     // 4. 目标地址载荷
     std::vector<uint8_t> plainPayload;
-    ProxyAddress::fromIPv4(htonl(0x01010101), 53).encodeSocks5(plainPayload);
+    Address::fromIPv4(htonl(0x01010101), 53).encodeSocks5(plainPayload);
 
     // 5. 加密 2 字节长度块 (len = plainPayload.size())
     std::array<uint8_t, 12> nonce{};
@@ -574,8 +574,8 @@ TEST(HandlerShadowsocksTest, Aes128GcmHandshakeAndDecryption)
 
 TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
 {
-    ProxyAddress detour = ProxyAddress::fromHostPort("127.0.0.1", 8388);
-    ProxyAddress fallback = ProxyAddress::fromHostPort("cloudflare.com", 443);
+    Address detour = Address::fromHostPort("127.0.0.1", 8388);
+    Address fallback = Address::fromHostPort("cloudflare.com", 443);
     std::string pass = "shadowtls-secret";
 
     // 辅助函数：构造带有指定 SessionID 和 SNI 的合法 ClientHello 报文
@@ -651,7 +651,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
         HandlerInboundShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
         bool callbackCalled = false;
         handler.setOnRequest(
-            [&](bool authed, const ProxyAddress &target)
+            [&](bool authed, const Address &target)
             {
                 callbackCalled = true;
                 EXPECT_FALSE(authed); // 未通过认证
@@ -679,7 +679,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
         HandlerInboundShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
         bool callbackCalled = false;
         handler.setOnRequest(
-            [&](bool authed, const ProxyAddress &target)
+            [&](bool authed, const Address &target)
             {
                 callbackCalled = true;
                 EXPECT_TRUE(authed); // 认证通过
@@ -708,7 +708,7 @@ TEST(HandlerShadowTlsTest, ClientHelloSniFallbackAndAuth)
     {
         HandlerInboundShadowTls handler(ShadowTlsVersion::V3, pass, detour, fallback);
         handler.setOnRequest(
-            [&](bool authed, const ProxyAddress &target)
+            [&](bool authed, const Address &target)
             {
                 EXPECT_FALSE(authed);
                 EXPECT_EQ(target.toString(), fallback.toString());
@@ -730,7 +730,7 @@ TEST(HandlerSnellTest, ConnectHandshake)
     HandlerInboundSnell handler(2, "psk123");
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(cmd, snell::kCmdConnect);
@@ -739,7 +739,7 @@ TEST(HandlerSnellTest, ConnectHandshake)
         });
 
     std::vector<uint8_t> req = {2, snell::kCmdConnect};
-    ProxyAddress::fromIPv4(htonl(0x01020304), 80).encodeSocks5(req);
+    Address::fromIPv4(htonl(0x01020304), 80).encodeSocks5(req);
 
     feed(handler, req);
     handler.handle();
@@ -757,7 +757,7 @@ TEST(HandlerHysteria2Test, AuthAndConnectSuccess)
     HandlerInboundHysteria2 handler("mypassword");
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(cmd, hysteria2::kCmdTcp);
@@ -771,7 +771,7 @@ TEST(HandlerHysteria2Test, AuthAndConnectSuccess)
     req.push_back(static_cast<uint8_t>(pass.size()));
     req.insert(req.end(), pass.begin(), pass.end());
     req.push_back(hysteria2::kCmdTcp);
-    ProxyAddress::fromDomain("example.com", 80).encodeSocks5(req);
+    Address::fromDomain("example.com", 80).encodeSocks5(req);
 
     feed(handler, req);
     handler.handle();
@@ -797,7 +797,7 @@ TEST(HandlerTuicTest, ConnectSuccess)
     HandlerInboundTuic handler(uuidStr);
     bool reqCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             reqCalled = true;
             EXPECT_EQ(cmd, tuic::kCmdConnect);
@@ -808,7 +808,7 @@ TEST(HandlerTuicTest, ConnectSuccess)
     std::vector<uint8_t> req;
     req.insert(req.end(), uuid->begin(), uuid->end());
     req.push_back(tuic::kCmdConnect);
-    ProxyAddress::fromIPv4(htonl(0x0A000001), 443).encodeSocks5(req);
+    Address::fromIPv4(htonl(0x0A000001), 443).encodeSocks5(req);
 
     feed(handler, req);
     handler.handle();
@@ -827,14 +827,14 @@ TEST(HandlerTuicTest, ConnectSuccess)
 
 TEST(HandlerDirectBlockTest, DirectPassThrough)
 {
-    ProxyAddress target = ProxyAddress::fromHostPort("8.8.8.8", 53);
+    Address target = Address::fromHostPort("8.8.8.8", 53);
     HandlerInboundDirect direct(target);
     EXPECT_TRUE(direct.isEstablished());
     EXPECT_EQ(direct.target().toString(), "8.8.8.8:53");
 
     bool called = false;
     direct.setOnRequest(
-        [&](const ProxyAddress &addr)
+        [&](const Address &addr)
         {
             called = true;
             EXPECT_EQ(addr.toString(), "8.8.8.8:53");
@@ -859,15 +859,15 @@ TEST(HandlerBlockTest, BlockRejects)
 class MockRedirectHandler : public HandlerInboundRedirect
 {
 public:
-    ProxyAddress mockDst = ProxyAddress::fromHostPort("104.16.132.229", 443);
-    std::optional<ProxyAddress> fetchOriginalDst() override { return mockDst; }
+    Address mockDst = Address::fromHostPort("104.16.132.229", 443);
+    std::optional<Address> fetchOriginalDst() override { return mockDst; }
 };
 
 class MockTProxyHandler : public HandlerInboundTProxy
 {
 public:
-    ProxyAddress mockDst = ProxyAddress::fromHostPort("1.1.1.1", 80);
-    std::optional<ProxyAddress> fetchOriginalDst() override { return mockDst; }
+    Address mockDst = Address::fromHostPort("1.1.1.1", 80);
+    std::optional<Address> fetchOriginalDst() override { return mockDst; }
 };
 
 static std::vector<uint8_t> makeTlsClientHello(std::string_view serverName)
@@ -937,11 +937,11 @@ static std::vector<uint8_t> makeTlsClientHello(std::string_view serverName)
 TEST(HandlerTransparentTest, RedirectWithTlsSniSniffing)
 {
     MockRedirectHandler handler;
-    ProxyAddress reportedTarget{};
+    Address reportedTarget{};
     bool callbackInvoked = false;
 
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             EXPECT_EQ(cmd, 0x01);
             reportedTarget = target;
@@ -967,11 +967,11 @@ TEST(HandlerTransparentTest, RedirectWithTlsSniSniffing)
 TEST(HandlerTransparentTest, TProxyWithHttpHostSniffing)
 {
     MockTProxyHandler handler;
-    ProxyAddress reportedTarget{};
+    Address reportedTarget{};
     bool callbackInvoked = false;
 
     handler.setOnRequest(
-        [&](uint8_t, const ProxyAddress &target)
+        [&](uint8_t, const Address &target)
         {
             reportedTarget = target;
             callbackInvoked = true;
@@ -999,11 +999,11 @@ TEST(HandlerTransparentTest, FallbackToDnsReverseCache)
     dns::DnsReverseCache::instance().insert(ip, "cached-cdn.net", 300);
 
     MockRedirectHandler handler;
-    ProxyAddress reportedTarget{};
+    Address reportedTarget{};
     bool callbackInvoked = false;
 
     handler.setOnRequest(
-        [&](uint8_t, const ProxyAddress &target)
+        [&](uint8_t, const Address &target)
         {
             reportedTarget = target;
             callbackInvoked = true;
@@ -1037,7 +1037,7 @@ TEST(HandlerTransparentTest, DatagramTProxyPacketHandling)
     ::inet_pton(AF_INET, "8.8.8.8", &origDst.sin_addr);
 
     HandlerInboundDatagramTProxy tproxy(
-        [&](const sockaddr_in &client, const ProxyAddress &target, const char *data, size_t n)
+        [&](const sockaddr_in &client, const Address &target, const char *data, size_t n)
         {
             packetReceived = true;
             EXPECT_EQ(client.sin_port, htons(12345));
@@ -1063,7 +1063,7 @@ TEST(HandlerTransparentTest, AcceptorTransparentAcceptConnectionPropagatesFdAndS
     int sp[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    ConnectionBase *conn = nullptr;
+    Connection *conn = nullptr;
     EXPECT_EQ(acc.acceptConnection(sp[0], conn), HandshakeStatus::SUCCESS);
     ASSERT_NE(conn, nullptr);
     ASSERT_NE(conn->handler(), nullptr);

@@ -28,7 +28,7 @@ namespace mynet::example
      * HandlerConnection::handle() 默认无操作，因此请求体留在缓冲区中，
      * 由 onStreamEnd 统一处理。
      */
-    class Http2BufferedHandler : public HandlerConnection
+    class Http2BufferedHandler : public Handler
     {
     };
 

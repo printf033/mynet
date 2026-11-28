@@ -41,13 +41,13 @@ namespace mynet
         /**
          * @brief RFC 9114 Section 6.2 单向流类型标识符
          */
-        namespace stream_type
+        namespace streamtype
         {
             inline constexpr uint64_t kControl = 0x00;
             inline constexpr uint64_t kPush = 0x01;
             inline constexpr uint64_t kQpackEncoder = 0x02;
             inline constexpr uint64_t kQpackDecoder = 0x03;
-        } // namespace stream_type
+        } // namespace streamtype
 
         /**
          * @brief 流生命周期状态枚举
@@ -62,25 +62,15 @@ namespace mynet
         };
 
         /**
-         * @brief 判断流是否为单向流 (RFC 9000: 流 ID 第 2 位为 1 表示单向流)
+         * @brief 判断流是否为单向流 (直接复用 quic::isUnidirectionalStream)
          */
-        [[nodiscard]] constexpr bool isUnidirectionalStream(uint64_t streamId) noexcept
-        {
-            return (streamId & 0x02u) != 0;
-        }
-
-        /**
-         * @brief 判断流是否为客户端发起的双向请求流 (streamId % 4 == 0)
-         */
-        [[nodiscard]] constexpr bool isClientBidirectionalStream(uint64_t streamId) noexcept
-        {
-            return (streamId & 0x03u) == 0;
-        }
+        using quic::isClientBidirectionalStream;
+        using quic::isUnidirectionalStream;
 
         /**
          * @brief HTTP/3 单条逻辑流上下文槽位
          */
-        template <typename StreamHandler = HandlerConnection>
+        template <typename StreamHandler = Handler>
         struct StreamSlot
         {
             StreamHandler *handler = nullptr;
@@ -128,7 +118,7 @@ namespace mynet
         /**
          * @brief HTTP/3 流上下文定容平坦哈希表管理器（基于公共 mux::StreamTable 算法）
          */
-        template <typename Slot = StreamSlot<HandlerConnection>>
+        template <typename Slot = StreamSlot<Handler>>
         class StreamTable
         {
         public:
@@ -232,9 +222,9 @@ namespace mynet
          *
          * @tparam StreamHandler 每条独立逻辑流所绑定的协议处理器类型，默认复用 HandlerConnection。
          */
-        template <typename StreamHandler = HandlerConnection>
+        template <typename StreamHandler = Handler>
             requires MandatoryMethodConnection<StreamHandler>
-        class HandlerHttp3 : public HandlerDatagram
+        class HandlerHttp3 : public Handler
         {
         public:
             static constexpr TransportType transport = TransportType::UDP;
@@ -274,9 +264,12 @@ namespace mynet
                 StreamTableType streamTable;
                 http::v3::FrameDecoder frameDecoder{};
                 uint32_t nextPacketNumber = 1;
-                size_t bytesReceived = 0;
-                size_t bytesSent = 0;
-                bool addressValidated = false;
+                quic::AntiAmplificationGuard antiAmplification{};
+                quic::AckTracker ackTracker{};
+                quic::RttEstimator rttEstimator{};
+                size_t &bytesReceived = antiAmplification.bytesReceived;
+                size_t &bytesSent = antiAmplification.bytesSent;
+                bool &addressValidated = antiAmplification.addressValidated;
 
                 explicit QuicSession(size_t maxStreams = 128)
                     : streamTable(maxStreams)
@@ -285,7 +278,7 @@ namespace mynet
             };
 
             explicit HandlerHttp3(size_t maxStreams = 128, const DatagramConfig &config = getDatagramConfig()) noexcept
-                : HandlerDatagram(config),
+                : Handler(config),
                   maxStreams_(maxStreams == 0 ? 1 : maxStreams),
                   streamTable_(maxStreams_ == 0 ? 1 : maxStreams_)
             {
@@ -302,7 +295,7 @@ namespace mynet
 
             void reset() noexcept override
             {
-                HandlerDatagram::reset();
+                Handler::reset();
                 clearAllStreams();
                 sessions_.clear();
                 ensureStreamPool();
@@ -311,9 +304,9 @@ namespace mynet
                 peerSettings_ = http::v3::Settings{};
             }
 
-            void onMessageComplete() noexcept override { HandlerDatagram::onMessageComplete(); }
+            void onMessageComplete() noexcept override { Handler::onMessageComplete(); }
 
-            void onParseError(const char *reason) noexcept override { HandlerDatagram::onParseError(reason); }
+            void onParseError(const char *reason) noexcept override { Handler::onParseError(reason); }
 
             [[nodiscard]] const http::v3::Settings &localSettings() const noexcept { return localSettings_; }
             [[nodiscard]] const http::v3::Settings &peerSettings() const noexcept { return peerSettings_; }
@@ -470,7 +463,8 @@ namespace mynet
                     {
                         return;
                     }
-                    session->bytesReceived += n;
+                    session->antiAmplification.recordReceived(n);
+                    session->ackTracker.onPacketReceived(shp.packetNumber, true);
                     handleQuicPacket(peer, shp, *session);
                     return;
                 }
@@ -560,17 +554,17 @@ namespace mynet
                         http::v3::appendFrame(frameBytes, std::to_underlying(http::v3::FRAME_TYPE::DATA), responseBody);
                     }
 
-                    // RFC 9000 Section 8.1 抗反射放大防护：未验证地址发送字节不得超过接收字节的 3 倍
-                    if (!session->addressValidated &&
-                        session->bytesSent + frameBytes.size() > 3 * session->bytesReceived)
+                    // RFC 9000 Section 8.1 抗反射放大防护：复用 quic::AntiAmplificationGuard
+                    if (!session->antiAmplification.canSend(frameBytes.size()))
                     {
                         LOG_WARN(
                             "HandlerHttp3: direct fallback anti-amplification limit exceeded (received {}, sent {})",
-                            session->bytesReceived, session->bytesSent + frameBytes.size());
+                            session->antiAmplification.bytesReceived,
+                            session->antiAmplification.bytesSent + frameBytes.size());
                     }
                     else
                     {
-                        session->bytesSent += frameBytes.size();
+                        session->antiAmplification.recordSent(frameBytes.size());
                         this->sendTo(peer, std::move(frameBytes));
                     }
                     if (slot->handler != nullptr)
@@ -617,16 +611,17 @@ namespace mynet
                 std::string packet;
                 http::v3::appendShortHeaderPacket(packet, session.dcid, session.nextPacketNumber++, quicPayload);
 
-                // RFC 9000 Section 8.1: 地址验证前响应字节数不得超过接收字节数的 3 倍 (Anti-Amplification Limit)
-                if (!session.addressValidated && session.bytesSent + packet.size() > 3 * session.bytesReceived)
+                // RFC 9000 Section 8.1: 复用 quic::AntiAmplificationGuard
+                if (!session.antiAmplification.canSend(packet.size()))
                 {
                     LOG_WARN(
                         "HandlerHttp3: anti-amplification limit exceeded for peer {} (received={}, sent={}, packet={})",
-                        datagramPeerText(peer), session.bytesReceived, session.bytesSent, packet.size());
+                        datagramPeerText(peer), session.antiAmplification.bytesReceived,
+                        session.antiAmplification.bytesSent, packet.size());
                     return;
                 }
 
-                session.bytesSent += packet.size();
+                session.antiAmplification.recordSent(packet.size());
                 this->sendTo(peer, std::move(packet));
             }
 
@@ -705,8 +700,8 @@ namespace mynet
                         }
 
                         auto &sf = *sfRes;
-                        // RFC 9000 Section 2.1: 客户端发起的流编号必须为偶数 (0x00 bidi, 0x02 uni)
-                        if ((sf.streamId & 1u) != 0) [[unlikely]]
+                        // RFC 9000 Section 2.1: 客户端发起的流编号必须为偶数 (复用 quic::isServerInitiatedStream)
+                        if (quic::isServerInitiatedStream(sf.streamId)) [[unlikely]]
                         {
                             LOG_WARN("HandlerHttp3: peer sent stream {} which is server-initiated", sf.streamId);
                             continue;
@@ -799,21 +794,9 @@ namespace mynet
                             session.streamTable.close(sf.streamId);
                         }
                     }
-                    else if (frameType == 0x01)
+                    else if (!quic::skipFrame(ptr, rem))
                     {
-                        // PING 帧，消耗 1 字节
-                        ++ptr;
-                        --rem;
-                    }
-                    else if (frameType == 0x00)
-                    {
-                        // PADDING 帧，消耗 1 字节
-                        ++ptr;
-                        --rem;
-                    }
-                    else
-                    {
-                        // 未知或非 STREAM 帧，跳过剩余部分
+                        // 未知或非完整帧类型，中止解析
                         break;
                     }
                 }

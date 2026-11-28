@@ -68,7 +68,7 @@ namespace mynet::handler
 
         [[nodiscard]] SocksProtocolVersion version() const noexcept { return version_; }
 
-        [[nodiscard]] const std::optional<ProxyAddress> &targetAddress() const noexcept
+        [[nodiscard]] const std::optional<Address> &targetAddress() const noexcept
         {
             if (s4Ptr_ != nullptr)
             {

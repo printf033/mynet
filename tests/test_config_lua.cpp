@@ -448,7 +448,7 @@ TEST(ConfigLua, RcuGracefulDrainKeepsOldConfigAliveUntilSessionReleases)
 
 TEST(ConfigLua, ConnectionPinsConfigurationGenerationAcrossLifecycle)
 {
-    mynet::ConnectionBase conn;
+    mynet::Connection conn;
     EXPECT_EQ(conn.fd(), -1);
 
     // 模拟建连，setFd 自动绑定当前代际并持久持有 RCU 智能指针
@@ -515,7 +515,7 @@ TEST(ConfigLua, ConnectionConfigLoadsAndAppliesDynamically)
     EXPECT_EQ(connCfg.maxWriteIov, 8u);
 
     // 验证 HandlerConnection 默认构造拾取配置中的容量与读写参数
-    mynet::HandlerConnection handler;
+    mynet::Handler handler;
     EXPECT_EQ(handler.readCredit(), 1048576u);
     auto prepRes = handler.prepareRequestWritable();
     ASSERT_TRUE(prepRes.has_value());
@@ -1068,7 +1068,7 @@ TEST(ConfigLua, CipherDefaultDoesNotOverrideSystemPolicy)
     auto cipherFingerprint = [](const mynet::SecurityConfig &security)
     {
         SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
-        mynet::TlsOptions options = mynet::detail::tlsOptionsFrom(security);
+        mynet::SecurityConfig options = mynet::detail::tlsOptionsFrom(security);
         (void)mynet::detail::configureTlsContext(ctx, options, true);
         std::string out;
         STACK_OF(SSL_CIPHER) *list = SSL_CTX_get_ciphers(ctx);
@@ -1103,7 +1103,7 @@ TEST(ConfigLua, ReactorAppliesMaxEventsToTheEventLoop)
     cfg.server.maxConnections = 16;
     mynet::publishMynetConfig(cfg);
 
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> server;
+    mynet::Reactor<mynet::AcceptorBase<mynet::Handler>> server;
     // 端口 0 交给内核挑，避免与本机其他测试/服务抢端口
     std::thread runner([&] { (void)server.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -1190,7 +1190,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     cfg.reactor.maxEvents = 384;
     mynet::publishMynetConfig(cfg);
 
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> running;
+    mynet::Reactor<mynet::AcceptorBase<mynet::Handler>> running;
     std::thread runner([&] { (void)running.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     ASSERT_EQ(running.loop().eventCapacity(), 384u);
@@ -1205,7 +1205,7 @@ TEST(ConfigLua, StartupFieldIsNotRetroactivelyAppliedToARunningEngine)
     runner.join();
 
     // 新启动的实例则采用新值。
-    mynet::Reactor<mynet::AcceptorBase<mynet::HandlerConnection>> fresh;
+    mynet::Reactor<mynet::AcceptorBase<mynet::Handler>> fresh;
     std::thread runner2([&] { (void)fresh.runTcp("127.0.0.1", 0); });
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     EXPECT_EQ(fresh.loop().eventCapacity(), 768u);
@@ -1223,12 +1223,12 @@ TEST(ConfigLua, HotFieldAppliesToConnectionsCreatedAfterReload)
     mynet::MynetConfig cfg = saved;
     cfg.connection.maxRequestBytes = 1 << 20;
     mynet::publishMynetConfig(cfg);
-    mynet::HandlerConnection before;
+    mynet::Handler before;
     EXPECT_EQ(before.readCredit(), 1u << 20);
 
     cfg.connection.maxRequestBytes = 2 << 20;
     mynet::publishMynetConfig(cfg);
-    mynet::HandlerConnection after;
+    mynet::Handler after;
     EXPECT_EQ(after.readCredit(), 2u << 20) << "Hot field must apply without restarting the engine";
 
     mynet::publishMynetConfig(saved);
@@ -1273,7 +1273,7 @@ TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
     cfg.server.tcpQuickAck = true;
     mynet::publishMynetConfig(cfg);
     {
-        mynet::ConnectionBase conn;
+        mynet::Connection conn;
         conn.setFd(serverFd);
         EXPECT_EQ(readFlag(), 1) << "tcpQuickAck = true must call setsockopt(TCP_QUICKACK)";
         conn.setFd(-1);
@@ -1284,7 +1284,7 @@ TEST(ConfigLua, TcpQuickAckActuallyReachesTheSocket)
     cfg.server.tcpQuickAck = false;
     mynet::publishMynetConfig(cfg);
     {
-        mynet::ConnectionBase conn;
+        mynet::Connection conn;
         conn.setFd(serverFd);
         EXPECT_EQ(readFlag(), 0) << "tcpQuickAck = false must leave the socket untouched";
         conn.setFd(-1);
@@ -1318,7 +1318,7 @@ TEST(ConfigLua, SecurityCaFileEnablesClientCertificateVerification)
     {
         SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
         ASSERT_NE(ctx, nullptr);
-        mynet::TlsOptions options = mynet::detail::tlsOptionsFrom(mynet::SecurityConfig{});
+        mynet::SecurityConfig options = mynet::detail::tlsOptionsFrom(mynet::SecurityConfig{});
         ASSERT_TRUE(mynet::detail::configureTlsContext(ctx, options, true));
         EXPECT_EQ(SSL_CTX_get_verify_mode(ctx), SSL_VERIFY_NONE);
         SSL_CTX_free(ctx);
@@ -1330,7 +1330,7 @@ TEST(ConfigLua, SecurityCaFileEnablesClientCertificateVerification)
         ASSERT_NE(ctx, nullptr);
         mynet::SecurityConfig security{};
         security.caFile = caPath.string();
-        mynet::TlsOptions options = mynet::detail::tlsOptionsFrom(security);
+        mynet::SecurityConfig options = mynet::detail::tlsOptionsFrom(security);
         ASSERT_TRUE(mynet::detail::configureTlsContext(ctx, options, true));
         const int mode = SSL_CTX_get_verify_mode(ctx);
         EXPECT_NE(mode & SSL_VERIFY_PEER, 0) << "caFile must request a peer certificate";
@@ -1344,7 +1344,7 @@ TEST(ConfigLua, SecurityCaFileEnablesClientCertificateVerification)
         ASSERT_NE(ctx, nullptr);
         mynet::SecurityConfig security{};
         security.caFile = "/nonexistent/ca-does-not-exist.crt";
-        mynet::TlsOptions options = mynet::detail::tlsOptionsFrom(security);
+        mynet::SecurityConfig options = mynet::detail::tlsOptionsFrom(security);
         EXPECT_FALSE(mynet::detail::configureTlsContext(ctx, options, true).has_value());
         SSL_CTX_free(ctx);
     }
@@ -1390,7 +1390,7 @@ TEST(ConfigLua, CoreLoadLuaConfigEndToEnd)
     EXPECT_EQ(core.router().defaultOutbound(), "direct");
 
     // 规则匹配测试
-    auto target = mynet::handler::ProxyAddress::fromDomain("test.ads.net", 80);
+    auto target = mynet::Address::fromDomain("test.ads.net", 80);
     mynet::handler::HandlerInboundDirect inbound(target);
     auto res = core.dispatch(inbound, -1, "mixed-in");
     EXPECT_EQ(res.status, mynet::CoreDispatchStatus::BLOCKED);

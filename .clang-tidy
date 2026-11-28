@@ -45,7 +45,7 @@ CheckOptions:
   readability-identifier-naming.LocalConstantCase: camelBack
   readability-identifier-naming.LocalConstantPrefix: ''
 
-  readability-identifier-naming.EnumCase: UPPER_CASE
+  readability-identifier-naming.EnumCase: CamelCase
   readability-identifier-naming.EnumConstantCase: UPPER_CASE
 
   readability-identifier-naming.MacroDefinitionCase: UPPER_CASE

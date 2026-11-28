@@ -1,8 +1,8 @@
 #pragma once
 
 /**
- * @file throne/frame.hpp
- * @brief Throne (NekoRay/NekoBox) 专属 UDS 二进制 RPC 帧编解码器。
+ * @file nekobox/frame.hpp
+ * @brief NekoBox (NekoRay/Throne) 专属 UDS 二进制 RPC 帧编解码器。
  *
  * 协议二进制帧布局 (Little-Endian):
  * 请求帧 (Request Frame):
@@ -28,7 +28,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mynet::throne
+namespace mynet::nekobox
 {
 
     inline constexpr size_t kMinRequestHeaderBytes = 4 + 2 + 0 + 4; // 10 字节最小请求帧头
@@ -198,4 +198,4 @@ namespace mynet::throne
         return frame;
     }
 
-} // namespace mynet::throne
+} // namespace mynet::nekobox

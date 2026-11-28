@@ -10,10 +10,10 @@
  * 5. 支持 -t 拓扑语法校验、-d 后台守护运行、SIGHUP 沙箱化 Lua 配置热重载与 SIGINT/SIGTERM 平滑停机。
  */
 
-#include "controller.hpp"
+#include "clash/controller.hpp"
 #include "core.hpp"
 #include "reactor.hpp"
-#include "throne/service.hpp"
+#include "nekobox/service.hpp"
 #if defined(MYNET_ENABLE_URING)
 #include "proactor.hpp"
 #endif
@@ -134,7 +134,7 @@ namespace
                                 }
                                 if (origDst.sin_port != 0)
                                 {
-                                    const auto target = mynet::handler::ProxyAddress::fromIPv4(
+                                    const auto target = mynet::Address::fromIPv4(
                                         origDst.sin_addr.s_addr, ntohs(origDst.sin_port));
                                     [[maybe_unused]] auto tx = core.dispatchDatagram(
                                         *dgramHandler, peer, target, std::string_view(buf, *r), tag, sniff);
@@ -164,7 +164,7 @@ namespace
                             }
                             const int clientFd = accRes->first;
                             const sockaddr_in clientAddr = accRes->second;
-                            mynet::ConnectionBase *conn = nullptr;
+                            mynet::Connection *conn = nullptr;
                             if (acc->acceptConnection(clientFd, conn) != mynet::HandshakeStatus::SUCCESS ||
                                 conn == nullptr)
                             {
@@ -182,7 +182,7 @@ namespace
                                 auto dispatched = std::make_shared<bool>(false);
                                 h->setOnRequest(
                                     [&core, h, inboundTag, dispatched](uint8_t cmd,
-                                                                       const mynet::handler::ProxyAddress &target)
+                                                                       const mynet::Address &target)
                                     {
                                         (void)cmd;
                                         (void)target;
@@ -284,13 +284,13 @@ int main(int argc, char *argv[])
         if (subcmd == "version")
         {
             printBanner();
-            std::cout << "mynet core version 1.0.0 (sing-box / throne compatible)\n";
+            std::cout << "mynet core version 1.0.0 (sing-box / nekobox compatible)\n";
             return 0;
         }
     }
 
     std::string configPath = "config/config.lua";
-    std::string throneSocket = mynet::throne::ThroneIpcService::getSocketPathFromEnv();
+    std::string nekoboxSocket = mynet::nekobox::NekoBoxIpcService::getSocketPathFromEnv();
     bool testConfigOnly = false;
     bool runDaemon = false;
 
@@ -318,14 +318,14 @@ int main(int argc, char *argv[])
             configPath = optarg;
             break;
         case 's':
-            throneSocket = optarg;
+            nekoboxSocket = optarg;
             break;
         case 't':
             testConfigOnly = true;
             break;
         case 'v':
             printBanner();
-            std::cout << "mynet core version 1.0.0 (sing-box / throne compatible)\n";
+            std::cout << "mynet core version 1.0.0 (sing-box / nekobox compatible)\n";
             return 0;
         case 'h':
             printBanner();
@@ -340,32 +340,32 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 2. 优先检测 Throne UDS IPC 环境变量与启动参数 (彻底解耦本地配置文件依赖)
-    if (!throneSocket.empty())
+    // 2. 优先检测 NekoBox UDS IPC 环境变量与启动参数 (彻底解耦本地配置文件依赖)
+    if (!nekoboxSocket.empty())
     {
         LOG_INFO("==================================================================");
-        LOG_INFO(" mynet proxy kernel running in Throne IPC Core mode");
-        LOG_INFO(" Connecting to Throne UDS: {}", throneSocket);
+        LOG_INFO(" mynet proxy kernel running in NekoBox IPC Core mode");
+        LOG_INFO(" Connecting to NekoBox UDS: {}", nekoboxSocket);
         LOG_INFO("==================================================================");
 
         auto core = std::make_shared<mynet::Core>();
-        mynet::throne::ThroneIpcService service(core);
+        mynet::nekobox::NekoBoxIpcService service(core);
 
-        static mynet::throne::ThroneIpcService *g_thronePtr = nullptr;
-        g_thronePtr = &service;
+        static mynet::nekobox::NekoBoxIpcService *g_nekoboxPtr = nullptr;
+        g_nekoboxPtr = &service;
 
         std::signal(SIGINT, [](int) {
-            if (g_thronePtr != nullptr)
-                g_thronePtr->stop();
+            if (g_nekoboxPtr != nullptr)
+                g_nekoboxPtr->stop();
         });
         std::signal(SIGTERM, [](int) {
-            if (g_thronePtr != nullptr)
-                g_thronePtr->stop();
+            if (g_nekoboxPtr != nullptr)
+                g_nekoboxPtr->stop();
         });
 
-        // 阻塞同步接入 Throne UDS 守护循环，等待 Throne GUI 调度生命周期
-        service.runSync(throneSocket);
-        LOG_INFO("Throne IPC Core stopped cleanly");
+        // 阻塞同步接入 NekoBox UDS 守护循环，等待 GUI 调度生命周期
+        service.runSync(nekoboxSocket);
+        LOG_INFO("NekoBox IPC Core stopped cleanly");
         return 0;
     }
 
@@ -561,10 +561,10 @@ int main(int argc, char *argv[])
              core.router().rules().size());
 
     // 启动可选的 Clash-compatible 控制 API
-    std::unique_ptr<mynet::Controller> apiController{nullptr};
+    std::unique_ptr<mynet::clash::Controller> apiController{nullptr};
     if (cfg.controller.enabled)
     {
-        apiController = std::make_unique<mynet::Controller>(&core, cfg.controller);
+        apiController = std::make_unique<mynet::clash::Controller>(&core, cfg.controller);
         if (auto res = apiController->startBackground(); res)
         {
             LOG_INFO("Clash-compatible RESTful Control API listening on {}:{}", cfg.controller.host,
@@ -577,14 +577,14 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 启动可选的 Throne UDS RPC 服务
-    std::unique_ptr<mynet::throne::ThroneIpcService> throneService{nullptr};
-    if (!throneSocket.empty())
+    // 启动可选的 NekoBox UDS RPC 服务
+    std::unique_ptr<mynet::nekobox::NekoBoxIpcService> nekoboxService{nullptr};
+    if (!nekoboxSocket.empty())
     {
-        LOG_INFO("Starting Throne UDS IPC service on: {}", throneSocket);
-        throneService = std::make_unique<mynet::throne::ThroneIpcService>(
+        LOG_INFO("Starting NekoBox UDS IPC service on: {}", nekoboxSocket);
+        nekoboxService = std::make_unique<mynet::nekobox::NekoBoxIpcService>(
             std::shared_ptr<mynet::Core>(&core, [](auto *) {}));
-        throneService->start(throneSocket);
+        nekoboxService->start(nekoboxSocket);
     }
 
     // 根据配置调度执行选定的 I/O 运行引擎 (Reactor 或 Proactor)
@@ -609,9 +609,9 @@ int main(int argc, char *argv[])
     // 优雅关断
     LOG_INFO("Shutting down mynet proxy kernel gracefully...");
     g_reloadHandler = nullptr;
-    if (throneService != nullptr)
+    if (nekoboxService != nullptr)
     {
-        throneService->stop();
+        nekoboxService->stop();
     }
     if (apiController != nullptr)
     {

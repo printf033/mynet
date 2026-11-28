@@ -30,7 +30,7 @@ namespace mynet::handler
     /**
      * @brief Hysteria 2 协议入站状态机处理器
      */
-    class HandlerInboundHysteria2 : public HandlerInboundConnectionBase
+    class HandlerInboundHysteria2 : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(std::string_view authStr)>;
@@ -57,7 +57,7 @@ namespace mynet::handler
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
         void setAutoReply(bool autoReply) noexcept { autoReplyOk_ = autoReply; }
 
-        void reset() noexcept override { HandlerInboundConnectionBase::reset(); }
+        void reset() noexcept override { HandlerInbound::reset(); }
 
         void handle() override
         {
@@ -121,7 +121,7 @@ namespace mynet::handler
 
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
-            auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
+            auto target = Address::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
                 return false;
@@ -153,7 +153,7 @@ namespace mynet::handler
      *
      * 自动向上游发送 [AuthLen 1B][AuthStr][CMD 0x01][Target Address]，并等待 1 字节状态码 0x00。
      */
-    class HandlerOutboundHysteria2 : public HandlerOutboundConnectionBase
+    class HandlerOutboundHysteria2 : public HandlerOutbound
     {
     private:
         std::string password_{};
@@ -161,8 +161,8 @@ namespace mynet::handler
 
     public:
         HandlerOutboundHysteria2() noexcept = default;
-        HandlerOutboundHysteria2(std::string_view password, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target),
+        HandlerOutboundHysteria2(std::string_view password, const Address &target)
+            : HandlerOutbound(target),
               password_(password)
         {
         }
@@ -171,7 +171,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             headerSent_ = false;
         }
 

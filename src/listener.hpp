@@ -5,7 +5,7 @@
 #endif
 
 #include "config/log.hpp"
-#include "datagramCore.hpp"
+#include "datagram.hpp"
 #include "error.hpp"
 #include <arpa/inet.h>
 #include <cerrno>
@@ -37,25 +37,33 @@ namespace mynet
     }
 
     /**
-     * @brief 真实传输套接字端点（封装基础套接字系统调用与地址状态）
+     * @brief 协议监听端点封装（抽象单一端口监听器，直接承载套接字与地址状态，支持 TCP 或 UDP 传输）
      */
-    struct SocketEndpoint
+    struct Listener
     {
-        int fd{-1};
-        sockaddr_in addr{};
+        int listenFd_{-1};
+        sockaddr_in listenAddr_{};
+        TransportType transport{TransportType::TCP};
+        uint16_t configuredPort{0};
+        int token{0};
 
-        [[nodiscard]] constexpr bool valid() const noexcept { return fd >= 0; }
-        [[nodiscard]] constexpr int getFd() const noexcept { return fd; }
-        [[nodiscard]] constexpr const sockaddr_in &getAddr() const noexcept { return addr; }
+        [[nodiscard]] constexpr bool isTcp() const noexcept { return transport == TransportType::TCP; }
+        [[nodiscard]] constexpr bool isUdp() const noexcept { return transport == TransportType::UDP; }
+
+        [[nodiscard]] constexpr bool valid() const noexcept { return listenFd_ >= 0; }
+        [[nodiscard]] constexpr int fd() const noexcept { return listenFd_; }
+        [[nodiscard]] constexpr const sockaddr_in &addr() const noexcept { return listenAddr_; }
+        constexpr void setFd(int fd) noexcept { listenFd_ = fd; }
+        constexpr void setAddr(const sockaddr_in &addr) noexcept { listenAddr_ = addr; }
 
         inline void reset() noexcept
         {
-            if (fd >= 0)
+            if (listenFd_ >= 0)
             {
-                ::close(fd);
-                fd = -1;
+                ::close(listenFd_);
+                listenFd_ = -1;
             }
-            addr = {};
+            listenAddr_ = {};
         }
 
         [[nodiscard]] inline Result<int> listenTcp(const char *ip, int port, int backlog = 128, bool reuseAddr = true,
@@ -69,27 +77,27 @@ namespace mynet
 
             ignoreSigpipeOnce();
 
-            addr.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]
+            listenAddr_.sin_family = AF_INET;
+            if (::inet_pton(AF_INET, ip, &listenAddr_.sin_addr) <= 0) [[unlikely]]
             {
-                LOG_ERROR("SocketEndpoint::listenTcp {}:{}: not an IPv4 address literal", ip, port);
+                LOG_ERROR("Listener::listenTcp {}:{}: not an IPv4 address literal", ip, port);
                 return std::unexpected(ERR::ADDR_INVALID);
             }
-            addr.sin_port = ::htons(static_cast<uint16_t>(port));
+            listenAddr_.sin_port = ::htons(static_cast<uint16_t>(port));
 
-            fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) [[unlikely]]
+            listenFd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+            if (listenFd_ < 0) [[unlikely]]
             {
-                LOG_ERROR("SocketEndpoint::listenTcp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
+                LOG_ERROR("Listener::listenTcp {}:{}: socket() failed: {}", ip, port, errnoText(errno));
                 return std::unexpected(ERR::SOCKET_FAILED);
             }
 
             constexpr int opt = 1;
             if (reuseAddr)
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
+                if (::setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) [[unlikely]]
                 {
-                    LOG_ERROR("SocketEndpoint::listenTcp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port,
+                    LOG_ERROR("Listener::listenTcp {}:{}: setsockopt(SO_REUSEADDR) failed: {}", ip, port,
                               errnoText(errno));
                     reset();
                     return std::unexpected(ERR::SETSOCKOPT_FAILED);
@@ -97,36 +105,37 @@ namespace mynet
             }
             if (reusePort)
             {
-                if (::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
+                if (::setsockopt(listenFd_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) [[unlikely]]
                 {
-                    LOG_ERROR("SocketEndpoint::listenTcp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port,
+                    LOG_ERROR("Listener::listenTcp {}:{}: setsockopt(SO_REUSEPORT) failed: {}", ip, port,
                               errnoText(errno));
                     reset();
                     return std::unexpected(ERR::SETSOCKOPT_FAILED);
                 }
             }
 
-            if (::bind(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(sockaddr_in)) < 0) [[unlikely]]
+            if (::bind(listenFd_, reinterpret_cast<const sockaddr *>(&listenAddr_), sizeof(sockaddr_in)) < 0)
+                [[unlikely]]
             {
-                LOG_ERROR("SocketEndpoint::listenTcp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
+                LOG_ERROR("Listener::listenTcp {}:{}: bind() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::BIND_FAILED);
             }
 
-            if (::listen(fd, backlog) < 0) [[unlikely]]
+            if (::listen(listenFd_, backlog) < 0) [[unlikely]]
             {
-                LOG_ERROR("SocketEndpoint::listenTcp {}:{}: listen() failed: {}", ip, port, errnoText(errno));
+                LOG_ERROR("Listener::listenTcp {}:{}: listen() failed: {}", ip, port, errnoText(errno));
                 reset();
                 return std::unexpected(ERR::LISTEN_FAILED);
             }
 
             if (port == 0)
             {
-                socklen_t len = sizeof(addr);
-                ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
+                socklen_t len = sizeof(listenAddr_);
+                ::getsockname(listenFd_, reinterpret_cast<sockaddr *>(&listenAddr_), &len);
             }
 
-            return fd;
+            return listenFd_;
         }
 
         [[nodiscard]] inline Result<int> listenUdp(const char *ip, int port, bool reuseAddr = true,
@@ -142,7 +151,7 @@ namespace mynet
             sa.sin_family = AF_INET;
             if (::inet_pton(AF_INET, ip, &sa.sin_addr) <= 0) [[unlikely]]
             {
-                LOG_ERROR("SocketEndpoint::listenUdp {}:{}: not an IPv4 address literal", ip, port);
+                LOG_ERROR("Listener::listenUdp {}:{}: not an IPv4 address literal", ip, port);
                 return std::unexpected(ERR::ADDR_INVALID);
             }
             sa.sin_port = ::htons(static_cast<uint16_t>(port));
@@ -150,82 +159,31 @@ namespace mynet
             auto dgramRes = Datagram::bind(sa, reuseAddr, reusePort);
             if (!dgramRes) [[unlikely]]
             {
-                LOG_ERROR("SocketEndpoint::listenUdp {}:{}: failed: {}", ip, port, toString(dgramRes.error()));
+                LOG_ERROR("Listener::listenUdp {}:{}: failed: {}", ip, port, toString(dgramRes.error()));
                 return std::unexpected(dgramRes.error());
             }
 
-            addr = dgramRes->localAddr();
-            fd = dgramRes->release();
-            return fd;
+            listenAddr_ = dgramRes->localAddr();
+            listenFd_ = dgramRes->release();
+            return listenFd_;
         }
 
         [[nodiscard]] inline Result<std::pair<int, sockaddr_in>> accept() noexcept
         {
-            if (fd < 0) [[unlikely]]
+            if (listenFd_ < 0) [[unlikely]]
             {
                 return std::unexpected(ERR::ACCEPT_FAILED);
             }
             sockaddr_in clientAddr{};
             socklen_t len = sizeof(clientAddr);
             int clientFd =
-                ::accept4(fd, reinterpret_cast<sockaddr *>(&clientAddr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                ::accept4(listenFd_, reinterpret_cast<sockaddr *>(&clientAddr), &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
             if (clientFd < 0) [[unlikely]]
             {
                 return std::unexpected(ERR::ACCEPT_FAILED);
             }
             return std::make_pair(clientFd, clientAddr);
         }
-
-        [[nodiscard]] inline Result<int> connectTcp(const char *ip, int port) noexcept
-        {
-            reset();
-            if (ip == nullptr || port < 0 || port > 65535) [[unlikely]]
-            {
-                return std::unexpected(ERR::ADDR_INVALID);
-            }
-
-            addr.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip, &addr.sin_addr) <= 0) [[unlikely]]
-            {
-                return std::unexpected(ERR::ADDR_INVALID);
-            }
-            addr.sin_port = ::htons(static_cast<uint16_t>(port));
-
-            fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-            if (fd < 0) [[unlikely]]
-            {
-                return std::unexpected(ERR::SOCKET_FAILED);
-            }
-
-            int rc = ::connect(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr));
-            if (rc < 0 && errno != EINPROGRESS) [[unlikely]]
-            {
-                reset();
-                return std::unexpected(ERR::CONNECT_FAILED);
-            }
-
-            return fd;
-        }
-    };
-
-    /**
-     * @brief 协议监听端点封装（抽象单一端口监听器，支持 TCP 或 UDP 传输）
-     */
-    struct Listener
-    {
-        SocketEndpoint socket{};
-        TransportType transport{TransportType::TCP};
-        uint16_t configuredPort{0};
-        int token{0};
-
-        [[nodiscard]] constexpr bool isTcp() const noexcept { return transport == TransportType::TCP; }
-        [[nodiscard]] constexpr bool isUdp() const noexcept { return transport == TransportType::UDP; }
-
-        [[nodiscard]] constexpr bool valid() const noexcept { return socket.valid(); }
-        [[nodiscard]] constexpr int fd() const noexcept { return socket.fd; }
-        [[nodiscard]] constexpr const sockaddr_in &addr() const noexcept { return socket.addr; }
-
-        inline void reset() noexcept { socket.reset(); }
 
         [[nodiscard]] inline Result<int> listen(const char *ip, int port = 0, int backlog = 128, bool reuseAddr = true,
                                                 bool reusePort = true) noexcept
@@ -236,12 +194,9 @@ namespace mynet
             }
             if (isTcp())
             {
-                return socket.listenTcp(ip, port, backlog, reuseAddr, reusePort);
+                return listenTcp(ip, port, backlog, reuseAddr, reusePort);
             }
-            else
-            {
-                return socket.listenUdp(ip, port, reuseAddr, reusePort);
-            }
+            return listenUdp(ip, port, reuseAddr, reusePort);
         }
     };
 
@@ -265,12 +220,12 @@ namespace mynet
      */
     struct EmptySocket
     {
-        static constexpr int fd = -1;
-        static constexpr sockaddr_in addr{};
+        static constexpr int listenFd_ = -1;
+        static constexpr sockaddr_in listenAddr_{};
 
         [[nodiscard]] static constexpr bool valid() noexcept { return false; }
-        [[nodiscard]] static constexpr int getFd() noexcept { return -1; }
-        [[nodiscard]] static constexpr const sockaddr_in &getAddr() noexcept { return addr; }
+        [[nodiscard]] static constexpr int fd() noexcept { return -1; }
+        [[nodiscard]] static constexpr const sockaddr_in &addr() noexcept { return listenAddr_; }
         static constexpr void reset() noexcept {}
 
         [[nodiscard]] static constexpr Result<int> listenTcp(const char *, int, int = 128, bool = true,
@@ -286,10 +241,6 @@ namespace mynet
         {
             return std::unexpected(ERR::SOCKET_FAILED);
         }
-        [[nodiscard]] static constexpr Result<int> connectTcp(const char *, int) noexcept
-        {
-            return std::unexpected(ERR::SOCKET_FAILED);
-        }
     };
 
     /**
@@ -298,8 +249,8 @@ namespace mynet
     template <bool EnableTcp, bool EnableUdp>
     struct TransportSockets
     {
-        using TcpEndpoint = std::conditional_t<EnableTcp, SocketEndpoint, EmptySocket>;
-        using UdpEndpoint = std::conditional_t<EnableUdp, SocketEndpoint, EmptySocket>;
+        using TcpEndpoint = std::conditional_t<EnableTcp, Listener, EmptySocket>;
+        using UdpEndpoint = std::conditional_t<EnableUdp, Listener, EmptySocket>;
 
         [[no_unique_address]] TcpEndpoint tcp{};
         [[no_unique_address]] UdpEndpoint udp{};
@@ -322,40 +273,30 @@ namespace mynet
         [[nodiscard]] inline Result<int> listenTcp(const char *ip, int port, sockaddr_in &outAddr, int backlog = 128,
                                                    bool reuseAddr = true, bool reusePort = true) noexcept
         {
-            SocketEndpoint ep;
+            Listener ep;
             auto res = ep.listenTcp(ip, port, backlog, reuseAddr, reusePort);
             if (!res)
                 return res;
-            outAddr = ep.addr;
+            outAddr = ep.addr();
             return res;
         }
 
         [[nodiscard]] inline Result<int> listenUdp(const char *ip, int port, sockaddr_in &outAddr,
                                                    bool reuseAddr = true, bool reusePort = true) noexcept
         {
-            SocketEndpoint ep;
+            Listener ep;
             auto res = ep.listenUdp(ip, port, reuseAddr, reusePort);
             if (!res)
                 return res;
-            outAddr = ep.addr;
+            outAddr = ep.addr();
             return res;
         }
 
         [[nodiscard]] inline Result<std::pair<int, sockaddr_in>> accept(int listenFd) noexcept
         {
-            SocketEndpoint ep;
-            ep.fd = listenFd;
+            Listener ep;
+            ep.listenFd_ = listenFd;
             return ep.accept();
-        }
-
-        [[nodiscard]] inline Result<int> connectTcp(const char *ip, int port, sockaddr_in &targetAddr) noexcept
-        {
-            SocketEndpoint ep;
-            auto res = ep.connectTcp(ip, port);
-            if (!res)
-                return res;
-            targetAddr = ep.addr;
-            return res;
         }
 
         [[nodiscard]] inline Result<> checkConnectError(int socketFd) noexcept

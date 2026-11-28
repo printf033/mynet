@@ -21,7 +21,7 @@ namespace mynet::example
      * handle() 在用户态读取请求缓冲并推入响应队列完成字节流回显；
      * 内核 eBPF/splice 零拷贝旁路仅用于 Forwarder 双端桥接会话。
      */
-    class SpliceEchoHandler : public HandlerConnection
+    class SpliceEchoHandler : public Handler
     {
     public:
 
@@ -39,7 +39,7 @@ namespace mynet::example
             requestClear();
         }
 
-        void reset() noexcept override { HandlerConnection::reset(); }
+        void reset() noexcept override { Handler::reset(); }
     };
 
     /**
@@ -47,7 +47,7 @@ namespace mynet::example
      *
      * 业务协议级回显：在 onDatagram 中自主将接收到的报文通过 sendTo 推入外发队列。
      */
-    class UdpEchoHandler : public HandlerDatagram
+    class UdpEchoHandler : public Handler
     {
     public:
         static constexpr TransportType transport = TransportType::UDP;

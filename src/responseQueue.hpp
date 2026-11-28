@@ -21,46 +21,46 @@ namespace mynet
      * 提供与 std::string / std::string_view 的隐式转换与兼容接口，
      * 保证流式会话与无连接数据报会话零适配成本无缝复用。
      */
-    struct DatagramPacket
+    struct Packet
     {
         sockaddr_in peer{};
         sockaddr_in origDst{};
         std::string bytes{};
 
-        DatagramPacket() noexcept = default;
-        DatagramPacket(std::string s) noexcept
+        Packet() noexcept = default;
+        Packet(std::string s) noexcept
             : bytes(std::move(s))
         {
         }
-        DatagramPacket(std::string_view sv)
+        Packet(std::string_view sv)
             : bytes(sv)
         {
         }
-        DatagramPacket(const char *buf, size_t n)
+        Packet(const char *buf, size_t n)
             : bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
         {
         }
-        DatagramPacket(const char *s)
+        Packet(const char *s)
             : bytes(s != nullptr ? s : "")
         {
         }
-        DatagramPacket(const sockaddr_in &p, std::string b) noexcept
+        Packet(const sockaddr_in &p, std::string b) noexcept
             : peer(p),
               bytes(std::move(b))
         {
         }
-        DatagramPacket(const sockaddr_in &p, const char *buf, size_t n)
+        Packet(const sockaddr_in &p, const char *buf, size_t n)
             : peer(p),
               bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
         {
         }
-        DatagramPacket(const sockaddr_in &p, const sockaddr_in &dst, std::string b) noexcept
+        Packet(const sockaddr_in &p, const sockaddr_in &dst, std::string b) noexcept
             : peer(p),
               origDst(dst),
               bytes(std::move(b))
         {
         }
-        DatagramPacket(const sockaddr_in &p, const sockaddr_in &dst, const char *buf, size_t n)
+        Packet(const sockaddr_in &p, const sockaddr_in &dst, const char *buf, size_t n)
             : peer(p),
               origDst(dst),
               bytes((buf != nullptr && n > 0) ? std::string(buf, n) : std::string())
@@ -83,23 +83,23 @@ namespace mynet
         operator std::string() && noexcept { return std::move(bytes); }
         operator std::string_view() const noexcept { return bytes; }
 
-        DatagramPacket &operator=(std::string s) noexcept
+        Packet &operator=(std::string s) noexcept
         {
             bytes = std::move(s);
             return *this;
         }
 
-        DatagramPacket &operator=(std::string_view sv)
+        Packet &operator=(std::string_view sv)
         {
             bytes.assign(sv);
             return *this;
         }
 
-        bool operator==(const DatagramPacket &other) const noexcept { return bytes == other.bytes; }
+        bool operator==(const Packet &other) const noexcept { return bytes == other.bytes; }
         bool operator==(std::string_view sv) const noexcept { return bytes == sv; }
         bool operator==(const char *s) const noexcept { return bytes == s; }
 
-        friend std::ostream &operator<<(std::ostream &os, const DatagramPacket &p) { return os << p.bytes; }
+        friend std::ostream &operator<<(std::ostream &os, const Packet &p) { return os << p.bytes; }
     };
 
     /**
@@ -109,7 +109,7 @@ namespace mynet
      * 队列在 init(capacity) 时一次性分配内存，后续 push/pop 均无任何堆分配，
      * 弹出与重置时调用槽位的 clear() 复用已分配容量。
      */
-    template <typename ItemType = DatagramPacket>
+    template <typename ItemType = Packet>
     class BasicResponseQueue
     {
     public:
@@ -321,13 +321,12 @@ namespace mynet
     };
 
     /**
-     * @brief 默认流式单连接响应队列别名与兼容别名
+     * @brief 默认流式单连接响应队列别名
      */
-    using ResponseQueue = BasicResponseQueue<DatagramPacket>;
+    using ResponseQueue = BasicResponseQueue<Packet>;
 
-    template <typename ItemType = DatagramPacket>
+    template <typename ItemType = Packet>
     using ResponseQueueBase = BasicResponseQueue<ItemType>;
 
-    using ResponseQueueDefault = ResponseQueue;
 
 } // namespace mynet

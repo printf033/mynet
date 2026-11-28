@@ -1,9 +1,9 @@
-#include "checksum.hpp"
 #include "dialer.hpp"
 #include "dns/ech.hpp"
 #include "process.hpp"
 #include "tls/fragmenter.hpp"
 #include "tls/pinning.hpp"
+#include "tun/packet.hpp"
 #include "uot/uot.hpp"
 #include "uvarint.hpp"
 #include <arpa/inet.h>
@@ -261,8 +261,8 @@ TEST(SingboxFeaturesTest, ParallelInterfaceDialerLocalEchoRace)
     std::vector<std::string> fallback = {""};
 
     auto res =
-        ParallelInterfaceDialer::dialParallelInterface(sin, primary, fallback, InterfaceStrategy::HYBRID,
-                                                       std::chrono::milliseconds(50), std::chrono::milliseconds(1000));
+        Connector::connectParallelInterface(sin, primary, fallback, InterfaceStrategy::HYBRID,
+                                            std::chrono::milliseconds(50), std::chrono::milliseconds(1000));
 
     EXPECT_GE(res.winnerFd, 0);
 
@@ -472,10 +472,10 @@ TEST(SingboxFeaturesTest, ChecksumParityAndZeroHandling)
 {
     // RFC 768 / RFC 1071 边界校验
     std::vector<uint8_t> oddBytes = {0x12, 0x34, 0x56};
-    uint16_t c1 = mynet::rfc1071Checksum(oddBytes);
+    uint16_t c1 = mynet::tun::calculateChecksum(oddBytes);
     EXPECT_NE(c1, 0);
 
     // RFC 768 规定若校验和为 0 必须输出 0xFFFF
-    uint16_t udpCsum = mynet::rfcUdp4Checksum(0x7F000001, 0x7F000001, 1234, 5678, {});
+    uint16_t udpCsum = mynet::tun::calculateUdp4Checksum(0x7F000001, 0x7F000001, 1234, 5678, {});
     EXPECT_NE(udpCsum, 0);
 }

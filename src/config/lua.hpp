@@ -1115,6 +1115,50 @@ namespace mynet
                     }
 
                     loadTransportSection(L, itemIdx, outCfg.transport, valid);
+
+                    auto readDialerFields = [&](int tblIdx)
+                    {
+                        lua_Integer dNum = 0;
+                        if (readNumberField(L, tblIdx, "fwmark", dNum, valid) ||
+                            readNumberField(L, tblIdx, "routing_mark", dNum, valid))
+                        {
+                            outCfg.dialer.fwmark = static_cast<uint32_t>(dNum);
+                        }
+                        if (!readStringField(L, tblIdx, "bindInterface", outCfg.dialer.bindInterface, valid))
+                        {
+                            readStringField(L, tblIdx, "bind_interface", outCfg.dialer.bindInterface, valid);
+                        }
+                        if (!readStringField(L, tblIdx, "bindAddress", outCfg.dialer.bindAddress, valid))
+                        {
+                            readStringField(L, tblIdx, "bind_address", outCfg.dialer.bindAddress, valid);
+                        }
+                        if (!readBoolField(L, tblIdx, "tcpFastOpen", outCfg.dialer.tcpFastOpen, valid))
+                        {
+                            readBoolField(L, tblIdx, "tcp_fast_open", outCfg.dialer.tcpFastOpen, valid);
+                        }
+                        readBoolField(L, tblIdx, "transparent", outCfg.dialer.transparent, valid);
+                        if (readNumberField(L, tblIdx, "dscp", dNum, valid))
+                        {
+                            outCfg.dialer.dscp = static_cast<uint8_t>(clampValue<lua_Integer>(dNum, 0, 63));
+                        }
+                        if (!readBoolField(L, tblIdx, "enableMptcp", outCfg.dialer.enableMptcp, valid))
+                        {
+                            readBoolField(L, tblIdx, "mptcp", outCfg.dialer.enableMptcp, valid);
+                        }
+                        if (readNumberField(L, tblIdx, "timeoutMs", dNum, valid) ||
+                            readNumberField(L, tblIdx, "timeout_ms", dNum, valid))
+                        {
+                            outCfg.dialer.timeout = std::chrono::milliseconds(clampValue<lua_Integer>(dNum, 100, 60000));
+                        }
+                    };
+                    readDialerFields(itemIdx);
+                    lua_getfield(L, itemIdx, "dialer");
+                    if (lua_istable(L, -1))
+                    {
+                        readDialerFields(lua_gettop(L));
+                    }
+                    lua_pop(L, 1);
+
                     outbounds.push_back(std::move(outCfg));
                 }
                 lua_pop(L, 1);

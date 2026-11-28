@@ -15,5 +15,4 @@ namespace mynet::trojan
         using Connection::Connection;
     };
 
-    using TrojanConnection = ConnectionTrojan;
 } // namespace mynet::trojan

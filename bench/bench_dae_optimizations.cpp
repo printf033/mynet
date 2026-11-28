@@ -15,7 +15,7 @@
 #include "forwarder.hpp"
 #include "http/http.hpp"
 #include "kdf.hpp"
-#include "outboundManager.hpp"
+#include "dialerManager.hpp"
 #include "sniffer.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -178,7 +178,7 @@ void benchSniffing()
     uint64_t sum = 0;
     for (size_t i = 0; i < kIterations; ++i)
     {
-        auto res = sniffing::DomainSniffer::sniffTlsSni(tlsSpan);
+        auto res = DomainSniffer::sniffTlsSni(tlsSpan);
         if (res.has_value())
             sum += res->size();
     }
@@ -196,7 +196,7 @@ void benchSniffing()
     sum = 0;
     for (size_t i = 0; i < kIterations; ++i)
     {
-        auto res = sniffing::DomainSniffer::sniffHttpHost(httpSpan);
+        auto res = DomainSniffer::sniffHttpHost(httpSpan);
         if (res.has_value())
             sum += res->first.size() + res->second;
     }
@@ -216,7 +216,7 @@ void benchSniffing()
     sum = 0;
     for (size_t i = 0; i < kIterations; ++i)
     {
-        auto res = sniffing::DomainSniffer::sniffDnsQuestion(dnsSpan);
+        auto res = DomainSniffer::sniffDnsQuestion(dnsSpan);
         if (res.has_value())
             sum += res->size();
     }
@@ -234,7 +234,7 @@ void benchSniffing()
     sum = 0;
     for (size_t i = 0; i < kQuicIters; ++i)
     {
-        auto res = sniffing::DomainSniffer::sniffQuicSni(quicSpan);
+        auto res = DomainSniffer::sniffQuicSni(quicSpan);
         if (res.has_value())
             sum += res->size();
     }
@@ -265,7 +265,7 @@ void benchDnsReverseCache()
     constexpr size_t kLookupIters = 1'000'000;
     in_addr queryIp{};
     queryIp.s_addr = htonl(0x0A000000 + 4242);
-    ProxyAddress target = ProxyAddress::fromIPv4(queryIp.s_addr, 443);
+    Address target = Address::fromIPv4(queryIp.s_addr, 443);
 
     auto t0 = Clock::now();
     uint64_t hits = 0;
@@ -632,7 +632,7 @@ void benchTcpStreamForwardingComparison()
     // -------------------------------------------------------------
     {
         printf("\n[模式 C: eBPF Sockmap 内核套接字流卸载 (TCP Stream Offload 机制对比)]\n");
-        bool bpfSupported = mynet::ebpf::EbpfManager::isSockmapSupported();
+        bool bpfSupported = mynet::ebpf::EbpfEngine::isSockmapSupported();
         printf("  系统 BPF 支持探测: %s\n", bpfSupported ? "检测到 /sys/fs/bpf 挂载" : "未挂载");
 
 #if defined(__linux__) && defined(__NR_bpf)
@@ -993,7 +993,7 @@ void benchHttp1ThroughputComparison()
     // -------------------------------------------------------------
     {
         printf("\n[模式 3: eBPF Sockmap 内核套接字流卸载 (TCP Stream Offload)]\n");
-        bool bpfSupported = mynet::ebpf::EbpfManager::isSockmapSupported();
+        bool bpfSupported = mynet::ebpf::EbpfEngine::isSockmapSupported();
         printf("  系统 BPF 支持探测: %s\n", bpfSupported ? "检测到 /sys/fs/bpf 挂载" : "未挂载");
 
 #if defined(__linux__) && defined(__NR_bpf)

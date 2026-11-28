@@ -48,7 +48,7 @@ namespace mynet::handler
     /**
      * @brief VMess 协议服务端入站状态机处理器
      */
-    class HandlerInboundVmess : public HandlerInboundConnectionBase
+    class HandlerInboundVmess : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &authId)>;
@@ -95,7 +95,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             vmessStage_ = VmessStage::AUTH;
             std::memset(authId_.data(), 0, 16);
         }
@@ -192,12 +192,12 @@ namespace mynet::handler
 
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
-            auto target = ProxyAddress::decodeVlessAddress(atyp, addrSpan, port, addrConsumed);
+            auto target = Address::decodeVlessAddress(atyp, addrSpan, port, addrConsumed);
             if (!target.has_value())
             {
                 // 兼容 SOCKS5 ATYP 格式
                 std::span<const uint8_t> s5Span(data + cmdOffset + 3, avail - (cmdOffset + 3));
-                target = ProxyAddress::decodeSocks5(s5Span, addrConsumed);
+                target = Address::decodeSocks5(s5Span, addrConsumed);
                 if (!target.has_value())
                 {
                     return false;
@@ -230,7 +230,7 @@ namespace mynet::handler
     /**
      * @brief VMess 客户端出站协议处理器 (VMess Outbound)
      */
-    class HandlerOutboundVmess : public HandlerOutboundConnectionBase
+    class HandlerOutboundVmess : public HandlerOutbound
     {
     private:
         std::array<uint8_t, 16> uuid_{};
@@ -239,14 +239,14 @@ namespace mynet::handler
 
     public:
         HandlerOutboundVmess() noexcept = default;
-        HandlerOutboundVmess(std::string_view uuidStr, std::string_view security, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target),
+        HandlerOutboundVmess(std::string_view uuidStr, std::string_view security, const Address &target)
+            : HandlerOutbound(target),
               security_(security)
         {
             setUuid(uuidStr);
         }
-        HandlerOutboundVmess(const std::array<uint8_t, 16> &uuid, std::string_view security, const ProxyAddress &target)
-            : HandlerOutboundConnectionBase(target),
+        HandlerOutboundVmess(const std::array<uint8_t, 16> &uuid, std::string_view security, const Address &target)
+            : HandlerOutbound(target),
               uuid_(uuid),
               security_(security)
         {
@@ -262,7 +262,7 @@ namespace mynet::handler
 
         void reset() noexcept override
         {
-            HandlerOutboundConnectionBase::reset();
+            HandlerOutbound::reset();
             headerSent_ = false;
         }
 

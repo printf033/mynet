@@ -13,7 +13,7 @@ static_assert(MandatoryMethodConnection<HandlerInboundSocks5>,
 
 namespace
 {
-    void feed(HandlerConnection &h, const std::vector<uint8_t> &bytes)
+    void feed(Handler &h, const std::vector<uint8_t> &bytes)
     {
         [[maybe_unused]] auto _ =
             h.appendRequest(reinterpret_cast<const char *>(bytes.data()), static_cast<ssize_t>(bytes.size()));
@@ -26,7 +26,7 @@ TEST(ProxyAddressTest, IPv4Codec)
 {
     // 127.0.0.1:8080 (0x7F000001, 8080 = 0x1F90)
     uint32_t ipBe = htonl(0x7F000001);
-    ProxyAddress addr = ProxyAddress::fromIPv4(ipBe, 8080);
+    Address addr = Address::fromIPv4(ipBe, 8080);
     EXPECT_EQ(addr.type, AddressType::IPV4);
     EXPECT_EQ(addr.host, "127.0.0.1");
     EXPECT_EQ(addr.port, 8080);
@@ -45,7 +45,7 @@ TEST(ProxyAddressTest, IPv4Codec)
     EXPECT_EQ(encoded[6], 0x90);
 
     size_t consumed = 0;
-    auto decoded = ProxyAddress::decodeSocks5(encoded, consumed);
+    auto decoded = Address::decodeSocks5(encoded, consumed);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(consumed, 7);
     EXPECT_EQ(decoded->type, AddressType::IPV4);
@@ -56,7 +56,7 @@ TEST(ProxyAddressTest, IPv4Codec)
 TEST(ProxyAddressTest, DomainCodec)
 {
     std::string domain = "example.com";
-    ProxyAddress addr = ProxyAddress::fromDomain(domain, 443);
+    Address addr = Address::fromDomain(domain, 443);
     EXPECT_EQ(addr.type, AddressType::DOMAIN);
     EXPECT_EQ(addr.host, "example.com");
     EXPECT_EQ(addr.port, 443);
@@ -72,7 +72,7 @@ TEST(ProxyAddressTest, DomainCodec)
     EXPECT_EQ(encoded[14], 0xBB);
 
     size_t consumed = 0;
-    auto decoded = ProxyAddress::decodeSocks5(encoded, consumed);
+    auto decoded = Address::decodeSocks5(encoded, consumed);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(consumed, encoded.size());
     EXPECT_EQ(decoded->type, AddressType::DOMAIN);
@@ -84,7 +84,7 @@ TEST(ProxyAddressTest, IPv6Codec)
 {
     uint8_t ip6[16] = {0};
     ip6[15] = 1; // ::1
-    ProxyAddress addr = ProxyAddress::fromIPv6(ip6, 1080);
+    Address addr = Address::fromIPv6(ip6, 1080);
     EXPECT_EQ(addr.type, AddressType::IPV6);
     EXPECT_EQ(addr.host, "::1");
     EXPECT_EQ(addr.port, 1080);
@@ -95,7 +95,7 @@ TEST(ProxyAddressTest, IPv6Codec)
     ASSERT_EQ(encoded.size(), 19);
 
     size_t consumed = 0;
-    auto decoded = ProxyAddress::decodeSocks5(encoded, consumed);
+    auto decoded = Address::decodeSocks5(encoded, consumed);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(consumed, 19);
     EXPECT_EQ(decoded->type, AddressType::IPV6);
@@ -136,7 +136,7 @@ TEST(HandlerSocks5Test, NoAuthConnectIPv4Success)
     HandlerInboundSocks5 handler;
     bool requestCalled = false;
     handler.setOnRequest(
-        [&](uint8_t cmd, const ProxyAddress &target)
+        [&](uint8_t cmd, const Address &target)
         {
             requestCalled = true;
             EXPECT_EQ(cmd, socks5::kCmdConnect);
@@ -180,7 +180,7 @@ TEST(HandlerSocks5Test, NoAuthConnectDomainSuccess)
     std::string targetHost;
     uint16_t targetPort = 0;
     handler.setOnRequest(
-        [&](uint8_t, const ProxyAddress &target)
+        [&](uint8_t, const Address &target)
         {
             targetHost = target.host;
             targetPort = target.port;

@@ -20,7 +20,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mynet::handler::dns
+namespace mynet::dns
 {
     // =========================================================================
     // 常量定义
@@ -506,4 +506,4 @@ namespace mynet::handler::dns
         return !outIpv4.empty() || !outIpv6.empty();
     }
 
-} // namespace mynet::handler::dns
+} // namespace mynet::dns

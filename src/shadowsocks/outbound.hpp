@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../outboundManager.hpp"
+#include "../dialerManager.hpp"
 #include "shadowsocks.hpp"
 #include <memory>
 #include <string>
@@ -37,19 +37,19 @@ namespace mynet
         [[nodiscard]] const std::string &method() const noexcept { return method_; }
         [[nodiscard]] const std::string &password() const noexcept { return password_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundShadowsocks>(serverHost_, serverPort_, target, method_,
+            return dialForwarderHelper<handler::HandlerOutboundShadowsocks>(serverHost_, serverPort_, target, ctx,
+                                                                            method_,
                                                                          password_);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundShadowsocks = DialerShadowsocks;
 
 } // namespace mynet

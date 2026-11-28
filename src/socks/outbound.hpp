@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../outboundManager.hpp"
+#include "../dialerManager.hpp"
 #include "socks5.hpp"
 #include <memory>
 #include <string>
@@ -37,18 +37,17 @@ namespace mynet
         [[nodiscard]] const std::string &username() const noexcept { return username_; }
         [[nodiscard]] const std::string &password() const noexcept { return password_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundSocks5>(serverHost_, serverPort_, target);
+            return dialForwarderHelper<handler::HandlerOutboundSocks5>(serverHost_, serverPort_, target, ctx);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundSocks5 = DialerSocks5;
 
 } // namespace mynet

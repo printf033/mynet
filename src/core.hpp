@@ -19,13 +19,15 @@
 #include "config/log.hpp"
 #include "connection.hpp"
 #include "datagram.hpp"
+#include "dns/cache.hpp"
 #include "ebpf.hpp"
 #include "error.hpp"
 #include "fakeip.hpp"
 #include "forwarder.hpp"
 #include "geo.hpp"
-#include "inboundManager.hpp"
-#include "outboundManager.hpp"
+#include "acceptorManager.hpp"
+#include "dialerManager.hpp"
+#include "process.hpp"
 #include "router.hpp"
 #include "sniffer.hpp"
 #include <atomic>
@@ -61,9 +63,9 @@ namespace mynet
         CoreDispatchStatus status{CoreDispatchStatus::SUCCESS};
         std::string outboundTag{};
         std::shared_ptr<ForwarderStreamSession> session{nullptr};
-        handler::ProxyAddress target{};
+        Address target{};
         std::string sniffedDomain{};
-        handler::sniffing::ProtocolType sniffedProtocol{handler::sniffing::ProtocolType::UNKNOWN};
+        ProtocolType sniffedProtocol{ProtocolType::UNKNOWN};
 
         [[nodiscard]] inline bool ok() const noexcept { return status == CoreDispatchStatus::SUCCESS; }
     };
@@ -138,66 +140,66 @@ namespace mynet
                 std::shared_ptr<Acceptor> acc;
                 if (inCfg.protocol == "socks5")
                 {
-                    acc = std::make_shared<InboundSocks5>(
+                    acc = std::make_shared<AcceptorSocks5>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "mixed")
                 {
-                    acc = std::make_shared<InboundMixed>(
+                    acc = std::make_shared<AcceptorMixed>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "http")
                 {
-                    acc = std::make_shared<InboundHttp>(
+                    acc = std::make_shared<AcceptorHttp>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "http2")
                 {
-                    acc = std::make_shared<InboundHttp2>(
+                    acc = std::make_shared<AcceptorHttp2>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.username, inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "http3")
                 {
-                    acc = std::make_shared<InboundHttp3>(
+                    acc = std::make_shared<AcceptorHttp3>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "trojan")
                 {
-                    acc = std::make_shared<InboundTrojan>(
+                    acc = std::make_shared<AcceptorTrojan>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "tproxy")
                 {
-                    acc = std::make_shared<InboundTransparent>(inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing);
+                    acc = std::make_shared<AcceptorTransparent>(inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "direct")
                 {
-                    acc = std::make_shared<InboundDirect>(inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing);
+                    acc = std::make_shared<AcceptorDirect>(inCfg.tag, inCfg.host, inCfg.port, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "vless")
                 {
-                    acc = std::make_shared<InboundVless>(inCfg.tag, inCfg.host, inCfg.port, inCfg.uuid,
+                    acc = std::make_shared<AcceptorVless>(inCfg.tag, inCfg.host, inCfg.port, inCfg.uuid,
                                                          inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "hysteria2")
                 {
-                    acc = std::make_shared<InboundHysteria2>(
+                    acc = std::make_shared<AcceptorHysteria2>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "shadowsocks")
                 {
-                    acc = std::make_shared<InboundShadowsocks>(
+                    acc = std::make_shared<AcceptorShadowsocks>(
                         inCfg.tag, inCfg.host, inCfg.port, inCfg.username.empty() ? "aes-128-gcm" : inCfg.username,
                         inCfg.password, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "tun")
                 {
-                    acc = std::make_shared<InboundTun>(
+                    acc = std::make_shared<AcceptorTun>(
                         inCfg.tag, inCfg.ifName, inCfg.inetIp, inCfg.inetMask, inCfg.mtu, inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "vmess")
                 {
-                    acc = std::make_shared<InboundVmess>(inCfg.tag, inCfg.host, inCfg.port, inCfg.uuid,
+                    acc = std::make_shared<AcceptorVmess>(inCfg.tag, inCfg.host, inCfg.port, inCfg.uuid,
                                                          inCfg.enableSniffing);
                 }
                 else if (inCfg.protocol == "datagram" || inCfg.protocol == "udp")
@@ -296,6 +298,7 @@ namespace mynet
                 }
                 if (dl != nullptr)
                 {
+                    dl->setOptions(outCfg.dialer);
                     if (outCfg.transport.enableTls || outCfg.transport.type != transport::TransportType::TCP)
                     {
                         dl->setTransportConfig(outCfg.transport);
@@ -744,6 +747,61 @@ namespace mynet
         }
 
         /**
+         * @brief 解析入站连接的本地进程名（优先 eBPF cgroup SO_COOKIE，不可用时回落至 Netlink ProcessResolver）
+         */
+        [[nodiscard]] inline std::string
+        resolveInboundProcessName(int fd, uint8_t proto, const sockaddr_in *peerOverride = nullptr) const noexcept
+        {
+            if (ebpfEngine_ != nullptr && fd >= 0)
+            {
+                if (auto proc = ebpfEngine_->getProcessBySocket(fd); proc.has_value() && !proc->name.empty())
+                {
+                    return proc->name;
+                }
+            }
+
+            if (fd < 0 && peerOverride == nullptr)
+            {
+                return {};
+            }
+
+            sockaddr_in peerAddr{};
+            if (peerOverride != nullptr)
+            {
+                peerAddr = *peerOverride;
+            }
+            else
+            {
+                socklen_t peerLen = sizeof(peerAddr);
+                if (::getpeername(fd, reinterpret_cast<sockaddr *>(&peerAddr), &peerLen) != 0 ||
+                    peerAddr.sin_family != AF_INET)
+                {
+                    return {};
+                }
+            }
+
+            sockaddr_in localAddr{};
+            if (fd >= 0)
+            {
+                socklen_t localLen = sizeof(localAddr);
+                if (::getsockname(fd, reinterpret_cast<sockaddr *>(&localAddr), &localLen) != 0 ||
+                    localAddr.sin_family != AF_INET)
+                {
+                    localAddr = {};
+                }
+            }
+
+            if (auto info = ProcessResolver::resolveByNetlink(
+                    ntohl(peerAddr.sin_addr.s_addr), ntohs(peerAddr.sin_port), ntohl(localAddr.sin_addr.s_addr),
+                    ntohs(localAddr.sin_port), proto);
+                info.has_value())
+            {
+                return info->processName;
+            }
+            return {};
+        }
+
+        /**
          * @brief 核心数据平面分发入口：接管一个已完成握手或就绪的入站连接并桥接至目标出站
          *
          * @param inbound 已完成握手的入站协议状态机
@@ -767,12 +825,12 @@ namespace mynet
             result.target = inbound.target();
 
             // 1.1 FakeIP 虚拟地址反解：若目标地址为 198.18.0.0/15 FakeIP，秒级还原原始域名
-            if (result.target.type == handler::AddressType::IPV4 &&
+            if (result.target.type == AddressType::IPV4 &&
                 FakeIPPool::instance().isFakeIp(result.target.ipv4_))
             {
                 if (auto orig = FakeIPPool::instance().lookup(result.target.ipv4_); orig.has_value())
                 {
-                    result.target = handler::ProxyAddress::fromDomain(*orig, result.target.port);
+                    result.target = Address::fromDomain(*orig, result.target.port);
                     result.sniffedDomain = *orig;
                 }
             }
@@ -783,13 +841,23 @@ namespace mynet
                 std::span<const uint8_t> earlyData(reinterpret_cast<const uint8_t *>(inbound.requestBegin()),
                                                    inbound.requestBytes());
 
-                if (auto sniffRes = handler::sniffing::DomainSniffer::sniff(earlyData); sniffRes.has_value())
+                if (auto sniffRes = DomainSniffer::sniff(earlyData, SniffTransport::TCP, result.target.port);
+                    sniffRes.has_value())
                 {
                     result.sniffedProtocol = sniffRes->protocol;
                     if (!sniffRes->host.empty())
                     {
                         result.sniffedDomain = sniffRes->host;
                     }
+                }
+            }
+
+            // 2.1 DNS 反向关联兜底（解决 ECH / 私有协议首包无明文域名的问题）
+            if (result.sniffedDomain.empty() && result.target.type != AddressType::DOMAIN)
+            {
+                if (auto rev = dns::DnsReverseCache::instance().lookup(result.target); rev.has_value())
+                {
+                    result.sniffedDomain = rev->host;
                 }
             }
 
@@ -800,6 +868,12 @@ namespace mynet
             ctx.target = result.target;
             ctx.sniffedDomain = result.sniffedDomain;
             ctx.sniffedProtocol = result.sniffedProtocol;
+            std::string resolvedProcName;
+            if (router_->hasProcessRules())
+            {
+                resolvedProcName = resolveInboundProcessName((inFd >= 0) ? inFd : inbound.fd(), IPPROTO_TCP);
+                ctx.processName = resolvedProcName;
+            }
 
             std::string_view outboundTag = router_->match(ctx);
             result.outboundTag = std::string(outboundTag);
@@ -813,8 +887,7 @@ namespace mynet
 
             // 4. 出站拨号建连与协议状态机装配
             const bool deferConnect = (forwarder_ != nullptr && forwarder_->loopHooks().deferOutboundConnect);
-            ScopedDeferTcpConnect deferGuard(deferConnect);
-            auto dialRes = dialerManager_->dialStream(outboundTag, result.target);
+            auto dialRes = dialerManager_->dialForwarder(outboundTag, result.target, DialContext{deferConnect});
             if (!dialRes)
             {
                 result.status = CoreDispatchStatus::DIAL_FAILED;
@@ -848,27 +921,55 @@ namespace mynet
         /**
          * @brief 调度与转发无连接 UDP 数据报（复用 Router 策略、DialerDatagram 与 ForwarderDatagramSession）
          */
-        inline Result<size_t> dispatchDatagram(HandlerBase &inbound, const sockaddr_in &clientPeer,
-                                               const handler::ProxyAddress &target, std::string_view payload,
+        inline Result<size_t> dispatchDatagram(Handler &inbound, const sockaddr_in &clientPeer,
+                                               const Address &target, std::string_view payload,
                                                std::string_view inboundTag = "", bool enableSniffing = true)
         {
             RouteContext ctx;
             ctx.network = NetworkType::UDP;
             ctx.inboundTag = inboundTag;
             ctx.target = target;
+            std::string resolvedProcName;
+            if (router_->hasProcessRules())
+            {
+                resolvedProcName = resolveInboundProcessName(inbound.fd(), IPPROTO_UDP, &clientPeer);
+                ctx.processName = resolvedProcName;
+            }
 
-            if (enableSniffing && !payload.empty())
+            const uint32_t targetIpBe =
+                (ctx.target.type == AddressType::IPV4) ? ctx.target.ipv4_.s_addr : 0u;
+            const uint8_t udpProtoKey = static_cast<uint8_t>(SniffTransport::UDP);
+            if (enableSniffing && !payload.empty() &&
+                !SniffNegativeCache::instance().isNegative(targetIpBe, ctx.target.port, udpProtoKey))
             {
                 std::span<const uint8_t> peekSpan(reinterpret_cast<const uint8_t *>(payload.data()), payload.size());
-                if (auto sniffRes = handler::sniffing::DomainSniffer::sniff(peekSpan); sniffRes.has_value())
+                if (auto sniffRes = DomainSniffer::sniff(peekSpan, SniffTransport::UDP, ctx.target.port);
+                    sniffRes.has_value())
                 {
+                    SniffNegativeCache::instance().recordSuccess(targetIpBe, ctx.target.port, udpProtoKey);
                     ctx.sniffedProtocol = sniffRes->protocol;
                     ctx.sniffedDomain = sniffRes->host;
-                    if (!sniffRes->host.empty() && ctx.target.type != handler::AddressType::DOMAIN)
+                    if (!sniffRes->host.empty() && ctx.target.type != AddressType::DOMAIN)
                     {
                         const uint16_t p = (ctx.target.port != 0) ? ctx.target.port : sniffRes->port;
-                        ctx.target = handler::ProxyAddress::fromDomain(sniffRes->host, p);
+                        ctx.target = Address::fromDomain(sniffRes->host, p);
                     }
+                }
+                else
+                {
+                    SniffNegativeCache::instance().recordFailure(targetIpBe, ctx.target.port, udpProtoKey);
+                }
+            }
+
+            // DNS 反向关联兜底（UDP ECH / 私有协议无法嗅探时由 IP 反查历史 DNS 解析记录）
+            std::string revUdpDomain;
+            if (ctx.sniffedDomain.empty() && ctx.target.type != AddressType::DOMAIN)
+            {
+                if (auto rev = dns::DnsReverseCache::instance().lookup(ctx.target); rev.has_value())
+                {
+                    revUdpDomain = rev->host;
+                    ctx.sniffedDomain = revUdpDomain;
+                    ctx.target = *rev;
                 }
             }
 

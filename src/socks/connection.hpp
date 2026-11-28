@@ -15,5 +15,4 @@ namespace mynet::socks
         using Connection::Connection;
     };
 
-    using SocksConnection = ConnectionSocks;
 } // namespace mynet::socks

@@ -1,6 +1,6 @@
 #include "core.hpp"
-#include "inboundManager.hpp"
-#include "outboundManager.hpp"
+#include "acceptorManager.hpp"
+#include "dialerManager.hpp"
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <linux/if_tun.h>
@@ -16,9 +16,9 @@ using namespace mynet;
 TEST(AdvancedProxyTest, UrlTestSelectsLowestLatencyNode)
 {
     DialerManager mgr;
-    mgr.registerDialer(std::make_shared<OutboundDirect>("hk-node"));
-    mgr.registerDialer(std::make_shared<OutboundDirect>("jp-node"));
-    mgr.registerDialer(std::make_shared<OutboundDirect>("us-node"));
+    mgr.registerDialer(std::make_shared<DialerDirect>("hk-node"));
+    mgr.registerDialer(std::make_shared<DialerDirect>("jp-node"));
+    mgr.registerDialer(std::make_shared<DialerDirect>("us-node"));
 
     auto urltest = std::make_shared<DialerUrlTest>("auto-fastest",
                                                    std::vector<std::string>{"hk-node", "jp-node", "us-node"}, &mgr);
@@ -48,8 +48,8 @@ TEST(AdvancedProxyTest, OutboundFallbackSequence)
 {
     DialerManager mgr;
     // 假定主节点指向无效地址，备用节点为 direct
-    mgr.registerDialer(std::make_shared<OutboundBlock>("faulty-primary"));
-    mgr.registerDialer(std::make_shared<OutboundDirect>("backup-node"));
+    mgr.registerDialer(std::make_shared<DialerBlock>("faulty-primary"));
+    mgr.registerDialer(std::make_shared<DialerDirect>("backup-node"));
 
     auto fallback = std::make_shared<DialerFallback>("auto-fallback",
                                                        std::vector<std::string>{"faulty-primary", "backup-node"}, &mgr);
@@ -68,25 +68,25 @@ TEST(AdvancedProxyTest, AdvancedInboundAndOutboundProtocols)
 {
     // 1. Inbounds
     auto vlessIn =
-        std::make_shared<InboundVless>("vless-in", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
+        std::make_shared<AcceptorVless>("vless-in", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
     EXPECT_EQ(vlessIn->type(), "vless");
     EXPECT_EQ(vlessIn->uuid(), "a1b2c3d4-e5f6-7890-1234-567890abcdef");
     auto vlessHandler = vlessIn->createHandler();
     ASSERT_NE(vlessHandler, nullptr);
 
-    auto hy2In = std::make_shared<InboundHysteria2>("hy2-in", "127.0.0.1", 4431, "secretpass");
+    auto hy2In = std::make_shared<AcceptorHysteria2>("hy2-in", "127.0.0.1", 4431, "secretpass");
     EXPECT_EQ(hy2In->type(), "hysteria2");
     EXPECT_EQ(hy2In->password(), "secretpass");
     auto hy2Handler = hy2In->createHandler();
     ASSERT_NE(hy2Handler, nullptr);
 
-    auto ssIn = std::make_shared<InboundShadowsocks>("ss-in", "127.0.0.1", 8388, "aes-256-gcm", "sspassword");
+    auto ssIn = std::make_shared<AcceptorShadowsocks>("ss-in", "127.0.0.1", 8388, "aes-256-gcm", "sspassword");
     EXPECT_EQ(ssIn->type(), "shadowsocks");
     EXPECT_EQ(ssIn->method(), "aes-256-gcm");
     auto ssHandler = ssIn->createHandler();
     ASSERT_NE(ssHandler, nullptr);
 
-    auto tunIn = std::make_shared<InboundTun>("tun-in", "tun88", "172.19.0.1", "255.255.255.0", 1500);
+    auto tunIn = std::make_shared<AcceptorTun>("tun-in", "tun88", "172.19.0.1", "255.255.255.0", 1500);
     EXPECT_EQ(tunIn->type(), "tun");
     EXPECT_EQ(tunIn->ifName(), "tun88");
     EXPECT_EQ(tunIn->inetIp(), "172.19.0.1");
@@ -96,12 +96,12 @@ TEST(AdvancedProxyTest, AdvancedInboundAndOutboundProtocols)
 
     // 2. Outbounds
     auto vlessOut =
-        std::make_shared<OutboundVless>("vless-out", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
+        std::make_shared<DialerVless>("vless-out", "127.0.0.1", 4430, "a1b2c3d4-e5f6-7890-1234-567890abcdef");
     EXPECT_EQ(vlessOut->type(), "vless");
     EXPECT_EQ(vlessOut->serverHost(), "127.0.0.1");
     EXPECT_EQ(vlessOut->serverPort(), 4430);
 
-    auto hy2Out = std::make_shared<OutboundHysteria2>("hy2-out", "127.0.0.1", 4431, "secretpass");
+    auto hy2Out = std::make_shared<DialerHysteria2>("hy2-out", "127.0.0.1", 4431, "secretpass");
     EXPECT_EQ(hy2Out->type(), "hysteria2");
     EXPECT_EQ(hy2Out->serverHost(), "127.0.0.1");
     EXPECT_EQ(hy2Out->serverPort(), 4431);

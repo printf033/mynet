@@ -18,7 +18,6 @@ namespace mynet::http
         [[nodiscard]] constexpr std::string_view version() const noexcept { return "HTTP/1.1"; }
     };
 
-    using HttpConnection = ConnectionHttp;
 
     /**
      * @brief HTTP/2 多路复用逻辑流连接会话实现
@@ -46,7 +45,6 @@ namespace mynet::http
         inline void updateWindow(int32_t delta) noexcept { windowSize_ += delta; }
     };
 
-    using Http2Connection = ConnectionHttp2;
 
     /**
      * @brief HTTP/3 基于 QUIC/UDP 的逻辑流连接会话实现
@@ -73,6 +71,5 @@ namespace mynet::http
         [[nodiscard]] inline bool isDatagram() const noexcept { return isDatagram_; }
     };
 
-    using Http3Connection = ConnectionHttp3;
 
 } // namespace mynet::http

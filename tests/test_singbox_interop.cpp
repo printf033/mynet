@@ -15,7 +15,7 @@
 #include "../src/http/http.hpp"
 #include "../src/http/inbound.hpp"
 #include "../src/http/outbound.hpp"
-#include "../src/inboundManager.hpp"
+#include "../src/acceptorManager.hpp"
 #include "../src/shadowsocks/inbound.hpp"
 #include "../src/shadowsocks/outbound.hpp"
 #include "../src/shadowsocks/shadowsocks.hpp"
@@ -54,7 +54,7 @@ using namespace mynet::handler;
 namespace
 {
 
-    bool driveTestHandshake(int clientFd, HandlerBase &handler, int timeoutMs = 2000)
+    bool driveTestHandshake(int clientFd, Handler &handler, int timeoutMs = 2000)
     {
         auto drainResponses = [&]() noexcept
         {
@@ -439,10 +439,10 @@ TEST(SingBoxInteropTest, MynetOutboundSocks5ToSingBoxInbound)
     ASSERT_TRUE(sb.isRunning());
 
     // Mynet OutboundSocks5 拨号至 Sing-box，目标为 EchoServer
-    OutboundSocks5 outbound("sb-socks", "127.0.0.1", 14001);
-    auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
+    DialerSocks5 outbound("sb-socks", "127.0.0.1", 14001);
+    auto target = Address::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
 
-    auto dialRes = outbound.dialStream(target);
+    auto dialRes = outbound.dialForwarder(target);
     ASSERT_TRUE(dialRes.has_value());
     int fd = dialRes->fd;
     ASSERT_GE(fd, 0);
@@ -487,7 +487,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundSocks5ToMynetInbound)
     EchoServer echo("ECHO_MYNET_SOCKS5:");
     ASSERT_TRUE(echo.isRunning());
 
-    InboundSocks5 mynetIn("m-socks-in", "127.0.0.1", 0);
+    AcceptorSocks5 mynetIn("m-socks-in", "127.0.0.1", 0);
     ASSERT_TRUE(mynetIn.listen().has_value());
     uint16_t mynetPort = mynetIn.port();
 
@@ -615,10 +615,10 @@ TEST(SingBoxInteropTest, MynetOutboundHttpToSingBoxInbound)
     SingBoxRunner sb(sbConfig);
     ASSERT_TRUE(sb.isRunning());
 
-    OutboundHttp outbound("sb-http", "127.0.0.1", 14003);
-    auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
+    DialerHttp outbound("sb-http", "127.0.0.1", 14003);
+    auto target = Address::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
 
-    auto dialRes = outbound.dialStream(target);
+    auto dialRes = outbound.dialForwarder(target);
     ASSERT_TRUE(dialRes.has_value());
     int fd = dialRes->fd;
     ASSERT_GE(fd, 0);
@@ -661,7 +661,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundHttpToMynetInbound)
     EchoServer echo("ECHO_MYNET_HTTP:");
     ASSERT_TRUE(echo.isRunning());
 
-    InboundHttp mynetIn("m-http-in", "127.0.0.1", 0);
+    AcceptorHttp mynetIn("m-http-in", "127.0.0.1", 0);
     ASSERT_TRUE(mynetIn.listen().has_value());
     uint16_t mynetPort = mynetIn.port();
 
@@ -789,10 +789,10 @@ TEST(SingBoxInteropTest, MynetOutboundTrojanToSingBoxInbound)
     SingBoxRunner sb(sbConfig);
     ASSERT_TRUE(sb.isRunning());
 
-    OutboundTrojan outbound("sb-trojan", "127.0.0.1", 14004, "secretpass");
-    auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
+    DialerTrojan outbound("sb-trojan", "127.0.0.1", 14004, "secretpass");
+    auto target = Address::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
 
-    auto dialRes = outbound.dialStream(target);
+    auto dialRes = outbound.dialForwarder(target);
     ASSERT_TRUE(dialRes.has_value());
     int fd = dialRes->fd;
     ASSERT_GE(fd, 0);
@@ -825,7 +825,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundTrojanToMynetInbound)
     EchoServer echo("ECHO_MYNET_TROJAN:");
     ASSERT_TRUE(echo.isRunning());
 
-    InboundTrojan mynetIn("m-trojan-in", "127.0.0.1", 0, "secretpass");
+    AcceptorTrojan mynetIn("m-trojan-in", "127.0.0.1", 0, "secretpass");
     ASSERT_TRUE(mynetIn.listen().has_value());
     uint16_t mynetPort = mynetIn.port();
 
@@ -952,10 +952,10 @@ TEST(SingBoxInteropTest, MynetOutboundVlessToSingBoxInbound)
     SingBoxRunner sb(sbConfig);
     ASSERT_TRUE(sb.isRunning());
 
-    OutboundVless outbound("sb-vless", "127.0.0.1", 14006, testUuid);
-    auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
+    DialerVless outbound("sb-vless", "127.0.0.1", 14006, testUuid);
+    auto target = Address::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
 
-    auto dialRes = outbound.dialStream(target);
+    auto dialRes = outbound.dialForwarder(target);
     ASSERT_TRUE(dialRes.has_value());
     int fd = dialRes->fd;
     ASSERT_GE(fd, 0);
@@ -994,7 +994,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundVlessToMynetInbound)
 
     std::string testUuid = "de04add9-5c1a-4b08-8e65-244e45cf5483";
 
-    InboundVless mynetIn("m-vless-in", "127.0.0.1", 0, testUuid);
+    AcceptorVless mynetIn("m-vless-in", "127.0.0.1", 0, testUuid);
     ASSERT_TRUE(mynetIn.listen().has_value());
     uint16_t mynetPort = mynetIn.port();
 
@@ -1116,10 +1116,10 @@ TEST(SingBoxInteropTest, MynetOutboundShadowsocksToSingBoxInbound)
     SingBoxRunner sb(sbConfig);
     ASSERT_TRUE(sb.isRunning());
 
-    OutboundShadowsocks outbound("sb-ss", "127.0.0.1", 14008, "aes-128-gcm", "sspassword");
-    auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
+    DialerShadowsocks outbound("sb-ss", "127.0.0.1", 14008, "aes-128-gcm", "sspassword");
+    auto target = Address::fromIPv4(htonl(INADDR_LOOPBACK), echo.port());
 
-    auto dialRes = outbound.dialStream(target);
+    auto dialRes = outbound.dialForwarder(target);
     ASSERT_TRUE(dialRes.has_value());
     int fd = dialRes->fd;
     ASSERT_GE(fd, 0);
@@ -1139,7 +1139,7 @@ TEST(SingBoxInteropTest, SingBoxOutboundShadowsocksToMynetInbound)
 {
     ASSERT_FALSE(findSingBoxBinary().empty()) << "sing-box binary not found";
 
-    InboundShadowsocks mynetIn("m-ss-in", "127.0.0.1", 0, "aes-128-gcm", "sspassword");
+    AcceptorShadowsocks mynetIn("m-ss-in", "127.0.0.1", 0, "aes-128-gcm", "sspassword");
     ASSERT_TRUE(mynetIn.listen().has_value());
     uint16_t mynetPort = mynetIn.port();
 

@@ -72,8 +72,8 @@ TEST(SrsTest, BuildSerializeAndParseRoundtrip)
     EXPECT_EQ(r.ports[0], 443);
     EXPECT_EQ(r.ports[1], 8443);
     ASSERT_EQ(r.portRanges.size(), 1u);
-    EXPECT_EQ(r.portRanges[0].from, 8000);
-    EXPECT_EQ(r.portRanges[0].to, 8080);
+    EXPECT_EQ(r.portRanges[0].start, 8000);
+    EXPECT_EQ(r.portRanges[0].end, 8080);
     ASSERT_EQ(r.ipRanges4.size(), 1u);
     EXPECT_EQ(r.ipRanges4[0].from, ipFrom);
     EXPECT_EQ(r.ipRanges4[0].to, ipTo);
@@ -143,14 +143,14 @@ TEST(SrsTest, RouterRuleSetIntegration)
     router.addRule(RouteRule::to("proxy").domainSuffix("google.com"));
 
     RouteContext ctxAd;
-    ctxAd.target = ProxyAddress::fromDomain("pagead2.doubleclick.net", 443);
+    ctxAd.target = Address::fromDomain("pagead2.doubleclick.net", 443);
     EXPECT_EQ(router.match(ctxAd), "block");
 
     RouteContext ctxGoogle;
-    ctxGoogle.target = ProxyAddress::fromDomain("www.google.com", 443);
+    ctxGoogle.target = Address::fromDomain("www.google.com", 443);
     EXPECT_EQ(router.match(ctxGoogle), "proxy");
 
     RouteContext ctxOther;
-    ctxOther.target = ProxyAddress::fromDomain("kernel.org", 443);
+    ctxOther.target = Address::fromDomain("kernel.org", 443);
     EXPECT_EQ(router.match(ctxOther), "direct");
 }

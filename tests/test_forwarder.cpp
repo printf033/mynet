@@ -132,13 +132,15 @@ TEST(ForwarderTest, ConnectionObjectBridge)
 {
     Forwarder forwarder;
 
-    ConnectionBase inConn;
-    HandlerInboundDirect inHandler;
-    inConn.setHandler(&inHandler);
+    Connection inConn;
+    auto inHandlerPtr = std::make_unique<HandlerInboundDirect>();
+    auto *inHandler = inHandlerPtr.get();
+    inConn.setHandler(std::move(inHandlerPtr));
 
-    ConnectionBase outConn;
-    HandlerOutboundDirect outHandler;
-    outConn.setHandler(&outHandler);
+    Connection outConn;
+    auto outHandlerPtr = std::make_unique<HandlerOutboundDirect>();
+    auto *outHandler = outHandlerPtr.get();
+    outConn.setHandler(std::move(outHandlerPtr));
 
     int sp[2] = {-1, -1};
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
@@ -148,8 +150,8 @@ TEST(ForwarderTest, ConnectionObjectBridge)
     auto session = forwarder.bridge(inConn, outConn);
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(session->activeMode(), ForwardMode::ZERO_COPY_SPLICE);
-    EXPECT_TRUE(inHandler.canSplice());
-    EXPECT_TRUE(outHandler.canSplice());
+    EXPECT_TRUE(inHandler->canSplice());
+    EXPECT_TRUE(outHandler->canSplice());
 
     inConn.reset();
     outConn.reset();
@@ -180,7 +182,7 @@ TEST(ForwarderTest, DatagramForwardingAndSweep)
     EXPECT_EQ(forwarder.activeDatagramSessions(), 1u);
 
     // 模拟数据报回复回写给客户端
-    HandlerBase inbound;
+    Handler inbound;
     const std::string dnsResp = "DNS_PACKET_RESPONSE_PAYLOAD";
     auto res = forwarder.forwardDatagramToClient(inbound, client, dnsResp, session.get());
     ASSERT_TRUE(res.has_value());
@@ -238,7 +240,7 @@ TEST(ForwarderTest, AggregatedMetricsAndCloseAll)
 
 TEST(ForwarderTest, ShadowsocksCodecSymmetricRelayViaPump)
 {
-    ProxyAddress target;
+    Address target;
     target.type = AddressType::DOMAIN;
     target.host = "example.com";
     target.port = 443;
@@ -259,7 +261,7 @@ TEST(ForwarderTest, ShadowsocksCodecSymmetricRelayViaPump)
     EXPECT_EQ(ssServer.target().port, 443);
     EXPECT_FALSE(ssServer.canSplice());
 
-    HandlerConnection upstream;
+    Handler upstream;
     Forwarder forwarder;
     auto session = forwarder.bridge(ssServer, upstream);
     EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
@@ -333,8 +335,8 @@ TEST(ForwarderTest, VirtualStreamChannelNonFdBidirectionalBridge)
     inCh->rxQueue = "virtual-up";
     outCh->rxQueue = "virtual-down";
 
-    HandlerConnection inbound;
-    HandlerConnection outbound;
+    Handler inbound;
+    Handler outbound;
     Forwarder forwarder;
     auto session = forwarder.bridgeChannels(inbound, inCh, outbound, outCh);
     EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);
@@ -501,7 +503,7 @@ TEST(ForwarderTest, DeferredConnectPromotesAfterConnectAndDrain)
     targetAddr.sin_port = htons(18080);
     auto session = forwarder.bridgeDispatched(
         in, std::make_unique<handler::HandlerOutboundDirect>(), spIn[1], spOut[0], false, true, true, targetAddr,
-        ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), 18080), "direct");
+        Address::fromIPv4(htonl(INADDR_LOOPBACK), 18080), "direct");
     ASSERT_NE(session, nullptr);
     // 尚在延迟建连阶段，不得提前激活 KERNEL_SOCKMAP/ZERO_COPY_SPLICE
     EXPECT_EQ(session->activeMode(), ForwardMode::BUFFER_PUMP);

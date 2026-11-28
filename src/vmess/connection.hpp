@@ -15,5 +15,4 @@ namespace mynet::vmess
         using Connection::Connection;
     };
 
-    using VmessConnection = ConnectionVmess;
 } // namespace mynet::vmess

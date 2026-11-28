@@ -253,6 +253,8 @@ namespace mynet
             sa.req.id.idiag_dport = htons(dstPort);
             sa.req.id.idiag_src[0] = htonl(srcIp);
             sa.req.id.idiag_dst[0] = htonl(dstIp);
+            sa.req.id.idiag_cookie[0] = INET_DIAG_NOCOOKIE;
+            sa.req.id.idiag_cookie[1] = INET_DIAG_NOCOOKIE;
 
             struct sockaddr_nl nladdr{};
             nladdr.nl_family = AF_NETLINK;

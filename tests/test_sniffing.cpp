@@ -4,6 +4,8 @@
 #include <vector>
 
 using namespace mynet::handler::sniffing;
+using mynet::DomainSniffer;
+using mynet::ProtocolType;
 
 namespace
 {
@@ -371,4 +373,31 @@ TEST(DomainSnifferTest, NegativeCases)
 
     // 空数据
     EXPECT_FALSE(DomainSniffer::sniff({}).has_value());
+}
+
+TEST(DomainSnifferTest, TransportScopedDispatchAndNegativeCache)
+{
+    auto tlsPkt = createTlsRecordClientHello("ech.example.com");
+    auto tlsTcp = DomainSniffer::sniff(tlsPkt, mynet::SniffTransport::TCP, 443);
+    ASSERT_TRUE(tlsTcp.has_value());
+    EXPECT_EQ(tlsTcp->protocol, mynet::ProtocolType::TLS);
+    auto tlsUdp = DomainSniffer::sniff(tlsPkt, mynet::SniffTransport::UDP, 443);
+    EXPECT_TRUE(!tlsUdp.has_value() || tlsUdp->protocol != mynet::ProtocolType::TLS);
+
+    std::string httpReq = "GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
+    std::span<const uint8_t> httpSpan(reinterpret_cast<const uint8_t *>(httpReq.data()), httpReq.size());
+    EXPECT_TRUE(DomainSniffer::sniff(httpSpan, mynet::SniffTransport::TCP, 80).has_value());
+    EXPECT_FALSE(DomainSniffer::sniff(httpSpan, mynet::SniffTransport::UDP, 80).has_value());
+
+    auto &neg = mynet::SniffNegativeCache::instance();
+    neg.clear();
+    const uint32_t ipBe = htonl(0x01020304);
+    EXPECT_FALSE(neg.isNegative(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP)));
+    neg.recordFailure(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP));
+    neg.recordFailure(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP));
+    EXPECT_FALSE(neg.isNegative(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP)));
+    neg.recordFailure(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP));
+    EXPECT_TRUE(neg.isNegative(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP)));
+    neg.recordSuccess(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP));
+    EXPECT_FALSE(neg.isNegative(ipBe, 51820, static_cast<uint8_t>(mynet::SniffTransport::UDP)));
 }

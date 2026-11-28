@@ -31,9 +31,7 @@ namespace mynet
 {
 
     class Connection;
-    using ConnectionBase = Connection;
     class Handler;
-    using HandlerBase = Handler;
 
     /**
      * @brief 空入站上下文结构（不占任何空间）
@@ -76,7 +74,7 @@ namespace mynet
         std::string type_{};
         std::string host_{"0.0.0.0"};
         uint16_t port_{0};
-        SocketEndpoint socket_{};
+        Listener socket_{};
         bool running_{false};
         bool enableSniffing_{true};
         transport::TransportConfig transportConfig_{};
@@ -115,8 +113,8 @@ namespace mynet
         [[nodiscard]] inline const std::string &type() const noexcept { return type_; }
         [[nodiscard]] inline const std::string &host() const noexcept { return host_; }
         [[nodiscard]] inline uint16_t port() const noexcept { return port_; }
-        [[nodiscard]] inline int listenFd() const noexcept { return socket_.fd; }
-        [[nodiscard]] inline const sockaddr_in &addr() const noexcept { return socket_.addr; }
+        [[nodiscard]] inline int listenFd() const noexcept { return socket_.fd(); }
+        [[nodiscard]] inline const sockaddr_in &addr() const noexcept { return socket_.addr(); }
         [[nodiscard]] inline bool isRunning() const noexcept { return running_; }
         [[nodiscard]] inline bool running() const noexcept { return running_; }
         [[nodiscard]] inline bool isSniffingEnabled() const noexcept { return enableSniffing_; }
@@ -142,7 +140,7 @@ namespace mynet
 
             if (port_ == 0)
             {
-                port_ = ntohs(socket_.addr.sin_port);
+                port_ = ntohs(socket_.addr().sin_port);
             }
 
             running_ = true;
@@ -243,9 +241,9 @@ namespace mynet
         }
 
         /**
-         * @brief 非阻塞建连装配：分配 owned Handler 并初始化传输握手（供 Reactor / Proactor 异步事件循环复用）
+         * @brief 非阻塞建连装配：分配 owned Handler 并初始化传输握手（供独立 Connection 生命周期管理使用）
          */
-        [[nodiscard]] virtual HandshakeStatus acceptConnection(int clientFd, ConnectionBase *&outConn)
+        [[nodiscard]] virtual HandshakeStatus acceptConnection(int clientFd, Connection *&outConn)
         {
             auto h = createHandler();
             if (!h)
@@ -258,80 +256,44 @@ namespace mynet
                 outConn = nullptr;
                 return HandshakeStatus::FAILED;
             }
-            auto *conn = new Connection();
-            conn->setFd(clientFd);
             h->onConnect(clientFd);
             [[maybe_unused]] auto _ = h->startTransportHandshake();
-            conn->setOwnedHandler(std::move(h));
+            auto *conn = new Connection();
+            conn->setFd(clientFd);
+            conn->setHandler(std::move(h));
             outConn = conn;
             return HandshakeStatus::SUCCESS;
+        }
+
+        /**
+         * @brief 转发建连装配：直接创建并初始化挂载好传输管线的 Handler（不包装 Connection，供 Forwarder 零拷贝桥接使用）
+         */
+        [[nodiscard]] virtual std::unique_ptr<Handler> acceptForwarder(int clientFd)
+        {
+            auto h = buildConfiguredHandler();
+            if (!h)
+            {
+                return nullptr;
+            }
+            h->onConnect(clientFd);
+            [[maybe_unused]] auto _ = h->startTransportHandshake();
+            return h;
+        }
+
+        /**
+         * @brief 数据报入站接收装配：由 UDP/Datagram 接收器覆写，返回已绑定的 datagram socket fd
+         */
+        [[nodiscard]] virtual Result<int> acceptDatagram(const Address &peer)
+        {
+            (void)peer;
+            return std::unexpected(ERR::ACCEPT_FAILED);
         }
 
         /**
          * @brief 重置握手器状态
          */
         virtual void reset() noexcept {}
-
-        /**
-         * @brief 启动入站 TLS 握手绑定（握手由 Acceptor 专职负责）
-         */
-        static inline Result<SSL *> startTls(int clientFd, SSL_CTX *ctx) noexcept
-        {
-            if (ctx == nullptr) [[unlikely]]
-            {
-                LOG_ERROR("Acceptor::startTls: no SSL_CTX (fd {})", clientFd);
-                return std::unexpected(ERR::SSL_CTX_FAILED);
-            }
-            SSL *ssl = SSL_new(ctx);
-            if (ssl == nullptr) [[unlikely]]
-            {
-                LOG_ERROR("Acceptor::startTls: SSL_new() failed on fd {}", clientFd);
-                return std::unexpected(ERR::SSL_NEW_FAILED);
-            }
-#ifdef MYNET_HAVE_KTLS
-            SSL_set_options(ssl, SSL_OP_ENABLE_KTLS);
-#endif
-            if (SSL_set_fd(ssl, clientFd) != 1) [[unlikely]]
-            {
-                LOG_ERROR("Acceptor::startTls: SSL_set_fd failed on fd {}", clientFd);
-                SSL_free(ssl);
-                return std::unexpected(ERR::SSL_SET_FD_FAILED);
-            }
-            SSL_set_accept_state(ssl);
-            return ssl;
-        }
-
-        static inline Result<SSL *> startTLS(int clientFd, SSL_CTX *ctx) noexcept { return startTls(clientFd, ctx); }
-
-        /**
-         * @brief 驱动非阻塞 TLS 握手演进
-         */
-        static inline HandshakeStatus doTlsHandshake(SSL *ssl) noexcept
-        {
-            if (ssl == nullptr) [[likely]]
-            {
-                return HandshakeStatus::SUCCESS;
-            }
-            const int r = SSL_accept(ssl);
-            if (r == 1)
-            {
-                return HandshakeStatus::SUCCESS;
-            }
-            const int err = SSL_get_error(ssl, r);
-            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
-            {
-                return HandshakeStatus::IN_PROGRESS;
-            }
-            return HandshakeStatus::FAILED;
-        }
     };
-
-    /**
-     * @brief 兼容别名：IAcceptor / InboundBase 直接收敛至统一的 Acceptor
-     */
-    using IAcceptor = Acceptor;
-    using InboundBase = Acceptor;
-    using Inbound = Acceptor;
 
     /**
      * @brief 泛型接收器模板包装（继承自 Acceptor）

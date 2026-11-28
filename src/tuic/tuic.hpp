@@ -33,7 +33,7 @@ namespace mynet::handler
     /**
      * @brief TUIC 协议入站状态机处理器
      */
-    class HandlerInboundTuic : public HandlerInboundConnectionBase
+    class HandlerInboundTuic : public HandlerInbound
     {
     public:
         using AuthCallback = std::function<bool(const std::array<uint8_t, 16> &uuid)>;
@@ -64,7 +64,7 @@ namespace mynet::handler
         void setAuthenticator(AuthCallback cb) noexcept { authCallback_ = std::move(cb); }
         void setAutoReply(bool autoReply) noexcept { autoReplySuccess_ = autoReply; }
 
-        void reset() noexcept override { HandlerInboundConnectionBase::reset(); }
+        void reset() noexcept override { HandlerInbound::reset(); }
 
         void handle() override
         {
@@ -122,7 +122,7 @@ namespace mynet::handler
 
             size_t addrConsumed = 0;
             std::span<const uint8_t> addrSpan(data + addrOffset, avail - addrOffset);
-            auto target = ProxyAddress::decodeSocks5(addrSpan, addrConsumed);
+            auto target = Address::decodeSocks5(addrSpan, addrConsumed);
             if (!target.has_value())
             {
                 return false;

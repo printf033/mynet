@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file inboundManager.hpp
+ * @file acceptorManager.hpp
  * @brief 接收器管理器 (AcceptorManager)。
  *
  * 职责彻底解耦：
@@ -43,6 +43,7 @@
 #include "socks/inbound.hpp"
 #include "transparent.hpp"
 #include "trojan/inbound.hpp"
+#include "tun/inbound.hpp"
 #include "vless/inbound.hpp"
 #include "vmess/inbound.hpp"
 

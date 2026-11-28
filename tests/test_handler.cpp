@@ -14,7 +14,7 @@ using namespace mynet::http::v1;
 
 namespace
 {
-    void feed(HandlerConnection &handler, const std::string &bytes)
+    void feed(Handler &handler, const std::string &bytes)
     {
         [[maybe_unused]] auto _ = handler.appendRequest(bytes.data(), static_cast<ssize_t>(bytes.size()));
     }
@@ -28,14 +28,14 @@ namespace
      * 覆盖并逐层转发，再叠加自己的数据报回显。
      * 纯报文处理器无需如此（引擎已支持只派生 HandlerDatagram）。
      */
-    class CombinedEchoHandler : public HandlerBase
+    class CombinedEchoHandler : public Handler
     {
     public:
-        void reset() noexcept override { HandlerBase::reset(); }
+        void reset() noexcept override { Handler::reset(); }
 
-        void onMessageComplete() noexcept override { HandlerBase::onMessageComplete(); }
+        void onMessageComplete() noexcept override { Handler::onMessageComplete(); }
 
-        void onParseError(const char *reason) noexcept override { HandlerBase::onParseError(reason); }
+        void onParseError(const char *reason) noexcept override { Handler::onParseError(reason); }
 
         void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
         {
@@ -52,7 +52,7 @@ namespace
 
 TEST(HandlerConnection, DefaultProcessDoesNotHandleRequests)
 {
-    HandlerConnection handler;
+    Handler handler;
     feed(handler, "hello");
     handler.handle();
     EXPECT_FALSE(handler.hasResponse());
@@ -62,7 +62,7 @@ TEST(HandlerConnection, DefaultProcessDoesNotHandleRequests)
 
 TEST(HandlerConnection, ResponseQueueIsFifo)
 {
-    HandlerConnection handler;
+    Handler handler;
     [[maybe_unused]] auto _1 = handler.pushResponse("first");
     [[maybe_unused]] auto _2 = handler.pushResponse(std::string("second"));
     EXPECT_EQ(handler.responseCount(), size_t{2});
@@ -74,7 +74,7 @@ TEST(HandlerConnection, ResponseQueueIsFifo)
 
 TEST(HandlerConnection, PushResponseFromABufferCopiesTheBytes)
 {
-    HandlerConnection handler;
+    Handler handler;
     const std::string bytes = "abcdef";
     [[maybe_unused]] auto _ = handler.pushResponse(std::string_view(bytes.data(), 3));
     EXPECT_EQ(handler.takeResponse(), "abc");
@@ -82,7 +82,7 @@ TEST(HandlerConnection, PushResponseFromABufferCopiesTheBytes)
 
 TEST(HandlerConnection, RequestLimitDrivesReadCredit)
 {
-    HandlerConnection handler;
+    Handler handler;
     handler.setMaxRequestBytes(8);
     EXPECT_EQ(handler.readCredit(), size_t{8});
     feed(handler, "abc");
@@ -96,7 +96,7 @@ TEST(HandlerConnection, RequestLimitDrivesReadCredit)
 
 TEST(HandlerConnection, DirectWritableZeroCopyIngress)
 {
-    HandlerConnection handler;
+    Handler handler;
     auto prepRes = handler.prepareRequestWritable(128);
     ASSERT_TRUE(prepRes.has_value());
     char *target = *prepRes;
@@ -115,7 +115,7 @@ TEST(HandlerConnection, DirectWritableZeroCopyIngress)
 
 TEST(HandlerConnection, RequestConsumeAndClearMoveTheCursor)
 {
-    HandlerConnection handler;
+    Handler handler;
     feed(handler, "abcdef");
     handler.requestConsume(2);
     EXPECT_EQ(handler.requestBytes(), size_t{4});
@@ -126,7 +126,7 @@ TEST(HandlerConnection, RequestConsumeAndClearMoveTheCursor)
 
 TEST(HandlerConnection, CloseAfterResponseDefaultsOffAndIsSettable)
 {
-    HandlerConnection handler;
+    Handler handler;
     EXPECT_FALSE(handler.closeAfterResponse());
     handler.setCloseAfterResponse(true);
     EXPECT_TRUE(handler.closeAfterResponse());
@@ -134,7 +134,7 @@ TEST(HandlerConnection, CloseAfterResponseDefaultsOffAndIsSettable)
 
 TEST(HandlerConnection, ResetClearsRequestsResponsesAndTheCloseFlag)
 {
-    HandlerConnection handler;
+    Handler handler;
     feed(handler, "request");
     [[maybe_unused]] auto _ = handler.pushResponse("response");
     handler.setCloseAfterResponse(true);
@@ -239,7 +239,7 @@ TEST(HandlerHttp, NullHeaderNameDoesNotCrash)
 
 TEST(HandlerConnection, NullPushResponseDoesNotCrash)
 {
-    HandlerConnection handler;
+    Handler handler;
     [[maybe_unused]] auto _1 = handler.pushResponse(std::string_view{});
     [[maybe_unused]] auto _2 = handler.pushResponse(std::string_view(nullptr, 0));
     EXPECT_FALSE(handler.hasResponse());
@@ -329,10 +329,10 @@ TEST(HandlerDatagram, StandsAloneWithoutTheStreamFacilities)
 {
     // 偏报文特化可独立实例化：无请求缓冲与响应队列，
     // 拥有对端标签化的外发队列。引擎的 UDP 入口正是以这种纯报文形态使用它。
-    HandlerDatagram handler;
-    static_assert(DerivedFromHandlerDatagram<HandlerDatagram>);
-    static_assert(HandlerConstraint<HandlerDatagram>);
-    static_assert(MandatoryMethodConnection<HandlerDatagram>);
+    Handler handler;
+    static_assert(DerivedFromHandlerDatagram<Handler>);
+    static_assert(HandlerConstraint<Handler>);
+    static_assert(MandatoryMethodConnection<Handler>);
 
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
@@ -396,9 +396,10 @@ TEST(Connection, WriteBacklogHardCapTriggersCloseAfterWrite)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    ConnectionBase conn;
-    HandlerBase handler;
-    conn.setHandler(&handler);
+    Connection conn;
+    auto handlerPtr = std::make_unique<Handler>();
+    auto &handler = *handlerPtr;
+    conn.setHandler(std::move(handlerPtr));
     conn.setFd(sp[1]);
 
     // 把发送端塞满，模拟对端零窗口。socketpair 保持非阻塞，
@@ -457,9 +458,10 @@ TEST(Connection, CommitSentRestoresReadPause)
     int sp[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sp), 0);
 
-    ConnectionBase conn;
-    HandlerBase handler;
-    conn.setHandler(&handler);
+    Connection conn;
+    auto handlerPtr = std::make_unique<Handler>();
+    auto &handler = *handlerPtr;
+    conn.setHandler(std::move(handlerPtr));
     conn.setFd(sp[1]);
 
     const std::string bigRequest(3u << 20, 'a');
@@ -662,27 +664,25 @@ namespace
     };
 } // namespace
 
-TEST(Connection, SetOwnedHandlerDeletesOwnedAndPreservesBorrowed)
+TEST(Connection, SetHandlerOwnsAndResets)
 {
     int destroyed = 0;
     {
         Connection conn;
-        conn.setOwnedHandler(std::make_unique<TrackedOwnedHandler>(&destroyed));
+        conn.setHandler(std::make_unique<TrackedOwnedHandler>(&destroyed));
         EXPECT_NE(conn.handler(), nullptr);
         conn.reset();
         EXPECT_EQ(destroyed, 1);
         EXPECT_EQ(conn.handler(), nullptr);
     }
+    EXPECT_EQ(destroyed, 1);
 
-    TrackedOwnedHandler stackHandler(&destroyed);
     {
         Connection conn;
-        conn.setHandler(&stackHandler);
-        EXPECT_EQ(conn.handler(), &stackHandler);
-        conn.reset();
-        EXPECT_EQ(destroyed, 1);
+        conn.setHandler(std::make_unique<TrackedOwnedHandler>(&destroyed));
+        EXPECT_NE(conn.handler(), nullptr);
     }
-    EXPECT_EQ(destroyed, 1);
+    EXPECT_EQ(destroyed, 2);
 }
 
 TEST(Handler, LazyDatagramQueueAllocation)
@@ -701,14 +701,14 @@ TEST(Handler, LazyDatagramQueueAllocation)
 
 TEST(Handler, MuxInboundHandlerVariantDispatchAndReset)
 {
-    class TestMux final : public MuxInboundHandler<HandlerConnection, HandlerHttp<HTTP_MODE::REQUEST>>
+    class TestMux final : public MuxInboundHandler<Handler, HandlerHttp<HTTP_MODE::REQUEST>>
     {
     public:
         void handle() override
         {
             if (activeChild() == nullptr && requestBytes() > 0)
             {
-                emplaceChild<HandlerConnection>();
+                emplaceChild<Handler>();
             }
             if (auto *c = activeChild(); c != nullptr)
             {
@@ -738,7 +738,8 @@ namespace
 
 TEST(Handler, ColdWireAndDatagramStateLazyDefaultsAndRemotePeer)
 {
-    Handler h;
+    auto hPtr = std::make_unique<Handler>();
+    auto &h = *hPtr;
     EXPECT_TRUE(h.isPassthrough());
     EXPECT_TRUE(h.canSplice());
     EXPECT_TRUE(std::as_const(h).transportPipeline().empty());
@@ -748,7 +749,7 @@ TEST(Handler, ColdWireAndDatagramStateLazyDefaultsAndRemotePeer)
     EXPECT_EQ(h.remotePeer().sin_port, 0);
 
     Connection conn;
-    conn.setHandler(&h);
+    conn.setHandler(std::move(hPtr));
     EXPECT_EQ(conn.ssl(), nullptr);
     EXPECT_FALSE(conn.ktlsRxActive());
     EXPECT_FALSE(conn.ktlsTxActive());

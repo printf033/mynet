@@ -1,18 +1,18 @@
-#include "../src/throne/frame.hpp"
-#include "../src/throne/proto.hpp"
-#include "../src/throne/service.hpp"
+#include "../src/nekobox/frame.hpp"
+#include "../src/nekobox/proto.hpp"
+#include "../src/nekobox/service.hpp"
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <thread>
 #include <vector>
 
-using namespace mynet::throne;
+using namespace mynet::nekobox;
 
 // ============================================================================
 // 1. 二进制帧编解码单元测试 (Frame Encoding & Decoding)
 // ============================================================================
 
-TEST(ThroneIpcTest, RequestFrameEncodeDecode)
+TEST(NekoBoxIpcTest, RequestFrameEncodeDecode)
 {
     uint32_t reqId = 12345;
     std::string method = "Start";
@@ -30,7 +30,7 @@ TEST(ThroneIpcTest, RequestFrameEncodeDecode)
     EXPECT_EQ(frameOpt->payload, payload);
     EXPECT_TRUE(span.empty());
 }
-TEST(ThroneIpcTest, ResponseFrameEncodeDecode)
+TEST(NekoBoxIpcTest, ResponseFrameEncodeDecode)
 {
     uint32_t reqId = 8888;
     uint8_t status = 0;
@@ -53,7 +53,7 @@ TEST(ThroneIpcTest, ResponseFrameEncodeDecode)
 // 2. Protobuf 协议结构编解码单元测试 (Protobuf Wire Encoders & Decoders)
 // ============================================================================
 
-TEST(ThroneIpcTest, ErrorRespEncodeDecode)
+TEST(NekoBoxIpcTest, ErrorRespEncodeDecode)
 {
     std::string errStr = "Invalid JSON syntax at line 42";
     std::string enc = proto::encodeErrorResp(errStr);
@@ -67,7 +67,7 @@ TEST(ThroneIpcTest, ErrorRespEncodeDecode)
     EXPECT_EQ(proto::decodeErrorResp(emptyEnc), "");
 }
 
-TEST(ThroneIpcTest, LoadConfigReqEncodeDecode)
+TEST(NekoBoxIpcTest, LoadConfigReqEncodeDecode)
 {
     proto::LoadConfigReq req;
     req.coreConfig = R"({"inbounds":[{"type":"mixed","listen_port":7890}]})";
@@ -83,7 +83,7 @@ TEST(ThroneIpcTest, LoadConfigReqEncodeDecode)
     EXPECT_EQ(dec.tunIpv4Cidr, "172.19.0.1/30");
 }
 
-TEST(ThroneIpcTest, IsPrivilegedResponseEncodeDecode)
+TEST(NekoBoxIpcTest, IsPrivilegedResponseEncodeDecode)
 {
     proto::IsPrivilegedResponse p;
     p.hasPrivilege = true;
@@ -104,7 +104,7 @@ TEST(ThroneIpcTest, IsPrivilegedResponseEncodeDecode)
     EXPECT_EQ(dec.corePid, 54321);
 }
 
-TEST(ThroneIpcTest, QueryStatsResponseEncodeDecode)
+TEST(NekoBoxIpcTest, QueryStatsResponseEncodeDecode)
 {
     std::map<std::string, int64_t> ups = {{"direct", 102400}, {"proxy", 512000}};
     std::map<std::string, int64_t> downs = {{"direct", 204800}, {"proxy", 1048576}};
@@ -121,7 +121,7 @@ TEST(ThroneIpcTest, QueryStatsResponseEncodeDecode)
     EXPECT_EQ(decDowns["proxy"], 1048576);
 }
 
-TEST(ThroneIpcTest, URLTestResponseEncodeDecode)
+TEST(NekoBoxIpcTest, URLTestResponseEncodeDecode)
 {
     std::vector<proto::URLTestResult> results = {
         {"hongkong-01", 38, ""},
@@ -149,13 +149,13 @@ TEST(ThroneIpcTest, URLTestResponseEncodeDecode)
 // 3. 端到端 UDS RPC 状态机交互与集成测试 (End-to-End UDS IPC Service)
 // ============================================================================
 
-TEST(ThroneIpcTest, EndToEndSocketPairInteraction)
+TEST(NekoBoxIpcTest, EndToEndSocketPairInteraction)
 {
     int sv[2];
     ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
 
     auto core = std::make_shared<mynet::Core>();
-    ThroneIpcService service(core);
+    NekoBoxIpcService service(core);
 
     bool startCalled = false;
     std::string startedJson;
@@ -309,7 +309,7 @@ TEST(ThroneIpcTest, EndToEndSocketPairInteraction)
 // 4. sing-box JSON 配置解析与转换单元测试 (JSON & Sing-Box Config Parser)
 // ============================================================================
 
-TEST(ThroneIpcTest, JsonParserBasics)
+TEST(NekoBoxIpcTest, JsonParserBasics)
 {
     std::string_view jsonStr = R"json({
         // 单行注释支持
@@ -344,7 +344,7 @@ TEST(ThroneIpcTest, JsonParserBasics)
     EXPECT_EQ(val["nested"]["key"].asString(), "val");
 }
 
-TEST(ThroneIpcTest, SingBoxConfigParsingAndMapping)
+TEST(NekoBoxIpcTest, SingBoxConfigParsingAndMapping)
 {
     std::string_view singboxJson = R"json({
         "log": {
@@ -458,10 +458,10 @@ TEST(ThroneIpcTest, SingBoxConfigParsingAndMapping)
     EXPECT_EQ(cfg.controller.secret, "my_secret_token");
 }
 
-TEST(ThroneIpcTest, ThroneStartAppliesSingBoxConfigToCore)
+TEST(NekoBoxIpcTest, NekoBoxStartAppliesSingBoxConfigToCore)
 {
     auto core = std::make_shared<mynet::Core>();
-    ThroneIpcService service(core);
+    NekoBoxIpcService service(core);
 
     std::string_view singboxJson = R"json({
         "inbounds": [

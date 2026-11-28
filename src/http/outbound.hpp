@@ -6,7 +6,7 @@
  */
 
 #include "../connection.hpp"
-#include "../outboundManager.hpp"
+#include "../dialerManager.hpp"
 #include "http.hpp"
 #include <cstdint>
 #include <string>
@@ -39,19 +39,18 @@ namespace mynet
         [[nodiscard]] std::string_view username() const noexcept { return username_; }
         [[nodiscard]] std::string_view password() const noexcept { return password_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundHttp>(serverHost_, serverPort_, target, username_,
+            return dialForwarderHelper<handler::HandlerOutboundHttp>(serverHost_, serverPort_, target, ctx, username_,
                                                                   password_);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &) override
+        Result<int> dialDatagram(const Address &) override
         {
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundHttp = DialerHttp;
 
     /**
      * @brief HTTP/2 代理协议拨号器 (DialerHttp2 / OutboundHttp2)
@@ -80,19 +79,18 @@ namespace mynet
         [[nodiscard]] std::string_view username() const noexcept { return username_; }
         [[nodiscard]] std::string_view password() const noexcept { return password_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundHttp2>(serverHost_, serverPort_, target, username_,
+            return dialForwarderHelper<handler::HandlerOutboundHttp2>(serverHost_, serverPort_, target, ctx, username_,
                                                                    password_);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &) override
+        Result<int> dialDatagram(const Address &) override
         {
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundHttp2 = DialerHttp2;
 
     /**
      * @brief HTTP/3 (QUIC/UDP) 代理协议拨号器 (DialerHttp3 / OutboundHttp3)
@@ -118,8 +116,9 @@ namespace mynet
         [[nodiscard]] uint16_t serverPort() const noexcept override { return serverPort_; }
         [[nodiscard]] std::string_view password() const noexcept { return password_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
+            (void)ctx;
             auto udpRes = dialUdp(serverHost_, serverPort_);
             if (!udpRes)
             {
@@ -138,13 +137,12 @@ namespace mynet
             return res;
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             return dialUdp(serverHost_, serverPort_);
         }
     };
 
-    using OutboundHttp3 = DialerHttp3;
 
 } // namespace mynet

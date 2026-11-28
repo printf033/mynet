@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../inboundManager.hpp"
+#include "../acceptorManager.hpp"
 #include "http.hpp"
 #include "v2/handler.hpp"
 #include "v3/handler.hpp"
@@ -54,7 +54,6 @@ namespace mynet
         }
     };
 
-    using InboundHttp = AcceptorHttp;
 
     /**
      * @brief HTTP/2 接收器 (AcceptorHttp2 / InboundHttp2)
@@ -99,7 +98,6 @@ namespace mynet
         }
     };
 
-    using InboundHttp2 = AcceptorHttp2;
 
     /**
      * @brief HTTP/3 接收器 (AcceptorHttp3 / InboundHttp3)
@@ -137,7 +135,7 @@ namespace mynet
 
             if (port_ == 0)
             {
-                port_ = ntohs(socket_.addr.sin_port);
+                port_ = ntohs(socket_.addr().sin_port);
             }
 
             running_ = true;
@@ -160,6 +158,5 @@ namespace mynet
         }
     };
 
-    using InboundHttp3 = AcceptorHttp3;
 
 } // namespace mynet

@@ -1,8 +1,8 @@
 #include "../src/config/singbox.hpp"
 #include "../src/core.hpp"
-#include "../src/transparent.hpp"
-#include "../src/tun.hpp"
-#include "../src/tunPacket.hpp"
+#include "../src/tun/inbound.hpp"
+#include "../src/tun/engine.hpp"
+#include "../src/tun/packet.hpp"
 #include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <sys/socket.h>
@@ -218,7 +218,7 @@ TEST(TunEngineTest, MockSocketpairIcmpPingLoop)
 
 TEST(AcceptorTunTest, MockModeLifecycle)
 {
-    auto tun = std::make_shared<AcceptorTun>("tun-test", "throne-tun", "172.19.0.1", "255.255.255.252", 9000);
+    auto tun = std::make_shared<AcceptorTun>("tun-test", "nekobox-tun", "172.19.0.1", "255.255.255.252", 9000);
     tun->setMockMode(true);
 
     auto res = tun->listen();
@@ -242,7 +242,7 @@ TEST(SingBoxTunConfigTest, ParseAndApplyToCore)
             {
                 "type": "tun",
                 "tag": "tun-in",
-                "interface_name": "throne-tun",
+                "interface_name": "nekobox-tun",
                 "address": ["172.19.0.1/30"],
                 "mtu": 9000,
                 "auto_route": true,
@@ -274,7 +274,7 @@ TEST(SingBoxTunConfigTest, ParseAndApplyToCore)
     const auto &tunCfg = parsed->inbounds[0];
     EXPECT_EQ(tunCfg.protocol, "tun");
     EXPECT_EQ(tunCfg.tag, "tun-in");
-    EXPECT_EQ(tunCfg.ifName, "throne-tun");
+    EXPECT_EQ(tunCfg.ifName, "nekobox-tun");
     EXPECT_EQ(tunCfg.inetIp, "172.19.0.1");
     EXPECT_EQ(tunCfg.inetMask, "255.255.255.252");
     EXPECT_EQ(tunCfg.mtu, 9000u);
@@ -288,7 +288,7 @@ TEST(SingBoxTunConfigTest, ParseAndApplyToCore)
 
     auto tunAcceptor = std::dynamic_pointer_cast<AcceptorTun>(core.acceptors().get("tun-in"));
     ASSERT_NE(tunAcceptor, nullptr);
-    EXPECT_EQ(tunAcceptor->ifName(), "throne-tun");
+    EXPECT_EQ(tunAcceptor->ifName(), "nekobox-tun");
     EXPECT_EQ(tunAcceptor->inetIp(), "172.19.0.1");
     EXPECT_EQ(tunAcceptor->netmask(), "255.255.255.252");
     EXPECT_EQ(tunAcceptor->mtu(), 9000u);

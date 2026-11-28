@@ -290,7 +290,3 @@ namespace mynet::encoding
 
 } // namespace mynet::encoding
 
-namespace mynet::handler
-{
-    namespace encoding = mynet::encoding;
-}

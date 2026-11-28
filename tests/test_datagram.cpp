@@ -1,4 +1,5 @@
 #include "datagram.hpp"
+#include "direct/inbound.hpp"
 #include "direct/outbound.hpp"
 #include <arpa/inet.h>
 #include <chrono>
@@ -55,7 +56,7 @@ TEST(DatagramTest, DatagramPacketExtended)
     dst.sin_port = htons(53);
     ::inet_pton(AF_INET, "1.1.1.1", &dst.sin_addr);
 
-    DatagramPacket packet(peer, dst, "test-data");
+    Packet packet(peer, dst, "test-data");
     EXPECT_EQ(packet.peer.sin_port, htons(1111));
     EXPECT_EQ(packet.origDst.sin_port, htons(53));
     EXPECT_EQ(packet.bytes, "test-data");
@@ -175,7 +176,7 @@ TEST(DatagramTest, BatchSendAndRecv)
     auto client = Datagram::bind("127.0.0.1", 0);
     ASSERT_TRUE(client.has_value());
 
-    std::vector<DatagramPacket> outgoing;
+    std::vector<Packet> outgoing;
     for (int i = 0; i < 4; ++i)
     {
         outgoing.emplace_back(server->localAddr(), "batch_msg_" + std::to_string(i));
@@ -187,7 +188,7 @@ TEST(DatagramTest, BatchSendAndRecv)
 
     std::this_thread::sleep_for(std::chrono::milliseconds(15));
 
-    std::vector<DatagramPacket> incoming(4);
+    std::vector<Packet> incoming(4);
     auto recvRes = server->recvBatch(incoming);
     ASSERT_TRUE(recvRes.has_value());
     EXPECT_EQ(*recvRes, 4u);
@@ -197,53 +198,6 @@ TEST(DatagramTest, BatchSendAndRecv)
         EXPECT_EQ(incoming[i].bytes, "batch_msg_" + std::to_string(i));
         EXPECT_EQ(incoming[i].peer.sin_port, client->localAddr().sin_port);
     }
-}
-
-TEST(DatagramTest, DatagramSessionAndNatTable)
-{
-    DatagramNatTable natTable;
-    EXPECT_EQ(natTable.size(), 0u);
-
-    sockaddr_in client{};
-    client.sin_family = AF_INET;
-    client.sin_port = htons(23456);
-    ::inet_pton(AF_INET, "192.168.1.50", &client.sin_addr);
-
-    sockaddr_in remote{};
-    remote.sin_family = AF_INET;
-    remote.sin_port = htons(53);
-    ::inet_pton(AF_INET, "8.8.8.8", &remote.sin_addr);
-
-    auto session = natTable.getOrCreate(client, remote, [](uint64_t id, const sockaddr_in &c, const sockaddr_in &r) {
-        return std::make_shared<DatagramSession>(id, c, r);
-    });
-
-    ASSERT_NE(session, nullptr);
-    EXPECT_EQ(session->id(), 1u);
-    EXPECT_EQ(session->clientAddr().sin_port, htons(23456));
-    EXPECT_EQ(session->remoteAddr().sin_port, htons(53));
-    EXPECT_EQ(natTable.size(), 1u);
-
-    // Record traffic
-    session->recordUp(100);
-    session->recordDown(200);
-    EXPECT_EQ(session->packetsUp(), 1u);
-    EXPECT_EQ(session->bytesUp(), 100u);
-    EXPECT_EQ(session->packetsDown(), 1u);
-    EXPECT_EQ(session->bytesDown(), 200u);
-
-    // Finding session
-    auto found = natTable.find(client, remote);
-    EXPECT_EQ(found, session);
-
-    // Sweep: not expired with 10s timeout
-    EXPECT_EQ(natTable.sweepExpired(std::chrono::seconds(10)), 0u);
-    EXPECT_EQ(natTable.size(), 1u);
-
-    // Sweep: expired with 0s timeout
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    EXPECT_EQ(natTable.sweepExpired(std::chrono::seconds(0)), 1u);
-    EXPECT_EQ(natTable.size(), 0u);
 }
 
 TEST(DatagramTest, AcceptorAndDialerDatagram)
@@ -269,7 +223,7 @@ TEST(DatagramTest, AcceptorAndDialerDatagram)
     EXPECT_EQ(dialer.tag(), "dgram-out");
     EXPECT_EQ(dialer.type(), "datagram");
 
-    handler::ProxyAddress target = handler::ProxyAddress::fromIPv4(0x08080808, 53);
+    Address target = Address::fromIPv4(0x08080808, 53);
     auto dialRes = dialer.dialDatagram(target);
     ASSERT_TRUE(dialRes.has_value());
     EXPECT_GE(*dialRes, 0);
@@ -295,7 +249,7 @@ TEST(DatagramTest, SharedFlushBatchAndDrainDatagramSocketReuse)
     ASSERT_TRUE(server.has_value());
     ASSERT_TRUE(client.has_value());
 
-    // 1. 测试 flushDatagramOutgoing 复用 Datagram::sendBatch（并正确补全 fallbackPeer）
+    // 测试 Datagram::sendPackets 复用 Datagram::sendBatch（并正确补全 fallbackPeer）
     Handler outHandler;
     sockaddr_in emptyPeer{};
     outHandler.sendTo(emptyPeer, "batch-0", 7);
@@ -303,7 +257,8 @@ TEST(DatagramTest, SharedFlushBatchAndDrainDatagramSocketReuse)
     outHandler.sendTo(emptyPeer, "batch-2", 7);
     EXPECT_EQ(outHandler.outgoingCount(), 3u);
 
-    inbound::flushDatagramOutgoing(*client, outHandler, server->localAddr());
+    auto batch = outHandler.takeAllOutgoing();
+    client->sendPackets(batch, server->localAddr());
     EXPECT_FALSE(outHandler.hasOutgoing());
 
     std::vector<std::string> got;
@@ -317,25 +272,4 @@ TEST(DatagramTest, SharedFlushBatchAndDrainDatagramSocketReuse)
     EXPECT_EQ(got[0], "batch-0");
     EXPECT_EQ(got[1], "batch-1");
     EXPECT_EQ(got[2], "batch-2");
-
-    // 2. 测试 inbound::drainDatagramSocket 复用 Datagram::drain + flushDatagramOutgoing 回显
-    class UdpEchoHandler final : public Handler
-    {
-    public:
-        void onDatagram(const sockaddr_in &peer, const char *data, size_t n) noexcept override
-        {
-            sendTo(peer, data, n);
-        }
-    } echoHandler;
-
-    ASSERT_TRUE(client->sendTo(server->localAddr(), "ping-shared-drain").has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    inbound::drainDatagramSocket(server->fd(), [&](std::span<const uint8_t>) -> HandlerBase * { return &echoHandler; });
-
-    char rxBuf[64]{};
-    sockaddr_in rxPeer{};
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    auto rxRes = client->recvFrom(rxBuf, sizeof(rxBuf), rxPeer);
-    ASSERT_TRUE(rxRes.has_value());
-    EXPECT_EQ(std::string_view(rxBuf, *rxRes), "ping-shared-drain");
 }

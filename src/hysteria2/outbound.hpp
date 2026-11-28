@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../outboundManager.hpp"
+#include "../dialerManager.hpp"
 #include "hysteria2.hpp"
 #include <memory>
 #include <string>
@@ -33,18 +33,18 @@ namespace mynet
         [[nodiscard]] std::string_view serverHost() const noexcept override { return serverHost_; }
         [[nodiscard]] uint16_t serverPort() const noexcept override { return serverPort_; }
 
-        Result<OutboundDialResult> dialStream(const handler::ProxyAddress &target) override
+        Result<OutboundDialResult> dialForwarder(const Address &target, DialContext ctx = {}) override
         {
-            return dialStreamHelper<handler::HandlerOutboundHysteria2>(serverHost_, serverPort_, target, password_);
+            return dialForwarderHelper<handler::HandlerOutboundHysteria2>(serverHost_, serverPort_, target, ctx,
+                                                                          password_);
         }
 
-        Result<int> dialDatagram(const handler::ProxyAddress &target) override
+        Result<int> dialDatagram(const Address &target) override
         {
             (void)target;
             return std::unexpected(ERR::CONNECT_FAILED);
         }
     };
 
-    using OutboundHysteria2 = DialerHysteria2;
 
 } // namespace mynet

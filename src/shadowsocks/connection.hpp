@@ -15,5 +15,4 @@ namespace mynet::shadowsocks
         using Connection::Connection;
     };
 
-    using ShadowsocksConnection = ConnectionShadowsocks;
 } // namespace mynet::shadowsocks

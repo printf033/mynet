@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../inboundManager.hpp"
+#include "../acceptorManager.hpp"
 #include "trojan.hpp"
 #include <memory>
 #include <string>
@@ -39,6 +39,5 @@ namespace mynet
         }
     };
 
-    using InboundTrojan = AcceptorTrojan;
 
 } // namespace mynet

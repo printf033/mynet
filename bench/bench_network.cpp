@@ -623,7 +623,7 @@ namespace
 
     void benchHttp2Streams()
     {
-        class QuietEchoStream : public HandlerConnection
+        class QuietEchoStream : public Handler
         {
         public:
             void handle() noexcept {}

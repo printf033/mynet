@@ -1,4 +1,4 @@
-#include "controller.hpp"
+#include "clash/controller.hpp"
 #include "core.hpp"
 #include "geo.hpp"
 #include "process.hpp"
@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 using namespace mynet;
+using namespace mynet::clash;
 
 namespace
 {
@@ -59,8 +60,8 @@ namespace
 TEST(ControllerTest, RestApiEndpoints)
 {
     Core core;
-    core.dialers().registerDialer(std::make_shared<OutboundDirect>("direct"));
-    core.dialers().registerDialer(std::make_shared<OutboundBlock>("block"));
+    core.dialers().registerDialer(std::make_shared<DialerDirect>("direct"));
+    core.dialers().registerDialer(std::make_shared<DialerBlock>("block"));
     auto sel =
         std::make_shared<DialerSelector>("proxy", std::vector<std::string>{"direct", "block"}, &core.dialers());
     core.dialers().registerDialer(sel);
@@ -107,7 +108,7 @@ TEST(ControllerTest, RestApiEndpoints)
         EXPECT_EQ(sel->selected(), "direct");
         std::string putReq = "PUT /proxies/proxy HTTP/1.1\r\n"
                              "Host: 127.0.0.1\r\n"
-                             "Content-Length: 17\r\n\r\n"
+                             "Content-Length: 16\r\n\r\n"
                              R"({"name":"block"})";
         std::string resp = httpExchange(apiPort, putReq);
         EXPECT_NE(resp.find("204 No Content"), std::string::npos);
@@ -215,8 +216,8 @@ TEST(ControllerTest, ProcessResolverCurrentPid)
 TEST(ControllerTest, UrlTestProbeDirect)
 {
     DialerManager mgr;
-    mgr.registerDialer(std::make_shared<OutboundDirect>("direct-node"));
-    mgr.registerDialer(std::make_shared<OutboundBlock>("block-node"));
+    mgr.registerDialer(std::make_shared<DialerDirect>("direct-node"));
+    mgr.registerDialer(std::make_shared<DialerBlock>("block-node"));
 
     auto urltest =
         std::make_shared<DialerUrlTest>("auto-probe", std::vector<std::string>{"direct-node", "block-node"}, &mgr);

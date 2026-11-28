@@ -15,5 +15,4 @@ namespace mynet::vless
         using Connection::Connection;
     };
 
-    using VlessConnection = ConnectionVless;
 } // namespace mynet::vless

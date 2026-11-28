@@ -2,40 +2,48 @@
 
 /**
  * @file transparent.hpp
- * @brief Linux Netfilter 透明代理入站状态机处理器、UDP TProxy 报文流水线与透明入站端点 (InboundTransparent, InboundTun)
+ * @brief Linux Netfilter 透明代理入站状态机处理器、UDP TProxy 报文流水线与 TProxy 接收器 (AcceptorTransparent)
  *
  * 借鉴 dae 与 sing-box 设计：
  * 1. HandlerInboundRedirect: iptables -j REDIRECT (SO_ORIGINAL_DST 提取 + L7 零拷贝域名嗅探 + DNS 反向还原)
  * 2. HandlerInboundTProxy: iptables -j TPROXY (getsockname 原始目的提取 + 域名嗅探)
  * 3. HandlerInboundDatagramTProxy: UDP TProxy 数据报透明代理 (IP_RECVORIGDSTADDR + QUIC/DNS 嗅探)
- * 4. InboundTransparent: Linux TProxy 透明代理入站端点 (setsockopt IP_TRANSPARENT)
- * 5. InboundTun: Linux TUN 虚拟网络接口端点 (/dev/net/tun)
+ * 4. AcceptorTransparent: Linux TProxy 透明代理入站端点 (setsockopt IP_TRANSPARENT)
  */
 
+#include "acceptor.hpp"
 #include "address.hpp"
 #include "connection.hpp"
 #include "dns/cache.hpp"
-#include "inboundManager.hpp"
 #include "sniffer.hpp"
-#include "tun.hpp"
-#include "tunPacket.hpp"
 #include <arpa/inet.h>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
-#include <linux/if_tun.h>
+#include <linux/netfilter_ipv4.h>
 #include <memory>
-#include <net/if.h>
 #include <netinet/in.h>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <sys/ioctl.h>
+
+#ifndef SO_ORIGINAL_DST
+#define SO_ORIGINAL_DST 80
+#endif
+#ifndef IP6T_SO_ORIGINAL_DST
+#define IP6T_SO_ORIGINAL_DST 80
+#endif
 #include <sys/socket.h>
 #include <utility>
 
+#ifndef SO_ORIGINAL_DST
+#define SO_ORIGINAL_DST 80
+#endif
+#ifndef IP6T_SO_ORIGINAL_DST
+#define IP6T_SO_ORIGINAL_DST 80
+#endif
 #ifndef IP_ORIGDSTADDR
 #define IP_ORIGDSTADDR 20
 #endif
@@ -45,6 +53,68 @@
 
 namespace mynet::handler
 {
+
+    /**
+     * @brief 从已连接套接字提取透明代理原始目的地址 (Linux Netfilter SO_ORIGINAL_DST)
+     */
+    [[nodiscard]] inline std::optional<Address> extractOriginalDst(int fd) noexcept
+    {
+        if (fd < 0)
+        {
+            return std::nullopt;
+        }
+
+        sockaddr_in sin{};
+        socklen_t slen = sizeof(sin);
+        if (::getsockopt(fd, SOL_IP, SO_ORIGINAL_DST, &sin, &slen) == 0 && sin.sin_family == AF_INET)
+        {
+            return Address::fromIPv4(sin.sin_addr.s_addr, ntohs(sin.sin_port));
+        }
+
+        sockaddr_in6 sin6{};
+        socklen_t slen6 = sizeof(sin6);
+        if (::getsockopt(fd, SOL_IPV6, IP6T_SO_ORIGINAL_DST, &sin6, &slen6) == 0 && sin6.sin6_family == AF_INET6)
+        {
+            return Address::fromIPv6(reinterpret_cast<const uint8_t *>(&sin6.sin6_addr), ntohs(sin6.sin6_port));
+        }
+
+        return std::nullopt;
+    }
+
+    /**
+     * @brief 从已连接套接字提取 Linux TProxy 原始目的地址 (getsockname 或 SO_ORIGINAL_DST 回落)
+     */
+    [[nodiscard]] inline std::optional<Address> extractTProxyDst(int fd) noexcept
+    {
+        if (fd < 0)
+        {
+            return std::nullopt;
+        }
+
+        sockaddr_storage ss{};
+        socklen_t slen = sizeof(ss);
+        if (::getsockname(fd, reinterpret_cast<sockaddr *>(&ss), &slen) == 0)
+        {
+            if (ss.ss_family == AF_INET)
+            {
+                const auto *sin = reinterpret_cast<const sockaddr_in *>(&ss);
+                if (sin->sin_addr.s_addr != INADDR_ANY)
+                {
+                    return Address::fromIPv4(sin->sin_addr.s_addr, ntohs(sin->sin_port));
+                }
+            }
+            else if (ss.ss_family == AF_INET6)
+            {
+                const auto *sin6 = reinterpret_cast<const sockaddr_in6 *>(&ss);
+                if (!IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr))
+                {
+                    return Address::fromIPv6(reinterpret_cast<const uint8_t *>(&sin6->sin6_addr), ntohs(sin6->sin6_port));
+                }
+            }
+        }
+
+        return extractOriginalDst(fd);
+    }
 
     enum class TransparentStage : uint8_t
     {
@@ -57,7 +127,7 @@ namespace mynet::handler
     /**
      * @brief Linux Redirect 透明代理入站处理器 (iptables -j REDIRECT)
      */
-    class HandlerInboundRedirect : public HandlerInboundConnectionBase
+    class HandlerInboundRedirect : public HandlerInbound
     {
     protected:
         TransparentStage transparentStage_{TransparentStage::RESOLVING};
@@ -87,13 +157,13 @@ namespace mynet::handler
 
         void onConnect(int fd) noexcept override
         {
-            HandlerInboundConnectionBase::onConnect(fd);
+            HandlerInbound::onConnect(fd);
             clientFd_ = fd;
         }
 
         void reset() noexcept override
         {
-            HandlerInboundConnectionBase::reset();
+            HandlerInbound::reset();
             transparentStage_ = TransparentStage::RESOLVING;
             clientFd_ = -1;
         }
@@ -125,12 +195,12 @@ namespace mynet::handler
         }
 
     protected:
-        virtual std::optional<ProxyAddress> fetchOriginalDst()
+        virtual std::optional<Address> fetchOriginalDst()
         {
             const int targetFd = (clientFd_ >= 0) ? clientFd_ : fd();
             if (targetFd >= 0)
             {
-                return ProxyAddress::fromOriginalDst(targetFd);
+                return extractOriginalDst(targetFd);
             }
             return std::nullopt;
         }
@@ -177,31 +247,22 @@ namespace mynet::handler
             }
 
             std::span<const uint8_t> data(reinterpret_cast<const uint8_t *>(requestBegin()), avail);
-            auto sniffResult = sniffing::DomainSniffer::sniff(data);
+            auto sniffResult = DomainSniffer::sniff(data, SniffTransport::TCP, targetAddress_->port);
 
             if (sniffResult.has_value())
             {
                 if (!sniffResult->host.empty())
                 {
                     const uint16_t port = sniffResult->port != 0 ? sniffResult->port : targetAddress_->port;
-                    targetAddress_ = ProxyAddress::fromDomain(sniffResult->host, port);
+                    targetAddress_ = Address::fromDomain(sniffResult->host, port);
                 }
                 transitionToStreaming();
                 return;
             }
 
-            // 检查首字节是否可能属于已知可嗅探协议 (TCP 嗅探 TLS / HTTP / BitTorrent / SSH / RDP)
-            const uint8_t b0 = data[0];
-            const bool couldBeTls = (b0 == 0x16);
-            const bool couldBeHttp =
-                (b0 == 'G' || b0 == 'P' || b0 == 'H' || b0 == 'D' || b0 == 'C' || b0 == 'O' || b0 == 'T');
-            const bool couldBeBt = (b0 == 19);
-            const bool couldBeSsh = (b0 == 'S');
-            const bool couldBeRdp = (b0 == 0x03);
-            const bool couldBeSniffable = couldBeTls || couldBeHttp || couldBeBt || couldBeSsh || couldBeRdp;
-
-            // 报文长度已超过嗅探窗口，或已知不可能属于嗅探协议，执行 DNS 反向还原兜底
-            if (avail >= maxSniffBytes_ || !couldBeSniffable || avail >= 512)
+            // 报文长度已超过嗅探窗口，或首字节不可能属于已知 TCP 嗅探协议，执行 DNS 反向还原兜底
+            if (avail >= maxSniffBytes_ || !DomainSniffer::couldBeSniffable(data[0], SniffTransport::TCP) ||
+                avail >= 512)
             {
                 tryFallbackReverseDns();
                 transitionToStreaming();
@@ -250,12 +311,12 @@ namespace mynet::handler
         using HandlerInboundRedirect::HandlerInboundRedirect;
 
     protected:
-        std::optional<ProxyAddress> fetchOriginalDst() override
+        std::optional<Address> fetchOriginalDst() override
         {
             const int targetFd = (clientFd_ >= 0) ? clientFd_ : fd();
             if (targetFd >= 0)
             {
-                return ProxyAddress::fromTProxyDst(targetFd);
+                return extractTProxyDst(targetFd);
             }
             return std::nullopt;
         }
@@ -267,11 +328,11 @@ namespace mynet::handler
      * 负责解析带有 IP_RECVORIGDSTADDR 原始目的地址控制消息的 UDP 报文，
      * 联动 QUIC Initial 与 DNS 嗅探器还原目标域名。
      */
-    class HandlerInboundDatagramTProxy : public HandlerInboundDatagramBase
+    class HandlerInboundDatagramTProxy : public HandlerInbound
     {
     public:
         using TProxyPacketCallback =
-            std::function<void(const sockaddr_in &clientPeer, const ProxyAddress &target, const char *data, size_t n)>;
+            std::function<void(const sockaddr_in &clientPeer, const Address &target, const char *data, size_t n)>;
 
     private:
         TProxyPacketCallback packetCallback_{nullptr};
@@ -289,7 +350,7 @@ namespace mynet::handler
         void setSniffing(bool enable) noexcept { sniffingEnabled_ = enable; }
         [[nodiscard]] bool isSniffingEnabled() const noexcept { return sniffingEnabled_; }
 
-        void reset() noexcept override { HandlerInboundDatagramBase::reset(); }
+        void reset() noexcept override { HandlerInbound::reset(); }
 
         /**
          * @brief 处理带有原始目的地址的入站 UDP 报文
@@ -306,30 +367,31 @@ namespace mynet::handler
                 return;
             }
 
-            ProxyAddress target = ProxyAddress::fromIPv4(origDst.sin_addr.s_addr, ntohs(origDst.sin_port));
+            Address target = Address::fromIPv4(origDst.sin_addr.s_addr, ntohs(origDst.sin_port));
 
-            // 尝试应用层深度嗅探（QUIC Initial SNI / DNS）
-            if (sniffingEnabled_)
+            // 尝试应用层深度嗅探（UDP 链：QUIC Initial SNI / DNS 等 + 负缓存防抖）
+            const uint32_t ipBe = origDst.sin_addr.s_addr;
+            const uint8_t udpProtoKey = static_cast<uint8_t>(SniffTransport::UDP);
+            bool sniffMatched = false;
+            if (sniffingEnabled_ && !SniffNegativeCache::instance().isNegative(ipBe, target.port, udpProtoKey))
             {
                 std::span<const uint8_t> payload(reinterpret_cast<const uint8_t *>(data), n);
-                if (auto res = sniffing::DomainSniffer::sniff(payload); res.has_value())
+                if (auto res = DomainSniffer::sniff(payload, SniffTransport::UDP, target.port); res.has_value())
                 {
+                    SniffNegativeCache::instance().recordSuccess(ipBe, target.port, udpProtoKey);
+                    sniffMatched = true;
                     if (!res->host.empty())
                     {
                         const uint16_t p = res->port != 0 ? res->port : target.port;
-                        target = ProxyAddress::fromDomain(res->host, p);
+                        target = Address::fromDomain(res->host, p);
                     }
                 }
                 else
                 {
-                    // 嗅探未命中，查询 DNS 逆向缓存
-                    if (auto rev = dns::DnsReverseCache::instance().lookup(target); rev.has_value())
-                    {
-                        target = *rev;
-                    }
+                    SniffNegativeCache::instance().recordFailure(ipBe, target.port, udpProtoKey);
                 }
             }
-            else
+            if (!sniffMatched)
             {
                 if (auto rev = dns::DnsReverseCache::instance().lookup(target); rev.has_value())
                 {
@@ -380,31 +442,17 @@ namespace mynet
 
         Result<> listen(int backlog = 128, bool reuseAddr = true, bool reusePort = true) noexcept override
         {
-            if (running_ && socket_.valid())
+            if (auto r = Acceptor::listen(backlog, reuseAddr, reusePort); !r)
             {
-                return {};
-            }
-            close();
-
-            auto res = socket_.listenTcp(host_.c_str(), port_, backlog, reuseAddr, reusePort);
-            if (!res)
-            {
-                return std::unexpected(res.error());
+                return r;
             }
 
             int transparentOpt = 1;
-            if (::setsockopt(socket_.fd, SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
+            if (::setsockopt(socket_.fd(), SOL_IP, IP_TRANSPARENT, &transparentOpt, sizeof(transparentOpt)) < 0)
             {
-                LOG_WARN("AcceptorTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", socket_.fd,
+                LOG_WARN("AcceptorTransparent: setsockopt IP_TRANSPARENT on fd {} failed: {}", socket_.fd(),
                          errnoText(errno));
             }
-
-            if (port_ == 0)
-            {
-                port_ = ntohs(socket_.addr.sin_port);
-            }
-
-            running_ = true;
             return {};
         }
 
@@ -415,224 +463,5 @@ namespace mynet
             return h;
         }
     };
-
-    using InboundTransparent = AcceptorTransparent;
-
-    /**
-     * @brief Linux 虚拟网卡接口配置辅助工具 (配置 IP、掩码与 MTU 并将接口置为 UP)
-     */
-    inline bool configureTunInterface(const std::string &ifName, const std::string &ip, const std::string &netmask,
-                                      uint32_t mtu) noexcept
-    {
-        int s = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-        if (s < 0)
-        {
-            return false;
-        }
-
-        struct ifreq ifr{};
-        std::strncpy(ifr.ifr_name, ifName.c_str(), IFNAMSIZ - 1);
-
-        // 1. 设置 MTU
-        if (mtu > 0)
-        {
-            ifr.ifr_mtu = static_cast<int>(mtu);
-            ::ioctl(s, SIOCSIFMTU, &ifr);
-        }
-
-        // 2. 设置本地 IPv4 地址
-        if (!ip.empty())
-        {
-            struct sockaddr_in sin{};
-            sin.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, ip.c_str(), &sin.sin_addr) == 1)
-            {
-                std::memcpy(&ifr.ifr_addr, &sin, sizeof(sin));
-                ::ioctl(s, SIOCSIFADDR, &ifr);
-            }
-        }
-
-        // 3. 设置子网掩码
-        if (!netmask.empty())
-        {
-            struct sockaddr_in sin{};
-            sin.sin_family = AF_INET;
-            if (::inet_pton(AF_INET, netmask.c_str(), &sin.sin_addr) == 1)
-            {
-                std::memcpy(&ifr.ifr_netmask, &sin, sizeof(sin));
-                ::ioctl(s, SIOCSIFNETMASK, &ifr);
-            }
-        }
-
-        // 4. 将网卡置为 UP 且 RUNNING
-        if (::ioctl(s, SIOCGIFFLAGS, &ifr) == 0)
-        {
-            ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
-            ::ioctl(s, SIOCSIFFLAGS, &ifr);
-        }
-
-        ::close(s);
-        return true;
-    }
-
-    /**
-     * @brief Linux TUN 虚拟网络接口接收器 (AcceptorTun / InboundTun)
-     */
-    class AcceptorTun : public Acceptor
-    {
-    private:
-        std::string ifName_{"tun0"};
-        std::string inetIp_{};
-        std::string netmask_{};
-        uint32_t mtu_{1500};
-        int tunFd_{-1};
-        int mockPeerFd_{-1};
-        bool mockMode_{false};
-        std::shared_ptr<tun::TunEngine> engine_{nullptr};
-
-    public:
-        AcceptorTun(std::string tag, std::string ifName = "tun0", bool enableSniffing = true)
-            : Acceptor(std::move(tag), "tun", "0.0.0.0", 0, enableSniffing),
-              ifName_(std::move(ifName))
-        {
-        }
-
-        AcceptorTun(std::string tag, std::string ifName, std::string inetIp, std::string netmask = "255.255.255.0",
-                    uint32_t mtu = 1500, bool enableSniffing = true)
-            : Acceptor(std::move(tag), "tun", "0.0.0.0", 0, enableSniffing),
-              ifName_(std::move(ifName)),
-              inetIp_(std::move(inetIp)),
-              netmask_(std::move(netmask)),
-              mtu_(mtu)
-        {
-        }
-
-        ~AcceptorTun() noexcept override { close(); }
-
-        [[nodiscard]] inline int tunFd() const noexcept { return tunFd_; }
-        [[nodiscard]] inline int mockPeerFd() const noexcept { return mockPeerFd_; }
-        [[nodiscard]] inline const std::string &ifName() const noexcept { return ifName_; }
-        [[nodiscard]] inline const std::string &interfaceName() const noexcept { return ifName_; }
-        [[nodiscard]] inline const std::string &inetIp() const noexcept { return inetIp_; }
-        [[nodiscard]] inline const std::string &netmask() const noexcept { return netmask_; }
-        [[nodiscard]] inline uint32_t mtu() const noexcept { return mtu_; }
-        [[nodiscard]] inline std::shared_ptr<tun::TunEngine> engine() const noexcept { return engine_; }
-
-        void setTunFd(int fd) noexcept
-        {
-            tunFd_ = fd;
-            socket_.fd = fd;
-        }
-
-        void setMockMode(bool enable) noexcept { mockMode_ = enable; }
-        [[nodiscard]] bool isMockMode() const noexcept { return mockMode_; }
-
-        Result<> listen(int = 128, bool = true, bool = true) noexcept override
-        {
-            if (running_ && tunFd_ >= 0)
-            {
-                return {};
-            }
-
-            if (mockMode_)
-            {
-                int sv[2];
-                if (::socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sv) == 0)
-                {
-                    tunFd_ = sv[0];
-                    mockPeerFd_ = sv[1];
-                    LOG_INFO("AcceptorTun: initialized mock TUN socketpair (fd={}, peer={})", tunFd_, mockPeerFd_);
-                }
-                else
-                {
-                    return std::unexpected(ERR::SOCKET_FAILED);
-                }
-            }
-            else if (tunFd_ < 0)
-            {
-                tunFd_ = ::open("/dev/net/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
-                bool ioctlOk = false;
-                if (tunFd_ >= 0)
-                {
-                    struct ifreq ifr{};
-                    ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-                    std::strncpy(ifr.ifr_name, ifName_.c_str(), IFNAMSIZ - 1);
-
-                    if (::ioctl(tunFd_, TUNSETIFF, &ifr) >= 0)
-                    {
-                        ioctlOk = true;
-                        // 尝试配置网卡 IP / 掩码 / MTU (若进程具备相应网络管理权限)
-                        configureTunInterface(ifName_, inetIp_, netmask_, mtu_);
-                    }
-                    else
-                    {
-                        LOG_WARN("AcceptorTun: ioctl(TUNSETIFF) on '{}' failed: {}", ifName_, errnoText(errno));
-                        ::close(tunFd_);
-                        tunFd_ = -1;
-                    }
-                }
-
-                if (!ioctlOk)
-                {
-                    if (std::getenv("MYNET_MOCK_TUN") != nullptr)
-                    {
-                        int sv[2];
-                        if (::socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, sv) == 0)
-                        {
-                            tunFd_ = sv[0];
-                            mockPeerFd_ = sv[1];
-                            LOG_INFO("AcceptorTun: fallback to mock TUN socketpair (fd={}, peer={})", tunFd_,
-                                     mockPeerFd_);
-                        }
-                        else
-                        {
-                            return std::unexpected(ERR::SOCKET_FAILED);
-                        }
-                    }
-                    else
-                    {
-                        return std::unexpected(ERR::SOCKET_FAILED);
-                    }
-                }
-            }
-
-            socket_.fd = tunFd_;
-            engine_ = std::make_shared<tun::TunEngine>(tunFd_, mtu_, enableSniffing_);
-            engine_->start();
-
-            running_ = true;
-            return {};
-        }
-
-        void close() noexcept override
-        {
-            if (engine_ != nullptr)
-            {
-                engine_->stop();
-                engine_.reset();
-            }
-            if (mockPeerFd_ >= 0)
-            {
-                ::close(mockPeerFd_);
-                mockPeerFd_ = -1;
-            }
-            if (tunFd_ >= 0)
-            {
-                ::close(tunFd_);
-                tunFd_ = -1;
-            }
-            socket_.fd = -1;
-            Acceptor::close();
-        }
-
-        [[nodiscard]] std::unique_ptr<Handler> createHandler() override
-        {
-            auto h = std::make_unique<handler::HandlerInboundTProxy>();
-            h->setSniffing(enableSniffing_);
-            return h;
-        }
-    };
-
-    using InboundTun = AcceptorTun;
 
 } // namespace mynet

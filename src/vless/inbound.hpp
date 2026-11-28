@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../inboundManager.hpp"
+#include "../acceptorManager.hpp"
 #include "vless.hpp"
 #include <memory>
 #include <string>
@@ -46,6 +46,5 @@ namespace mynet
         }
     };
 
-    using InboundVless = AcceptorVless;
 
 } // namespace mynet

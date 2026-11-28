@@ -49,7 +49,7 @@ mynet_unit_test(test_singbox_features)
 mynet_unit_test(test_singbox_interop)
 mynet_unit_test(test_acceptor_dialer)
 mynet_unit_test(test_datagram)
-mynet_unit_test(test_throne_ipc)
+mynet_unit_test(test_nekobox_ipc)
 mynet_unit_test(test_tun)
 
 if(MYNET_ENABLE_LUA)

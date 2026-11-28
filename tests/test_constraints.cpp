@@ -75,7 +75,7 @@ namespace
     };
 
     /// 正例：派生自 HandlerConnection，只重写 handle() 表达业务定制。
-    struct FakeHandler : public HandlerConnection
+    struct FakeHandler : public Handler
     {
         void handle() {}
     };
@@ -128,7 +128,7 @@ namespace
         void reset() noexcept {}
     };
 
-    struct ThrowingAppendHandler : public HandlerConnection
+    struct ThrowingAppendHandler : public Handler
     {
         // 历史语义：appendRequest 曾允许抛出 bad_alloc，现被 MandatoryMethodConnection
         // 约束拒绝——非 noexcept、非 Result<> 返回的摄入路径不再是合法协议头。
@@ -140,51 +140,51 @@ namespace
         void handle() = delete;
     };
 
-    struct DeletedTakeResponseHandler : public HandlerConnection
+    struct DeletedTakeResponseHandler : public Handler
     {
         std::string takeResponse() = delete;
     };
 
-    struct DeletedPushResponseHandler : public HandlerConnection
+    struct DeletedPushResponseHandler : public Handler
     {
         Result<> pushResponse(std::string &&) = delete;
     };
 
-    struct DeletedPrepareRequestWritableHandler : public HandlerConnection
+    struct DeletedPrepareRequestWritableHandler : public Handler
     {
         std::expected<char *, ERR> prepareRequestWritable(size_t) = delete;
     };
 
     /// 双特化组合：统一 HandlerBase 兼具流式与数据报双模能力
-    struct CombinedHandler : HandlerBase
+    struct CombinedHandler : Handler
     {
-        void reset() noexcept override { HandlerBase::reset(); }
-        void onMessageComplete() noexcept override { HandlerBase::onMessageComplete(); }
-        void onParseError(const char *reason) noexcept override { HandlerBase::onParseError(reason); }
+        void reset() noexcept override { Handler::reset(); }
+        void onMessageComplete() noexcept override { Handler::onMessageComplete(); }
+        void onParseError(const char *reason) noexcept override { Handler::onParseError(reason); }
         void onDatagram(const sockaddr_in &, const char *, size_t) noexcept override {}
     };
 
     /// 纯报文处理器：只派生报文特化，不具备任何流式设施。
-    struct PureDatagramHandler : HandlerDatagram
+    struct PureDatagramHandler : Handler
     {
         void onDatagram(const sockaddr_in &, const char *, size_t) noexcept override {}
     };
 
     /// 反例：已派生报文特化，但引擎经处理器类型直接读取的接收上界缺失。
-    struct MissingMaxDatagramBytesHandler : HandlerDatagram
+    struct MissingMaxDatagramBytesHandler : Handler
     {
         void onDatagram(const sockaddr_in &, const char *, size_t) noexcept override {}
         size_t maxDatagramBytes() = delete;
     };
 
-    struct DeletedSendToHandler : HandlerDatagram
+    struct DeletedSendToHandler : Handler
     {
         void sendTo(const sockaddr_in &, const char *, size_t) = delete;
     };
 
-    struct DeletedTakeOutgoingHandler : HandlerDatagram
+    struct DeletedTakeOutgoingHandler : Handler
     {
-        DatagramPacket takeOutgoing() = delete;
+        Packet takeOutgoing() = delete;
     };
 
     /// 反例：方法全齐、可重置，但未派生 HandlerDatagram。
@@ -202,12 +202,12 @@ namespace
 
         bool hasOutgoing() noexcept { return false; }
         size_t outgoingCount() noexcept { return 0; }
-        const DatagramPacket &peekOutgoing() noexcept
+        const Packet &peekOutgoing() noexcept
         {
-            static DatagramPacket p;
+            static Packet p;
             return p;
         }
-        DatagramPacket takeOutgoing() { return {}; }
+        Packet takeOutgoing() { return {}; }
         size_t droppedOutgoing() noexcept { return 0; }
 
         void setMaxDatagramBytes(size_t) noexcept {}
@@ -259,14 +259,14 @@ TEST(Constraints, ResettableStrictlyRequiresNoexceptVoidReset)
     static_assert(Resettable<RequestBuffer>);
     static_assert(Resettable<ResponseQueue>);
     static_assert(Resettable<DatagramQueue>);
-    static_assert(Resettable<HandlerConnection>);
-    static_assert(Resettable<HandlerDatagram>);
-    static_assert(Resettable<AcceptorBase<HandlerConnection>>);
-    static_assert(Resettable<DialerBase<HandlerConnection>>);
-    static_assert(Resettable<HandlerInboundConnectionBase>);
-    static_assert(Resettable<HandlerInboundDatagramBase>);
-    static_assert(Resettable<HandlerOutboundConnectionBase>);
-    static_assert(Resettable<HandlerOutboundDatagramBase>);
+    static_assert(Resettable<Handler>);
+    static_assert(Resettable<Handler>);
+    static_assert(Resettable<AcceptorBase<Handler>>);
+    static_assert(Resettable<DialerBase<Handler>>);
+    static_assert(Resettable<HandlerInbound>);
+    static_assert(Resettable<HandlerInbound>);
+    static_assert(Resettable<HandlerOutbound>);
+    static_assert(Resettable<HandlerOutbound>);
     static_assert(Resettable<HandlerOutboundDirect>);
     static_assert(Resettable<HandlerOutboundTrojan>);
     static_assert(Resettable<HandlerOutboundVless>);
@@ -288,8 +288,8 @@ TEST(Constraints, HandlerConstraintEnforcement)
 {
     // 原 HandlerBase 的接口契约在此以概念形式保留：两个处理器基类并列独立，
     // 事件层只依赖这份最小约束，不再依赖任何共同祖先。
-    static_assert(HandlerConstraint<HandlerConnection>);
-    static_assert(HandlerConstraint<HandlerDatagram>);
+    static_assert(HandlerConstraint<Handler>);
+    static_assert(HandlerConstraint<Handler>);
     static_assert(HandlerConstraint<FakeHandler>);
     static_assert(HandlerConstraint<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(HandlerConstraint<HandlerHttp3<>>);
@@ -300,8 +300,8 @@ TEST(Constraints, HandlerConstraintEnforcement)
     static_assert(!HandlerConstraint<NoReset>);
     static_assert(!HandlerConstraint<int>);
 
-    EXPECT_TRUE(HandlerConstraint<HandlerConnection>);
-    EXPECT_TRUE(HandlerConstraint<HandlerDatagram>);
+    EXPECT_TRUE(HandlerConstraint<Handler>);
+    EXPECT_TRUE(HandlerConstraint<Handler>);
     EXPECT_TRUE(HandlerConstraint<HandlerHttp3<>>);
     EXPECT_FALSE(HandlerConstraint<ValidResettable>);
     EXPECT_FALSE(HandlerConstraint<NonDerivedHandler>);
@@ -310,8 +310,8 @@ TEST(Constraints, HandlerConstraintEnforcement)
 TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
 {
     // 报文基类不承诺字节流契约；流式契约只由 HandlerConnection 提供
-    static_assert(MandatoryMethodConnection<HandlerBase>);
-    static_assert(MandatoryMethodConnection<HandlerConnection>);
+    static_assert(MandatoryMethodConnection<Handler>);
+    static_assert(MandatoryMethodConnection<Handler>);
     static_assert(MandatoryMethodConnection<FakeHandler>);
     // 两层要求各自可独立生效：结构齐全但不派生 → 仍被拒
     static_assert(!MandatoryMethodConnection<FullContractWithoutDerivation>);
@@ -327,8 +327,8 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
     static_assert(!MandatoryMethodConnection<NonDerivedHandler>);
     static_assert(!MandatoryMethodConnection<NoReset>);
 
-    EXPECT_TRUE(MandatoryMethodConnection<HandlerBase>);
-    EXPECT_TRUE(MandatoryMethodConnection<HandlerConnection>);
+    EXPECT_TRUE(MandatoryMethodConnection<Handler>);
+    EXPECT_TRUE(MandatoryMethodConnection<Handler>);
     EXPECT_FALSE(MandatoryMethodConnection<FullContractWithoutDerivation>);
     EXPECT_FALSE(MandatoryMethodConnection<LegacySixMemberHandler>);
     EXPECT_FALSE(MandatoryMethodConnection<ThrowingAppendHandler>);
@@ -341,12 +341,12 @@ TEST(Constraints, MandatoryMethodConnectionContractEnforcement)
 
 TEST(Constraints, DerivedFromHandlerConnectionConstraints)
 {
-    static_assert(DerivedFromHandlerConnection<HandlerConnection>);
+    static_assert(DerivedFromHandlerConnection<Handler>);
     static_assert(DerivedFromHandlerConnection<HandlerHttp<HTTP_MODE::REQUEST>>);
     static_assert(DerivedFromHandlerConnection<CombinedHandler>);
     static_assert(DerivedFromHandlerConnection<HandlerHttp3<>>);
     static_assert(DerivedFromHandlerDatagram<HandlerHttp3<>>);
-    static_assert(HandlerConstraint<HandlerConnection>);
+    static_assert(HandlerConstraint<Handler>);
     static_assert(HandlerConstraint<HandlerHttp3<>>);
 
     static_assert(!DerivedFromHandlerConnection<NonDerivedHandler>);
@@ -360,28 +360,28 @@ TEST(Constraints, DerivedFromHandlerConnectionConstraints)
 TEST(Constraints, HandlerBaseIsUnifiedWithoutVirtualInheritance)
 {
 #if defined(__cpp_lib_is_virtual_base_of)
-    static_assert(!std::is_virtual_base_of_v<HandlerBase, CombinedHandler>);
+    static_assert(!std::is_virtual_base_of_v<Handler, CombinedHandler>);
 #endif
 
-    static_assert(std::same_as<HandlerConnection, HandlerBase>);
-    static_assert(std::same_as<HandlerDatagram, HandlerBase>);
-    static_assert(HandlerConstraint<HandlerBase>);
-    static_assert(MandatoryMethodConnection<HandlerBase>);
-    static_assert(MandatoryMethodDatagram<HandlerBase>);
+    static_assert(std::same_as<Handler, Handler>);
+    static_assert(std::same_as<Handler, Handler>);
+    static_assert(HandlerConstraint<Handler>);
+    static_assert(MandatoryMethodConnection<Handler>);
+    static_assert(MandatoryMethodDatagram<Handler>);
 }
 
 TEST(Constraints, DerivedFromHandlerDatagramConstraints)
 {
-    static_assert(DerivedFromHandlerDatagram<HandlerDatagram>);
+    static_assert(DerivedFromHandlerDatagram<Handler>);
     static_assert(DerivedFromHandlerDatagram<CombinedHandler>);
-    static_assert(HandlerConstraint<HandlerDatagram>);
+    static_assert(HandlerConstraint<Handler>);
     static_assert(HandlerConstraint<CombinedHandler>);
-    static_assert(std::derived_from<CombinedHandler, HandlerConnection>);
+    static_assert(std::derived_from<CombinedHandler, Handler>);
     static_assert(MandatoryMethodConnection<CombinedHandler>);
     static_assert(Resettable<CombinedHandler>);
     static_assert(!DerivedFromHandlerDatagram<NonDerivedHandler>);
 
-    EXPECT_TRUE(DerivedFromHandlerDatagram<HandlerDatagram>);
+    EXPECT_TRUE(DerivedFromHandlerDatagram<Handler>);
     EXPECT_TRUE(DerivedFromHandlerDatagram<CombinedHandler>);
     EXPECT_TRUE(HandlerConstraint<CombinedHandler>);
     EXPECT_TRUE(MandatoryMethodConnection<CombinedHandler>);
@@ -390,14 +390,14 @@ TEST(Constraints, DerivedFromHandlerDatagramConstraints)
 TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
 {
     // 数据报侧的必需方法契约：与 MandatoryMethodConnection 对称的两层保证。
-    static_assert(MandatoryMethodDatagram<HandlerDatagram>); // 概念只校验接口，不要求可实例化
+    static_assert(MandatoryMethodDatagram<Handler>); // 概念只校验接口，不要求可实例化
     static_assert(MandatoryMethodDatagram<PureDatagramHandler>);
     static_assert(MandatoryMethodDatagram<CombinedHandler>);
     static_assert(MandatoryMethodDatagram<HandlerHttp3<>>);
 
     // 统一 HandlerBase 兼具流式与数据报双模能力
     static_assert(MandatoryMethodConnection<PureDatagramHandler>);
-    static_assert(MandatoryMethodConnection<HandlerDatagram>);
+    static_assert(MandatoryMethodConnection<Handler>);
 
     // 派生但缺必需方法 → 被拒
     static_assert(!MandatoryMethodDatagram<MissingMaxDatagramBytesHandler>);
@@ -420,26 +420,26 @@ TEST(Constraints, MandatoryMethodDatagramContractEnforcement)
 
 TEST(Constraints, AcceptorConceptsEvaluationOnCompleteTypes)
 {
-    using Acc = AcceptorBase<HandlerConnection>;
+    using Acc = AcceptorBase<Handler>;
     using BaseAcc = Acceptor;
 
     static_assert(DerivedFromAcceptor<Acc>);
     static_assert(DerivedFromAcceptor<BaseAcc>);
-    static_assert(!DerivedFromAcceptor<HandlerConnection>);
+    static_assert(!DerivedFromAcceptor<Handler>);
 
     EXPECT_TRUE(DerivedFromAcceptor<Acc>);
 }
 
 TEST(Constraints, DialerAndOutboundConceptsEvaluation)
 {
-    using Dial = DialerBase<HandlerConnection>;
+    using Dial = DialerBase<Handler>;
     using BaseDial = Dialer;
 
     // 概念约束测试：DerivedFromDialer & DerivedFromDialerBase
     static_assert(DerivedFromDialer<Dial>);
     static_assert(DerivedFromDialer<BaseDial>);
     static_assert(DerivedFromDialerBase<BaseDial>);
-    static_assert(!DerivedFromDialer<HandlerConnection>);
+    static_assert(!DerivedFromDialer<Handler>);
 
     static_assert(BaseDialer<Dial>);
     static_assert(BaseDialer<BaseDial>);
@@ -448,17 +448,17 @@ TEST(Constraints, DialerAndOutboundConceptsEvaluation)
     EXPECT_TRUE(BaseDialer<Dial>);
 
     // 出站协议处理器约束测试：全部满足 HandlerConstraint 与 MandatoryMethodConnection
-    static_assert(HandlerConstraint<HandlerOutboundConnectionBase>);
-    static_assert(MandatoryMethodConnection<HandlerOutboundConnectionBase>);
+    static_assert(HandlerConstraint<HandlerOutbound>);
+    static_assert(MandatoryMethodConnection<HandlerOutbound>);
 
-    static_assert(HandlerConstraint<HandlerOutboundDatagramBase>);
-    static_assert(MandatoryMethodDatagram<HandlerOutboundDatagramBase>);
+    static_assert(HandlerConstraint<HandlerOutbound>);
+    static_assert(MandatoryMethodDatagram<HandlerOutbound>);
 
-    static_assert(HandlerConstraint<HandlerInboundConnectionBase>);
-    static_assert(MandatoryMethodConnection<HandlerInboundConnectionBase>);
+    static_assert(HandlerConstraint<HandlerInbound>);
+    static_assert(MandatoryMethodConnection<HandlerInbound>);
 
-    static_assert(HandlerConstraint<HandlerInboundDatagramBase>);
-    static_assert(MandatoryMethodDatagram<HandlerInboundDatagramBase>);
+    static_assert(HandlerConstraint<HandlerInbound>);
+    static_assert(MandatoryMethodDatagram<HandlerInbound>);
 
     static_assert(HandlerConstraint<HandlerOutboundDirect>);
     static_assert(MandatoryMethodConnection<HandlerOutboundDirect>);
@@ -506,7 +506,7 @@ TEST(Constraints, AcceptorAndDialerPlaceholderZeroOverhead)
     static_assert(PureTcpReactor::kHasTcp);
     static_assert(!PureTcpReactor::kHasUdp);
 
-    using BaseReactor = Reactor<AcceptorBase<HandlerConnection>>;
+    using BaseReactor = Reactor<AcceptorBase<Handler>>;
     static_assert(BaseReactor::kListenerCount == 1);
     static_assert(BaseReactor::kHasTcp);
     static_assert(!BaseReactor::kHasUdp);

@@ -1,8 +1,8 @@
 #pragma once
 
 /**
- * @file throne/proto.hpp
- * @brief Throne (NekoRay/NekoBox) LibcoreService 协议的高性能零依赖 Protobuf 编解码器。
+ * @file nekobox/proto.hpp
+ * @brief NekoBox (NekoRay/Throne) LibcoreService 协议的高性能零依赖 Protobuf 编解码器。
  *
  * 依据 libcore.proto 规则，完全复用 mynet 内部的高效 uvarint 变长编码实现，
  * 彻底避免引入庞大的 Google Protobuf 运行时依赖。
@@ -17,7 +17,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mynet::throne::proto
+namespace mynet::nekobox::proto
 {
 
     inline constexpr uint32_t kWireTypeVarint = 0;
@@ -632,4 +632,4 @@ namespace mynet::throne::proto
         return out;
     }
 
-} // namespace mynet::throne::proto
+} // namespace mynet::nekobox::proto

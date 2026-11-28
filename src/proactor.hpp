@@ -484,7 +484,7 @@ namespace mynet
             }
 
             // ---- SQE 辅助与 Ring 会话绑定 ----
-            inline void attachRing(io_uring *ring, std::unordered_map<int, ConnectionBase *> *conns,
+            inline void attachRing(io_uring *ring, std::unordered_map<int, Connection *> *conns,
                                    std::stop_source *stopSrc) noexcept
             {
                 ring_ = ring;
@@ -684,7 +684,7 @@ namespace mynet
                 {
                     return;
                 }
-                ConnectionBase *conn = cIt->second;
+                Connection *conn = cIt->second;
                 ConnTrack &tr = tIt->second;
                 if (conn == nullptr || tr.closing || tr.recvActive || !conn->wantRead())
                 {
@@ -752,7 +752,7 @@ namespace mynet
                 {
                     return;
                 }
-                ConnectionBase *conn = cIt->second;
+                Connection *conn = cIt->second;
                 ConnTrack &tr = tIt->second;
                 if (conn == nullptr || tr.closing)
                 {
@@ -1153,7 +1153,7 @@ namespace mynet
                     return;
                 if (auto cIt = connections_->find(fd); cIt != connections_->end())
                 {
-                    ConnectionBase *c = cIt->second;
+                    Connection *c = cIt->second;
                     connections_->erase(cIt);
                     if (c != nullptr)
                     {
@@ -1552,7 +1552,7 @@ namespace mynet
             }
 
             io_uring *ring_{nullptr};
-            std::unordered_map<int, ConnectionBase *> *connections_{nullptr};
+            std::unordered_map<int, Connection *> *connections_{nullptr};
             std::stop_source *stopSource_{nullptr};
             uint64_t nextOpId_{1};
 
@@ -1865,7 +1865,7 @@ namespace mynet
         /**
          * @brief 将外部 Acceptor（如 TProxy / 多端口入站）创建的 Connection 纳入 Proactor 异步 io_uring 托管
          */
-        inline bool adoptConnection(ConnectionBase *conn)
+        inline bool adoptConnection(Connection *conn)
         {
             if (conn == nullptr || conn->fd() < 0) [[unlikely]]
             {
@@ -1950,8 +1950,8 @@ namespace mynet
         {
             struct UdpHandlerGuard
             {
-                HandlerBase *&slot;
-                explicit UdpHandlerGuard(HandlerBase *&s, HandlerBase *h) noexcept : slot(s) { slot = h; }
+                Handler *&slot;
+                explicit UdpHandlerGuard(Handler *&s, Handler *h) noexcept : slot(s) { slot = h; }
                 ~UdpHandlerGuard() noexcept { slot = nullptr; }
             } guard(externalUdpHandler_, &handler);
             return runUdp(ip, port, getServerConfig(), proactor);
@@ -2201,14 +2201,14 @@ namespace mynet
                 if (res >= 0)
                 {
                     const int clientFd = res;
-                    ConnectionBase *conn = nullptr;
+                    Connection *conn = nullptr;
                     if constexpr (sizeof...(Protocols) > 0)
                     {
                         detail::dispatchProtocolTcpClient<Protocols...>(clientFd, conn, op->idx, acceptors_);
                     }
                     if (conn == nullptr)
                     {
-                        conn = new ConnectionBase();
+                        conn = new Connection();
                     }
                     conn->setFd(clientFd);
                     conn->setPeerAddr(op->addr);
@@ -2253,7 +2253,7 @@ namespace mynet
                     break;
                 }
                 auto cIt = connections_.find(op->fd);
-                ConnectionBase *conn = (cIt != connections_.end()) ? cIt->second : nullptr;
+                Connection *conn = (cIt != connections_.end()) ? cIt->second : nullptr;
                 if (conn == nullptr)
                 {
                     core_.tracks_.erase(tIt);
@@ -2317,7 +2317,7 @@ namespace mynet
                     break;
                 }
                 auto cIt = connections_.find(op->fd);
-                ConnectionBase *conn = (cIt != connections_.end()) ? cIt->second : nullptr;
+                Connection *conn = (cIt != connections_.end()) ? cIt->second : nullptr;
                 if (conn == nullptr)
                 {
                     core_.tracks_.erase(tIt);
@@ -2359,8 +2359,8 @@ namespace mynet
         std::tuple<typename ProtocolTraits<Protocols>::Acceptor...> acceptors_{};
         std::tuple<typename ProtocolTraits<Protocols>::Dialer...> dialers_{};
         std::array<std::unique_ptr<Handler>, (kProtocolCount > 0 ? kProtocolCount : 1)> udpHandlers_{};
-        HandlerBase *externalUdpHandler_{nullptr};
-        std::unordered_map<int, ConnectionBase *> connections_{};
+        Handler *externalUdpHandler_{nullptr};
+        std::unordered_map<int, Connection *> connections_{};
 
         std::stop_source stopSource_{};
         detail::ProactorCore core_{};

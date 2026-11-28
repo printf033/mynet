@@ -36,7 +36,7 @@ TEST(CoreTest, InitializationAndLifecycle)
     EXPECT_TRUE(core.dialers().has("block"));
 
     // 入站接收器管理器注册与查询
-    core.acceptors().registerAcceptor(std::make_shared<InboundSocks5>("my-socks-in", "127.0.0.1", 1080));
+    core.acceptors().registerAcceptor(std::make_shared<AcceptorSocks5>("my-socks-in", "127.0.0.1", 1080));
     EXPECT_TRUE(core.acceptors().has("my-socks-in"));
     EXPECT_EQ(core.acceptors().size(), 1u);
 
@@ -81,7 +81,7 @@ TEST(CoreTest, DispatchBlockRule)
     // 添加拦截广告分流规则
     core.router().addRule(RouteRule::to("block").domainKeyword("adserver"));
 
-    auto target = ProxyAddress::fromDomain("tracker.adserver.analytics.com", 80);
+    auto target = Address::fromDomain("tracker.adserver.analytics.com", 80);
     HandlerInboundDirect inbound(target);
 
     auto res = core.dispatch(inbound, -1, "test-in");
@@ -105,7 +105,7 @@ TEST(CoreTest, DispatchSniffingAssistedRoute)
     // 模拟透明代理：入站只拿到了目的 IP，但客户端首包携带 TLS ClientHello (SNI="www.netflix.com")
     in_addr remoteIp{};
     ::inet_pton(AF_INET, "198.51.100.1", &remoteIp);
-    auto target = ProxyAddress::fromIPv4(remoteIp.s_addr, 443);
+    auto target = Address::fromIPv4(remoteIp.s_addr, 443);
     HandlerInboundDirect inbound(target);
 
     // 构造一个合法的 TLS ClientHello (带 SNI="www.netflix.com")
@@ -209,7 +209,7 @@ TEST(CoreTest, EndToEndDirectDispatchAndPump)
     Core core;
     ASSERT_TRUE(core.start().has_value());
 
-    auto target = ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), port);
+    auto target = Address::fromIPv4(htonl(INADDR_LOOPBACK), port);
     HandlerInboundDirect inbound(target);
 
     // 客户端发送 HTTP 请求
@@ -260,8 +260,8 @@ TEST(CoreTest, StartFailsOnDanglingRouteRuleOutbound)
 TEST(CoreTest, StartAndStopManagesBothInboundsAndOutbounds)
 {
     Core core;
-    auto in = std::make_shared<InboundSocks5>("test-in", "127.0.0.1", 0);
-    auto out = std::make_shared<OutboundDirect>("custom-direct");
+    auto in = std::make_shared<AcceptorSocks5>("test-in", "127.0.0.1", 0);
+    auto out = std::make_shared<DialerDirect>("custom-direct");
     core.acceptors().registerAcceptor(in);
     core.dialers().registerDialer(out);
 
@@ -340,7 +340,7 @@ TEST(CoreTest, ApplyConfigHotReloadClearsStaleRulesAndConfiguresTransport)
     EXPECT_TRUE(core.acceptors().has("in1"));
     EXPECT_TRUE(core.dialers().has("ss1"));
     RouteContext oldCtx;
-    oldCtx.target = ProxyAddress::fromDomain("old.example.com", 443);
+    oldCtx.target = Address::fromDomain("old.example.com", 443);
     EXPECT_EQ(core.router().match(oldCtx), "ss1");
 
     MynetConfig cfg2;
@@ -365,7 +365,7 @@ TEST(CoreTest, ApplyConfigHotReloadClearsStaleRulesAndConfiguresTransport)
     // 旧规则必须已被清理，不能再路由到不存在的 ss1
     EXPECT_EQ(core.router().match(oldCtx), "direct");
     RouteContext newCtx;
-    newCtx.target = ProxyAddress::fromDomain("new.example.org", 443);
+    newCtx.target = Address::fromDomain("new.example.org", 443);
     EXPECT_EQ(core.router().match(newCtx), "direct");
 
     transport::TransportConfig wsCfg;
@@ -466,10 +466,10 @@ TEST(CoreTest, AttachEventLoopDrivesOutboundWatchWithoutPolling)
 
     Core core;
     ASSERT_TRUE(core.start().has_value());
-    Reactor<AcceptorBase<HandlerConnection>> reactor;
+    Reactor<AcceptorBase<Handler>> reactor;
     core.attachEventLoop(reactor.loop());
 
-    HandlerInboundDirect inbound(ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), port));
+    HandlerInboundDirect inbound(Address::fromIPv4(htonl(INADDR_LOOPBACK), port));
     ASSERT_TRUE(inbound.appendRequest("ping-evloop").has_value());
 
     auto res = core.dispatch(inbound, -1, "mixed-in", false, true);
@@ -545,7 +545,7 @@ TEST(CoreTest, ProactorLoopHooksAndDeferredConnectParity)
 
     Core core;
     ASSERT_TRUE(core.start().has_value());
-    Proactor<AcceptorBase<HandlerConnection>> proactor;
+    Proactor<AcceptorBase<Handler>> proactor;
     core.attachEventLoop(proactor.loop());
 
     EXPECT_TRUE(core.forwarder()->loopHooks().hasAsyncRelay());
@@ -564,7 +564,7 @@ TEST(CoreTest, ProactorLoopHooksAndDeferredConnectParity)
     ::close(sv[0]);
     ::close(sv[1]);
 
-    HandlerInboundDirect inbound(ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), port));
+    HandlerInboundDirect inbound(Address::fromIPv4(htonl(INADDR_LOOPBACK), port));
     ASSERT_TRUE(inbound.appendRequest("deferred-uring-req").has_value());
     auto res = core.dispatch(inbound, -1, "mixed-in", false, true);
     ASSERT_EQ(res.status, CoreDispatchStatus::SUCCESS);
@@ -600,11 +600,11 @@ TEST(CoreTest, ProactorEndToEndOutboundAsyncConnectRecvSend)
 
     Core core;
     ASSERT_TRUE(core.start().has_value());
-    Proactor<AcceptorBase<HandlerConnection>> proactor;
+    Proactor<AcceptorBase<Handler>> proactor;
     ASSERT_TRUE(proactor.listenTcp("127.0.0.1", 0).has_value());
     core.attachEventLoop(proactor.loop());
 
-    HandlerInboundDirect inbound(ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), port));
+    HandlerInboundDirect inbound(Address::fromIPv4(htonl(INADDR_LOOPBACK), port));
     ASSERT_TRUE(inbound.appendRequest("ping-proactor-outbound").has_value());
 
     auto res = core.dispatch(inbound, -1, "mixed-in", false, true);
@@ -714,7 +714,7 @@ TEST(CoreTest, ConfigDatagramInboundOutboundAndDispatchEventDriven)
     ASSERT_TRUE(remoteEcho.has_value());
     const uint16_t echoPort = remoteEcho->localPort();
 
-    Reactor<AcceptorBase<HandlerConnection>> reactor;
+    Reactor<AcceptorBase<Handler>> reactor;
     core.attachEventLoop(reactor.loop());
 
     Handler inbound;
@@ -723,7 +723,7 @@ TEST(CoreTest, ConfigDatagramInboundOutboundAndDispatchEventDriven)
     clientPeer.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     clientPeer.sin_port = htons(54321);
 
-    auto txRes = core.dispatchDatagram(inbound, clientPeer, ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), echoPort),
+    auto txRes = core.dispatchDatagram(inbound, clientPeer, Address::fromIPv4(htonl(INADDR_LOOPBACK), echoPort),
                                      "hello-core-udp", "udp-in");
     ASSERT_TRUE(txRes.has_value());
     EXPECT_EQ(*txRes, 14u);
@@ -811,7 +811,7 @@ TEST(CoreIntegration, ReactorAdoptConnectionBridgesThreeTierForwarderEndToEnd)
     Core core(cfg);
     ASSERT_TRUE(core.start().has_value());
 
-    Reactor<AcceptorBase<HandlerConnection>> reactor;
+    Reactor<AcceptorBase<Handler>> reactor;
     core.attachEventLoop(reactor.loop());
 
     // 2. 用自定义透明重定向类模拟 TProxy 获取到原始目的端口
@@ -821,9 +821,9 @@ TEST(CoreIntegration, ReactorAdoptConnectionBridgesThreeTierForwarderEndToEnd)
         explicit LoopbackTProxyHandler(uint16_t targetPort) : targetPort_(targetPort) {}
 
     protected:
-        std::optional<ProxyAddress> fetchOriginalDst() override
+        std::optional<Address> fetchOriginalDst() override
         {
-            return ProxyAddress::fromIPv4(htonl(INADDR_LOOPBACK), targetPort_);
+            return Address::fromIPv4(htonl(INADDR_LOOPBACK), targetPort_);
         }
 
     private:
@@ -845,7 +845,7 @@ TEST(CoreIntegration, ReactorAdoptConnectionBridgesThreeTierForwarderEndToEnd)
     bool dispatched = false;
     Handler *rawH = h.get();
     h->setOnRequest(
-        [&](uint8_t, const ProxyAddress &)
+        [&](uint8_t, const Address &)
         {
             if (dispatched)
             {
@@ -859,7 +859,7 @@ TEST(CoreIntegration, ReactorAdoptConnectionBridgesThreeTierForwarderEndToEnd)
                 dispatchedMode = res.session->activeMode();
             }
         });
-    conn->setOwnedHandler(std::move(h));
+    conn->setHandler(std::move(h));
     ASSERT_TRUE(reactor.adoptConnection(conn));
     conn->handle();
 
@@ -919,4 +919,80 @@ TEST(CoreIntegration, ReactorAdoptConnectionBridgesThreeTierForwarderEndToEnd)
     ::close(cliFd[0]);
     core.clearEventLoop();
     core.stop();
+}
+
+TEST(CoreIntegration, ProcessRoutingFallbackWithoutEbpf)
+{
+    MynetConfig cfg;
+    cfg.ebpf.enabled = false;
+    const std::string selfProcName = ProcessResolver::getProcessNameByPid(::getpid());
+    ASSERT_FALSE(selfProcName.empty());
+
+    RouteRuleConfig procRule;
+    procRule.processName = selfProcName;
+    procRule.outbound = "block";
+    cfg.router.rules.push_back(procRule);
+
+    Core core(cfg);
+    EXPECT_TRUE(core.router().hasProcessRules());
+
+    // 在本进程内建立本地 TCP 环回连接，验证无 eBPF 时回落到 ProcessResolver 解析并命中进程规则
+    Acceptor srv("test-srv", "direct", "127.0.0.1", 0);
+    ASSERT_TRUE(srv.listen(4, true, false).has_value());
+
+    int cliFd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    ASSERT_GE(cliFd, 0);
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    dst.sin_port = htons(srv.port());
+    (void)::connect(cliFd, reinterpret_cast<const sockaddr *>(&dst), sizeof(dst));
+
+    int acceptedFd = -1;
+    for (int i = 0; i < 20 && acceptedFd < 0; ++i)
+    {
+        auto acc = srv.acceptOne();
+        if (acc)
+        {
+            acceptedFd = acc->first;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_GE(acceptedFd, 0);
+
+    handler::HandlerInboundDirect inbound(Address::fromIPv4(htonl(INADDR_LOOPBACK), srv.port()));
+    inbound.onConnect(acceptedFd);
+    auto res = core.dispatch(inbound, acceptedFd, "direct-in", false);
+    EXPECT_EQ(res.status, CoreDispatchStatus::BLOCKED);
+    EXPECT_EQ(res.outboundTag, "block");
+
+    ::close(acceptedFd);
+    ::close(cliFd);
+    srv.close();
+}
+
+TEST(CoreIntegration, DnsReverseCacheFallbackForOpaqueTraffic)
+{
+    MynetConfig cfg;
+    RouteRuleConfig domainRule;
+    domainRule.domainSuffixes.push_back("ech-secret.org");
+    domainRule.outbound = "block";
+    cfg.router.rules.push_back(domainRule);
+
+    Core core(cfg);
+
+    in_addr opaqueIp{};
+    ASSERT_EQ(::inet_pton(AF_INET, "93.184.216.34", &opaqueIp), 1);
+    dns::DnsReverseCache::instance().insert(opaqueIp, "api.ech-secret.org", 120);
+
+    handler::HandlerInboundDirect inbound(Address::fromIPv4(opaqueIp.s_addr, 443));
+    // 模拟无法嗅探 SNI 的首包（如 ECH / 私有协议）
+    const std::string opaquePayload = "\xde\xad\xbe\xef\x01\x02\x03\x04";
+    ASSERT_TRUE(inbound.appendRequest(opaquePayload.data(), static_cast<ssize_t>(opaquePayload.size())).has_value());
+
+    auto res = core.dispatch(inbound, -1, "tproxy-in", true);
+    EXPECT_EQ(res.status, CoreDispatchStatus::BLOCKED);
+    EXPECT_EQ(res.outboundTag, "block");
+    EXPECT_EQ(res.sniffedDomain, "api.ech-secret.org");
 }
